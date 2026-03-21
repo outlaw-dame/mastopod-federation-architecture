@@ -1,0 +1,214 @@
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # Fedify Sidecar - handles remote federation with RedPanda message queue
+  # ==========================================================================
+  fedify-sidecar:
+    build: .
+    container_name: fedify-sidecar
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - HOST=0.0.0.0
+      - DOMAIN=${DOMAIN:-localhost}
+      - BASE_URL=${BASE_URL:-http://localhost:3001}
+      
+      # RedPanda - used as Fedify's message queue
+      - REDPANDA_BROKERS=redpanda:9092
+      - REDPANDA_CLIENT_ID=fedify-sidecar
+      
+      # Stream topics
+      - TOPIC_STREAM1=stream1-local-public
+      - TOPIC_STREAM2=stream2-remote-public
+      - TOPIC_FIREHOSE=firehose
+      
+      # ActivityPods
+      - ACTIVITYPODS_URL=${ACTIVITYPODS_URL:-http://activitypods:3000}
+      - ACTIVITYPODS_SIGNING_API_URL=${ACTIVITYPODS_URL:-http://activitypods:3000}/api/signing
+      - ACTIVITYPODS_INTERNAL_API_KEY=${ACTIVITYPODS_INTERNAL_API_KEY:-}
+      
+      # OpenSearch
+      - OPENSEARCH_NODE=http://opensearch:9200
+      - OPENSEARCH_INDEX_PREFIX=activitypods
+      
+      # Delivery settings
+      - DELIVERY_MAX_CONCURRENT_DOMAINS=50
+      - DELIVERY_MAX_CONCURRENT_PER_DOMAIN=5
+      - DELIVERY_MAX_RETRIES=8
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_FORMAT=json
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    networks:
+      - activitypods-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ==========================================================================
+  # RedPanda - Kafka-compatible streaming platform
+  # Used as Fedify's message queue AND for Stream1/Stream2/Firehose
+  # ==========================================================================
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.1
+    container_name: redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --smp 1
+      - --memory 1G
+      - --mode dev-container
+      - --default-log-level=warn
+    ports:
+      - "19092:19092"  # Kafka API (external)
+      - "18082:18082"  # Pandaproxy (external)
+      - "18081:18081"  # Schema Registry (external)
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    networks:
+      - activitypods-network
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+
+  # RedPanda Console - Web UI for RedPanda
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.4.5
+    container_name: redpanda-console
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - activitypods-network
+
+  # ==========================================================================
+  # OpenSearch - DBMS for all public activities (Firehose storage)
+  # ==========================================================================
+  opensearch:
+    image: opensearchproject/opensearch:2.12.0
+    container_name: opensearch
+    restart: unless-stopped
+    environment:
+      - cluster.name=opensearch-cluster
+      - node.name=opensearch-node
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - DISABLE_SECURITY_PLUGIN=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - activitypods-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -vq '\"status\":\"red\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # OpenSearch Dashboards - Web UI for OpenSearch
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.12.0
+    container_name: opensearch-dashboards
+    restart: unless-stopped
+    ports:
+      - "5601:5601"
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    networks:
+      - activitypods-network
+
+  # ==========================================================================
+  # Prometheus - Metrics collection
+  # ==========================================================================
+  prometheus:
+    image: prom/prometheus:v2.49.1
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - activitypods-network
+
+  # ==========================================================================
+  # Grafana - Metrics visualization
+  # ==========================================================================
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - activitypods-network
+
+networks:
+  activitypods-network:
+    name: activitypods-network
+    driver: bridge
+
+volumes:
+  redpanda-data:
+  opensearch-data:
+  prometheus-data:
+  grafana-data:

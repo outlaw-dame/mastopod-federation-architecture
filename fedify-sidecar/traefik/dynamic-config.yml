@@ -1,0 +1,115 @@
+# Traefik Dynamic Configuration for ActivityPods + Fedify Sidecar
+# 
+# This configuration routes federation traffic to the Fedify sidecar
+# while keeping other traffic going to ActivityPods.
+
+http:
+  routers:
+    # WebFinger - always goes to sidecar
+    webfinger:
+      rule: "PathPrefix(`/.well-known/webfinger`)"
+      service: fedify-sidecar
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+    # NodeInfo - goes to sidecar (proxies to ActivityPods)
+    nodeinfo:
+      rule: "PathPrefix(`/.well-known/nodeinfo`)"
+      service: fedify-sidecar
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+    # Shared inbox - goes to sidecar
+    shared-inbox:
+      rule: "Path(`/inbox`) && Method(`POST`)"
+      service: fedify-sidecar
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+    # User inbox POST - goes to sidecar
+    user-inbox:
+      rule: "PathPrefix(`/users/`) && PathRegexp(`/users/[^/]+/inbox`) && Method(`POST`)"
+      service: fedify-sidecar
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+    # Actor documents with ActivityPub Accept header - goes to sidecar
+    actor-activitypub:
+      rule: "PathPrefix(`/users/`) && !PathRegexp(`/users/[^/]+/(inbox|outbox|followers|following)`) && HeadersRegexp(`Accept`, `application/(activity\\+json|ld\\+json)`)"
+      service: fedify-sidecar
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      priority: 100
+
+    # Outbox GET - goes to sidecar
+    user-outbox-get:
+      rule: "PathPrefix(`/users/`) && PathRegexp(`/users/[^/]+/outbox`) && Method(`GET`)"
+      service: fedify-sidecar
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+    # Followers/Following GET - goes to sidecar
+    user-collections:
+      rule: "PathPrefix(`/users/`) && PathRegexp(`/users/[^/]+/(followers|following)`) && Method(`GET`)"
+      service: fedify-sidecar
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+
+    # Everything else - goes to ActivityPods
+    activitypods:
+      rule: "PathPrefix(`/`)"
+      service: activitypods
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      priority: 1
+
+  services:
+    fedify-sidecar:
+      loadBalancer:
+        servers:
+          - url: "http://fedify-sidecar:3001"
+        healthCheck:
+          path: /health
+          interval: "10s"
+          timeout: "3s"
+
+    activitypods:
+      loadBalancer:
+        servers:
+          - url: "http://activitypods:3000"
+        healthCheck:
+          path: /health
+          interval: "10s"
+          timeout: "3s"
+
+  middlewares:
+    # Add security headers
+    security-headers:
+      headers:
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+
+    # Rate limiting for federation endpoints
+    federation-ratelimit:
+      rateLimit:
+        average: 100
+        burst: 200
+        period: 1m
