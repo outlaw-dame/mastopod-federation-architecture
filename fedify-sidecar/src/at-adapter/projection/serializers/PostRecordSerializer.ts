@@ -19,6 +19,8 @@ export interface AppBskyFeedPostRecord {
   };
 }
 
+import { ReplyRefResolver } from './ReplyRefResolver';
+
 export interface PostRecordSerializer {
   serialize(
     post: CanonicalPost,
@@ -27,6 +29,7 @@ export interface PostRecordSerializer {
       facetBuilder: FacetBuilder;
       embedBuilder: EmbedBuilder;
       recordRefResolver: AtRecordRefResolver;
+      replyRefResolver?: ReplyRefResolver;
     }
   ): Promise<AppBskyFeedPostRecord>;
 }
@@ -36,7 +39,7 @@ export interface FacetBuilder {
 }
 
 export interface EmbedBuilder {
-  build(post: CanonicalPost): Promise<unknown | undefined>;
+  build(post: CanonicalPost, did: string): Promise<unknown | undefined>;
 }
 
 export interface AtRecordRefResolver {
@@ -63,6 +66,7 @@ export class DefaultPostRecordSerializer implements PostRecordSerializer {
       facetBuilder: FacetBuilder;
       embedBuilder: EmbedBuilder;
       recordRefResolver: AtRecordRefResolver;
+      replyRefResolver?: ReplyRefResolver;
     }
   ): Promise<AppBskyFeedPostRecord> {
     const text = normalizeAtPostText(post.bodyPlaintext);
@@ -78,13 +82,20 @@ export class DefaultPostRecordSerializer implements PostRecordSerializer {
       record.facets = facets;
     }
 
-    const embed = await deps.embedBuilder.build(post);
+    const embed = await deps.embedBuilder.build(post, binding.atprotoDid!);
     if (embed) {
       record.embed = embed;
     }
 
-    // Reply handling would go here if we supported it in Phase 3
-    // but the spec says "No follows/likes/reposts yet" and "quote-post threading beyond simplest resolvable alias" is deferred
+    if (deps.replyRefResolver && post.replyToCanonicalPostId) {
+      const replyRefs = await deps.replyRefResolver.resolve(post);
+      if (replyRefs) {
+        record.reply = {
+          root: replyRefs.root,
+          parent: replyRefs.parent
+        };
+      }
+    }
 
     return record;
   }

@@ -1,1 +1,241 @@
-/**\n * V6.5 Phase 3: ATProto Alias Store\n *\n * Maps canonical IDs to ATProto aliases.\n * Essential for:\n * - Reusing rkey on updates\n * - Targeting correct URI on deletes\n * - Resolving references for replies/quotes\n */\n\n/**\n * AT Alias Record\n *\n * Tracks the mapping between canonical entities and their AT repo representations.\n */\nexport interface AtAliasRecord {\n  /**\n   * Canonical ID (from Tier 1)\n   */\n  canonicalRefId: string;\n  \n  /**\n   * Type of canonical entity\n   */\n  canonicalType: 'profile' | 'post';\n  \n  /**\n   * Repository DID\n   */\n  did: string;\n  \n  /**\n   * Collection NSID\n   */\n  collection: 'app.bsky.actor.profile' | 'app.bsky.feed.post';\n  \n  /**\n   * Record key\n   */\n  rkey: string;\n  \n  /**\n   * AT URI (at://did/collection/rkey)\n   */\n  atUri: string;\n  \n  /**\n   * Content ID (CBOR hash) of the record\n   */\n  cid?: string | null;\n  \n  /**\n   * Repository revision at time of last commit\n   */\n  lastRev?: string | null;\n  \n  /**\n   * Creation timestamp\n   */\n  createdAt: string;\n  \n  /**\n   * Last update timestamp\n   */\n  updatedAt: string;\n  \n  /**\n   * Deletion timestamp (if deleted)\n   */\n  deletedAt?: string | null;\n}\n\n/**\n * AT Alias Store Interface\n *\n * Persists canonical-to-AT mappings.\n */\nexport interface AtAliasStore {\n  /**\n   * Get alias by canonical reference ID\n   */\n  getByCanonicalRefId(canonicalRefId: string): Promise<AtAliasRecord | null>;\n  \n  /**\n   * Store or update alias\n   */\n  put(alias: AtAliasRecord): Promise<void>;\n  \n  /**\n   * Mark alias as deleted\n   */\n  markDeleted(canonicalRefId: string, deletedAt: string): Promise<void>;\n  \n  /**\n   * Update CID and revision after commit\n   */\n  updateCidAndRev(canonicalRefId: string, cid: string, rev: string): Promise<void>;\n  \n  /**\n   * List all aliases for a DID\n   */\n  listByDid(did: string): Promise<AtAliasRecord[]>;\n  \n  /**\n   * Get all active (non-deleted) aliases\n   */\n  listActive(): Promise<AtAliasRecord[]>;\n}\n\n/**\n * In-Memory AT Alias Store (for testing)\n */\nexport class InMemoryAtAliasStore implements AtAliasStore {\n  private aliases = new Map<string, AtAliasRecord>();\n  \n  async getByCanonicalRefId(canonicalRefId: string): Promise<AtAliasRecord | null> {\n    return this.aliases.get(canonicalRefId) || null;\n  }\n  \n  async put(alias: AtAliasRecord): Promise<void> {\n    this.aliases.set(alias.canonicalRefId, alias);\n  }\n  \n  async markDeleted(canonicalRefId: string, deletedAt: string): Promise<void> {\n    const alias = this.aliases.get(canonicalRefId);\n    if (alias) {\n      alias.deletedAt = deletedAt;\n      alias.updatedAt = deletedAt;\n    }\n  }\n  \n  async updateCidAndRev(canonicalRefId: string, cid: string, rev: string): Promise<void> {\n    const alias = this.aliases.get(canonicalRefId);\n    if (alias) {\n      alias.cid = cid;\n      alias.lastRev = rev;\n      alias.updatedAt = new Date().toISOString();\n    }\n  }\n  \n  async listByDid(did: string): Promise<AtAliasRecord[]> {\n    return Array.from(this.aliases.values()).filter(a => a.did === did);\n  }\n  \n  async listActive(): Promise<AtAliasRecord[]> {\n    return Array.from(this.aliases.values()).filter(a => !a.deletedAt);\n  }\n}\n\n/**\n * Redis-backed AT Alias Store\n */\nexport class RedisAtAliasStore implements AtAliasStore {\n  private readonly redis: any; // Redis client\n  private readonly prefix = 'at:alias:';\n  \n  constructor(redis: any) {\n    this.redis = redis;\n  }\n  \n  async getByCanonicalRefId(canonicalRefId: string): Promise<AtAliasRecord | null> {\n    const key = `${this.prefix}canonical:${canonicalRefId}`;\n    const data = await this.redis.get(key);\n    return data ? JSON.parse(data) : null;\n  }\n  \n  async put(alias: AtAliasRecord): Promise<void> {\n    const key = `${this.prefix}canonical:${alias.canonicalRefId}`;\n    await this.redis.set(key, JSON.stringify(alias));\n  }\n  \n  async markDeleted(canonicalRefId: string, deletedAt: string): Promise<void> {\n    const alias = await this.getByCanonicalRefId(canonicalRefId);\n    if (alias) {\n      alias.deletedAt = deletedAt;\n      alias.updatedAt = deletedAt;\n      await this.put(alias);\n    }\n  }\n  \n  async updateCidAndRev(canonicalRefId: string, cid: string, rev: string): Promise<void> {\n    const alias = await this.getByCanonicalRefId(canonicalRefId);\n    if (alias) {\n      alias.cid = cid;\n      alias.lastRev = rev;\n      alias.updatedAt = new Date().toISOString();\n      await this.put(alias);\n    }\n  }\n  \n  async listByDid(did: string): Promise<AtAliasRecord[]> {\n    // Scan for all keys matching pattern\n    const keys = await this.redis.keys(`${this.prefix}canonical:*`);\n    const aliases: AtAliasRecord[] = [];\n    \n    for (const key of keys) {\n      const data = await this.redis.get(key);\n      const alias = JSON.parse(data);\n      if (alias.did === did) {\n        aliases.push(alias);\n      }\n    }\n    \n    return aliases;\n  }\n  \n  async listActive(): Promise<AtAliasRecord[]> {\n    const keys = await this.redis.keys(`${this.prefix}canonical:*`);\n    const aliases: AtAliasRecord[] = [];\n    \n    for (const key of keys) {\n      const data = await this.redis.get(key);\n      const alias = JSON.parse(data);\n      if (!alias.deletedAt) {\n        aliases.push(alias);\n      }\n    }\n    \n    return aliases;\n  }\n}\n
+/**
+ * V6.5 Phase 3: ATProto Alias Store
+ *
+ * Maps canonical IDs to ATProto aliases.
+ * Essential for:
+ * - Reusing rkey on updates
+ * - Targeting correct URI on deletes
+ * - Resolving references for replies/quotes
+ */
+
+/**
+ * AT Alias Record
+ *
+ * Tracks the mapping between canonical entities and their AT repo representations.
+ */
+export interface AtAliasRecord {
+  /**
+   * Canonical ID (from Tier 1)
+   */
+  canonicalRefId: string;
+  
+  /**
+   * Type of canonical entity
+   */
+  canonicalType: 'profile' | 'post' | 'follow' | 'like' | 'repost';
+  
+  /**
+   * Repository DID
+   */
+  did: string;
+  
+  /**
+   * Collection NSID
+   */
+  collection:
+    | 'app.bsky.actor.profile'
+    | 'app.bsky.feed.post'
+    | 'app.bsky.graph.follow'
+    | 'app.bsky.feed.like'
+    | 'app.bsky.feed.repost';
+  
+  /**
+   * Record key
+   */
+  rkey: string;
+  
+  /**
+   * AT URI (at://did/collection/rkey)
+   */
+  atUri: string;
+  
+  /**
+   * Content ID (CBOR hash) of the record
+   */
+  cid?: string | null;
+  
+  /**
+   * Repository revision at time of last commit
+   */
+  lastRev?: string | null;
+  
+  /**
+   * Creation timestamp
+   */
+  createdAt: string;
+  
+  /**
+   * Last update timestamp
+   */
+  updatedAt: string;
+  
+  /**
+   * Deletion timestamp (if deleted)
+   */
+  deletedAt?: string | null;
+
+  /**
+   * Subject DID (for follows)
+   */
+  subjectDid?: string | null;
+
+  /**
+   * Subject URI (for likes/reposts)
+   */
+  subjectUri?: string | null;
+
+  /**
+   * Subject CID (for likes/reposts)
+   */
+  subjectCid?: string | null;
+}
+
+/**
+ * AT Alias Store Interface
+ *
+ * Persists canonical-to-AT mappings.
+ */
+export interface AtAliasStore {
+  /**
+   * Get alias by canonical reference ID
+   */
+  getByCanonicalRefId(canonicalRefId: string): Promise<AtAliasRecord | null>;
+  
+  /**
+   * Store or update alias
+   */
+  put(alias: AtAliasRecord): Promise<void>;
+  
+  /**
+   * Mark alias as deleted
+   */
+  markDeleted(canonicalRefId: string, deletedAt: string): Promise<void>;
+  
+  /**
+   * Update CID and revision after commit
+   */
+  updateCidAndRev(canonicalRefId: string, cid: string, rev: string): Promise<void>;
+  
+  /**
+   * List all aliases for a DID
+   */
+  listByDid(did: string): Promise<AtAliasRecord[]>;
+  
+  /**
+   * Get all active (non-deleted) aliases
+   */
+  listActive(): Promise<AtAliasRecord[]>;
+}
+
+/**
+ * In-Memory AT Alias Store (for testing)
+ */
+export class InMemoryAtAliasStore implements AtAliasStore {
+  private aliases = new Map<string, AtAliasRecord>();
+  
+  async getByCanonicalRefId(canonicalRefId: string): Promise<AtAliasRecord | null> {
+    return this.aliases.get(canonicalRefId) || null;
+  }
+  
+  async put(alias: AtAliasRecord): Promise<void> {
+    this.aliases.set(alias.canonicalRefId, alias);
+  }
+  
+  async markDeleted(canonicalRefId: string, deletedAt: string): Promise<void> {
+    const alias = this.aliases.get(canonicalRefId);
+    if (alias) {
+      alias.deletedAt = deletedAt;
+      alias.updatedAt = deletedAt;
+    }
+  }
+  
+  async updateCidAndRev(canonicalRefId: string, cid: string, rev: string): Promise<void> {
+    const alias = this.aliases.get(canonicalRefId);
+    if (alias) {
+      alias.cid = cid;
+      alias.lastRev = rev;
+      alias.updatedAt = new Date().toISOString();
+    }
+  }
+  
+  async listByDid(did: string): Promise<AtAliasRecord[]> {
+    return Array.from(this.aliases.values()).filter(a => a.did === did);
+  }
+  
+  async listActive(): Promise<AtAliasRecord[]> {
+    return Array.from(this.aliases.values()).filter(a => !a.deletedAt);
+  }
+}
+
+/**
+ * Redis-backed AT Alias Store
+ */
+export class RedisAtAliasStore implements AtAliasStore {
+  private readonly redis: any; // Redis client
+  private readonly prefix = 'at:alias:';
+  
+  constructor(redis: any) {
+    this.redis = redis;
+  }
+  
+  async getByCanonicalRefId(canonicalRefId: string): Promise<AtAliasRecord | null> {
+    const key = `${this.prefix}canonical:${canonicalRefId}`;
+    const data = await this.redis.get(key);
+    return data ? JSON.parse(data) : null;
+  }
+  
+  async put(alias: AtAliasRecord): Promise<void> {
+    const key = `${this.prefix}canonical:${alias.canonicalRefId}`;
+    await this.redis.set(key, JSON.stringify(alias));
+  }
+  
+  async markDeleted(canonicalRefId: string, deletedAt: string): Promise<void> {
+    const alias = await this.getByCanonicalRefId(canonicalRefId);
+    if (alias) {
+      alias.deletedAt = deletedAt;
+      alias.updatedAt = deletedAt;
+      await this.put(alias);
+    }
+  }
+  
+  async updateCidAndRev(canonicalRefId: string, cid: string, rev: string): Promise<void> {
+    const alias = await this.getByCanonicalRefId(canonicalRefId);
+    if (alias) {
+      alias.cid = cid;
+      alias.lastRev = rev;
+      alias.updatedAt = new Date().toISOString();
+      await this.put(alias);
+    }
+  }
+  
+  async listByDid(did: string): Promise<AtAliasRecord[]> {
+    // Scan for all keys matching pattern
+    const keys = await this.redis.keys(`${this.prefix}canonical:*`);
+    const aliases: AtAliasRecord[] = [];
+    
+    for (const key of keys) {
+      const data = await this.redis.get(key);
+      const alias = JSON.parse(data);
+      if (alias.did === did) {
+        aliases.push(alias);
+      }
+    }
+    
+    return aliases;
+  }
+  
+  async listActive(): Promise<AtAliasRecord[]> {
+    const keys = await this.redis.keys(`${this.prefix}canonical:*`);
+    const aliases: AtAliasRecord[] = [];
+    
+    for (const key of keys) {
+      const data = await this.redis.get(key);
+      const alias = JSON.parse(data);
+      if (!alias.deletedAt) {
+        aliases.push(alias);
+      }
+    }
+    
+    return aliases;
+  }
+}

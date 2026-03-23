@@ -139,9 +139,14 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
   async handleRequest(
     method: string,
     path: string,
-    query: Record<string, string | undefined>
+    query: Record<string, string | undefined>,
+    clientIp?: string
   ): Promise<{ status: number; headers: Record<string, string>; body: any }> {
     try {
+      // TODO (Phase 5): Implement rate limiting middleware here.
+      // E.g., check rateLimitStore.increment(clientIp, path)
+      // If exceeded, throw XrpcErrors.rateLimitExceeded()
+      
       let result: { headers: Record<string, string>; body: any };
 
       if (method === 'GET' && path === '/xrpc/com.atproto.sync.getRepo') {

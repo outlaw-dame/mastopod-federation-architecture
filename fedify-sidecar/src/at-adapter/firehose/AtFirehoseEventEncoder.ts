@@ -78,19 +78,12 @@ export class DefaultAtFirehoseEventEncoder implements AtFirehoseEventEncoder {
   }
 
   /**
-   * Placeholder encoder — produces JSON bytes.
-   * Replace with CBOR: encode([ { op: 1, t: type }, body ]) using cborg.
+   * Encodes the event into a CBOR array: [header, body]
    */
   private _encode(type: string, body: any): Uint8Array {
-    const serialisable = JSON.parse(
-      JSON.stringify(body, (_key, value) => {
-        if (value instanceof Uint8Array) {
-          return { $bytes: Buffer.from(value).toString('base64') };
-        }
-        return value;
-      })
-    );
-    const envelope = { header: { op: 1, t: type }, body: serialisable };
-    return new Uint8Array(Buffer.from(JSON.stringify(envelope)));
+    const header = { op: 1, t: type };
+    // We use dynamic import or require for cborg to avoid top-level errors if not installed yet
+    const { encode } = require('cborg');
+    return encode([header, body]);
   }
 }

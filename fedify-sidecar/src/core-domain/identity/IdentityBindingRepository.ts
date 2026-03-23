@@ -98,6 +98,15 @@ export interface IdentityBindingRepository {
   getByAtprotoHandle(handle: string): Promise<IdentityBinding | null>;
 
   /**
+   * Alias for getByAtprotoHandle (used in Phase 4/5)
+   *
+   * @param handle - The handle (e.g., alice.pod.example)
+   * @returns The binding, or null if not found
+   * @throws RepositoryError on query failure
+   */
+  findByHandle?(handle: string): Promise<IdentityBinding | null>;
+
+  /**
    * Retrieve binding by ActivityPub actor URI
    *
    * @param actorUri - The actor URI (e.g., https://pod.example/alice)

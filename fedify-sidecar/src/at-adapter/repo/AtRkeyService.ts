@@ -1,1 +1,93 @@
-/**\n * V6.5 Phase 3: ATProto Record Key Service\n *\n * Deterministic rkey allocation for AT records:\n * - Profiles: fixed \"self\" rkey\n * - Posts: TID-based rkey from timestamp\n * - Updates: reuse existing rkey\n * - Deletes: require prior alias lookup\n */\n\n/**\n * TID (Timestamp Identifier) - 13-character base32-encoded timestamp + random\n * Used for posts and other time-ordered records\n */\nexport function generateTidFromTimestamp(publishedAt: string): string {\n  const timestamp = new Date(publishedAt).getTime();\n  \n  // TID format: 53-bit timestamp (milliseconds since epoch) + 10-bit random\n  // Encoded as 13-character base32\n  const timestampBits = BigInt(timestamp) << 10n;\n  const randomBits = BigInt(Math.floor(Math.random() * 1024));\n  const tidValue = timestampBits | randomBits;\n  \n  // Convert to base32\n  return encodeBase32(tidValue);\n}\n\n/**\n * Encode BigInt as base32 (RFC 4648 alphabet)\n */\nfunction encodeBase32(value: bigint): string {\n  const alphabet = '234567abcdefghijklmnopqrstuvwxyz';\n  let result = '';\n  let n = value;\n  \n  while (n > 0n) {\n    result = alphabet[Number(n & 31n)] + result;\n    n = n >> 5n;\n  }\n  \n  // Pad to 13 characters\n  return result.padStart(13, '2');\n}\n\n/**\n * ATProto Record Key Service\n *\n * Allocates deterministic record keys for different collection types.\n */\nexport interface AtRkeyService {\n  /**\n   * Get rkey for profile record (always \"self\")\n   */\n  profileRkey(): string;\n  \n  /**\n   * Allocate rkey for new post record (TID-based)\n   */\n  postRkey(publishedAt: string): string;\n}\n\n/**\n * Default implementation\n */\nexport class DefaultAtRkeyService implements AtRkeyService {\n  /**\n   * Profile records use fixed \"self\" rkey\n   * This ensures there's only one profile record per repository\n   */\n  profileRkey(): string {\n    return 'self';\n  }\n  \n  /**\n   * Post records use TID-based rkey\n   * TIDs are timestamp-based, ensuring temporal ordering\n   */\n  postRkey(publishedAt: string): string {\n    return generateTidFromTimestamp(publishedAt);\n  }\n}\n\n/**\n * Validate rkey format\n */\nexport function validateRkey(rkey: string): boolean {\n  // rkey must be 1-256 characters, alphanumeric + hyphen\n  if (rkey.length === 0 || rkey.length > 256) {\n    return false;\n  }\n  \n  return /^[a-zA-Z0-9_-]+$/.test(rkey);\n}\n
+/**
+ * V6.5 Phase 3: ATProto Record Key Service
+ *
+ * Deterministic rkey allocation for AT records:
+ * - Profiles: fixed "self" rkey
+ * - Posts: TID-based rkey from timestamp
+ * - Updates: reuse existing rkey
+ * - Deletes: require prior alias lookup
+ */
+
+/**
+ * TID (Timestamp Identifier) - 13-character base32-encoded timestamp + random
+ * Used for posts and other time-ordered records
+ */
+export function generateTidFromTimestamp(publishedAt: string): string {
+  const timestamp = new Date(publishedAt).getTime();
+  
+  // TID format: 53-bit timestamp (milliseconds since epoch) + 10-bit random
+  // Encoded as 13-character base32
+  const timestampBits = BigInt(timestamp) << 10n;
+  const randomBits = BigInt(Math.floor(Math.random() * 1024));
+  const tidValue = timestampBits | randomBits;
+  
+  // Convert to base32
+  return encodeBase32(tidValue);
+}
+
+/**
+ * Encode BigInt as base32 (RFC 4648 alphabet)
+ */
+function encodeBase32(value: bigint): string {
+  const alphabet = '234567abcdefghijklmnopqrstuvwxyz';
+  let result = '';
+  let n = value;
+  
+  while (n > 0n) {
+    result = alphabet[Number(n & 31n)] + result;
+    n = n >> 5n;
+  }
+  
+  // Pad to 13 characters
+  return result.padStart(13, '2');
+}
+
+/**
+ * ATProto Record Key Service
+ *
+ * Allocates deterministic record keys for different collection types.
+ */
+export interface AtRkeyService {
+  /**
+   * Get rkey for profile record (always "self")
+   */
+  profileRkey(): string;
+  
+  /**
+   * Allocate rkey for new post record (TID-based)
+   */
+  postRkey(publishedAt: string): string;
+}
+
+/**
+ * Default implementation
+ */
+export class DefaultAtRkeyService implements AtRkeyService {
+  /**
+   * Profile records use fixed "self" rkey
+   * This ensures there's only one profile record per repository
+   */
+  profileRkey(): string {
+    return 'self';
+  }
+  
+  /**
+   * Post records use TID-based rkey
+   * TIDs are timestamp-based, ensuring temporal ordering
+   */
+  postRkey(publishedAt: string): string {
+    return generateTidFromTimestamp(publishedAt);
+  }
+}
+
+/**
+ * Validate rkey format
+ */
+export function validateRkey(rkey: string): boolean {
+  // rkey must be 1-256 characters, alphanumeric + hyphen
+  if (rkey.length === 0 || rkey.length > 256) {
+    return false;
+  }
+  
+  return /^[a-zA-Z0-9_-]+$/.test(rkey);
+}

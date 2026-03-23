@@ -1,1 +1,348 @@
-/**\n * V6.5 ATProto Repository Registry - Multi-Repository Management\n *\n * Manages multiple ATProto repositories (one per DID).\n * Provides efficient lookup and state management.\n *\n * Uses Redis for persistence and in-memory cache for performance.\n */\n\nimport { RepositoryState } from './AtprotoRepoState.js';\n\n/**\n * Repository registry error codes\n */\nexport enum RegistryErrorCode {\n  /**\n   * Repository not found\n   */\n  NOT_FOUND = 'NOT_FOUND',\n\n  /**\n   * Repository already exists\n   */\n  ALREADY_EXISTS = 'ALREADY_EXISTS',\n\n  /**\n   * Persistence error\n   */\n  PERSISTENCE_ERROR = 'PERSISTENCE_ERROR',\n\n  /**\n   * Validation error\n   */\n  VALIDATION_ERROR = 'VALIDATION_ERROR',\n}\n\n/**\n * Registry error\n */\nexport class RegistryError extends Error {\n  constructor(\n    public code: RegistryErrorCode,\n    message: string,\n    public details?: Record<string, any>\n  ) {\n    super(message);\n    this.name = 'RegistryError';\n  }\n}\n\n/**\n * ATProto Repository Registry\n *\n * Manages repository state across multiple DIDs.\n */\nexport interface AtprotoRepoRegistry {\n  /**\n   * Register a new repository\n   *\n   * @param state - Repository state\n   * @throws RegistryError if already exists or persistence fails\n   */\n  register(state: RepositoryState): Promise<void>;\n\n  /**\n   * Get repository by DID\n   *\n   * @param did - Repository DID\n   * @returns Repository state or null if not found\n   * @throws RegistryError on persistence error\n   */\n  getByDid(did: string): Promise<RepositoryState | null>;\n\n  /**\n   * Update repository state\n   *\n   * @param state - Updated repository state\n   * @throws RegistryError if not found or persistence fails\n   */\n  update(state: RepositoryState): Promise<void>;\n\n  /**\n   * Delete repository\n   *\n   * @param did - Repository DID\n   * @returns true if deleted, false if not found\n   * @throws RegistryError on persistence error\n   */\n  delete(did: string): Promise<boolean>;\n\n  /**\n   * List all repositories\n   *\n   * @param limit - Maximum results (default 100)\n   * @param offset - Pagination offset (default 0)\n   * @returns Array of repository states\n   * @throws RegistryError on persistence error\n   */\n  list(limit?: number, offset?: number): Promise<RepositoryState[]>;\n\n  /**\n   * Count total repositories\n   *\n   * @returns Total count\n   * @throws RegistryError on persistence error\n   */\n  count(): Promise<number>;\n\n  /**\n   * Check if repository exists\n   *\n   * @param did - Repository DID\n   * @returns true if exists\n   * @throws RegistryError on persistence error\n   */\n  exists(did: string): Promise<boolean>;\n\n  /**\n   * Get repositories by collection\n   *\n   * @param nsid - Collection NSID\n   * @returns Array of repository states\n   * @throws RegistryError on persistence error\n   */\n  getByCollection(nsid: string): Promise<RepositoryState[]>;\n\n  /**\n   * Get repositories with pending commits\n   *\n   * @returns Array of repository states\n   * @throws RegistryError on persistence error\n   */\n  getWithPendingCommits(): Promise<RepositoryState[]>;\n\n  /**\n   * Transaction support\n   *\n   * @param callback - Function to execute within transaction\n   * @throws RegistryError on transaction failure\n   */\n  transaction<T>(callback: (registry: AtprotoRepoRegistry) => Promise<T>): Promise<T>;\n\n  /**\n   * Health check\n   *\n   * @returns true if registry is healthy\n   */\n  health(): Promise<boolean>;\n}\n\n/**\n * In-memory repository registry (for testing/caching)\n */\nexport class InMemoryAtprotoRepoRegistry implements AtprotoRepoRegistry {\n  private repositories = new Map<string, RepositoryState>();\n\n  async register(state: RepositoryState): Promise<void> {\n    if (this.repositories.has(state.did)) {\n      throw new RegistryError(\n        RegistryErrorCode.ALREADY_EXISTS,\n        `Repository already exists: ${state.did}`\n      );\n    }\n    this.repositories.set(state.did, state);\n  }\n\n  async getByDid(did: string): Promise<RepositoryState | null> {\n    return this.repositories.get(did) || null;\n  }\n\n  async update(state: RepositoryState): Promise<void> {\n    if (!this.repositories.has(state.did)) {\n      throw new RegistryError(\n        RegistryErrorCode.NOT_FOUND,\n        `Repository not found: ${state.did}`\n      );\n    }\n    this.repositories.set(state.did, state);\n  }\n\n  async delete(did: string): Promise<boolean> {\n    return this.repositories.delete(did);\n  }\n\n  async list(limit: number = 100, offset: number = 0): Promise<RepositoryState[]> {\n    return Array.from(this.repositories.values()).slice(offset, offset + limit);\n  }\n\n  async count(): Promise<number> {\n    return this.repositories.size;\n  }\n\n  async exists(did: string): Promise<boolean> {\n    return this.repositories.has(did);\n  }\n\n  async getByCollection(nsid: string): Promise<RepositoryState[]> {\n    return Array.from(this.repositories.values()).filter((repo) =>\n      repo.collections.some((c) => c.nsid === nsid)\n    );\n  }\n\n  async getWithPendingCommits(): Promise<RepositoryState[]> {\n    // In-memory implementation doesn't track pending commits\n    return [];\n  }\n\n  async transaction<T>(callback: (registry: AtprotoRepoRegistry) => Promise<T>): Promise<T> {\n    return callback(this);\n  }\n\n  async health(): Promise<boolean> {\n    return true;\n  }\n}\n\n/**\n * Redis-backed repository registry\n */\nexport class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {\n  private readonly keyPrefix = 'atproto:repo:';\n  private readonly indexKey = 'atproto:repos';\n\n  constructor(private redis: any) {}\n\n  async register(state: RepositoryState): Promise<void> {\n    const key = `${this.keyPrefix}${state.did}`;\n\n    // Check if already exists\n    const exists = await this.redis.exists(key);\n    if (exists) {\n      throw new RegistryError(\n        RegistryErrorCode.ALREADY_EXISTS,\n        `Repository already exists: ${state.did}`\n      );\n    }\n\n    // Store repository state\n    await this.redis.set(key, JSON.stringify(state), 'EX', 86400 * 30); // 30 days TTL\n\n    // Add to index\n    await this.redis.sadd(this.indexKey, state.did);\n  }\n\n  async getByDid(did: string): Promise<RepositoryState | null> {\n    const key = `${this.keyPrefix}${did}`;\n    const data = await this.redis.get(key);\n\n    if (!data) {\n      return null;\n    }\n\n    return JSON.parse(data);\n  }\n\n  async update(state: RepositoryState): Promise<void> {\n    const key = `${this.keyPrefix}${state.did}`;\n\n    // Check if exists\n    const exists = await this.redis.exists(key);\n    if (!exists) {\n      throw new RegistryError(\n        RegistryErrorCode.NOT_FOUND,\n        `Repository not found: ${state.did}`\n      );\n    }\n\n    // Update repository state\n    await this.redis.set(key, JSON.stringify(state), 'EX', 86400 * 30);\n  }\n\n  async delete(did: string): Promise<boolean> {\n    const key = `${this.keyPrefix}${did}`;\n    const deleted = await this.redis.del(key);\n    await this.redis.srem(this.indexKey, did);\n    return deleted > 0;\n  }\n\n  async list(limit: number = 100, offset: number = 0): Promise<RepositoryState[]> {\n    const dids = await this.redis.smembers(this.indexKey);\n    const slice = dids.slice(offset, offset + limit);\n\n    const results: RepositoryState[] = [];\n    for (const did of slice) {\n      const state = await this.getByDid(did);\n      if (state) {\n        results.push(state);\n      }\n    }\n\n    return results;\n  }\n\n  async count(): Promise<number> {\n    return this.redis.scard(this.indexKey);\n  }\n\n  async exists(did: string): Promise<boolean> {\n    const key = `${this.keyPrefix}${did}`;\n    return (await this.redis.exists(key)) > 0;\n  }\n\n  async getByCollection(nsid: string): Promise<RepositoryState[]> {\n    const dids = await this.redis.smembers(this.indexKey);\n    const results: RepositoryState[] = [];\n\n    for (const did of dids) {\n      const state = await this.getByDid(did);\n      if (state && state.collections.some((c) => c.nsid === nsid)) {\n        results.push(state);\n      }\n    }\n\n    return results;\n  }\n\n  async getWithPendingCommits(): Promise<RepositoryState[]> {\n    // Would require additional tracking in Redis\n    return [];\n  }\n\n  async transaction<T>(callback: (registry: AtprotoRepoRegistry) => Promise<T>): Promise<T> {\n    // Redis transactions would be implemented here\n    return callback(this);\n  }\n\n  async health(): Promise<boolean> {\n    try {\n      await this.redis.ping();\n      return true;\n    } catch {\n      return false;\n    }\n  }\n}\n
+/**
+ * V6.5 ATProto Repository Registry - Multi-Repository Management
+ *
+ * Manages multiple ATProto repositories (one per DID).
+ * Provides efficient lookup and state management.
+ *
+ * Uses Redis for persistence and in-memory cache for performance.
+ */
+
+import { RepositoryState } from './AtprotoRepoState.js';
+
+/**
+ * Repository registry error codes
+ */
+export enum RegistryErrorCode {
+  /**
+   * Repository not found
+   */
+  NOT_FOUND = 'NOT_FOUND',
+
+  /**
+   * Repository already exists
+   */
+  ALREADY_EXISTS = 'ALREADY_EXISTS',
+
+  /**
+   * Persistence error
+   */
+  PERSISTENCE_ERROR = 'PERSISTENCE_ERROR',
+
+  /**
+   * Validation error
+   */
+  VALIDATION_ERROR = 'VALIDATION_ERROR',
+}
+
+/**
+ * Registry error
+ */
+export class RegistryError extends Error {
+  constructor(
+    public code: RegistryErrorCode,
+    message: string,
+    public details?: Record<string, any>
+  ) {
+    super(message);
+    this.name = 'RegistryError';
+  }
+}
+
+/**
+ * ATProto Repository Registry
+ *
+ * Manages repository state across multiple DIDs.
+ */
+export interface AtprotoRepoRegistry {
+  /**
+   * Register a new repository
+   *
+   * @param state - Repository state
+   * @throws RegistryError if already exists or persistence fails
+   */
+  register(state: RepositoryState): Promise<void>;
+
+  /**
+   * Get repository by DID
+   *
+   * @param did - Repository DID
+   * @returns Repository state or null if not found
+   * @throws RegistryError on persistence error
+   */
+  getByDid(did: string): Promise<RepositoryState | null>;
+
+  /**
+   * Update repository state
+   *
+   * @param state - Updated repository state
+   * @throws RegistryError if not found or persistence fails
+   */
+  update(state: RepositoryState): Promise<void>;
+
+  /**
+   * Delete repository
+   *
+   * @param did - Repository DID
+   * @returns true if deleted, false if not found
+   * @throws RegistryError on persistence error
+   */
+  delete(did: string): Promise<boolean>;
+
+  /**
+   * List all repositories
+   *
+   * @param limit - Maximum results (default 100)
+   * @param offset - Pagination offset (default 0)
+   * @returns Array of repository states
+   * @throws RegistryError on persistence error
+   */
+  list(limit?: number, offset?: number): Promise<RepositoryState[]>;
+
+  /**
+   * Count total repositories
+   *
+   * @returns Total count
+   * @throws RegistryError on persistence error
+   */
+  count(): Promise<number>;
+
+  /**
+   * Check if repository exists
+   *
+   * @param did - Repository DID
+   * @returns true if exists
+   * @throws RegistryError on persistence error
+   */
+  exists(did: string): Promise<boolean>;
+
+  /**
+   * Get repositories by collection
+   *
+   * @param nsid - Collection NSID
+   * @returns Array of repository states
+   * @throws RegistryError on persistence error
+   */
+  getByCollection(nsid: string): Promise<RepositoryState[]>;
+
+  /**
+   * Get repositories with pending commits
+   *
+   * @returns Array of repository states
+   * @throws RegistryError on persistence error
+   */
+  getWithPendingCommits(): Promise<RepositoryState[]>;
+
+  /**
+   * Transaction support
+   *
+   * @param callback - Function to execute within transaction
+   * @throws RegistryError on transaction failure
+   */
+  transaction<T>(callback: (registry: AtprotoRepoRegistry) => Promise<T>): Promise<T>;
+
+  /**
+   * Health check
+   *
+   * @returns true if registry is healthy
+   */
+  health(): Promise<boolean>;
+  
+  /**
+   * Get repository state (alias for getByDid used in Phase 3/4/5)
+   */
+  getRepoState(did: string): Promise<RepositoryState | null>;
+}
+
+/**
+ * In-memory repository registry (for testing/caching)
+ */
+export class InMemoryAtprotoRepoRegistry implements AtprotoRepoRegistry {
+  private repositories = new Map<string, RepositoryState>();
+
+  async register(state: RepositoryState): Promise<void> {
+    if (this.repositories.has(state.did)) {
+      throw new RegistryError(
+        RegistryErrorCode.ALREADY_EXISTS,
+        `Repository already exists: ${state.did}`
+      );
+    }
+    this.repositories.set(state.did, state);
+  }
+
+  async getByDid(did: string): Promise<RepositoryState | null> {
+    return this.repositories.get(did) || null;
+  }
+  
+  async getRepoState(did: string): Promise<RepositoryState | null> {
+    return this.getByDid(did);
+  }
+
+  async update(state: RepositoryState): Promise<void> {
+    if (!this.repositories.has(state.did)) {
+      throw new RegistryError(
+        RegistryErrorCode.NOT_FOUND,
+        `Repository not found: ${state.did}`
+      );
+    }
+    this.repositories.set(state.did, state);
+  }
+
+  async delete(did: string): Promise<boolean> {
+    return this.repositories.delete(did);
+  }
+
+  async list(limit: number = 100, offset: number = 0): Promise<RepositoryState[]> {
+    return Array.from(this.repositories.values()).slice(offset, offset + limit);
+  }
+
+  async count(): Promise<number> {
+    return this.repositories.size;
+  }
+
+  async exists(did: string): Promise<boolean> {
+    return this.repositories.has(did);
+  }
+
+  async getByCollection(nsid: string): Promise<RepositoryState[]> {
+    return Array.from(this.repositories.values()).filter((repo) =>
+      repo.collections.some((c) => c.nsid === nsid)
+    );
+  }
+
+  async getWithPendingCommits(): Promise<RepositoryState[]> {
+    // In-memory implementation doesn't track pending commits
+    return [];
+  }
+
+  async transaction<T>(callback: (registry: AtprotoRepoRegistry) => Promise<T>): Promise<T> {
+    return callback(this);
+  }
+
+  async health(): Promise<boolean> {
+    return true;
+  }
+}
+
+/**
+ * Redis-backed repository registry
+ */
+export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
+  private readonly keyPrefix = 'atproto:repo:';
+  private readonly indexKey = 'atproto:repos';
+
+  constructor(private redis: any) {}
+
+  async register(state: RepositoryState): Promise<void> {
+    const key = `${this.keyPrefix}${state.did}`;
+
+    // Check if already exists
+    const exists = await this.redis.exists(key);
+    if (exists) {
+      throw new RegistryError(
+        RegistryErrorCode.ALREADY_EXISTS,
+        `Repository already exists: ${state.did}`
+      );
+    }
+
+    // Store repository state
+    await this.redis.set(key, JSON.stringify(state), 'EX', 86400 * 30); // 30 days TTL
+
+    // Add to index
+    await this.redis.sadd(this.indexKey, state.did);
+  }
+
+  async getByDid(did: string): Promise<RepositoryState | null> {
+    const key = `${this.keyPrefix}${did}`;
+    const data = await this.redis.get(key);
+
+    if (!data) {
+      return null;
+    }
+
+    return JSON.parse(data);
+  }
+  
+  async getRepoState(did: string): Promise<RepositoryState | null> {
+    return this.getByDid(did);
+  }
+
+  async update(state: RepositoryState): Promise<void> {
+    const key = `${this.keyPrefix}${state.did}`;
+
+    // Check if exists
+    const exists = await this.redis.exists(key);
+    if (!exists) {
+      throw new RegistryError(
+        RegistryErrorCode.NOT_FOUND,
+        `Repository not found: ${state.did}`
+      );
+    }
+
+    // Update repository state
+    await this.redis.set(key, JSON.stringify(state), 'EX', 86400 * 30);
+  }
+
+  async delete(did: string): Promise<boolean> {
+    const key = `${this.keyPrefix}${did}`;
+    const deleted = await this.redis.del(key);
+    await this.redis.srem(this.indexKey, did);
+    return deleted > 0;
+  }
+
+  async list(limit: number = 100, offset: number = 0): Promise<RepositoryState[]> {
+    const dids = await this.redis.smembers(this.indexKey);
+    const slice = dids.slice(offset, offset + limit);
+
+    const results: RepositoryState[] = [];
+    for (const did of slice) {
+      const state = await this.getByDid(did);
+      if (state) {
+        results.push(state);
+      }
+    }
+
+    return results;
+  }
+
+  async count(): Promise<number> {
+    return this.redis.scard(this.indexKey);
+  }
+
+  async exists(did: string): Promise<boolean> {
+    const key = `${this.keyPrefix}${did}`;
+    return (await this.redis.exists(key)) > 0;
+  }
+
+  async getByCollection(nsid: string): Promise<RepositoryState[]> {
+    const dids = await this.redis.smembers(this.indexKey);
+    const results: RepositoryState[] = [];
+
+    for (const did of dids) {
+      const state = await this.getByDid(did);
+      if (state && state.collections.some((c) => c.nsid === nsid)) {
+        results.push(state);
+      }
+    }
+
+    return results;
+  }
+
+  async getWithPendingCommits(): Promise<RepositoryState[]> {
+    // Would require additional tracking in Redis
+    return [];
+  }
+
+  async transaction<T>(callback: (registry: AtprotoRepoRegistry) => Promise<T>): Promise<T> {
+    // Redis transactions would be implemented here
+    return callback(this);
+  }
+
+  async health(): Promise<boolean> {
+    try {
+      await this.redis.ping();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}

@@ -74,10 +74,10 @@ export class DefaultHandleResolutionReader implements HandleResolutionReader {
     }
 
     try {
-      // 2. Look up the binding by handle.  The repository interface exposes
-      //    findByHandle; if it does not yet exist, fall back to a linear scan
-      //    via listByStatus so we never expose raw errors to callers.
-      const binding = await (this.identityRepo as any).findByHandle?.(sanitised) ?? null;
+      // 2. Look up the binding by handle.
+      const binding = await (this.identityRepo.findByHandle
+        ? this.identityRepo.findByHandle(sanitised)
+        : this.identityRepo.getByAtprotoHandle(sanitised));
       if (!binding) return null;
       if (binding.status !== 'active') return null;
       return binding.atprotoDid ?? null;

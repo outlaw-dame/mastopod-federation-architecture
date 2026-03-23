@@ -16,6 +16,14 @@ export interface CanonicalPost {
   visibility: 'public' | 'unlisted' | 'private' | 'direct';
   publishedAt: string;
   deletedAt?: string;
+  replyToCanonicalPostId?: string;
+  attachments?: Array<{
+    kind: 'image' | 'video' | 'audio' | 'document';
+    mediaId: string;
+    altText?: string;
+    width?: number;
+    height?: number;
+  }>;
 }
 
 export interface AtProjectionDecision {
@@ -26,6 +34,7 @@ export interface AtProjectionDecision {
 export interface AtProjectionPolicy {
   canProjectProfile(profile: CanonicalProfile, binding: IdentityBinding): AtProjectionDecision;
   canProjectPost(post: CanonicalPost, binding: IdentityBinding): AtProjectionDecision;
+  canProjectSocialAction(binding: IdentityBinding): AtProjectionDecision;
 }
 
 export class DefaultAtProjectionPolicy implements AtProjectionPolicy {
@@ -51,6 +60,16 @@ export class DefaultAtProjectionPolicy implements AtProjectionPolicy {
     }
     if (post.deletedAt) {
       return { allowed: true };
+    }
+    return { allowed: true };
+  }
+
+  canProjectSocialAction(binding: IdentityBinding): AtProjectionDecision {
+    if (!binding.atprotoDid || !binding.atprotoHandle) {
+      return { allowed: false, reason: 'missing_atproto_identity' };
+    }
+    if (binding.status !== 'active') {
+      return { allowed: false, reason: 'identity_not_active' };
     }
     return { allowed: true };
   }
