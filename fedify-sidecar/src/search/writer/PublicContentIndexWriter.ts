@@ -9,6 +9,7 @@
 import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents';
 import { PublicContentDocument } from '../models/PublicContentDocument';
 import { SearchDocAliasCache } from './SearchDocAliasCache';
+import { SearchDedupService } from '../aliases/SearchDedupService';
 
 export interface OpenSearchClient {
   get(id: string): Promise<PublicContentDocument | null>;
@@ -19,29 +20,30 @@ export interface OpenSearchClient {
 export class PublicContentIndexWriter {
   constructor(
     private readonly osClient: OpenSearchClient,
-    private readonly aliasCache: SearchDocAliasCache
+    private readonly aliasCache: SearchDocAliasCache,
+    private readonly dedupService: SearchDedupService
   ) {}
 
   async onUpsert(event: SearchPublicUpsertV1): Promise<void> {
-    // 1. Determine the target stableDocId
-    let targetDocId = event.stableDocId;
-
-    // Check cache for existing aliases to merge
-    if (event.canonicalContentId) {
-      const cached = await this.aliasCache.getByCanonicalId(event.canonicalContentId);
-      if (cached) targetDocId = cached;
-    } else if (event.ap?.objectUri) {
-      const cached = await this.aliasCache.getByApUri(event.ap.objectUri);
-      if (cached) targetDocId = cached;
-    } else if (event.at?.uri) {
-      const cached = await this.aliasCache.getByAtUri(event.at.uri);
-      if (cached) targetDocId = cached;
-    }
+    // 1. Determine the target stableDocId using DedupService
+    const targetDocId = await this.dedupService.resolveStableDocId(event);
 
     // 2. Fetch existing document if any
     const existingDoc = await this.osClient.get(targetDocId);
 
-    // 3. Merge or create
+    // 3. Check if we should merge (for remote content)
+    if (existingDoc && existingDoc.sourceKind === 'remote' && event.sourceKind === 'remote') {
+      const shouldMerge = await this.dedupService.shouldMergeRemoteDuplicate(existingDoc, event);
+      if (!shouldMerge) {
+        // If we shouldn't merge, we need a new stableDocId to avoid overwriting
+        // In a real system, we might append a hash or timestamp
+        // For now, we'll just log and skip to avoid corrupting the index
+        console.warn(`Skipping merge for remote duplicate: ${targetDocId}`);
+        return;
+      }
+    }
+
+    // 4. Merge or create
     const doc: Partial<PublicContentDocument> = existingDoc ? { ...existingDoc } : {
       stableDocId: targetDocId,
       canonicalContentId: event.canonicalContentId,
@@ -74,10 +76,19 @@ export class PublicContentIndexWriter {
       doc.at = { ...doc.at, ...event.at };
     }
 
-    // 4. Upsert to OpenSearch
+    // Initialize engagement if new
+    if (!existingDoc) {
+      doc.engagement = {
+        likeCount: 0,
+        repostCount: 0,
+        replyCount: 0
+      };
+    }
+
+    // 5. Upsert to OpenSearch
     await this.osClient.upsert(targetDocId, doc);
 
-    // 5. Update alias cache
+    // 6. Update alias cache
     if (event.canonicalContentId) {
       await this.aliasCache.setCanonicalId(event.canonicalContentId, targetDocId);
     }

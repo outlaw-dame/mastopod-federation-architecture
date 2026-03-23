@@ -1,11 +1,11 @@
 /**
- * V6.5 Phase 5.25: Unified Public Indexing Addendum
+ * V6.5 Phase 5.5: Unified OpenSearch Read Stack
  *
  * OpenSearch Document Model for the unified public-content-v1 index.
  */
 
 export interface PublicContentDocument {
-  stableDocId: string;
+  stableDocId: string;                // canonicalContentId for local content
   canonicalContentId?: string;
 
   protocolPresence: Array<'ap' | 'at'>;
@@ -27,10 +27,13 @@ export interface PublicContentDocument {
     apUri?: string;
     did?: string;
     handle?: string;
+    displayName?: string;
   };
 
-  text: string;
+  text: string;                       // normalized plaintext
+  textRaw?: string;                   // optional for debugging only
   createdAt: string;
+  updatedAt?: string;
   langs?: string[];
   tags?: string[];
 
@@ -40,6 +43,20 @@ export interface PublicContentDocument {
   hasMedia: boolean;
   mediaCount: number;
 
+  engagement?: {
+    likeCount?: number;
+    repostCount?: number;
+    replyCount?: number;
+  };
+
+  ranking?: {
+    recencyBucket?: string;
+    localAffinityScore?: number;
+    graphAffinityScore?: number;
+    qualityScore?: number;
+  };
+
+  embedding?: number[];               // semantic vector
   isDeleted: boolean;
   indexedAt: string;
 }
