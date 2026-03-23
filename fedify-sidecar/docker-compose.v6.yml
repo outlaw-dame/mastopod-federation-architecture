@@ -1,0 +1,167 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # Redis (Delivery State, Caching, MRF KV)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: fedify-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fedify
+
+  # ============================================================================
+  # RedPanda (Event Logs - NOT Work Queue)
+  # ============================================================================
+  redpanda:
+    image: vectorized/redpanda:latest
+    container_name: fedify-redpanda
+    ports:
+      - '9092:9092'
+      - '29092:29092'
+    environment:
+      REDPANDA_BROKERS: redpanda:9092
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --advertised-kafka-api=redpanda:9092
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ['CMD', 'rpk', 'cluster', 'info']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fedify
+
+  # ============================================================================
+  # Fedify Sidecar (V6)
+  # ============================================================================
+  fedify-sidecar:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fedify-sidecar-v6
+    ports:
+      - '8080:8080'
+    environment:
+      # Server
+      SIDECAR_PORT: '8080'
+      SIDECAR_HOST: '0.0.0.0'
+      SIDECAR_BASE_URL: 'http://localhost:8080'
+
+      # ActivityPods
+      ACTIVITYPODS_URL: 'http://activitypods:3000'
+      ACTIVITYPODS_TOKEN: '${ACTIVITYPODS_TOKEN}'
+
+      # Redis
+      REDIS_URL: 'redis://redis:6379'
+      MAX_CONCURRENT_PER_DOMAIN: '5'
+      IDEMPOTENCY_TTL_MS: '86400000'
+      RATE_LIMIT_WINDOW_MS: '3600000'
+      RATE_LIMIT_MAX_PER_WINDOW: '1000'
+      ACTOR_CACHE_TTL_MS: '3600000'
+
+      # RedPanda
+      REDPANDA_BROKERS: 'redpanda:9092'
+      REDPANDA_CLIENT_ID: 'fedify-sidecar-v6'
+      REDPANDA_COMPRESSION: 'zstd'
+
+      # V6 Topics
+      STREAM1_TOPIC: 'ap.stream1.local-public.v1'
+      STREAM2_TOPIC: 'ap.stream2.remote-public.v1'
+      FIREHOSE_TOPIC: 'ap.firehose.v1'
+      OUTBOUND_TOPIC: 'ap.outbound.v1'
+      INBOUND_TOPIC: 'ap.inbound.v1'
+      MRF_REJECTED_TOPIC: 'ap.mrf.rejected.v1'
+      TOMBSTONES_TOPIC: 'ap.tombstones.v1'
+
+      # Consumer Groups
+      INBOUND_CONSUMER_GROUP: 'fedify-inbound-v6'
+      OUTBOUND_CONSUMER_GROUP: 'fedify-outbound-v6'
+      INDEXER_CONSUMER_GROUP: 'fedify-indexer-v6'
+
+      # Workers
+      ENABLE_INBOUND_WORKER: 'true'
+      ENABLE_OUTBOUND_WORKER: 'true'
+      INBOUND_CONCURRENCY: '10'
+      OUTBOUND_CONCURRENCY: '20'
+      REQUEST_TIMEOUT_MS: '30000'
+
+      # MRF
+      ENABLE_MRF: 'true'
+      MRF_POLICY_SIGNATURE_VALIDATION: 'true'
+      MRF_POLICY_BLOCKED_DOMAIN: 'true'
+      MRF_POLICY_SUSPICIOUS_ACTIVITY: 'true'
+
+      # Logging
+      LOG_LEVEL: 'info'
+      LOG_FORMAT: 'json'
+
+    depends_on:
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - fedify
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8080/health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # ActivityPods (External Service)
+  # ============================================================================
+  # Uncomment if running ActivityPods in this compose file
+  # activitypods:
+  #   image: activitypods:latest
+  #   container_name: activitypods
+  #   ports:
+  #     - '3000:3000'
+  #   environment:
+  #     DATABASE_URL: 'postgresql://postgres:password@postgres:5432/activitypods'
+  #   depends_on:
+  #     - postgres
+  #   networks:
+  #     - fedify
+
+  # ============================================================================
+  # PostgreSQL (Optional - for ActivityPods)
+  # ============================================================================
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: postgres
+  #   environment:
+  #     POSTGRES_PASSWORD: password
+  #     POSTGRES_DB: activitypods
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   networks:
+  #     - fedify
+
+volumes:
+  redis_data:
+  redpanda_data:
+  # postgres_data:
+
+networks:
+  fedify:
+    driver: bridge
