@@ -6,7 +6,7 @@
  * Outputs: search.public.upsert.v1, search.public.delete.v1
  */
 
-import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents';
+import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchAuthorUpsertV1, SearchAuthorDeleteV1 } from '../events/SearchEvents';
 import { IdentityAliasResolver } from '../identity/IdentityAliasResolver';
 import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
@@ -22,7 +22,17 @@ export class ApSearchProjector {
    */
   async onApFirehoseEvent(event: any): Promise<void> {
     const activity = event.activity;
-    if (!activity || activity.type !== 'Create') return;
+    if (!activity) return;
+
+    if (activity.type === 'Create' && activity.object?.type === 'Person') {
+      await this.projectActor(activity.object, event.origin === 'local');
+      return;
+    } else if (activity.type === 'Update' && activity.object?.type === 'Person') {
+      await this.projectActor(activity.object, event.origin === 'local');
+      return;
+    }
+
+    if (activity.type !== 'Create') return;
 
     const object = activity.object;
     if (!object || typeof object !== 'object' || object.type !== 'Note') return;
@@ -57,6 +67,7 @@ export class ApSearchProjector {
     const inReplyTo = typeof object.inReplyTo === 'string' ? object.inReplyTo : object.inReplyTo?.id;
 
     const upsert: SearchPublicUpsertV1 = {
+      upsertKind: 'full',
       stableDocId,
       canonicalContentId: isLocal ? objectUri : undefined, // Simplified for Phase 5.25
       protocolSource: 'ap',
@@ -106,10 +117,35 @@ export class ApSearchProjector {
     const del: SearchPublicDeleteV1 = {
       stableDocId,
       reason: 'ap_tombstone',
+      deleteMode: 'soft',
       deletedAt: new Date().toISOString()
     };
 
     await this.eventPublisher.publish('search.public.delete.v1', del as any);
+  }
+
+  private async projectActor(actor: any, isLocal: boolean): Promise<void> {
+    const apUri = actor.id;
+    if (!apUri) return;
+
+    const stableAuthorId = await SearchDocIdStrategy.forRemoteAp(apUri);
+    
+    // Try to resolve canonical ID if known
+    const identity = await this.identityResolver.resolveByApUri(apUri);
+
+    const upsert: SearchAuthorUpsertV1 = {
+      stableAuthorId: identity.canonicalId || stableAuthorId,
+      canonicalAccountId: identity.canonicalId,
+      protocolSource: 'ap',
+      sourceKind: isLocal ? 'local' : 'remote',
+      apUri,
+      displayName: actor.name,
+      summaryText: actor.summary ? this.stripHtml(actor.summary) : undefined,
+      handle: actor.preferredUsername,
+      updatedAt: new Date().toISOString()
+    };
+
+    await this.eventPublisher.publish('search.author.upsert.v1', upsert as any);
   }
 
   private isPublic(obj: any): boolean {

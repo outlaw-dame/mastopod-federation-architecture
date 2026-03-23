@@ -31,6 +31,7 @@ describe('Phase 5.5 Acceptance Tests', () => {
 
   it('Test 1 — Dedup Service: Local deterministic merge', async () => {
     const upsert1: SearchPublicUpsertV1 = {
+      upsertKind: 'full',
       stableDocId: 'post1',
       canonicalContentId: 'post1',
       protocolSource: 'ap',
@@ -41,6 +42,7 @@ describe('Phase 5.5 Acceptance Tests', () => {
     };
 
     const upsert2: SearchPublicUpsertV1 = {
+      upsertKind: 'full',
       stableDocId: 'post1',
       canonicalContentId: 'post1',
       protocolSource: 'at',
@@ -63,6 +65,7 @@ describe('Phase 5.5 Acceptance Tests', () => {
     const now = new Date().toISOString();
     
     const upsert1: SearchPublicUpsertV1 = {
+      upsertKind: 'full',
       stableDocId: 'ap:remote1',
       protocolSource: 'ap',
       sourceKind: 'remote',
@@ -73,6 +76,7 @@ describe('Phase 5.5 Acceptance Tests', () => {
     };
 
     const upsert2: SearchPublicUpsertV1 = {
+      upsertKind: 'full',
       stableDocId: 'at:remote1',
       protocolSource: 'at',
       sourceKind: 'remote',
@@ -99,6 +103,7 @@ describe('Phase 5.5 Acceptance Tests', () => {
     const now = new Date().toISOString();
     
     const upsert1: SearchPublicUpsertV1 = {
+      upsertKind: 'full',
       stableDocId: 'ap:remote2',
       protocolSource: 'ap',
       sourceKind: 'remote',
@@ -109,6 +114,7 @@ describe('Phase 5.5 Acceptance Tests', () => {
     };
 
     const upsert2: SearchPublicUpsertV1 = {
+      upsertKind: 'full',
       stableDocId: 'at:remote2',
       protocolSource: 'at',
       sourceKind: 'remote',
@@ -133,6 +139,7 @@ describe('Phase 5.5 Acceptance Tests', () => {
 
   it('Test 4 — Embedding Worker', async () => {
     const upsert: SearchPublicUpsertV1 = {
+      upsertKind: 'full',
       stableDocId: 'post3',
       canonicalContentId: 'post3',
       protocolSource: 'ap',

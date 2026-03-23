@@ -39,6 +39,20 @@ export class DefaultOpenSearchClient implements IOpenSearchClient {
     });
   }
 
+  async updateScripted(id: string, script: string, params: Record<string, any>): Promise<void> {
+    await this.client.update({
+      index: this.indexName,
+      id,
+      body: {
+        script: {
+          source: script,
+          params
+        }
+      },
+      refresh: true
+    });
+  }
+
   async delete(id: string): Promise<void> {
     try {
       await this.client.delete({
@@ -128,6 +142,23 @@ export class InMemoryOpenSearchClient implements IOpenSearchClient {
   async upsert(id: string, doc: Partial<PublicContentDocument>): Promise<void> {
     const existing = this.docs.get(id) || {} as PublicContentDocument;
     this.docs.set(id, { ...existing, ...doc } as PublicContentDocument);
+  }
+
+  async updateScripted(id: string, script: string, params: Record<string, any>): Promise<void> {
+    const existing = this.docs.get(id);
+    if (!existing) return;
+    
+    // Mock implementation of the scripted update for engagement
+    if (!existing.engagement) {
+      existing.engagement = { likeCount: 0, repostCount: 0, replyCount: 0 };
+    }
+    
+    if (params['likeDelta']) existing.engagement.likeCount += params['likeDelta'];
+    if (params['repostDelta']) existing.engagement.repostCount += params['repostDelta'];
+    if (params['replyDelta']) existing.engagement.replyCount += params['replyDelta'];
+    if (params['indexedAt']) existing.indexedAt = params['indexedAt'];
+    
+    this.docs.set(id, existing);
   }
 
   async delete(id: string): Promise<void> {

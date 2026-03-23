@@ -7,10 +7,23 @@
 export const PublicContentMapping = {
   settings: {
     index: {
-      knn: true
+      knn: true,
+      number_of_shards: 3,
+      number_of_replicas: 1,
+      default_pipeline: "public-content-ingest-v1"
+    },
+    analysis: {
+      analyzer: {
+        content_text_analyzer: {
+          type: "custom",
+          tokenizer: "standard",
+          filter: ["lowercase"]
+        }
+      }
     }
   },
   mappings: {
+    dynamic: "strict",
     properties: {
       stableDocId:        { type: 'keyword' },
       canonicalContentId: { type: 'keyword' },
@@ -18,40 +31,94 @@ export const PublicContentMapping = {
       protocolPresence:   { type: 'keyword' },
       sourceKind:         { type: 'keyword' },
 
-      'ap.objectUri':     { type: 'keyword' },
-      'ap.activityUri':   { type: 'keyword' },
+      ap: {
+        properties: {
+          objectUri: { type: 'keyword' },
+          activityUri: { type: 'keyword' }
+        }
+      },
 
-      'at.uri':           { type: 'keyword' },
-      'at.cid':           { type: 'keyword' },
-      'at.did':           { type: 'keyword' },
+      at: {
+        properties: {
+          uri: { type: 'keyword' },
+          cid: { type: 'keyword' },
+          did: { type: 'keyword' }
+        }
+      },
 
-      'author.canonicalId': { type: 'keyword' },
-      'author.apUri':       { type: 'keyword' },
-      'author.did':         { type: 'keyword' },
-      'author.handle':      { type: 'keyword' },
-      'author.displayName': { type: 'text' },
+      author: {
+        properties: {
+          canonicalId: { type: 'keyword' },
+          apUri: { type: 'keyword' },
+          did: { type: 'keyword' },
+          handle: { type: 'keyword' },
+          displayName: {
+            type: 'text',
+            analyzer: 'content_text_analyzer',
+            fields: {
+              raw: {
+                type: 'keyword',
+                ignore_above: 256
+              }
+            }
+          }
+        }
+      },
 
-      text:               { type: 'text' },
-      createdAt:          { type: 'date' },
-      updatedAt:          { type: 'date' },
+      text: {
+        type: 'text',
+        analyzer: 'content_text_analyzer',
+        fields: {
+          raw: {
+            type: 'keyword',
+            ignore_above: 32766
+          }
+        }
+      },
+      textRaw: {
+        type: 'keyword',
+        index: false,
+        doc_values: false
+      },
 
-      langs:              { type: 'keyword' },
-      tags:               { type: 'keyword' },
+      createdAt: {
+        type: 'date',
+        format: 'strict_date_optional_time||epoch_millis'
+      },
+      updatedAt: {
+        type: 'date',
+        format: 'strict_date_optional_time||epoch_millis'
+      },
+      indexedAt: {
+        type: 'date',
+        format: 'strict_date_optional_time||epoch_millis'
+      },
 
-      replyToStableId:    { type: 'keyword' },
-      quoteOfStableId:    { type: 'keyword' },
+      langs: { type: 'keyword' },
+      tags: { type: 'keyword' },
 
-      hasMedia:           { type: 'boolean' },
-      mediaCount:         { type: 'integer' },
+      replyToStableId: { type: 'keyword' },
+      quoteOfStableId: { type: 'keyword' },
 
-      'engagement.likeCount':   { type: 'integer' },
-      'engagement.repostCount': { type: 'integer' },
-      'engagement.replyCount':  { type: 'integer' },
+      hasMedia: { type: 'boolean' },
+      mediaCount: { type: 'integer' },
 
-      'ranking.recencyBucket':      { type: 'keyword' },
-      'ranking.localAffinityScore': { type: 'float' },
-      'ranking.graphAffinityScore': { type: 'float' },
-      'ranking.qualityScore':       { type: 'float' },
+      engagement: {
+        properties: {
+          likeCount: { type: 'integer' },
+          repostCount: { type: 'integer' },
+          replyCount: { type: 'integer' }
+        }
+      },
+
+      ranking: {
+        properties: {
+          recencyBucket: { type: 'keyword' },
+          localAffinityScore: { type: 'float' },
+          graphAffinityScore: { type: 'float' },
+          qualityScore: { type: 'float' }
+        }
+      },
 
       embedding: {
         type: 'knn_vector',
@@ -60,9 +127,13 @@ export const PublicContentMapping = {
         mode: 'on_disk',
         compression_level: '16x'
       },
+      embeddingStatus: { type: 'keyword' },
+      embeddingUpdatedAt: {
+        type: 'date',
+        format: 'strict_date_optional_time||epoch_millis'
+      },
 
-      isDeleted:          { type: 'boolean' },
-      indexedAt:          { type: 'date' }
+      isDeleted: { type: 'boolean' }
     }
   }
 };

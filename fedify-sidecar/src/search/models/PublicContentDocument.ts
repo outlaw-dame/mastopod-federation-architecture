@@ -57,6 +57,9 @@ export interface PublicContentDocument {
   };
 
   embedding?: number[];               // semantic vector
+  embeddingStatus?: 'pending' | 'complete' | 'failed';
+  embeddingUpdatedAt?: string;
+
   isDeleted: boolean;
   indexedAt: string;
 }

@@ -46,15 +46,32 @@ export class EmbeddingIngestWorker {
     try {
       const vector = await this.embeddingService.embedText(doc.text);
       
-      // Upsert just the embedding
+      // Upsert just the embedding and status
       await this.osClient.upsert(stableDocId, {
         embedding: vector,
-        indexedAt: new Date().toISOString()
+        embeddingStatus: 'complete',
+        embeddingUpdatedAt: new Date().toISOString()
       });
     } catch (error) {
       console.error(`Failed to embed document ${stableDocId}:`, error);
-      // In a real system, we'd implement retry logic here
+      
+      // Mark as failed for retry
+      await this.osClient.upsert(stableDocId, {
+        embeddingStatus: 'failed',
+        embeddingUpdatedAt: new Date().toISOString()
+      });
     }
+  }
+
+  /**
+   * Self-healing scan to find and retry pending/failed embeddings.
+   * Would be called periodically by a cron job.
+   */
+  async scanAndRetry(limit: number = 100): Promise<void> {
+    // In a real implementation, this would query OpenSearch for:
+    // embeddingStatus: 'pending' OR (embeddingStatus: 'failed' AND embeddingUpdatedAt < now - 1h)
+    // For this phase, we just define the interface.
+    console.log(`Scanning for up to ${limit} documents needing embeddings...`);
   }
 }
 

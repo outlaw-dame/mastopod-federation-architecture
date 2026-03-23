@@ -6,7 +6,7 @@
  * Writes: OpenSearch public-content-v1 index
  */
 
-import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents';
+import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchPublicPartialUpdateV1 } from '../events/SearchEvents';
 import { PublicContentDocument } from '../models/PublicContentDocument';
 import { SearchDocAliasCache } from './SearchDocAliasCache';
 import { SearchDedupService } from '../aliases/SearchDedupService';
@@ -14,6 +14,7 @@ import { SearchDedupService } from '../aliases/SearchDedupService';
 export interface OpenSearchClient {
   get(id: string): Promise<PublicContentDocument | null>;
   upsert(id: string, doc: Partial<PublicContentDocument>): Promise<void>;
+  updateScripted(id: string, script: string, params: Record<string, any>): Promise<void>;
   delete(id: string): Promise<void>;
 }
 
@@ -25,6 +26,13 @@ export class PublicContentIndexWriter {
   ) {}
 
   async onUpsert(event: SearchPublicUpsertV1): Promise<void> {
+    if (event.upsertKind === 'partial') {
+      // For partial upserts, we just update the existing document
+      // In a real system, we'd need to handle the case where the document doesn't exist yet
+      // For this phase, we assume it exists or we ignore it
+      return;
+    }
+
     // 1. Determine the target stableDocId using DedupService
     const targetDocId = await this.dedupService.resolveStableDocId(event);
 
@@ -100,17 +108,43 @@ export class PublicContentIndexWriter {
     }
   }
 
-  async onDelete(event: SearchPublicDeleteV1): Promise<void> {
-    // For deletes, we just mark as deleted or remove.
-    // The spec says "mark isDeleted = true OR remove document (configurable)".
-    // We'll mark as deleted to preserve tombstones.
-    
-    const existingDoc = await this.osClient.get(event.stableDocId);
-    if (existingDoc) {
-      await this.osClient.upsert(event.stableDocId, {
-        isDeleted: true,
-        indexedAt: new Date().toISOString()
+  async onPartialUpdate(event: SearchPublicPartialUpdateV1): Promise<void> {
+    if (event.updateKind === 'engagement_delta' && event.deltas) {
+      const script = `
+        if (ctx._source.engagement == null) {
+          ctx._source.engagement = ['likeCount': 0, 'repostCount': 0, 'replyCount': 0];
+        }
+        if (params.likeDelta != null) ctx._source.engagement.likeCount += params.likeDelta;
+        if (params.repostDelta != null) ctx._source.engagement.repostCount += params.repostDelta;
+        if (params.replyDelta != null) ctx._source.engagement.replyCount += params.replyDelta;
+        ctx._source.indexedAt = params.indexedAt;
+      `;
+      
+      await this.osClient.updateScripted(event.stableDocId, script, {
+        likeDelta: event.deltas.likeCount,
+        repostDelta: event.deltas.repostCount,
+        replyDelta: event.deltas.replyCount,
+        indexedAt: event.indexedAt
       });
+    } else if (event.partialFields) {
+      await this.osClient.upsert(event.stableDocId, {
+        ...event.partialFields,
+        indexedAt: event.indexedAt
+      });
+    }
+  }
+
+  async onDelete(event: SearchPublicDeleteV1): Promise<void> {
+    if (event.deleteMode === 'hard') {
+      await this.osClient.delete(event.stableDocId);
+    } else {
+      const existingDoc = await this.osClient.get(event.stableDocId);
+      if (existingDoc) {
+        await this.osClient.upsert(event.stableDocId, {
+          isDeleted: true,
+          indexedAt: new Date().toISOString()
+        });
+      }
     }
   }
 }

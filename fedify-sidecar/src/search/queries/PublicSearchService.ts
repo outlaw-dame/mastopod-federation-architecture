@@ -31,7 +31,7 @@ export interface PublicSearchService {
 
 export class DefaultPublicSearchService implements PublicSearchService {
   private readonly indexName = 'public-content-v1';
-  private readonly pipelineName = 'public-hybrid-pipeline';
+  private readonly pipelineName = 'public-hybrid-pipeline-v1';
 
   constructor(
     private readonly osClient: any, // OpenSearch JS client
@@ -63,7 +63,17 @@ export class DefaultPublicSearchService implements PublicSearchService {
 
     // Add pagination and source filtering
     body.size = input.limit;
-    body._source = { exclude: ['embedding'] };
+    body._source = { exclude: ['embedding', 'textRaw'] };
+    
+    // Add sorting
+    body.sort = [
+      '_score',
+      {
+        createdAt: {
+          order: 'desc'
+        }
+      }
+    ];
     
     if (input.cursor) {
       // In a real implementation, we'd use search_after
