@@ -11,7 +11,8 @@
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest",
-    "test:coverage": "vitest --coverage"
+    "test:coverage": "vitest --coverage",
+    "test:harness": "tsx src/at-adapter/tests/local-harness.ts"
   },
   "dependencies": {
     "@fedify/fedify": "^1.4.0",
@@ -37,13 +38,15 @@
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/node": "^20.11.0",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
     "eslint": "^8.56.0",
     "ts-jest": "^29.4.6",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
-    "vitest": "^1.2.2"
+    "vitest": "^1.2.2",
+    "ws": "^8.20.0"
   },
   "engines": {
     "node": ">=20.0.0"

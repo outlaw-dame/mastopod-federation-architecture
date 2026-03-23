@@ -10,56 +10,71 @@ export * from './AtIngressEvents';
 
 // Consumer
 export {
+  DefaultAtFirehoseConsumer,
+} from './AtFirehoseConsumer';
+export type {
   AtFirehoseSource,
   AtFirehoseConsumer,
-  DefaultAtFirehoseConsumer,
 } from './AtFirehoseConsumer';
 
 // Decoder
 export {
-  DecodedFirehoseHeader,
-  AtFirehoseDecoder,
   DefaultAtFirehoseDecoder,
   FirehoseDecodeError,
+} from './AtFirehoseDecoder';
+export type {
+  DecodedFirehoseHeader,
+  AtFirehoseDecoder,
 } from './AtFirehoseDecoder';
 
 // Cursor management
 export {
-  AtFirehoseCursorManager,
   DefaultAtFirehoseCursorManager,
   InMemoryAtFirehoseCursorManager,
   CursorError,
 } from './AtFirehoseCursorManager';
+export type {
+  AtFirehoseCursorManager,
+} from './AtFirehoseCursorManager';
 
 // Checkpoint store
 export {
-  AtIngressCheckpointStore,
   RedisAtIngressCheckpointStore,
   InMemoryAtIngressCheckpointStore,
   CheckpointError,
 } from './AtIngressCheckpointStore';
+export type {
+  AtIngressCheckpointStore,
+} from './AtIngressCheckpointStore';
 
 // Event classifier
 export {
-  AtIngressEventClassifier,
   Phase55AEventClassifier,
   Phase55BEventClassifier,
   InMemoryAtIngressEventClassifier,
   ClassifierError,
 } from './AtIngressEventClassifier';
+export type {
+  AtIngressEventClassifier,
+} from './AtIngressEventClassifier';
 
 // Audit publisher
 export {
-  AtIngressAuditPublisher,
   DefaultAtIngressAuditPublisher,
   InMemoryAtIngressAuditPublisher,
   AT_VERIFY_FAILED_TOPIC,
 } from './AtIngressAuditPublisher';
+export type {
+  AtIngressAuditPublisher,
+} from './AtIngressAuditPublisher';
 
 // Verifier
 export {
-  AtIngressVerifier,
   DefaultAtIngressVerifier,
+} from './AtIngressVerifier';
+
+export type {
+  AtIngressVerifier,
   AtCommitVerifier,
   AtIdentityResolver,
   AtSyncRebuilder,
@@ -68,6 +83,8 @@ export {
 // Webhook forwarder (memory UI integration)
 export {
   AtIngressWebhookForwarder,
+} from './AtIngressWebhookForwarder';
+export type {
   WebhookEndpoint,
   ForwarderResult,
 } from './AtIngressWebhookForwarder';
