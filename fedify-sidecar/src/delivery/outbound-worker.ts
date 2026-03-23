@@ -17,7 +17,7 @@ import {
   RedisStreamsQueue, 
   OutboundJob, 
   backoffMs,
-} from "../queue/redis-streams-queue.js";
+} from "../queue/sidecar-redis-queue.js";
 import { SigningClient, SignResult } from "../signing/signing-client.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
 import { logger } from "../utils/logger.js";

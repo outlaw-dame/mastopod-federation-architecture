@@ -1,12 +1,20 @@
 /**
- * ActivityPods Integration: Signing API Service
+ * ActivityPods Integration: Signing API Service (v5)
  * 
  * This Moleculer service exposes an HTTP API for the Fedify sidecar to request
  * HTTP signatures. Private keys never leave the pod boundary.
  * 
+ * Contract (per v5 architecture):
+ * - POST /api/internal/signatures/batch
+ * - Request: { requests: SignRequest[] }
+ * - Response: { results: SignResult[] }
+ * - Each request carries its own actorUri, targetUrl, headers, body
+ * - Bearer token authentication required
+ * 
  * Installation:
  * 1. Copy this file to your ActivityPods backend services directory
  * 2. Configure the API route in your API gateway
+ * 3. Set SIGNING_API_TOKEN environment variable for authentication
  */
 
 const crypto = require('crypto');
@@ -17,120 +25,223 @@ module.exports = {
   dependencies: ['signature', 'keys'],
 
   settings: {
-    // Allowed sidecar IPs/hosts for security
+    // Internal API authentication token
+    internalApiToken: process.env.SIGNING_API_TOKEN || 'change-me-in-production',
+    
+    // Allowed sidecar IPs/hosts for additional security (optional)
     allowedHosts: (process.env.SIGNING_API_ALLOWED_HOSTS || 'localhost,127.0.0.1,fedify-sidecar').split(','),
   },
 
+  /**
+   * Middleware to check internal API authentication
+   */
+  middlewares: [
+    {
+      name: 'auth',
+      use(req, res, next) {
+        // Only apply to internal API routes
+        if (!req.url.startsWith('/api/internal/')) {
+          return next();
+        }
+
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+          return res.status(401).json({ error: 'Missing or invalid authorization' });
+        }
+
+        const token = authHeader.substring(7);
+        if (token !== this.settings.internalApiToken) {
+          return res.status(403).json({ error: 'Invalid authentication token' });
+        }
+
+        next();
+      },
+    },
+  ],
+
   actions: {
     /**
-     * Sign a request for the Fedify sidecar
+     * Batch sign multiple requests (v5 contract)
+     * 
      * @param {Object} ctx - Moleculer context
-     * @param {string} ctx.params.actorUri - The actor URI to sign as
-     * @param {string} ctx.params.method - HTTP method
-     * @param {string} ctx.params.url - Target URL
-     * @param {Object} ctx.params.headers - Headers to include in signature
-     * @param {string} ctx.params.digest - Request body digest
+     * @param {Array<Object>} ctx.params.requests - Array of SignRequest objects
+     *   Each request has: requestId, actorUri, method, targetUrl, headers, body?, options?
      */
-    async sign(ctx) {
-      const { actorUri, method, url, headers, digest } = ctx.params;
+    async 'batch'(ctx) {
+      const { requests } = ctx.params;
 
-      // Validate request origin (in production, add more robust checks)
-      // This is a simplified check - in production use proper authentication
-
-      try {
-        // Get the actor's private key
-        const privateKey = await ctx.call('keys.getPrivateKey', { actorUri });
-        
-        if (!privateKey) {
-          throw new Error(`No private key found for actor: ${actorUri}`);
-        }
-
-        // Build the signing string
-        const targetUrl = new URL(url);
-        const headersToSign = ['(request-target)', 'host', 'date', 'digest'];
-        
-        const signingLines = [
-          `(request-target): ${method.toLowerCase()} ${targetUrl.pathname}`,
-          `host: ${headers.Host || targetUrl.host}`,
-          `date: ${headers.Date}`,
-          `digest: ${digest}`,
-        ];
-        
-        const signingString = signingLines.join('\n');
-
-        // Create the signature
-        const signer = crypto.createSign('RSA-SHA256');
-        signer.update(signingString);
-        const signature = signer.sign(privateKey, 'base64');
-
-        // Get the key ID
-        const keyId = `${actorUri}#main-key`;
-
-        // Build the Signature header
-        const signatureHeader = [
-          `keyId="${keyId}"`,
-          `algorithm="rsa-sha256"`,
-          `headers="${headersToSign.join(' ')}"`,
-          `signature="${signature}"`,
-        ].join(',');
-
-        return {
-          signedHeaders: {
-            ...headers,
-            'Signature': signatureHeader,
-          },
-        };
-      } catch (err) {
-        this.logger.error(`Failed to sign request for ${actorUri}:`, err);
-        throw err;
+      if (!Array.isArray(requests)) {
+        throw new Error('requests must be an array');
       }
-    },
 
-    /**
-     * Batch sign multiple requests
-     * @param {Object} ctx - Moleculer context
-     * @param {string} ctx.params.actorUri - The actor URI to sign as
-     * @param {Array<Object>} ctx.params.requests - Array of request parameters
-     */
-    async batchSign(ctx) {
-      const { actorUri, requests } = ctx.params;
+      const results = [];
 
-      const signatures = [];
       for (const request of requests) {
         try {
-          const result = await this.actions.sign({
-            actorUri,
-            ...request,
-          });
-          signatures.push(result.signedHeaders);
+          const result = await this.signRequest(ctx, request);
+          results.push(result);
         } catch (err) {
-          signatures.push({ error: err.message });
+          this.logger.error(`Failed to sign request ${request.requestId}:`, err);
+          results.push({
+            requestId: request.requestId,
+            ok: false,
+            error: {
+              code: 'INTERNAL_ERROR',
+              message: err.message,
+            },
+          });
         }
       }
 
-      return { signatures };
+      return { results };
     },
 
     /**
-     * Get the public key for an actor
-     * @param {Object} ctx - Moleculer context
-     * @param {string} ctx.params.actorUri - The actor URI
+     * Sign a single request (internal helper)
      */
-    async publicKey(ctx) {
-      const { actorUri } = ctx.params;
+    async 'sign'(ctx) {
+      const request = ctx.params;
+      return this.signRequest(ctx, request);
+    },
+  },
 
-      try {
-        const publicKey = await ctx.call('keys.getPublicKey', { actorUri });
-        
-        if (!publicKey) {
-          throw new Error(`No public key found for actor: ${actorUri}`);
-        }
+  /**
+   * Helper method to sign a single request
+   */
+  async signRequest(ctx, request) {
+    const { requestId, actorUri, method, targetUrl, headers, body, options } = request;
 
-        return { publicKey };
-      } catch (err) {
-        this.logger.error(`Failed to get public key for ${actorUri}:`, err);
-        throw err;
+    try {
+      // Validate required fields
+      if (!actorUri || !method || !targetUrl || !headers) {
+        return {
+          requestId,
+          ok: false,
+          error: {
+            code: 'INVALID_REQUEST',
+            message: 'Missing required fields: actorUri, method, targetUrl, headers',
+          },
+        };
       }
+
+      // Get the actor's private key
+      let privateKey;
+      try {
+        privateKey = await ctx.call('keys.getPrivateKey', { actorUri });
+      } catch (err) {
+        this.logger.warn(`Failed to get private key for ${actorUri}:`, err);
+        return {
+          requestId,
+          ok: false,
+          error: {
+            code: 'ACTOR_NOT_FOUND',
+            message: `No private key found for actor: ${actorUri}`,
+          },
+        };
+      }
+
+      if (!privateKey) {
+        return {
+          requestId,
+          ok: false,
+          error: {
+            code: 'KEY_NOT_FOUND',
+            message: `No private key material available for actor: ${actorUri}`,
+          },
+        };
+      }
+
+      // Parse target URL
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(targetUrl);
+      } catch (err) {
+        return {
+          requestId,
+          ok: false,
+          error: {
+            code: 'INVALID_REQUEST',
+            message: `Invalid targetUrl: ${err.message}`,
+          },
+        };
+      }
+
+      // Determine headers to sign
+      const headersToSign = options?.signatureHeaders || ['(request-target)', 'host', 'date', 'digest'];
+
+      // Build the signing string
+      const signingLines = [];
+      for (const header of headersToSign) {
+        if (header === '(request-target)') {
+          signingLines.push(`(request-target): ${method.toLowerCase()} ${parsedUrl.pathname}${parsedUrl.search || ''}`);
+        } else {
+          const headerValue = headers[header] || headers[header.toLowerCase()];
+          if (!headerValue) {
+            return {
+              requestId,
+              ok: false,
+              error: {
+                code: 'INVALID_REQUEST',
+                message: `Missing required header for signing: ${header}`,
+              },
+            };
+          }
+          signingLines.push(`${header.toLowerCase()}: ${headerValue}`);
+        }
+      }
+
+      const signingString = signingLines.join('\n');
+
+      // Create the signature
+      let signature;
+      try {
+        const signer = crypto.createSign('RSA-SHA256');
+        signer.update(signingString);
+        signature = signer.sign(privateKey, 'base64');
+      } catch (err) {
+        this.logger.error(`Failed to create signature for ${actorUri}:`, err);
+        return {
+          requestId,
+          ok: false,
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: `Signature creation failed: ${err.message}`,
+          },
+        };
+      }
+
+      // Get the key ID (use keyId from options if provided, otherwise derive)
+      const keyId = options?.keyId || `${actorUri}#main-key`;
+
+      // Build the Signature header value
+      const signatureHeaderValue = [
+        `keyId="${keyId}"`,
+        `algorithm="rsa-sha256"`,
+        `headers="${headersToSign.join(' ')}"`,
+        `signature="${signature}"`,
+      ].join(',');
+
+      // Build response with signed headers
+      const signedHeaders = {
+        date: headers.date || headers.Date,
+        signature: signatureHeaderValue,
+      };
+
+      // Include digest if present in request
+      if (headers.digest || headers.Digest) {
+        signedHeaders.digest = headers.digest || headers.Digest;
+      }
+
+      return {
+        requestId,
+        ok: true,
+        signedHeaders,
+        meta: {
+          keyId,
+          algorithm: 'rsa-sha256',
+          signedHeadersList: headersToSign,
+        },
+      };
     },
   },
 
@@ -140,15 +251,16 @@ module.exports = {
    */
   routes: [
     {
-      path: '/api/signature',
+      path: '/api/internal/signatures',
       aliases: {
-        'POST /sign': 'signing-api.sign',
-        'POST /batch-sign': 'signing-api.batchSign',
-        'POST /public-key': 'signing-api.publicKey',
+        'POST /batch': 'signing-api.batch',
       },
       bodyParsers: {
         json: true,
       },
+      // Require internal authentication
+      authentication: true,
+      authorization: true,
     },
   ],
 };

@@ -44,7 +44,7 @@ export interface ActivityDocument {
   published_at?: string;
   received_at: string;
   indexed_at: string;
-  origin: "local" | "remote";
+  origin: "local" | "remote" | "unknown";
   
   // Denormalized fields for querying
   to?: string[];
@@ -284,7 +284,7 @@ export class OpenSearchIndexer {
       published_at: activity.published,
       received_at: new Date(event.receivedAt || event.streamTimestamp).toISOString(),
       indexed_at: new Date().toISOString(),
-      origin: event.origin || "unknown",
+      origin: (event.origin as "local" | "remote" | "unknown") || "unknown",
       to,
       cc,
       in_reply_to: inReplyTo,

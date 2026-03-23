@@ -19,7 +19,7 @@ import {
   RedisStreamsQueue, 
   createDefaultConfig as createQueueConfig,
   createInboundEnvelope,
-} from "./queue/redis-streams-queue.js";
+} from "./queue/sidecar-redis-queue.js";
 import { createSigningClient } from "./signing/signing-client.js";
 import { createRedPandaProducer } from "./streams/redpanda-producer.js";
 import { createOpenSearchIndexer } from "./streams/opensearch-indexer.js";

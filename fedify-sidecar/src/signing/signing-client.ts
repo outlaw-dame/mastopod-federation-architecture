@@ -293,7 +293,7 @@ export class SigningClient {
 export function createSigningClient(overrides?: Partial<SigningClientConfig>): SigningClient {
   const config: SigningClientConfig = {
     baseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
-    token: process.env.SIGNING_API_TOKEN || "",
+    token: process.env.ACTIVITYPODS_TOKEN || "",
     maxBatchSize: 200,
     maxBodyBytes: 512 * 1024,  // 512KB
     timeoutMs: 30000,

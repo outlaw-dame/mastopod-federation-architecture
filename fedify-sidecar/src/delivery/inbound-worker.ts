@@ -17,7 +17,7 @@ import { createVerify, createHash } from "node:crypto";
 import { 
   RedisStreamsQueue, 
   InboundEnvelope,
-} from "../queue/redis-streams-queue.js";
+} from "../queue/sidecar-redis-queue.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
 import { logger } from "../utils/logger.js";
 

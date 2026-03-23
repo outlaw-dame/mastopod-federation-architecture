@@ -73,7 +73,7 @@ export const config = {
     // Initial retry delay in ms
     retryDelay: parseInt(process.env.RETRY_DELAY || '60000', 10),
     // Request timeout in ms
-    requestTimeout: parseInt(process.env.REQUEST_TIMEOUT || '30000', 10),
+    requestTimeout: parseInt(process.env.REQUEST_TIMEOUT_MS || '30000', 10),
   },
   
   // Logging

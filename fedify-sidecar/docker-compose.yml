@@ -2,48 +2,88 @@ version: '3.8'
 
 services:
   # ==========================================================================
-  # Fedify Sidecar - handles remote federation with RedPanda message queue
+  # Redis - Work queues (inbound/outbound), idempotency, rate limiting
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - activitypods-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # ==========================================================================
+  # Fedify Sidecar - handles remote federation
+  # Uses Redis Streams for work queues, RedPanda for event logs only
   # ==========================================================================
   fedify-sidecar:
     build: .
     container_name: fedify-sidecar
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      - "8080:8080"
     environment:
       - NODE_ENV=production
-      - PORT=3001
+      - PORT=8080
       - HOST=0.0.0.0
+      - VERSION=5.0.0
       - DOMAIN=${DOMAIN:-localhost}
-      - BASE_URL=${BASE_URL:-http://localhost:3001}
+      - BASE_URL=${BASE_URL:-http://localhost:8080}
       
-      # RedPanda - used as Fedify's message queue
+      # Redis - work queues and control data
+      - REDIS_URL=redis://redis:6379
+      - INBOUND_STREAM_KEY=ap:queue:inbound:v1
+      - OUTBOUND_STREAM_KEY=ap:queue:outbound:v1
+      - DLQ_STREAM_KEY=ap:queue:dlq:v1
+      - CONSUMER_GROUP=sidecar-workers
+      - BLOCK_TIMEOUT_MS=5000
+      - CLAIM_IDLE_TIME_MS=60000
+      
+      # RedPanda - event logs ONLY (not work queues)
       - REDPANDA_BROKERS=redpanda:9092
       - REDPANDA_CLIENT_ID=fedify-sidecar
+      - TOPIC_STREAM1=ap.public.local.v1
+      - TOPIC_STREAM2=ap.public.remote.v1
+      - TOPIC_FIREHOSE=ap.public.firehose.v1
+      - CONSUMER_GROUP_INDEXER=sidecar-indexer
       
-      # Stream topics
-      - TOPIC_STREAM1=stream1-local-public
-      - TOPIC_STREAM2=stream2-remote-public
-      - TOPIC_FIREHOSE=firehose
-      
-      # ActivityPods
+      # ActivityPods - signing API (keys never leave)
       - ACTIVITYPODS_URL=${ACTIVITYPODS_URL:-http://activitypods:3000}
-      - ACTIVITYPODS_SIGNING_API_URL=${ACTIVITYPODS_URL:-http://activitypods:3000}/api/signing
-      - ACTIVITYPODS_INTERNAL_API_KEY=${ACTIVITYPODS_INTERNAL_API_KEY:-}
+      - ACTIVITYPODS_TOKEN=${ACTIVITYPODS_TOKEN:-}
+      - SIGNING_API_URL=http://activitypods:3000/api/internal/signatures/batch
       
-      # OpenSearch
+      # OpenSearch - activity storage
       - OPENSEARCH_NODE=http://opensearch:9200
       - OPENSEARCH_INDEX_PREFIX=activitypods
       
       # Delivery settings
-      - DELIVERY_MAX_CONCURRENT_DOMAINS=50
-      - DELIVERY_MAX_CONCURRENT_PER_DOMAIN=5
-      - DELIVERY_MAX_RETRIES=8
+      - OUTBOUND_CONCURRENCY=64
+      - MAX_CONCURRENT_PER_DOMAIN=10
+      - INBOUND_CONCURRENCY=32
+      - REQUEST_TIMEOUT_MS=30000
+      - USER_AGENT=Fedify-Sidecar/5.0 (ActivityPods)
+      
+      # Feature flags
+      - ENABLE_OUTBOUND_WORKER=true
+      - ENABLE_INBOUND_WORKER=true
+      - ENABLE_OPENSEARCH_INDEXER=true
       
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - LOG_FORMAT=json
     depends_on:
+      redis:
+        condition: service_healthy
       redpanda:
         condition: service_healthy
       opensearch:
@@ -51,7 +91,7 @@ services:
     networks:
       - activitypods-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -59,7 +99,8 @@ services:
 
   # ==========================================================================
   # RedPanda - Kafka-compatible streaming platform
-  # Used as Fedify's message queue AND for Stream1/Stream2/Firehose
+  # Used ONLY for immutable event logs (Stream1, Stream2, Firehose)
+  # NOT used for work queues - Redis Streams handles that
   # ==========================================================================
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v24.1.1
@@ -100,7 +141,7 @@ services:
     container_name: redpanda-console
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8081:8080"
     environment:
       - KAFKA_BROKERS=redpanda:9092
     depends_on:
@@ -208,6 +249,7 @@ networks:
     driver: bridge
 
 volumes:
+  redis-data:
   redpanda-data:
   opensearch-data:
   prometheus-data:
