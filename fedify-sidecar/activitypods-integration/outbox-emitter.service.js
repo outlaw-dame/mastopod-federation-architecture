@@ -20,8 +20,9 @@ module.exports = {
 
   settings: {
     // Sidecar webhook URL for event delivery
-    sidecarWebhookUrl: process.env.SIDECAR_WEBHOOK_URL || "http://fedify-sidecar:3001/webhook/outbox",
-    
+    sidecarWebhookUrl: process.env.SIDECAR_WEBHOOK_URL || "http://fedify-sidecar:8080/webhook/outbox",
+    sidecarToken: process.env.SIDECAR_TOKEN || "",
+
     // Retry settings for webhook delivery
     webhookRetries: Number(process.env.WEBHOOK_RETRIES) || 3,
     webhookTimeoutMs: Number(process.env.WEBHOOK_TIMEOUT_MS) || 5000,
@@ -33,29 +34,41 @@ module.exports = {
      * This event is emitted by ActivityPods when an activity is successfully
      * committed to an actor's outbox.
      */
-    "activitypub.outbox.committed": {
-      async handler(ctx) {
-        const { actorUri, activity, deliveryTargets, meta } = ctx.params;
+    "activitypub.outbox.posted": {
+                async handler(ctx) {
+        const { activity } = ctx.params;
+        const actorUri = typeof activity.actor === 'string' ? activity.actor : activity.actor?.id || null;
+
+        // Resolve remote delivery targets (not provided by ActivityPods in this event)
+        let deliveryTargets = [];
+        if (actorUri) {
+          try {
+            const result = await ctx.call('outbox-emitter.resolveDeliveryTargets', { actorUri, activity });
+            deliveryTargets = result.targets || [];
+          } catch (err) {
+            this.logger.warn("Failed to resolve delivery targets", { actorUri, error: err.message });
+          }
+        }
 
         // Build the event payload matching the Stream1 schema
         const event = {
           schema: "ap.outbox.committed.v1",
           eventId: ulid(),
           timestamp: new Date().toISOString(),
-          
+
           // Source
           actorUri,
-          podDataset: meta?.podDataset,
-          
+          podDataset: ctx.meta?.podDataset,
+
           // Activity
           activityId: activity.id || activity["@id"],
           objectId: this.extractObjectId(activity),
           activityType: activity.type || activity["@type"],
           activity,
-          
-          // Delivery targets (resolved by ActivityPods)
-          deliveryTargets: deliveryTargets || [],
-          
+
+          // Delivery targets (resolved above)
+          deliveryTargets,
+
           // Metadata
           meta: {
             isPublicIndexable: this.isPublicIndexable(activity),
@@ -137,7 +150,7 @@ module.exports = {
             if (actorDoc) {
               const host = new URL(recipientUri).hostname;
               targets.push({
-                recipientHost: host,
+                targetDomain: host,
                 inboxUrl: actorDoc.inbox,
                 sharedInboxUrl: actorDoc.endpoints?.sharedInbox || actorDoc.inbox,
               });
@@ -161,17 +174,27 @@ module.exports = {
      */
     async deliverToSidecar(ctx, event) {
       const url = this.settings.sidecarWebhookUrl;
-      
+
+      // Build the webhook payload in the shape the sidecar expects.
+      // The internal event schema differs from the sidecar's webhook contract.
+      const payload = {
+        actorUri: event.actorUri,
+        activityId: event.activityId,
+        activity: event.activity,
+        remoteTargets: event.deliveryTargets,  // sidecar validates body.remoteTargets
+      };
+
       for (let attempt = 1; attempt <= this.settings.webhookRetries; attempt++) {
         try {
           const response = await fetch(url, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              "Authorization": `Bearer ${this.settings.sidecarToken}`,
               "X-Event-Id": event.eventId,
               "X-Event-Schema": event.schema,
             },
-            body: JSON.stringify(event),
+            body: JSON.stringify(payload),
             signal: AbortSignal.timeout(this.settings.webhookTimeoutMs),
           });
 

@@ -55,7 +55,13 @@ export class DefaultAtCommitBuilder implements AtCommitBuilder {
     })).toString('base64');
 
     // 6. Call SigningService signCommit
+    const canonicalAccountId = ops[0]?.canonicalAccountId;
+    if (!canonicalAccountId) {
+      throw new Error('Cannot sign commit without canonicalAccountId');
+    }
+
     const signResponse = await this.signingService.signAtprotoCommit({
+      canonicalAccountId,
       did,
       unsignedCommitBytesBase64,
       rev: newRev

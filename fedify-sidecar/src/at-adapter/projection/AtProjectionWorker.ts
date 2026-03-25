@@ -91,6 +91,47 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     }
   ) {}
 
+  private async getOrCreateRepoState(did: string): Promise<any | null> {
+    const existing = await this.repoRegistry.getRepoState(did);
+    if (existing) return existing;
+
+    const now = new Date().toISOString();
+    const bootstrapState: any = {
+      did,
+      rootCid: null,
+      rev: '0',
+      collections: [],
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    try {
+      await this.repoRegistry.register(bootstrapState);
+    } catch {
+      // Another request may have raced us; fall through and read current state.
+    }
+
+    return this.repoRegistry.getRepoState(did);
+  }
+
+  private async persistAndUpdateRepoState(repoState: any, commitResult: any): Promise<void> {
+    await this.persistenceService.persist(commitResult);
+
+    const updatedState: any = {
+      ...repoState,
+      rev: commitResult.rev,
+      rootCid: commitResult.commitCid,
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      await this.repoRegistry.update(updatedState);
+    } catch {
+      // Repo may have been removed/recreated concurrently; best-effort update only.
+    }
+  }
+
   async onProfileUpserted(event: CoreProfileUpsertedV1): Promise<void> {
     const binding = await this.identityRepo.getByCanonicalAccountId(event.profile.id);
     if (!binding) return;
@@ -98,7 +139,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const decision = this.policy.canProjectProfile(event.profile, binding);
     if (!decision.allowed) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const record = await this.profileSerializer.serialize(event.profile, binding, this.deps.mediaResolver);
@@ -123,7 +164,23 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     await this.eventPublisher.publish('at.repo.op.v1', op as any);
 
     const commitResult = await this.commitBuilder.buildCommit(repoState, [op]);
-    await this.persistenceService.persist(commitResult);
+
+    const now = new Date().toISOString();
+    await this.aliasStore.put({
+      canonicalRefId: event.profile.id,
+      canonicalType: 'profile',
+      did: binding.atprotoDid!,
+      collection,
+      rkey,
+      atUri: `at://${binding.atprotoDid}/${collection}/${rkey}`,
+      cid: existingAlias?.cid ?? null,
+      lastRev: existingAlias?.lastRev ?? null,
+      createdAt: existingAlias?.createdAt ?? now,
+      updatedAt: now,
+      deletedAt: null,
+    });
+
+    await this.persistAndUpdateRepoState(repoState, commitResult);
   }
 
   async onPostCreated(event: CorePostCreatedV1): Promise<void> {
@@ -133,7 +190,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const decision = this.policy.canProjectPost(event.canonicalPost, binding);
     if (!decision.allowed) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const record = await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
@@ -168,7 +225,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       updatedAt: new Date().toISOString()
     });
 
-    await this.persistenceService.persist(commitResult);
+    await this.persistAndUpdateRepoState(repoState, commitResult);
   }
 
   async onPostUpdated(event: CorePostUpdatedV1): Promise<void> {
@@ -181,7 +238,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const decision = this.policy.canProjectPost(event.canonicalPost, binding);
     if (!decision.allowed) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const record = await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
@@ -201,7 +258,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     await this.eventPublisher.publish('at.repo.op.v1', op as any);
 
     const commitResult = await this.commitBuilder.buildCommit(repoState, [op]);
-    await this.persistenceService.persist(commitResult);
+    await this.persistAndUpdateRepoState(repoState, commitResult);
   }
 
   async onPostDeleted(event: CorePostDeletedV1): Promise<void> {
@@ -211,7 +268,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalAuthorId);
     if (!binding) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const op: AtRepoOpV1 = {
@@ -229,7 +286,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     await this.eventPublisher.publish('at.repo.op.v1', op as any);
 
     const commitResult = await this.commitBuilder.buildCommit(repoState, [op]);
-    await this.persistenceService.persist(commitResult);
+    await this.persistAndUpdateRepoState(repoState, commitResult);
   }
 
   // ---------------------------------------------------------------------------
@@ -246,7 +303,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const subjectDid = await this.deps.subjectResolver.resolveDidForIdentity(event.followed);
     if (!subjectDid) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const record = this.deps.followSerializer.serialize({
@@ -284,7 +341,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       updatedAt: new Date().toISOString()
     });
 
-    await this.persistenceService.persist(commitResult);
+    await this.persistAndUpdateRepoState(repoState, commitResult);
   }
 
   async onFollowDeleted(event: CoreFollowDeletedV1): Promise<void> {
@@ -294,7 +351,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const binding = await this.identityRepo.getByCanonicalAccountId(event.followerCanonicalId);
     if (!binding) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const op: AtSocialRepoOpV1 = {
@@ -312,7 +369,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     await this.eventPublisher.publish('at.repo.op.v1', op as any);
     const commitResult = await this.commitBuilder.buildCommit(repoState, [op as any]);
     
-    await this.persistenceService.persist(commitResult);
+    await this.persistAndUpdateRepoState(repoState, commitResult);
     await this.aliasStore.markDeleted(event.canonicalFollowId, event.deletedAt);
   }
 
@@ -326,7 +383,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const targetRef = await this.deps.targetAliasResolver.resolvePostStrongRef(event.targetPost.id);
     if (!targetRef) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const record = this.deps.likeSerializer.serialize({
@@ -365,7 +422,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       updatedAt: new Date().toISOString()
     });
 
-    await this.persistenceService.persist(commitResult);
+    await this.persistAndUpdateRepoState(repoState, commitResult);
   }
 
   async onLikeDeleted(event: CoreLikeDeletedV1): Promise<void> {
@@ -375,7 +432,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalActorId);
     if (!binding) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const op: AtSocialRepoOpV1 = {
@@ -393,7 +450,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     await this.eventPublisher.publish('at.repo.op.v1', op as any);
     const commitResult = await this.commitBuilder.buildCommit(repoState, [op as any]);
     
-    await this.persistenceService.persist(commitResult);
+    await this.persistAndUpdateRepoState(repoState, commitResult);
     await this.aliasStore.markDeleted(event.canonicalLikeId, event.deletedAt);
   }
 
@@ -407,7 +464,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const targetRef = await this.deps.targetAliasResolver.resolvePostStrongRef(event.targetPost.id);
     if (!targetRef) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const record = this.deps.repostSerializer.serialize({
@@ -446,7 +503,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       updatedAt: new Date().toISOString()
     });
 
-    await this.persistenceService.persist(commitResult);
+    await this.persistAndUpdateRepoState(repoState, commitResult);
   }
 
   async onRepostDeleted(event: CoreRepostDeletedV1): Promise<void> {
@@ -456,7 +513,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalActorId);
     if (!binding) return;
 
-    const repoState = await this.repoRegistry.getRepoState(binding.atprotoDid!);
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
     const op: AtSocialRepoOpV1 = {
@@ -474,7 +531,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     await this.eventPublisher.publish('at.repo.op.v1', op as any);
     const commitResult = await this.commitBuilder.buildCommit(repoState, [op as any]);
     
-    await this.persistenceService.persist(commitResult);
+    await this.persistAndUpdateRepoState(repoState, commitResult);
     await this.aliasStore.markDeleted(event.canonicalRepostId, event.deletedAt);
   }
 }

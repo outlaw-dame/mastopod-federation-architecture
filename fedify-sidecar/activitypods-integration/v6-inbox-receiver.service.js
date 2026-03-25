@@ -1,284 +1,135 @@
-/**
- * V6 Inbox Receiver Service for ActivityPods
- * 
- * Hardened internal inbox receiver that enforces the V6 security model:
- * - Fail-closed authentication (bearer token required)
- * - Sidecar is trust boundary (signature already verified)
- * - Proper inbox path parsing
- * - Audit logging
- * - Rate limiting
- * 
- * Endpoint: POST /api/internal/inbox/receive
- * 
- * This service receives verified activities from the sidecar and processes them
- * within ActivityPods. The sidecar has already verified the HTTP signature, so
- * this endpoint can skip signature verification.
- */
-
-const express = require('express');
-const router = express.Router();
-
-// ============================================================================
-// Middleware
-// ============================================================================
+"use strict";
 
 /**
- * Bearer token authentication (fail-closed)
+ * Sidecar Inbox Receiver — Moleculer Service
+ *
+ * Receives verified inbound activities from the fedify-sidecar and forwards
+ * them to ActivityPods via activitypub.inbox.post.
+ *
+ * The sidecar has already verified the HTTP signature, so we skip
+ * signature validation and trust the verifiedActorUri.
+ *
+ * Route: POST /api/internal/inbox/receive
+ * Auth:  Bearer ${ACTIVITYPODS_TOKEN}  (same secret as ACTIVITYPODS_TOKEN on the sidecar)
  */
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) {
-    console.warn(`[INBOX] Rejected request without authorization token from ${req.ip}`);
-    return res.status(401).json({
-      error: 'unauthorized',
-      message: 'Missing authorization token',
-    });
-  }
+const { Errors: E } = require("moleculer-web");
 
-  // Verify token against SIDECAR_TOKEN
-  const expectedToken = process.env.SIDECAR_TOKEN;
-  if (!expectedToken || token !== expectedToken) {
-    console.warn(`[INBOX] Rejected request with invalid token from ${req.ip}`);
-    return res.status(403).json({
-      error: 'forbidden',
-      message: 'Invalid authorization token',
-    });
-  }
+module.exports = {
+  name: "sidecar.inbox-receiver",
 
-  next();
-}
+  settings: {
+    // Must match ACTIVITYPODS_TOKEN in the sidecar's environment.
+    // Both sides MUST reference the same shared secret value.
+    sidecarToken: process.env.ACTIVITYPODS_TOKEN || "",
+  },
 
-/**
- * Request validation middleware
- */
-function validateInboxRequest(req, res, next) {
-  const { targetInbox, activity, verifiedActorUri, receivedAt, remoteIp } = req.body;
+  async started() {
+    const sidecarToken = this.settings.sidecarToken;
 
-  if (!targetInbox || typeof targetInbox !== 'string') {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'targetInbox is required and must be a string',
-    });
-  }
-
-  if (!activity || typeof activity !== 'object') {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'activity is required and must be an object',
-    });
-  }
-
-  if (!verifiedActorUri || typeof verifiedActorUri !== 'string') {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'verifiedActorUri is required and must be a string',
-    });
-  }
-
-  if (!receivedAt || typeof receivedAt !== 'number') {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'receivedAt is required and must be a number (timestamp)',
-    });
-  }
-
-  if (!remoteIp || typeof remoteIp !== 'string') {
-    return res.status(400).json({
-      error: 'invalid_request',
-      message: 'remoteIp is required and must be a string',
-    });
-  }
-
-  next();
-}
-
-// ============================================================================
-// Inbox Receiver Endpoint
-// ============================================================================
-
-/**
- * POST /api/internal/inbox/receive
- * 
- * Request:
- * {
- *   "targetInbox": "https://example.com/users/alice/inbox",
- *   "activity": {...activity object...},
- *   "verifiedActorUri": "https://remote.example/users/bob",
- *   "receivedAt": 1711270800000,
- *   "remoteIp": "192.0.2.1"
- * }
- * 
- * Response:
- * {
- *   "success": true
- * }
- * 
- * or
- * 
- * {
- *   "success": false,
- *   "error": "error_code",
- *   "message": "Human-readable error message"
- * }
- */
-router.post('/api/internal/inbox/receive', authenticateToken, validateInboxRequest, async (req, res) => {
-  const { targetInbox, activity, verifiedActorUri, receivedAt, remoteIp } = req.body;
-
-  try {
-    // Parse inbox path to extract username
-    const inboxUrl = new URL(targetInbox);
-    const pathParts = inboxUrl.pathname.split('/').filter(Boolean);
-
-    // Expected format: /users/{username}/inbox
-    if (pathParts.length < 3 || pathParts[0] !== 'users' || pathParts[2] !== 'inbox') {
-      console.warn(`[INBOX] Invalid inbox path: ${targetInbox}`);
-      return res.status(400).json({
-        error: 'invalid_inbox_path',
-        message: 'Invalid inbox path format',
-      });
+    if (!sidecarToken) {
+      this.logger.warn("[SidecarInbox] ACTIVITYPODS_TOKEN is not set — all requests will be rejected");
     }
 
-    const username = pathParts[1];
-
-    // Audit log
-    console.log(`[INBOX] Received activity from ${verifiedActorUri} for @${username}`, {
-      activityType: activity.type,
-      activityId: activity.id,
-      remoteIp,
-      receivedAt: new Date(receivedAt).toISOString(),
+    // api.addRoute is a local call — functions survive without serialization
+    await this.broker.call("api.addRoute", {
+      route: {
+        path: "/api/internal/inbox",
+        authorization: false,
+        authentication: false,
+        bodyParsers: { json: { strict: false } },
+        onBeforeCall(ctx, route, req) {
+          const authHeader = req.headers["authorization"] || "";
+          const [scheme, token] = authHeader.split(" ");
+          if (scheme !== "Bearer" || !sidecarToken || token !== sidecarToken) {
+            throw new E.UnAuthorizedError(E.ERR_NO_TOKEN, null, "Invalid sidecar token");
+          }
+        },
+        aliases: {
+          "POST /receive": "sidecar.inbox-receiver.receive",
+        },
+      },
     });
 
-    // Validate activity structure
-    if (!activity.id || !activity.type) {
-      console.warn(`[INBOX] Activity missing required fields`, {
-        activityId: activity.id,
-        activityType: activity.type,
-      });
-      return res.status(400).json({
-        error: 'invalid_activity',
-        message: 'Activity must have id and type',
-      });
-    }
+    this.logger.info("[SidecarInbox] Route POST /api/internal/inbox/receive registered");
+  },
 
-    // Validate actor matches verified actor
-    if (activity.actor !== verifiedActorUri) {
-      console.warn(`[INBOX] Activity actor mismatch`, {
-        activityActor: activity.actor,
-        verifiedActor: verifiedActorUri,
-      });
-      return res.status(400).json({
-        error: 'actor_mismatch',
-        message: 'Activity actor does not match verified actor',
-      });
-    }
+  actions: {
+    /**
+     * Receive a verified inbound activity from the sidecar.
+     *
+     * Params: { targetInbox, activity, verifiedActorUri, receivedAt, remoteIp }
+     */
+    async receive(ctx) {
+      const { targetInbox, activity, verifiedActorUri, receivedAt, remoteIp } = ctx.params;
 
-    // Forward to ActivityPods inbox processing
-    // The sidecar has already verified the signature, so we can skip verification
-    const result = await forwardToActivityPodsInbox(
-      username,
-      activity,
-      verifiedActorUri,
-      {
-        receivedAt,
-        remoteIp,
-        skipSignatureVerification: true, // Sidecar is trust boundary
+      // Validate required fields
+      if (!targetInbox || typeof targetInbox !== "string") {
+        ctx.meta.$statusCode = 400;
+        return { error: "invalid_request", message: "targetInbox is required" };
       }
-    );
+      if (!activity || typeof activity !== "object") {
+        ctx.meta.$statusCode = 400;
+        return { error: "invalid_request", message: "activity is required" };
+      }
+      if (!verifiedActorUri || typeof verifiedActorUri !== "string") {
+        ctx.meta.$statusCode = 400;
+        return { error: "invalid_request", message: "verifiedActorUri is required" };
+      }
+      if (!receivedAt || typeof receivedAt !== "number") {
+        ctx.meta.$statusCode = 400;
+        return { error: "invalid_request", message: "receivedAt must be a number (timestamp)" };
+      }
+      if (!remoteIp || typeof remoteIp !== "string") {
+        ctx.meta.$statusCode = 400;
+        return { error: "invalid_request", message: "remoteIp is required" };
+      }
 
-    if (!result.success) {
-      console.error(`[INBOX] Failed to process activity`, {
-        error: result.error,
-        username,
-        activityId: activity.id,
-      });
+      // Resolve the activity.actor to its URI, handling both string and object forms.
+      // ActivityPub allows actor to be either a URL string or an object with an id.
+      const activityActorUri =
+        typeof activity.actor === "string"
+          ? activity.actor
+          : (activity.actor && typeof activity.actor === "object" ? activity.actor.id : null);
 
-      return res.status(result.statusCode || 500).json({
-        success: false,
-        error: result.error,
-        message: result.message,
-      });
-    }
+      if (!activityActorUri || activityActorUri !== verifiedActorUri) {
+        ctx.meta.$statusCode = 400;
+        return { error: "actor_mismatch", message: "activity.actor does not match verifiedActorUri" };
+      }
 
-    // Success
-    console.log(`[INBOX] ✓ Activity processed for @${username}`, {
-      activityId: activity.id,
-      activityType: activity.type,
-    });
+      this.logger.info(
+        `[SidecarInbox] ${activity.type} from ${verifiedActorUri} → ${targetInbox}`,
+        { activityId: activity.id, remoteIp }
+      );
 
-    res.status(202).json({ success: true });
-  } catch (err) {
-    console.error(`[INBOX] Unhandled error processing inbox request:`, err);
+      try {
+        // activitypub.inbox.post destructures { collectionUri, ...activity } from params.
+        // Setting skipSignatureValidation skips the HTTP-sig re-check — the sidecar
+        // already verified it. Setting webId = verifiedActorUri satisfies the
+        // actor === webId guard inside inbox.post.
+        await ctx.call(
+          "activitypub.inbox.post",
+          { collectionUri: targetInbox, ...activity },
+          { meta: { webId: verifiedActorUri, skipSignatureValidation: true } }
+        );
 
-    res.status(500).json({
-      success: false,
-      error: 'server_error',
-      message: 'Internal server error',
-    });
-  }
-});
+        ctx.meta.$statusCode = 202;
+        return { success: true };
+      } catch (err) {
+        this.logger.error("[SidecarInbox] Failed to deliver activity", {
+          error: err.message,
+          activityId: activity.id,
+          targetInbox,
+        });
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+        if (err.code === 404 || err.type === "NOT_FOUND") {
+          ctx.meta.$statusCode = 404;
+          return { success: false, error: "not_found", message: err.message };
+        }
 
-/**
- * Forward activity to ActivityPods inbox processing
- * 
- * This is a placeholder - actual implementation depends on ActivityPods internals.
- * The key point is that the sidecar has already verified the signature, so we
- * can trust the activity and forward it directly.
- */
-async function forwardToActivityPodsInbox(username, activity, verifiedActorUri, options) {
-  // Pseudocode - implement based on ActivityPods internals
-  // This should:
-  // 1. Find the user's inbox
-  // 2. Add the activity to the inbox
-  // 3. Trigger any side-effects (notifications, etc.)
-  // 4. Return success/failure
-  
-  // Example:
-  // try {
-  //   const user = await ActivityPodsDB.findUserByUsername(username);
-  //   if (!user) {
-  //     return {
-  //       success: false,
-  //       statusCode: 404,
-  //       error: 'user_not_found',
-  //       message: `User ${username} not found`,
-  //     };
-  //   }
-  //
-  //   // Add activity to inbox
-  //   await ActivityPodsDB.addToInbox(user.id, activity);
-  //
-  //   // Trigger side-effects
-  //   await triggerSideEffects(user, activity);
-  //
-  //   return { success: true };
-  // } catch (err) {
-  //   return {
-  //     success: false,
-  //     statusCode: 500,
-  //     error: 'processing_error',
-  //     message: err.message,
-  //   };
-  // }
-  
-  throw new Error('forwardToActivityPodsInbox must be implemented by ActivityPods');
-}
-
-// ============================================================================
-// Health Check
-// ============================================================================
-
-router.get('/health', (req, res) => {
-  res.status(200).json({ status: 'healthy' });
-});
-
-// ============================================================================
-// Export
-// ============================================================================
-
-module.exports = router;
+        ctx.meta.$statusCode = 500;
+        return { success: false, error: "processing_error", message: err.message };
+      }
+    },
+  },
+};

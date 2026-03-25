@@ -31,7 +31,14 @@ export type XrpcErrorName =
   | 'RepoDeactivated'
   | 'RepoTakendown'
   | 'UnsupportedAlgorithm'
-  | 'InternalServerError';
+  | 'InternalServerError'
+  // Phase 7: auth + write errors
+  | 'AuthRequired'
+  | 'Forbidden'
+  | 'UnsupportedCollection'
+  | 'WriteNotAllowed'
+  | 'WriteTimeout'
+  | 'InvalidSwap';
 
 export class XrpcError extends Error {
   constructor(
@@ -63,6 +70,13 @@ export const XrpcErrors = {
   repoDeactivated: (did: string) => new XrpcError(400, 'RepoDeactivated', `Repo is deactivated: ${did}`),
   repoTakendown: (did: string) => new XrpcError(400, 'RepoTakendown', `Repo is taken down: ${did}`),
   internal: () => new XrpcError(500, 'InternalServerError', 'An unexpected error occurred'),
+  // Phase 7: auth + write errors
+  authRequired: (msg = 'Authentication required') => new XrpcError(401, 'AuthRequired', msg),
+  forbidden: (msg: string) => new XrpcError(403, 'Forbidden', msg),
+  unsupportedCollection: (col: string) => new XrpcError(400, 'UnsupportedCollection', `Collection not supported: ${col}`),
+  writeNotAllowed: (msg: string) => new XrpcError(403, 'WriteNotAllowed', msg),
+  writeTimeout: () => new XrpcError(503, 'WriteTimeout', 'Write result not available; retry the request'),
+  invalidSwap: (msg: string) => new XrpcError(400, 'InvalidSwap', msg),
 } as const;
 
 // ---------------------------------------------------------------------------

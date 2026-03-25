@@ -140,8 +140,8 @@ docker-compose up -d
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
 | `REDPANDA_BROKERS` | RedPanda broker addresses | `localhost:9092` |
 | `ACTIVITYPODS_URL` | ActivityPods base URL | `http://localhost:3000` |
-| `SIGNING_API_TOKEN` | Token for Signing API | (required) |
-| `FORWARDING_TOKEN` | Token for forwarding to ActivityPods | (required) |
+| `ACTIVITYPODS_TOKEN` | Shared secret for Sidecar → ActivityPods APIs (signing + inbox receive) | (required) |
+| `SIDECAR_TOKEN` | Shared secret for ActivityPods → Sidecar outbox webhook | (required) |
 
 ## Signing API Contract
 

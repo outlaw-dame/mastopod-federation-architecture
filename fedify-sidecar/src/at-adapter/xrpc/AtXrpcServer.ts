@@ -32,6 +32,7 @@ import { AtCarExporter } from '../repo/AtCarExporter';
 import { HandleResolutionReader } from '../identity/HandleResolutionReader';
 import { AtFirehoseSubscriptionManager } from '../firehose/AtFirehoseSubscriptionManager';
 import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry';
+import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository';
 import { SyncGetRepoRoute } from './routes/SyncGetRepoRoute';
 import { SyncGetLatestCommitRoute } from './routes/SyncGetLatestCommitRoute';
 import { RepoGetRecordRoute } from './routes/RepoGetRecordRoute';
@@ -39,7 +40,20 @@ import { RepoListRecordsRoute } from './routes/RepoListRecordsRoute';
 import { IdentityResolveHandleRoute } from './routes/IdentityResolveHandleRoute';
 import { SubscribeReposRoute } from './routes/SubscribeReposRoute';
 import { DefaultRepoRevLookup } from './middleware/AtRepoRevHeader';
-import { mapToXrpcError } from './middleware/XrpcErrorMapper';
+import { mapToXrpcError, XrpcErrors } from './middleware/XrpcErrorMapper';
+// Phase 7: authenticated write + session routes
+import {
+  ServerDescribeServerRoute,
+  type ServerDescribeServerConfig,
+} from './routes/ServerDescribeServerRoute';
+import { ServerCreateSessionRoute } from './routes/ServerCreateSessionRoute';
+import { RepoCreateRecordRoute } from './routes/RepoCreateRecordRoute';
+import { RepoPutRecordRoute } from './routes/RepoPutRecordRoute';
+import { RepoDeleteRecordRoute } from './routes/RepoDeleteRecordRoute';
+import { RepoDescribeRepoRoute } from './routes/RepoDescribeRepoRoute';
+import type { AtSessionService, AtAccountResolver, AtPasswordVerifier } from '../auth/AtSessionTypes';
+import type { AtWriteGateway } from '../writes/AtWriteTypes';
+import type { AtSessionContext } from '../auth/AtSessionTypes';
 
 // ---------------------------------------------------------------------------
 // Dependency injection interface
@@ -51,6 +65,14 @@ export interface AtXrpcServerDeps {
   handleResolutionReader: HandleResolutionReader;
   firehoseSubscriptions: AtFirehoseSubscriptionManager;
   repoRegistry: AtprotoRepoRegistry;
+  /** Optional: enables handleIsCorrect round-trip in describeRepo */
+  identityRepo?: IdentityBindingRepository;
+  // Phase 7: write + session deps (optional — omit to disable write endpoints)
+  serverConfig?: ServerDescribeServerConfig;
+  sessionService?: AtSessionService;
+  accountResolver?: AtAccountResolver;
+  passwordVerifier?: AtPasswordVerifier;
+  writeGateway?: AtWriteGateway;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +106,13 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
   private readonly listRecordsRoute: RepoListRecordsRoute;
   private readonly resolveHandleRoute: IdentityResolveHandleRoute;
   private readonly subscribeReposRoute: SubscribeReposRoute;
+  // Phase 7 routes (null when Phase 7 deps not provided)
+  private readonly describeServerRoute: ServerDescribeServerRoute | null;
+  private readonly createSessionRoute: ServerCreateSessionRoute | null;
+  private readonly createRecordRoute: RepoCreateRecordRoute | null;
+  private readonly putRecordRoute: RepoPutRecordRoute | null;
+  private readonly deleteRecordRoute: RepoDeleteRecordRoute | null;
+  private readonly describeRepoRoute: RepoDescribeRepoRoute | null;
 
   constructor(private readonly deps: AtXrpcServerDeps) {
     const revLookup = new DefaultRepoRevLookup(deps.repoRegistry);
@@ -118,6 +147,38 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
 
     this.subscribeReposRoute = new SubscribeReposRoute(
       deps.firehoseSubscriptions
+    );
+
+    // Phase 7: wire write/session routes when all deps are present
+    this.describeServerRoute = deps.serverConfig
+      ? new ServerDescribeServerRoute(deps.serverConfig)
+      : null;
+
+    this.createSessionRoute =
+      deps.accountResolver && deps.passwordVerifier && deps.sessionService
+        ? new ServerCreateSessionRoute(
+            deps.accountResolver,
+            deps.passwordVerifier,
+            deps.sessionService
+          )
+        : null;
+
+    this.createRecordRoute = deps.writeGateway
+      ? new RepoCreateRecordRoute(deps.writeGateway)
+      : null;
+
+    this.putRecordRoute = deps.writeGateway
+      ? new RepoPutRecordRoute(deps.writeGateway)
+      : null;
+
+    this.deleteRecordRoute = deps.writeGateway
+      ? new RepoDeleteRecordRoute(deps.writeGateway)
+      : null;
+
+    this.describeRepoRoute = new RepoDescribeRepoRoute(
+      deps.repoRegistry,
+      deps.handleResolutionReader,
+      deps.identityRepo,
     );
   }
 
@@ -176,6 +237,15 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
       } else if (method === 'GET' && path === '/xrpc/com.atproto.identity.resolveHandle') {
         result = await this.resolveHandleRoute.handle(query.handle);
 
+      } else if (method === 'GET' && path === '/xrpc/com.atproto.server.describeServer') {
+        if (!this.describeServerRoute) {
+          return { status: 501, headers: { ...SECURITY_HEADERS }, body: { error: 'MethodNotImplemented', message: 'describeServer not configured' } };
+        }
+        result = await this.describeServerRoute.handle();
+
+      } else if (method === 'GET' && path === '/xrpc/com.atproto.repo.describeRepo') {
+        result = await this.describeRepoRoute!.handle(query.repo);
+
       } else {
         return {
           status: 501,
@@ -190,6 +260,94 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
         body: result.body
       };
 
+    } catch (err) {
+      const mapped = mapToXrpcError(err);
+      return {
+        status: mapped.status,
+        headers: { ...SECURITY_HEADERS, 'Content-Type': 'application/json' },
+        body: mapped.body
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 7: Authenticated request dispatch
+  // Caller is responsible for extracting the bearer token and resolving the
+  // AtSessionContext before calling this method.
+  // ---------------------------------------------------------------------------
+
+  async handleAuthenticatedRequest(
+    method: string,
+    path: string,
+    body: Record<string, unknown> | undefined,
+    auth: AtSessionContext
+  ): Promise<{ status: number; headers: Record<string, string>; body: any }> {
+    try {
+      let result: { headers: Record<string, string>; body: any };
+
+      if (method === 'POST' && path === '/xrpc/com.atproto.repo.createRecord') {
+        if (!this.createRecordRoute) {
+          return { status: 501, headers: { ...SECURITY_HEADERS }, body: { error: 'MethodNotImplemented', message: 'Write endpoints not configured' } };
+        }
+        result = await this.createRecordRoute.handle(body, auth);
+
+      } else if (method === 'POST' && path === '/xrpc/com.atproto.repo.putRecord') {
+        if (!this.putRecordRoute) {
+          return { status: 501, headers: { ...SECURITY_HEADERS }, body: { error: 'MethodNotImplemented', message: 'Write endpoints not configured' } };
+        }
+        result = await this.putRecordRoute.handle(body, auth);
+
+      } else if (method === 'POST' && path === '/xrpc/com.atproto.repo.deleteRecord') {
+        if (!this.deleteRecordRoute) {
+          return { status: 501, headers: { ...SECURITY_HEADERS }, body: { error: 'MethodNotImplemented', message: 'Write endpoints not configured' } };
+        }
+        result = await this.deleteRecordRoute.handle(body, auth);
+
+      } else {
+        return {
+          status: 501,
+          headers: { ...SECURITY_HEADERS },
+          body: { error: 'MethodNotImplemented', message: 'Route not found' }
+        };
+      }
+
+      return {
+        status: 200,
+        headers: { ...SECURITY_HEADERS, ...result.headers },
+        body: result.body
+      };
+
+    } catch (err) {
+      const mapped = mapToXrpcError(err);
+      return {
+        status: mapped.status,
+        headers: { ...SECURITY_HEADERS, 'Content-Type': 'application/json' },
+        body: mapped.body
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 7: Unauthenticated session creation (special case: no auth token yet)
+  // ---------------------------------------------------------------------------
+
+  async handleCreateSession(
+    body: Record<string, unknown> | undefined
+  ): Promise<{ status: number; headers: Record<string, string>; body: any }> {
+    try {
+      if (!this.createSessionRoute) {
+        return {
+          status: 501,
+          headers: { ...SECURITY_HEADERS },
+          body: { error: 'MethodNotImplemented', message: 'Session endpoints not configured' }
+        };
+      }
+      const result = await this.createSessionRoute.handle(body);
+      return {
+        status: 200,
+        headers: { ...SECURITY_HEADERS, ...result.headers },
+        body: result.body
+      };
     } catch (err) {
       const mapped = mapToXrpcError(err);
       return {

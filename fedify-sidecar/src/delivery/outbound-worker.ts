@@ -18,7 +18,7 @@ import {
   OutboundJob, 
   backoffMs,
 } from "../queue/sidecar-redis-queue.js";
-import { SigningClient, SignResult } from "../signing/signing-client.js";
+import { SigningClient, SignResult, SignErrorResult } from "../signing/signing-client.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
 import { logger } from "../utils/logger.js";
 
@@ -245,8 +245,8 @@ export class OutboundWorker {
     });
 
     if (!signResult.ok) {
-      const errorResult = signResult as { ok: false; error: { code: string; message: string } };
-      const isPermanent = SigningClient.isPermanentError(errorResult.error.code as any);
+      const errorResult = signResult as SignErrorResult;
+      const isPermanent = SigningClient.isPermanentError(errorResult);
       return {
         jobId: job.jobId,
         success: false,

@@ -27,8 +27,10 @@ import { IdentityBindingRepository } from '../../core-domain/identity/IdentityBi
  *  Ref: https://atproto.com/specs/handle */
 const HANDLE_RE = /^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$/;
 
-/** did:plc and did:web are the only methods we host. */
-const DID_RE = /^did:(plc:[a-z2-7]{24}|web:[a-zA-Z0-9._:%-]{1,200})$/;
+/** did:plc and did:web are the only methods we host.
+ *  did:plc format is loosened for local/dev fixtures that do not use 24-char base32 IDs.
+ */
+const DID_RE = /^did:(plc:[a-zA-Z0-9._:-]{3,256}|web:[a-zA-Z0-9._:%-]{1,200})$/;
 
 export function isValidHandle(handle: string): boolean {
   if (!handle || handle.length > 253) return false;

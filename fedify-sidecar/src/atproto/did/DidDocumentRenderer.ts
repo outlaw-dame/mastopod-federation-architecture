@@ -1,1 +1,320 @@
-/**\n * V6.5 DID Document Renderer - DID Document Generation\n *\n * Renders DID documents for both did:plc and did:web methods.\n * DID documents are the authoritative source for public keys and service endpoints.\n *\n * Follows W3C DID Core specification and ATProto conventions.\n */\n\nimport { IdentityBinding } from '../../core-domain/identity/IdentityBinding.js';\n\n/**\n * DID document\n */\nexport interface DidDocument {\n  /**\n   * Context\n   */\n  '@context':\n    | string\n    | string[]\n    | Record<string, any>\n    | Array<string | Record<string, any>>;\n\n  /**\n   * DID identifier\n   */\n  id: string;\n\n  /**\n   * Verification methods (public keys)\n   */\n  verificationMethod?: VerificationMethod[];\n\n  /**\n   * Authentication methods\n   */\n  authentication?: string[];\n\n  /**\n   * Assertion methods\n   */\n  assertionMethod?: string[];\n\n  /**\n   * Service endpoints\n   */\n  service?: ServiceEndpoint[];\n\n  /**\n   * Also known as (aliases)\n   */\n  alsoKnownAs?: string[];\n}\n\n/**\n * Verification method (public key)\n */\nexport interface VerificationMethod {\n  /**\n   * Method ID\n   */\n  id: string;\n\n  /**\n   * Method type\n   */\n  type: string;\n\n  /**\n   * Controller DID\n   */\n  controller: string;\n\n  /**\n   * Public key in multibase format\n   */\n  publicKeyMultibase?: string;\n\n  /**\n   * Public key in PEM format\n   */\n  publicKeyPem?: string;\n}\n\n/**\n * Service endpoint\n */\nexport interface ServiceEndpoint {\n  /**\n   * Service ID\n   */\n  id: string;\n\n  /**\n   * Service type\n   */\n  type: string | string[];\n\n  /**\n   * Service endpoint URL\n   */\n  serviceEndpoint: string | Record<string, string>;\n}\n\n/**\n * DID Document Renderer\n *\n * Generates DID documents for different DID methods.\n */\nexport class DidDocumentRenderer {\n  /**\n   * Render DID document for did:plc\n   *\n   * @param binding - The identity binding\n   * @param signingPublicKey - The signing key in multibase format\n   * @param rotationPublicKey - The rotation key in multibase format\n   * @returns DID document\n   */\n  renderPlcDidDocument(\n    binding: IdentityBinding,\n    signingPublicKey: string,\n    rotationPublicKey: string\n  ): DidDocument {\n    if (!binding.atprotoDid) {\n      throw new Error('ATProto DID not provisioned');\n    }\n\n    const did = binding.atprotoDid;\n\n    return {\n      '@context': [\n        'https://www.w3.org/ns/did/v1',\n        'https://w3id.org/security/suites/secp256k1-2019/v1',\n      ],\n      id: did,\n      verificationMethod: [\n        {\n          id: `${did}#signing-key`,\n          type: 'EcdsaSecp256k1VerificationKey2019',\n          controller: did,\n          publicKeyMultibase: signingPublicKey,\n        },\n        {\n          id: `${did}#rotation-key`,\n          type: 'EcdsaSecp256k1VerificationKey2019',\n          controller: did,\n          publicKeyMultibase: rotationPublicKey,\n        },\n      ],\n      authentication: [`${did}#signing-key`],\n      assertionMethod: [`${did}#signing-key`],\n      service: this.generateServiceEndpoints(binding),\n      alsoKnownAs: this.generateAlsoKnownAs(binding),\n    };\n  }\n\n  /**\n   * Render DID document for did:web\n   *\n   * @param binding - The identity binding\n   * @param signingPublicKey - The signing key in PEM format\n   * @returns DID document\n   */\n  renderWebDidDocument(\n    binding: IdentityBinding,\n    signingPublicKey: string\n  ): DidDocument {\n    if (!binding.didWeb) {\n      throw new Error('did:web state not initialized');\n    }\n\n    const hostname = binding.didWeb.hostname;\n    const did = `did:web:${hostname}`;\n\n    return {\n      '@context': [\n        'https://www.w3.org/ns/did/v1',\n        'https://w3id.org/security/suites/rsa-2018/v1',\n      ],\n      id: did,\n      verificationMethod: [\n        {\n          id: `${did}#key-1`,\n          type: 'RsaVerificationKey2018',\n          controller: did,\n          publicKeyPem: signingPublicKey,\n        },\n      ],\n      authentication: [`${did}#key-1`],\n      assertionMethod: [`${did}#key-1`],\n      service: this.generateServiceEndpoints(binding),\n      alsoKnownAs: this.generateAlsoKnownAs(binding),\n    };\n  }\n\n  /**\n   * Generate service endpoints\n   *\n   * @param binding - The identity binding\n   * @returns Service endpoints\n   */\n  private generateServiceEndpoints(binding: IdentityBinding): ServiceEndpoint[] {\n    const endpoints: ServiceEndpoint[] = [];\n\n    // ATProto PDS endpoint\n    if (binding.atprotoPdsEndpoint) {\n      endpoints.push({\n        id: `${binding.atprotoDid}#pds`,\n        type: 'AtprotoPersonalDataServer',\n        serviceEndpoint: binding.atprotoPdsEndpoint,\n      });\n    }\n\n    // ActivityPub endpoints\n    endpoints.push({\n      id: `${binding.atprotoDid}#ap-inbox`,\n      type: 'ActivityPubInbox',\n      serviceEndpoint: `${binding.activityPubActorUri}/inbox`,\n    });\n\n    endpoints.push({\n      id: `${binding.atprotoDid}#ap-outbox`,\n      type: 'ActivityPubOutbox',\n      serviceEndpoint: `${binding.activityPubActorUri}/outbox`,\n    });\n\n    // WebID endpoint\n    endpoints.push({\n      id: `${binding.atprotoDid}#webid`,\n      type: 'WebID',\n      serviceEndpoint: binding.webId,\n    });\n\n    return endpoints;\n  }\n\n  /**\n   * Generate alsoKnownAs list\n   *\n   * @param binding - The identity binding\n   * @returns Array of aliases\n   */\n  private generateAlsoKnownAs(binding: IdentityBinding): string[] {\n    const aliases: string[] = [];\n\n    // ActivityPub actor\n    aliases.push(binding.activityPubActorUri);\n\n    // WebID\n    aliases.push(binding.webId);\n\n    // ATProto handle\n    if (binding.atprotoHandle) {\n      aliases.push(`at://${binding.atprotoHandle}`);\n    }\n\n    // Custom aliases\n    aliases.push(...binding.accountLinks.atAlsoKnownAs);\n\n    return aliases;\n  }\n\n  /**\n   * Render DID document as JSON\n   *\n   * @param doc - The DID document\n   * @returns JSON string\n   */\n  toJson(doc: DidDocument): string {\n    return JSON.stringify(doc, null, 2);\n  }\n\n  /**\n   * Render DID document as JSON-LD\n   *\n   * @param doc - The DID document\n   * @returns JSON-LD string\n   */\n  toJsonLd(doc: DidDocument): string {\n    return JSON.stringify(doc, null, 2);\n  }\n\n  /**\n   * Validate DID document\n   *\n   * @param doc - The DID document\n   * @returns Validation result\n   */\n  validate(doc: DidDocument): { valid: boolean; errors: string[] } {\n    const errors: string[] = [];\n\n    // Check required fields\n    if (!doc.id) {\n      errors.push('Missing required field: id');\n    }\n\n    if (!doc['@context']) {\n      errors.push('Missing required field: @context');\n    }\n\n    // Check verification methods\n    if (!doc.verificationMethod || doc.verificationMethod.length === 0) {\n      errors.push('Must have at least one verification method');\n    } else {\n      for (const method of doc.verificationMethod) {\n        if (!method.id || !method.type || !method.controller) {\n          errors.push('Verification method missing required fields');\n        }\n      }\n    }\n\n    // Check authentication methods\n    if (!doc.authentication || doc.authentication.length === 0) {\n      errors.push('Must have at least one authentication method');\n    }\n\n    return {\n      valid: errors.length === 0,\n      errors,\n    };\n  }\n}\n
+/**
+ * V6.5 DID Document Renderer - DID Document Generation
+ *
+ * Renders DID documents for both did:plc and did:web methods.
+ * DID documents are the authoritative source for public keys and service endpoints.
+ *
+ * Follows W3C DID Core specification and ATProto conventions.
+ */
+
+import { IdentityBinding } from '../../core-domain/identity/IdentityBinding.js';
+
+/**
+ * DID document
+ */
+export interface DidDocument {
+  /**
+   * Context
+   */
+  '@context':
+    | string
+    | string[]
+    | Record<string, any>
+    | Array<string | Record<string, any>>;
+
+  /**
+   * DID identifier
+   */
+  id: string;
+
+  /**
+   * Verification methods (public keys)
+   */
+  verificationMethod?: VerificationMethod[];
+
+  /**
+   * Authentication methods
+   */
+  authentication?: string[];
+
+  /**
+   * Assertion methods
+   */
+  assertionMethod?: string[];
+
+  /**
+   * Service endpoints
+   */
+  service?: ServiceEndpoint[];
+
+  /**
+   * Also known as (aliases)
+   */
+  alsoKnownAs?: string[];
+}
+
+/**
+ * Verification method (public key)
+ */
+export interface VerificationMethod {
+  /**
+   * Method ID
+   */
+  id: string;
+
+  /**
+   * Method type
+   */
+  type: string;
+
+  /**
+   * Controller DID
+   */
+  controller: string;
+
+  /**
+   * Public key in multibase format
+   */
+  publicKeyMultibase?: string;
+
+  /**
+   * Public key in PEM format
+   */
+  publicKeyPem?: string;
+}
+
+/**
+ * Service endpoint
+ */
+export interface ServiceEndpoint {
+  /**
+   * Service ID
+   */
+  id: string;
+
+  /**
+   * Service type
+   */
+  type: string | string[];
+
+  /**
+   * Service endpoint URL
+   */
+  serviceEndpoint: string | Record<string, string>;
+}
+
+/**
+ * DID Document Renderer
+ *
+ * Generates DID documents for different DID methods.
+ */
+export class DidDocumentRenderer {
+  /**
+   * Render DID document for did:plc
+   *
+   * @param binding - The identity binding
+   * @param signingPublicKey - The signing key in multibase format
+   * @param rotationPublicKey - The rotation key in multibase format
+   * @returns DID document
+   */
+  renderPlcDidDocument(
+    binding: IdentityBinding,
+    signingPublicKey: string,
+    rotationPublicKey: string
+  ): DidDocument {
+    if (!binding.atprotoDid) {
+      throw new Error('ATProto DID not provisioned');
+    }
+
+    const did = binding.atprotoDid;
+
+    return {
+      '@context': [
+        'https://www.w3.org/ns/did/v1',
+        'https://w3id.org/security/suites/secp256k1-2019/v1',
+      ],
+      id: did,
+      verificationMethod: [
+        {
+          id: `${did}#signing-key`,
+          type: 'EcdsaSecp256k1VerificationKey2019',
+          controller: did,
+          publicKeyMultibase: signingPublicKey,
+        },
+        {
+          id: `${did}#rotation-key`,
+          type: 'EcdsaSecp256k1VerificationKey2019',
+          controller: did,
+          publicKeyMultibase: rotationPublicKey,
+        },
+      ],
+      authentication: [`${did}#signing-key`],
+      assertionMethod: [`${did}#signing-key`],
+      service: this.generateServiceEndpoints(binding, did),
+      alsoKnownAs: this.generateAlsoKnownAs(binding),
+    };
+  }
+
+  /**
+   * Render DID document for did:web
+   *
+   * @param binding - The identity binding
+   * @param signingPublicKey - The signing key in PEM format
+   * @returns DID document
+   */
+  renderWebDidDocument(
+    binding: IdentityBinding,
+    signingPublicKey: string
+  ): DidDocument {
+    if (!binding.didWeb) {
+      throw new Error('did:web state not initialized');
+    }
+
+    const hostname = binding.didWeb.hostname;
+    if (!hostname) {
+      throw new Error('did:web hostname not configured');
+    }
+
+    const did = `did:web:${hostname}`;
+
+    return {
+      '@context': [
+        'https://www.w3.org/ns/did/v1',
+        'https://w3id.org/security/suites/rsa-2018/v1',
+      ],
+      id: did,
+      verificationMethod: [
+        {
+          id: `${did}#key-1`,
+          type: 'RsaVerificationKey2018',
+          controller: did,
+          publicKeyPem: signingPublicKey,
+        },
+      ],
+      authentication: [`${did}#key-1`],
+      assertionMethod: [`${did}#key-1`],
+      service: this.generateServiceEndpoints(binding, did),
+      alsoKnownAs: this.generateAlsoKnownAs(binding),
+    };
+  }
+
+  /**
+   * Generate service endpoints
+   *
+   * @param binding - The identity binding
+   * @param did - DID being rendered for the document
+   * @returns Service endpoints
+   */
+  private generateServiceEndpoints(
+    binding: IdentityBinding,
+    did: string
+  ): ServiceEndpoint[] {
+    const endpoints: ServiceEndpoint[] = [];
+
+    if (binding.atprotoPdsEndpoint && binding.atprotoDid) {
+      endpoints.push({
+        id: `${binding.atprotoDid}#pds`,
+        type: 'AtprotoPersonalDataServer',
+        serviceEndpoint: binding.atprotoPdsEndpoint,
+      });
+    }
+
+    endpoints.push({
+      id: `${did}#ap-inbox`,
+      type: 'ActivityPubInbox',
+      serviceEndpoint: `${binding.activityPubActorUri}/inbox`,
+    });
+
+    endpoints.push({
+      id: `${did}#ap-outbox`,
+      type: 'ActivityPubOutbox',
+      serviceEndpoint: `${binding.activityPubActorUri}/outbox`,
+    });
+
+    endpoints.push({
+      id: `${did}#webid`,
+      type: 'WebID',
+      serviceEndpoint: binding.webId,
+    });
+
+    return endpoints;
+  }
+
+  /**
+   * Generate alsoKnownAs list
+   *
+   * @param binding - The identity binding
+   * @returns Array of aliases
+   */
+  private generateAlsoKnownAs(binding: IdentityBinding): string[] {
+    const aliases: string[] = [];
+
+    aliases.push(binding.activityPubActorUri);
+    aliases.push(binding.webId);
+
+    if (binding.atprotoHandle) {
+      aliases.push(`at://${binding.atprotoHandle}`);
+    }
+
+    aliases.push(...binding.accountLinks.atAlsoKnownAs);
+
+    return aliases;
+  }
+
+  /**
+   * Render DID document as JSON
+   *
+   * @param doc - The DID document
+   * @returns JSON string
+   */
+  toJson(doc: DidDocument): string {
+    return JSON.stringify(doc, null, 2);
+  }
+
+  /**
+   * Render DID document as JSON-LD
+   *
+   * @param doc - The DID document
+   * @returns JSON-LD string
+   */
+  toJsonLd(doc: DidDocument): string {
+    return JSON.stringify(doc, null, 2);
+  }
+
+  /**
+   * Validate DID document
+   *
+   * @param doc - The DID document
+   * @returns Validation result
+   */
+  validate(doc: DidDocument): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    if (!doc.id) {
+      errors.push('Missing required field: id');
+    }
+
+    if (!doc['@context']) {
+      errors.push('Missing required field: @context');
+    }
+
+    if (!doc.verificationMethod || doc.verificationMethod.length === 0) {
+      errors.push('Must have at least one verification method');
+    } else {
+      for (const method of doc.verificationMethod) {
+        if (!method.id || !method.type || !method.controller) {
+          errors.push('Verification method missing required fields');
+        }
+      }
+    }
+
+    if (!doc.authentication || doc.authentication.length === 0) {
+      errors.push('Must have at least one authentication method');
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+    };
+  }
+}
