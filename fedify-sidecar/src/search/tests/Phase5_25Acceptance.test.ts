@@ -4,11 +4,13 @@
  * Acceptance Tests
  */
 
+import { describe, it, expect, beforeEach } from 'vitest';
 import { ApSearchProjector } from '../projectors/ApSearchProjector';
 import { AtSearchProjector } from '../projectors/AtSearchProjector';
 import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter';
 import { InMemoryOpenSearchClient } from '../writer/OpenSearchClient';
 import { InMemorySearchDocAliasCache } from '../writer/SearchDocAliasCache';
+import { DefaultSearchDedupService } from '../aliases/SearchDedupService';
 import { IdentityAliasResolver, ResolvedIdentity } from '../identity/IdentityAliasResolver';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
 import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents';
@@ -66,7 +68,8 @@ describe('Phase 5.25 Acceptance Tests', () => {
   beforeEach(() => {
     osClient = new InMemoryOpenSearchClient();
     aliasCache = new InMemorySearchDocAliasCache();
-    writer = new PublicContentIndexWriter(osClient, aliasCache);
+    const dedupService = new DefaultSearchDedupService(aliasCache);
+    writer = new PublicContentIndexWriter(osClient, aliasCache, dedupService);
     publisher = new DirectEventPublisher(writer);
     identityResolver = new MockIdentityResolver();
     apProjector = new ApSearchProjector(identityResolver, publisher);

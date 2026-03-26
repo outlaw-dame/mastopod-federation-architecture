@@ -4,6 +4,7 @@
  * Tests A-I covering follow, like, repost, image blobs, and reply roots.
  */
 
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DefaultAtProjectionWorker } from '../projection/AtProjectionWorker';
 import { DefaultAtProjectionPolicy } from '../projection/AtProjectionPolicy';
 import { InMemoryAtAliasStore } from '../repo/AtAliasStore';
@@ -21,40 +22,40 @@ import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecor
 
 // Mock dependencies
 const mockIdentityRepo = {
-  findByCanonicalId: jest.fn(),
-  getByCanonicalAccountId: jest.fn(),
+  findByCanonicalId: vi.fn(),
+  getByCanonicalAccountId: vi.fn(),
 };
 
 const mockRepoRegistry = {
-  getRepoState: jest.fn(),
+  getRepoState: vi.fn(),
 };
 
 const mockRkeyService = {
-  postRkey: jest.fn(() => 'mockrkey'),
-  profileRkey: jest.fn(() => 'self'),
+  postRkey: vi.fn(() => 'mockrkey'),
+  profileRkey: vi.fn(() => 'self'),
 };
 
 const mockCommitBuilder = {
-  buildCommit: jest.fn(),
+  buildCommit: vi.fn(),
 };
 
 const mockPersistenceService = {
-  persist: jest.fn(),
+  persist: vi.fn(),
 };
 
 const mockEventPublisher = {
-  publish: jest.fn().mockResolvedValue(undefined),
-  publishBatch: jest.fn().mockResolvedValue(undefined),
+  publish: vi.fn().mockResolvedValue(undefined),
+  publishBatch: vi.fn().mockResolvedValue(undefined),
 };
 
 const mockMediaResolver = {
-  resolveMedia: jest.fn(),
-  resolveAvatarBlob: jest.fn(),
-  resolveBannerBlob: jest.fn(),
+  resolveMedia: vi.fn(),
+  resolveAvatarBlob: vi.fn(),
+  resolveBannerBlob: vi.fn(),
 };
 
 const mockPostRepository = {
-  getById: jest.fn(),
+  getById: vi.fn(),
 };
 
 describe('Phase 5 Acceptance Tests', () => {
@@ -63,7 +64,7 @@ describe('Phase 5 Acceptance Tests', () => {
   let blobStore: DefaultAtBlobStore;
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     aliasStore = new InMemoryAtAliasStore();
     blobStore = new DefaultAtBlobStore();
 
