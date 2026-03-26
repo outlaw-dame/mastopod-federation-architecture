@@ -11,6 +11,7 @@
  *   7. Verify failure path: invalid signature → at.verify-failed.v1
  */
 
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   DefaultAtIngressVerifier,
   AtCommitVerifier,
@@ -73,7 +74,7 @@ function buildMockCommitVerifier(
   reason?: string,
 ): AtCommitVerifier {
   return {
-    verifyCommit: jest.fn().mockResolvedValue({
+    verifyCommit: vi.fn().mockResolvedValue({
       isValid,
       reason,
       ops: isValid
@@ -93,7 +94,7 @@ function buildMockCommitVerifier(
 
 function buildMockIdentityResolver(success = true): AtIdentityResolver {
   return {
-    resolveIdentity: jest.fn().mockResolvedValue({
+    resolveIdentity: vi.fn().mockResolvedValue({
       success,
       handle: success ? 'alice.bsky.social' : undefined,
       didDocument: success ? { id: 'did:plc:testactor123', '@context': ['https://www.w3.org/ns/did/v1'] } : undefined,
@@ -104,7 +105,7 @@ function buildMockIdentityResolver(success = true): AtIdentityResolver {
 
 function buildMockSyncRebuilder(success = true): AtSyncRebuilder {
   return {
-    rebuildRepo: jest.fn().mockResolvedValue({
+    rebuildRepo: vi.fn().mockResolvedValue({
       success,
       reason: success ? undefined : 'CAR fetch failed',
     }),
@@ -113,8 +114,8 @@ function buildMockSyncRebuilder(success = true): AtSyncRebuilder {
 
 function buildMockEventPublisher() {
   return {
-    publish: jest.fn().mockResolvedValue(undefined),
-    publishBatch: jest.fn().mockResolvedValue(undefined),
+    publish: vi.fn().mockResolvedValue(undefined),
+    publishBatch: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -133,7 +134,7 @@ describe('Phase 5.5 Acceptance Tests', () => {
   let verifier: DefaultAtIngressVerifier;
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     decoder = new DefaultAtFirehoseDecoder();
     classifier = new InMemoryAtIngressEventClassifier({ acceptAll: true });
     auditPublisher = new InMemoryAtIngressAuditPublisher();
@@ -445,11 +446,11 @@ describe('Phase 5.5 Acceptance Tests', () => {
 
       // First processing
       await verifier.handleRawEvent(envelope);
-      const firstPublishCount = (eventPublisher.publish as jest.Mock).mock.calls.length;
+      const firstPublishCount = (eventPublisher.publish as ReturnType<typeof vi.fn>).mock.calls.length;
 
       // Second processing (replay)
       await verifier.handleRawEvent(envelope);
-      const secondPublishCount = (eventPublisher.publish as jest.Mock).mock.calls.length;
+      const secondPublishCount = (eventPublisher.publish as ReturnType<typeof vi.fn>).mock.calls.length;
 
       // No additional trusted events should have been published
       expect(secondPublishCount).toBe(firstPublishCount);

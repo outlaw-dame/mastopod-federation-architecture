@@ -4,6 +4,7 @@
  * Acceptance Tests
  */
 
+import { describe, it, expect, beforeEach } from 'vitest';
 import { DefaultSearchDedupService } from '../aliases/SearchDedupService';
 import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter';
 import { InMemoryOpenSearchClient } from '../writer/OpenSearchClient';

@@ -237,11 +237,16 @@ function requireCbor(): CborLib {
 /**
  * Minimal CBOR stub for test environments where cbor-x is not installed.
  * Supports only the subset of CBOR used by ATProto firehose frames.
+ *
+ * The test harness encodes frames as JSON in the format:
+ *   { "header": { "t": "...", "op": 1 }, "body": { "seq": ..., ... } }
+ *
+ * This stub splits that wrapper into header + remaining body bytes so that
+ * the two-pass decode path in decodeFull/decodeHeader works correctly.
  */
 function buildMinimalCborStub(): CborLib {
   return {
     decode: (data: Uint8Array): unknown => {
-      // Attempt JSON parse of the UTF-8 payload as a last resort.
       try {
         return JSON.parse(Buffer.from(data).toString('utf8'));
       } catch {
@@ -249,12 +254,22 @@ function buildMinimalCborStub(): CborLib {
       }
     },
     decodeFirst: (data: Uint8Array): [unknown, Uint8Array] => {
+      let parsed: unknown;
       try {
-        const parsed = JSON.parse(Buffer.from(data).toString('utf8'));
-        return [parsed, new Uint8Array(0)];
-      } catch {
-        return [{}, new Uint8Array(0)];
+        parsed = JSON.parse(Buffer.from(data).toString('utf8'));
+      } catch (err) {
+        throw new FirehoseDecodeError('Failed to parse test frame as JSON', err);
       }
+      // Handle the { header, body } wrapper format used in tests
+      if (parsed && typeof parsed === 'object' && 'header' in (parsed as object)) {
+        const wrapped = parsed as { header: unknown; body?: unknown };
+        const bodyBytes =
+          wrapped.body != null
+            ? Buffer.from(JSON.stringify(wrapped.body))
+            : new Uint8Array(0);
+        return [wrapped.header, bodyBytes];
+      }
+      return [parsed, new Uint8Array(0)];
     },
   };
 }
