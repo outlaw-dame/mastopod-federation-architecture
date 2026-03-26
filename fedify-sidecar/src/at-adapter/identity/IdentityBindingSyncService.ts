@@ -29,7 +29,7 @@ export interface IdentityBindingSyncServiceConfig {
   timeoutMs?: number;
 }
 
-export class IdentityBindingSyncServiceImpl implements IdentityBindingSyncService {
+export class HttpIdentityBindingSyncService implements IdentityBindingSyncService {
   private readonly backendBaseUrl: string;
   private readonly bearerToken: string;
   private readonly identityBindingRepository: IdentityBindingRepository;
@@ -126,3 +126,5 @@ export class IdentityBindingSyncServiceImpl implements IdentityBindingSyncServic
     return 'suspended';
   }
 }
+
+export { HttpIdentityBindingSyncService as IdentityBindingSyncServiceImpl };

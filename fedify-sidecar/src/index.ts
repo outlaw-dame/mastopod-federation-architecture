@@ -44,7 +44,7 @@ import { DefaultAtCommitPersistenceService } from "./at-adapter/repo/AtCommitPer
 // AT adapter — identity / handle
 import { DefaultHandleResolutionReader } from "./at-adapter/identity/HandleResolutionReader.js";
 import { DefaultAtSubjectResolver } from "./at-adapter/identity/AtSubjectResolver.js";
-import { IdentityBindingSyncServiceImpl } from "./at-adapter/identity/IdentityBindingSyncService.js";
+import { HttpIdentityBindingSyncService } from "./at-adapter/identity/IdentityBindingSyncService.js";
 // AT adapter — firehose
 import { DefaultAtFirehoseSubscriptionManager } from "./at-adapter/firehose/AtFirehoseSubscriptionManager.js";
 import { InMemoryAtFirehoseCursorStore } from "./at-adapter/firehose/AtFirehoseCursorStore.js";
@@ -136,6 +136,15 @@ async function main() {
     version: config.version,
     nodeEnv: config.nodeEnv,
   });
+
+  if (config.enableXrpcServer && !config.atLocalFixture) {
+    if (!process.env.ACTIVITYPODS_URL) {
+      throw new Error("ENABLE_XRPC_SERVER requires ACTIVITYPODS_URL when AT_LOCAL_FIXTURE is false");
+    }
+    if (!process.env.ACTIVITYPODS_TOKEN) {
+      throw new Error("ENABLE_XRPC_SERVER requires ACTIVITYPODS_TOKEN when AT_LOCAL_FIXTURE is false");
+    }
+  }
 
   // Fixture mode banner — unmistakable, fires before any service connections
   if (config.atLocalFixture) {
@@ -462,14 +471,20 @@ async function main() {
         let passwordVerifierForSession: any = undefined;
         if (sessionEndpointEnabled) {
           const tokenService    = new DefaultAtSessionTokenService({ secret: sessionSecret });
-          const identityBindingSyncService = new IdentityBindingSyncServiceImpl({
-            backendBaseUrl: process.env.ACTIVITYPODS_URL ?? "http://localhost:3000",
-            bearerToken:
-              process.env.ACTIVITYPODS_TOKEN ??
-              process.env.SIDECAR_TOKEN ??
-              "",
-            identityBindingRepository: identityRepo,
-          });
+          const identityBindingSyncService = config.atLocalFixture
+            ? undefined
+            : new HttpIdentityBindingSyncService({
+                backendBaseUrl: process.env.ACTIVITYPODS_URL!,
+                bearerToken: process.env.ACTIVITYPODS_TOKEN!,
+                identityBindingRepository: identityRepo,
+              });
+
+          if (identityBindingSyncService) {
+            logger.info("AT identity sync enabled", {
+              backendBaseUrl: process.env.ACTIVITYPODS_URL,
+            });
+          }
+
           const accountResolver = new DefaultAtAccountResolver(identityRepo, identityBindingSyncService);
 
           // Local fixture mode: bypass ActivityPods auth (dev/test only)
@@ -619,12 +634,12 @@ async function main() {
       }
     }
 
-    // Start HTTP server only after all HTTP routes are registered.
-    await app.listen({ port: config.port, host: config.host });
-
     if (xrpcServerForWebSocket) {
       attachSubscribeReposWebSocket(app, xrpcServerForWebSocket);
     }
+
+    // Start HTTP server only after all HTTP and WebSocket routes are registered.
+    await app.listen({ port: config.port, host: config.host });
 
     logger.info(`Fedify Sidecar listening on ${config.host}:${config.port}`);
     logger.info(`Metrics available at http://${config.host}:${config.port}/metrics`);
