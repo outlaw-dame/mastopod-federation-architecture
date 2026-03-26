@@ -22,11 +22,27 @@ export interface IdentityBindingSyncService {
   syncByHandle(handle: string): Promise<boolean>;
 }
 
+/** Signature-compatible subset of undici's `request` return type used for testing. */
+export type HttpRequestFn = (
+  url: string,
+  options: {
+    method: string;
+    headers: Record<string, string>;
+    bodyTimeout: number;
+    headersTimeout: number;
+  }
+) => Promise<{
+  statusCode: number;
+  body: { json(): Promise<unknown>; text(): Promise<string> };
+}>;
+
 export interface IdentityBindingSyncServiceConfig {
   backendBaseUrl: string;
   bearerToken: string;
   identityBindingRepository: IdentityBindingRepository;
   timeoutMs?: number;
+  /** Override the HTTP request function. Intended for unit tests only. */
+  requestFn?: HttpRequestFn;
 }
 
 export class HttpIdentityBindingSyncService implements IdentityBindingSyncService {
@@ -34,12 +50,14 @@ export class HttpIdentityBindingSyncService implements IdentityBindingSyncServic
   private readonly bearerToken: string;
   private readonly identityBindingRepository: IdentityBindingRepository;
   private readonly timeoutMs: number;
+  private readonly requestFn: HttpRequestFn;
 
   constructor(config: IdentityBindingSyncServiceConfig) {
     this.backendBaseUrl = config.backendBaseUrl.replace(/\/$/, '');
     this.bearerToken = config.bearerToken;
     this.identityBindingRepository = config.identityBindingRepository;
     this.timeoutMs = config.timeoutMs ?? 10_000;
+    this.requestFn = config.requestFn ?? (request as unknown as HttpRequestFn);
   }
 
   async syncByCanonicalAccountId(canonicalAccountId: string): Promise<boolean> {
@@ -60,7 +78,7 @@ export class HttpIdentityBindingSyncService implements IdentityBindingSyncServic
   }
 
   private async fetchAndUpsert(path: string): Promise<boolean> {
-    const res = await request(`${this.backendBaseUrl}${path}`, {
+    const res = await this.requestFn(`${this.backendBaseUrl}${path}`, {
       method: 'GET',
       headers: {
         authorization: `Bearer ${this.bearerToken}`,
