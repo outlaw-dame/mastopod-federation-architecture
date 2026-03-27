@@ -18,5 +18,10 @@ export function traceIdentitySync(
   if (!isIdentitySyncTraceEnabled()) return;
   if (!logger) return;
 
-  logger[level](`[identity-sync] ${message}`, meta);
+  if (meta && Object.keys(meta).length > 0) {
+    logger[level]({ ...meta }, `[identity-sync] ${message}`);
+    return;
+  }
+
+  logger[level](`[identity-sync] ${message}`);
 }

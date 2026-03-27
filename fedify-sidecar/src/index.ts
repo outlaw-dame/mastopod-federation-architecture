@@ -469,9 +469,10 @@ async function main() {
         let sessionService: any = undefined;
         let accountResolverForSession: any = undefined;
         let passwordVerifierForSession: any = undefined;
+        let identityBindingSyncService: HttpIdentityBindingSyncService | undefined = undefined;
         if (sessionEndpointEnabled) {
           const tokenService    = new DefaultAtSessionTokenService({ secret: sessionSecret });
-          const identityBindingSyncService = config.atLocalFixture
+          identityBindingSyncService = config.atLocalFixture
             ? undefined
             : new HttpIdentityBindingSyncService({
                 backendBaseUrl: process.env.ACTIVITYPODS_URL!,
@@ -634,10 +635,10 @@ async function main() {
           localFixtureMode:      config.atLocalFixture,
         });
       } catch (err: any) {
-        logger.error("Failed to initialise AT XRPC server", {
+        logger.error({
           error: err.message,
           stack: err.stack,
-        });
+        }, "Failed to initialise AT XRPC server");
       }
     }
 
@@ -658,7 +659,7 @@ async function main() {
     });
 
   } catch (error: any) {
-    logger.error("Failed to start Fedify Sidecar", { error: error.message, stack: error.stack });
+    logger.error({ error: error.message, stack: error.stack }, "Failed to start Fedify Sidecar");
     process.exit(1);
   }
 }

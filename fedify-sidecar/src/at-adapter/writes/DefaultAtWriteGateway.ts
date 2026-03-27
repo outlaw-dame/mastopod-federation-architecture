@@ -210,9 +210,11 @@ export class DefaultAtWriteGateway implements AtWriteGateway {
 
     return (
       code === 'IDENTITY_BINDING_NOT_FOUND' ||
+      code === 'ACCOUNT_NOT_FOUND' ||
       code === 'REPO_NOT_FOUND' ||
       code === 'UNKNOWN_REPO' ||
       message.includes('Identity binding not found') ||
+      message.includes('Account not found') ||
       message.includes('Repo not found') ||
       message.includes('Unknown repo')
     );
