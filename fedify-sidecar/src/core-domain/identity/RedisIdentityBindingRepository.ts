@@ -35,20 +35,28 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   // ---------------------------------------------------------------------------
 
   async getByCanonicalAccountId(canonicalAccountId: string): Promise<IdentityBinding | null> {
-    const raw = await this.redis.get(`${PREFIX}${canonicalAccountId}`);
+    const raw = await this.redis.get(this.bindingKey(canonicalAccountId));
     return raw ? (JSON.parse(raw) as IdentityBinding) : null;
   }
 
   async getByAtprotoDid(did: string): Promise<IdentityBinding | null> {
-    const canonicalAccountId = await this.redis.get(`${IDX_DID}${did}`);
+    const canonicalAccountId = await this.redis.get(this.didIndexKey(did));
     if (!canonicalAccountId) return null;
     return this.getByCanonicalAccountId(canonicalAccountId);
   }
 
+  async getByDid(did: string): Promise<IdentityBinding | null> {
+    return this.getByAtprotoDid(did);
+  }
+
   async getByAtprotoHandle(handle: string): Promise<IdentityBinding | null> {
-    const canonicalAccountId = await this.redis.get(`${IDX_HANDLE}${handle.toLowerCase()}`);
+    const canonicalAccountId = await this.redis.get(this.handleIndexKey(handle));
     if (!canonicalAccountId) return null;
     return this.getByCanonicalAccountId(canonicalAccountId);
+  }
+
+  async getByHandle(handle: string): Promise<IdentityBinding | null> {
+    return this.getByAtprotoHandle(handle);
   }
 
   async findByHandle(handle: string): Promise<IdentityBinding | null> {
@@ -111,13 +119,48 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   }
 
   async upsert(binding: IdentityBinding): Promise<void> {
-    const key = `${PREFIX}${binding.canonicalAccountId}`;
-    const existing = await this.redis.get(key);
+    const existing = await this.getByCanonicalAccountId(binding.canonicalAccountId);
+
+    const normalized: IdentityBinding = {
+      ...binding,
+      createdAt: binding.createdAt ?? existing?.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const multi = this.redis.multi();
+
     if (existing) {
-      const old = JSON.parse(existing) as IdentityBinding;
-      await this._removeIndexes(old);
+      if (existing.atprotoDid && existing.atprotoDid !== normalized.atprotoDid) {
+        multi.del(this.didIndexKey(existing.atprotoDid));
+      }
+      if (existing.atprotoHandle && existing.atprotoHandle !== normalized.atprotoHandle) {
+        multi.del(this.handleIndexKey(existing.atprotoHandle));
+      }
+      if (existing.activityPubActorUri && existing.activityPubActorUri !== normalized.activityPubActorUri) {
+        multi.del(this.actorIndexKey(existing.activityPubActorUri));
+      }
+      if (existing.webId && existing.webId !== normalized.webId) {
+        multi.del(this.webIdIndexKey(existing.webId));
+      }
     }
-    await this._write(binding);
+
+    multi.set(this.bindingKey(normalized.canonicalAccountId), JSON.stringify(normalized));
+    multi.sadd(ALL_SET, normalized.canonicalAccountId);
+
+    if (normalized.atprotoDid) {
+      multi.set(this.didIndexKey(normalized.atprotoDid), normalized.canonicalAccountId);
+    }
+    if (normalized.atprotoHandle) {
+      multi.set(this.handleIndexKey(normalized.atprotoHandle), normalized.canonicalAccountId);
+    }
+    if (normalized.activityPubActorUri) {
+      multi.set(this.actorIndexKey(normalized.activityPubActorUri), normalized.canonicalAccountId);
+    }
+    if (normalized.webId) {
+      multi.set(this.webIdIndexKey(normalized.webId), normalized.canonicalAccountId);
+    }
+
+    await multi.exec();
   }
 
   async delete(canonicalAccountId: string): Promise<boolean> {
@@ -222,36 +265,35 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   // ---------------------------------------------------------------------------
 
   private async _write(binding: IdentityBinding): Promise<void> {
-    const key = `${PREFIX}${binding.canonicalAccountId}`;
-    await this.redis.set(key, JSON.stringify(binding));
+    await this.redis.set(this.bindingKey(binding.canonicalAccountId), JSON.stringify(binding));
     await this.redis.sadd(ALL_SET, binding.canonicalAccountId);
 
     if (binding.atprotoDid) {
-      await this.redis.set(`${IDX_DID}${binding.atprotoDid}`, binding.canonicalAccountId);
+      await this.redis.set(this.didIndexKey(binding.atprotoDid), binding.canonicalAccountId);
     }
     if (binding.atprotoHandle) {
-      await this.redis.set(`${IDX_HANDLE}${binding.atprotoHandle.toLowerCase()}`, binding.canonicalAccountId);
+      await this.redis.set(this.handleIndexKey(binding.atprotoHandle), binding.canonicalAccountId);
     }
     if (binding.activityPubActorUri) {
-      await this.redis.set(`${IDX_ACTOR}${binding.activityPubActorUri}`, binding.canonicalAccountId);
+      await this.redis.set(this.actorIndexKey(binding.activityPubActorUri), binding.canonicalAccountId);
     }
     if (binding.webId) {
-      await this.redis.set(`${IDX_WEBID}${binding.webId}`, binding.canonicalAccountId);
+      await this.redis.set(this.webIdIndexKey(binding.webId), binding.canonicalAccountId);
     }
   }
 
   private async _removeIndexes(binding: IdentityBinding): Promise<void> {
     if (binding.atprotoDid) {
-      await this.redis.del(`${IDX_DID}${binding.atprotoDid}`);
+      await this.redis.del(this.didIndexKey(binding.atprotoDid));
     }
     if (binding.atprotoHandle) {
-      await this.redis.del(`${IDX_HANDLE}${binding.atprotoHandle.toLowerCase()}`);
+      await this.redis.del(this.handleIndexKey(binding.atprotoHandle));
     }
     if (binding.activityPubActorUri) {
-      await this.redis.del(`${IDX_ACTOR}${binding.activityPubActorUri}`);
+      await this.redis.del(this.actorIndexKey(binding.activityPubActorUri));
     }
     if (binding.webId) {
-      await this.redis.del(`${IDX_WEBID}${binding.webId}`);
+      await this.redis.del(this.webIdIndexKey(binding.webId));
     }
   }
 
@@ -259,9 +301,29 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     const ids: string[] = await this.redis.smembers(ALL_SET);
     const results: IdentityBinding[] = [];
     for (const id of ids) {
-      const raw = await this.redis.get(`${PREFIX}${id}`);
+      const raw = await this.redis.get(this.bindingKey(id));
       if (raw) results.push(JSON.parse(raw) as IdentityBinding);
     }
     return results;
+  }
+
+  private bindingKey(canonicalAccountId: string): string {
+    return `${PREFIX}${canonicalAccountId}`;
+  }
+
+  private didIndexKey(did: string): string {
+    return `${IDX_DID}${did}`;
+  }
+
+  private handleIndexKey(handle: string): string {
+    return `${IDX_HANDLE}${handle.toLowerCase()}`;
+  }
+
+  private actorIndexKey(actorUri: string): string {
+    return `${IDX_ACTOR}${actorUri}`;
+  }
+
+  private webIdIndexKey(webId: string): string {
+    return `${IDX_WEBID}${webId}`;
   }
 }

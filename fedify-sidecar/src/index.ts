@@ -477,6 +477,7 @@ async function main() {
                 backendBaseUrl: process.env.ACTIVITYPODS_URL!,
                 bearerToken: process.env.ACTIVITYPODS_TOKEN!,
                 identityBindingRepository: identityRepo,
+                logger,
               });
 
           if (identityBindingSyncService) {
@@ -485,7 +486,11 @@ async function main() {
             });
           }
 
-          const accountResolver = new DefaultAtAccountResolver(identityRepo, identityBindingSyncService);
+          const accountResolver = new DefaultAtAccountResolver(
+            identityRepo,
+            identityBindingSyncService,
+            logger,
+          );
 
           // Local fixture mode: bypass ActivityPods auth (dev/test only)
           const passwordVerifier = config.atLocalFixture
@@ -588,6 +593,8 @@ async function main() {
           policyGate:  new DefaultAtWritePolicyGate(identityRepo, aliasStore),
           writeService,
           resultStore,
+          identityBindingSyncService,
+          logger,
         });
 
         // ---- Assemble XRPC server ----
@@ -712,7 +719,7 @@ async function shutdown(signal: string): Promise<void> {
     }
 
     // Close write-result store (drains pending waiters + quits subscriber)
-    if (writeResultStore?.close) {
+    if (writeResultStore) {
       await writeResultStore.close();
       logger.info("Write result store closed");
     }

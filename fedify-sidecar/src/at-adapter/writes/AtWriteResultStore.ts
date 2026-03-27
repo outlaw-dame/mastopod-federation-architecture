@@ -51,7 +51,7 @@ export interface AtWriteResultStore {
    * Release all resources held by this store (subscriber connection, etc.).
    * Safe to call multiple times.
    */
-  close?(): Promise<void>;
+  close(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,8 +136,14 @@ export class RedisAtWriteResultStore implements AtWriteResultStore {
     const payload = JSON.stringify(result);
     const resultKey = this.resultKey(clientMutationId);
 
-    await this.redis.set(resultKey, payload, 'EX', this.resultTtlSec);
-    await this.redis.publish(this.channelName(clientMutationId), payload);
+    // Pipeline set + publish so both commands travel in one round-trip and
+    // partial delivery (persist without notify, or notify without persist) is
+    // minimised under network interruptions.
+    await this.redis
+      .pipeline()
+      .set(resultKey, payload, 'EX', this.resultTtlSec)
+      .publish(this.channelName(clientMutationId), payload)
+      .exec();
   }
 
   private async ensureSubscriber(): Promise<void> {

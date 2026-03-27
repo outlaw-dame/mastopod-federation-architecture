@@ -37,6 +37,76 @@ async function requestJson(
   };
 }
 
+async function requestSessionWithRetry(
+  sidecarBase: string,
+  identifier: string,
+  password: string,
+  maxAttempts = 10,
+  delayMs = 1000
+): Promise<{ status: number; body: unknown; attempts: number }> {
+  let last: { status: number; body: unknown } = { status: 0, body: {} };
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    last = await requestJson(`${sidecarBase}/xrpc/com.atproto.server.createSession`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier,
+        password
+      })
+    });
+
+    if (last.status === 200) {
+      return { ...last, attempts: attempt };
+    }
+
+    if (last.status !== 404 || attempt === maxAttempts) {
+      return { ...last, attempts: attempt };
+    }
+
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+
+  return { ...last, attempts: maxAttempts };
+}
+
+async function waitForBackendIdentityReady(
+  backendBase: string,
+  canonicalAccountId: string,
+  token: string,
+  maxAttempts = 20,
+  delayMs = 1000
+): Promise<{ ready: boolean; attempts: number; status: number; authUnavailable?: boolean }> {
+  let status = 0;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const res = await requestJson(
+      `${backendBase}/api/internal/identity/by-canonical?canonicalAccountId=${encodeURIComponent(canonicalAccountId)}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    );
+
+    status = res.status;
+    if (res.status === 200) {
+      return { ready: true, attempts: attempt, status };
+    }
+
+    if (res.status === 401) {
+      return { ready: false, attempts: attempt, status, authUnavailable: true };
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+
+  return { ready: false, attempts: maxAttempts, status };
+}
+
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
@@ -62,6 +132,10 @@ async function main() {
   const env = process.env as Record<string, string | undefined>;
   const backendBase = ensureEnv('UNIFIED_BACKEND_BASE', 'http://localhost:3000');
   const sidecarBase = ensureEnv('UNIFIED_SIDECAR_BASE', 'http://localhost:8085');
+  const internalToken =
+    env['INTERNAL_IDENTITY_BEARER_TOKEN'] ??
+    env['ACTIVITYPODS_TOKEN'] ??
+    'test-atproto-signing-token-local';
   const identifierMode = (env['UNIFIED_TEST_IDENTIFIER_MODE'] ?? 'canonical') as
     | 'canonical'
     | 'did'
@@ -130,21 +204,28 @@ async function main() {
   assert(did, 'createAccount response missing atproto.did');
   assert(handle, 'createAccount response missing atproto.handle');
 
+  const backendIdentityReady = await waitForBackendIdentityReady(
+    backendBase,
+    canonicalAccountId,
+    internalToken
+  );
+  (report.steps as Json).backendIdentityReady = backendIdentityReady;
+  if (!backendIdentityReady.authUnavailable) {
+    assert(
+      backendIdentityReady.ready,
+      `backend internal identity projection not ready for ${canonicalAccountId}; last status ${backendIdentityReady.status}`
+    );
+  }
+
   const identifier = resolveIdentifier(identifierMode, canonicalAccountId, did, handle);
 
-  const createSession = await requestJson(
-    `${sidecarBase}/xrpc/com.atproto.server.createSession`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        identifier,
-        password
-      })
-    }
-  );
+  const createSession = await requestSessionWithRetry(sidecarBase, identifier, password);
 
-  (report.steps as Json).createSession = createSession;
+  (report.steps as Json).createSession = {
+    status: createSession.status,
+    body: createSession.body,
+    attempts: createSession.attempts
+  };
 
   assert(
     createSession.status === 200,
