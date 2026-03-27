@@ -17,6 +17,7 @@
     "test:live:phase7": "tsx src/at-adapter/tests/Phase7LiveProof.ts",
     "proof:identity-sync": "tsx src/at-adapter/tests/UnifiedAccountIdentitySyncProof.ts",
     "proof:identity-sync:write-miss": "tsx src/at-adapter/tests/IdentitySyncWriteMissProof.ts",
+    "proof:identity-warmup": "tsx src/at-adapter/tests/IdentityWarmupProof.ts",
     "smoke:identity-repo:upsert": "tsx src/at-adapter/tests/IdentityBindingRepositoryUpsertSmoke.ts",
     "smoke:identity-sync:direct": "tsx src/at-adapter/tests/IdentitySyncDirectSmoke.ts",
     "inspect:identity-redis": "tsx src/at-adapter/tests/IdentityRedisInspector.ts",

@@ -1,6 +1,5 @@
-import { buildInternalIdentityProjectionPathsByCanonicalAccountId } from '../identity/InternalIdentityApi.js';
-
 import { Redis } from 'ioredis';
+import { buildInternalIdentityProjectionPathsByCanonicalAccountId } from '../identity/InternalIdentityApi.js';
 
 type Json = Record<string, unknown>;
 
@@ -32,31 +31,6 @@ async function requestJson(
     status: res.status,
     body: await asJson(res),
   };
-}
-
-async function requestSessionWithRetry(
-  sidecarBase: string,
-  identifier: string,
-  password: string,
-  maxAttempts = 10,
-  delayMs = 1000
-): Promise<{ status: number; body: unknown; attempts: number }> {
-  let last: { status: number; body: unknown } = { status: 0, body: {} };
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    last = await requestJson(`${sidecarBase}/xrpc/com.atproto.server.createSession`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier, password }),
-    });
-
-    if (last.status === 200) return { ...last, attempts: attempt };
-    if (last.status !== 404 || attempt === maxAttempts) return { ...last, attempts: attempt };
-
-    await new Promise(resolve => setTimeout(resolve, delayMs));
-  }
-
-  return { ...last, attempts: maxAttempts };
 }
 
 async function waitForBackendIdentityReady(
@@ -118,7 +92,7 @@ async function deleteLocalIdentity(redis: Redis, canonicalAccountId: string, did
       }
     }
   } catch {
-    // Ignore parse errors; primary keys are sufficient.
+    // Primary identity keys are enough for the proof if the binding is malformed.
   }
 
   await redis.del(...keys);
@@ -130,6 +104,26 @@ async function readLocalIdentity(redis: Redis, canonicalAccountId: string) {
   return JSON.parse(raw);
 }
 
+async function waitForLocalIdentity(
+  redis: Redis,
+  canonicalAccountId: string,
+  timeoutMs: number,
+  pollMs = 500
+) {
+  const startedAt = Date.now();
+  let binding = await readLocalIdentity(redis, canonicalAccountId);
+
+  while (!binding && Date.now() - startedAt < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, pollMs));
+    binding = await readLocalIdentity(redis, canonicalAccountId);
+  }
+
+  return {
+    binding,
+    waitedMs: Date.now() - startedAt,
+  };
+}
+
 async function main() {
   const backendBase = env('UNIFIED_BACKEND_BASE', 'http://localhost:3000');
   const sidecarBase = env('UNIFIED_SIDECAR_BASE', 'http://localhost:8085');
@@ -138,8 +132,10 @@ async function main() {
     process.env['INTERNAL_IDENTITY_BEARER_TOKEN'] ??
     process.env['ACTIVITYPODS_TOKEN'] ??
     'test-atproto-signing-token-local';
+  const warmIntervalMs = Number.parseInt(process.env['IDENTITY_WARM_INTERVAL_MS'] ?? '5000', 10);
+  const waitBudgetMs = warmIntervalMs + 3000;
 
-  const username = process.env['UNIFIED_TEST_USERNAME'] ?? `write-miss-${Date.now()}`;
+  const username = process.env['UNIFIED_TEST_USERNAME'] ?? `warmup-${Date.now()}`;
   const password = process.env['UNIFIED_TEST_PASSWORD'] ?? 'Phase7LivePass123';
   const email = process.env['UNIFIED_TEST_EMAIL'] ?? `${username}@example.com`;
 
@@ -149,6 +145,8 @@ async function main() {
     sidecarBase,
     redisUrl,
     username,
+    warmIntervalMs,
+    waitBudgetMs,
     steps: {},
   };
 
@@ -161,8 +159,8 @@ async function main() {
         email,
         password,
         profile: {
-          displayName: 'Identity Sync Write Miss Proof',
-          summary: 'Write path should sync identity on local miss',
+          displayName: 'Identity Warmup Proof',
+          summary: 'Background warmup should recreate local identity state',
         },
         solid: { enabled: true },
         activitypub: { enabled: true },
@@ -171,7 +169,6 @@ async function main() {
     });
 
     (report['steps'] as Json)['createAccount'] = createAccount;
-
     assert(
       createAccount.status === 200 || createAccount.status === 201,
       `createAccount failed: ${createAccount.status}`
@@ -196,22 +193,9 @@ async function main() {
     if (!backendIdentityReady.authUnavailable) {
       assert(
         backendIdentityReady.ready,
-        `backend internal identity projection not ready for ${canonicalAccountId}; last status ${backendIdentityReady.status}`
+        `backend identity projection not ready for ${canonicalAccountId}; last status ${backendIdentityReady.status}`
       );
     }
-
-    const createSession = await requestSessionWithRetry(sidecarBase, did, password);
-
-    (report['steps'] as Json)['createSession'] = {
-      status: createSession.status,
-      body: createSession.body,
-      attempts: createSession.attempts,
-    };
-    assert(createSession.status === 200, `createSession failed: ${createSession.status}`);
-
-    const createSessionBody = createSession.body as Json;
-    const accessJwt = createSessionBody['accessJwt'] as string | undefined;
-    assert(accessJwt, 'missing accessJwt');
 
     await deleteLocalIdentity(redis, canonicalAccountId, did, handle);
 
@@ -221,53 +205,29 @@ async function main() {
     };
     assert(!localAfterDelete, 'local identity binding still exists after forced delete');
 
-    const createRecord = await requestJson(
-      `${sidecarBase}/xrpc/com.atproto.repo.createRecord`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessJwt}`,
-        },
-        body: JSON.stringify({
-          repo: did,
-          collection: 'app.bsky.feed.post',
-          record: {
-            $type: 'app.bsky.feed.post',
-            text: `Identity sync write miss proof ${Date.now()}`,
-            createdAt: new Date().toISOString(),
-          },
-        }),
-      }
+    const localAfterWarmup = await waitForLocalIdentity(
+      redis,
+      canonicalAccountId,
+      waitBudgetMs
     );
-
-    (report['steps'] as Json)['createRecord'] = createRecord;
-    assert(createRecord.status === 200, `createRecord failed: ${createRecord.status}`);
-
-    const createRecordBody = createRecord.body as Json;
-    const uri = createRecordBody['uri'] as string | undefined;
-    const cid = createRecordBody['cid'] as string | undefined;
-    assert(uri, 'missing createRecord uri');
-    assert(cid, 'missing createRecord cid');
-
-    const localAfterWrite = await readLocalIdentity(redis, canonicalAccountId);
-    (report['steps'] as Json)['localAfterWrite'] = {
-      exists: !!localAfterWrite,
-      binding: localAfterWrite
+    (report['steps'] as Json)['localAfterWarmup'] = {
+      exists: !!localAfterWarmup.binding,
+      waitedMs: localAfterWarmup.waitedMs,
+      binding: localAfterWarmup.binding
         ? {
-            canonicalAccountId: localAfterWrite.canonicalAccountId,
-            webId: localAfterWrite.webId,
-            atprotoDid: localAfterWrite.atprotoDid,
-            atprotoHandle: localAfterWrite.atprotoHandle,
-            status: localAfterWrite.status,
+            canonicalAccountId: localAfterWarmup.binding.canonicalAccountId,
+            webId: localAfterWarmup.binding.webId,
+            atprotoDid: localAfterWarmup.binding.atprotoDid,
+            atprotoHandle: localAfterWarmup.binding.atprotoHandle,
+            status: localAfterWarmup.binding.status,
           }
         : null,
     };
 
-    assert(localAfterWrite, 'local identity binding was not recreated after write');
+    assert(localAfterWarmup.binding, 'local identity binding was not recreated by warmup');
     assert(
-      localAfterWrite.atprotoDid === did,
-      `recreated binding DID mismatch: expected ${did}, got ${String(localAfterWrite.atprotoDid)}`
+      localAfterWarmup.binding.atprotoDid === did,
+      `recreated binding DID mismatch: expected ${did}, got ${String(localAfterWarmup.binding.atprotoDid)}`
     );
 
     report['summary'] = {
@@ -275,8 +235,7 @@ async function main() {
       canonicalAccountId,
       did,
       handle,
-      uri,
-      cid,
+      waitedMs: localAfterWarmup.waitedMs,
     };
 
     console.log(JSON.stringify(report, null, 2));

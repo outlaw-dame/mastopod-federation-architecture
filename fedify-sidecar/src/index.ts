@@ -45,6 +45,8 @@ import { DefaultAtCommitPersistenceService } from "./at-adapter/repo/AtCommitPer
 import { DefaultHandleResolutionReader } from "./at-adapter/identity/HandleResolutionReader.js";
 import { DefaultAtSubjectResolver } from "./at-adapter/identity/AtSubjectResolver.js";
 import { HttpIdentityBindingSyncService } from "./at-adapter/identity/IdentityBindingSyncService.js";
+import { PollingIdentityWarmupService } from "./at-adapter/identity/IdentityWarmupService.js";
+import { RedisIdentityWarmCursorStore } from "./at-adapter/identity/RedisIdentityWarmCursorStore.js";
 // AT adapter — firehose
 import { DefaultAtFirehoseSubscriptionManager } from "./at-adapter/firehose/AtFirehoseSubscriptionManager.js";
 import { InMemoryAtFirehoseCursorStore } from "./at-adapter/firehose/AtFirehoseCursorStore.js";
@@ -113,6 +115,9 @@ const config = {
   // LocalAtSigningService (secp256k1 signing from Redis-stored fixture keys).
   // NEVER set in production.  Requires provision-test-fixture.ts to have been run.
   atLocalFixture: process.env.AT_LOCAL_FIXTURE === "true",
+
+  identityWarmIntervalMs: parseInt(process.env.IDENTITY_WARM_INTERVAL_MS || "30000", 10),
+  identityWarmBatchLimit: parseInt(process.env.IDENTITY_WARM_BATCH_LIMIT || "100", 10),
 };
 
 // ============================================================================
@@ -125,6 +130,7 @@ let inboundWorker: InboundWorker | null = null;
 let opensearchIndexer: ReturnType<typeof createOpenSearchIndexer> | null = null;
 let atRedisClient: Redis | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
+let identityWarmupService: PollingIdentityWarmupService | null = null;
 let isShuttingDown = false;
 
 // ============================================================================
@@ -478,12 +484,33 @@ async function main() {
                 backendBaseUrl: process.env.ACTIVITYPODS_URL!,
                 bearerToken: process.env.ACTIVITYPODS_TOKEN!,
                 identityBindingRepository: identityRepo,
+                repoRegistry,
                 logger,
               });
 
           if (identityBindingSyncService) {
             logger.info("AT identity sync enabled", {
               backendBaseUrl: process.env.ACTIVITYPODS_URL,
+            });
+          }
+
+          if (!config.atLocalFixture) {
+            identityWarmupService = new PollingIdentityWarmupService({
+              backendBaseUrl: process.env.ACTIVITYPODS_URL!,
+              bearerToken: process.env.ACTIVITYPODS_TOKEN!,
+              identityBindingRepository: identityRepo,
+              cursorStore: new RedisIdentityWarmCursorStore(atRedis),
+              repoRegistry,
+              logger,
+              intervalMs: config.identityWarmIntervalMs,
+              batchLimit: config.identityWarmBatchLimit,
+            });
+            identityWarmupService.start();
+
+            logger.info("AT identity warmup enabled", {
+              backendBaseUrl: process.env.ACTIVITYPODS_URL,
+              intervalMs: config.identityWarmIntervalMs,
+              batchLimit: config.identityWarmBatchLimit,
             });
           }
 
@@ -711,6 +738,12 @@ async function shutdown(signal: string): Promise<void> {
     if (opensearchIndexer) {
       await opensearchIndexer.stop();
       logger.info("OpenSearch indexer stopped");
+    }
+
+    if (identityWarmupService) {
+      await identityWarmupService.stop();
+      identityWarmupService = null;
+      logger.info("Identity warmup service stopped");
     }
 
     // Disconnect queue
