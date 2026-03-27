@@ -20,6 +20,7 @@
     "smoke:identity-repo:upsert": "tsx src/at-adapter/tests/IdentityBindingRepositoryUpsertSmoke.ts",
     "smoke:identity-sync:direct": "tsx src/at-adapter/tests/IdentitySyncDirectSmoke.ts",
     "inspect:identity-redis": "tsx src/at-adapter/tests/IdentityRedisInspector.ts",
+    "trace:identity-sync": "bash scripts/trace-identity-sync.sh",
     "smoke:phase7:primary": "tsx src/at-adapter/tests/Phase7PrimarySmoke.ts",
     "provision:test:fixture": "tsx scripts/provision-test-fixture.ts",
     "smoke:phase7:full": "npm run provision:test:fixture && npm run smoke:phase7:primary"
