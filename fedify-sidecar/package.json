@@ -30,6 +30,7 @@
     "smoke:phase7:full": "npm run provision:test:fixture && npm run smoke:phase7:primary"
   },
   "dependencies": {
+    "@atproto/oauth-client-node": "^0.3.17",
     "@fedify/fedify": "^1.4.0",
     "@hono/node-server": "^1.8.0",
     "@ipld/car": "^5.4.2",

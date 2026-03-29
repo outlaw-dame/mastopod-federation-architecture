@@ -1,4 +1,5 @@
-import { randomInt } from 'node:crypto';
+import { randomInt, createHash } from 'node:crypto';
+import { buildDpopProof } from '../oauth/OAuthDpopKeyManager.js';
 
 export interface ExternalPdsSessionResponse {
   did: string;
@@ -20,6 +21,17 @@ interface ExternalPdsClientConfig {
 
 interface RequestJsonOptions extends RequestInit {
   allowRetryOnAuthFailure?: boolean;
+  /**
+   * When set the DPoP private key JWK is used to generate a per-request proof.
+   * The Authorization header will be sent as `DPoP <token>` and a `DPoP`
+   * proof header will be appended automatically inside request().
+   */
+  dpopPrivateKeyJwk?: string;
+  /**
+   * The access token to bind in the DPoP proof `ath` claim.
+   * Must be set whenever dpopPrivateKeyJwk is set.
+   */
+  dpopAccessToken?: string;
 }
 
 export class ExternalPdsClientError extends Error {
@@ -101,37 +113,116 @@ export class ExternalPdsClient {
   async createRecord(
     pdsUrl: string,
     accessJwt: string,
-    body: unknown
+    body: unknown,
+    dpopPrivateKeyJwk?: string
   ): Promise<ExternalPdsResponse<unknown>> {
     return this.requestJson(
       pdsUrl,
       '/xrpc/com.atproto.repo.createRecord',
-      withBearerJson(accessJwt, body)
+      dpopPrivateKeyJwk
+        ? withDpopJson(accessJwt, dpopPrivateKeyJwk, body)
+        : withBearerJson(accessJwt, body)
     );
   }
 
   async putRecord(
     pdsUrl: string,
     accessJwt: string,
-    body: unknown
+    body: unknown,
+    dpopPrivateKeyJwk?: string
   ): Promise<ExternalPdsResponse<unknown>> {
     return this.requestJson(
       pdsUrl,
       '/xrpc/com.atproto.repo.putRecord',
-      withBearerJson(accessJwt, body)
+      dpopPrivateKeyJwk
+        ? withDpopJson(accessJwt, dpopPrivateKeyJwk, body)
+        : withBearerJson(accessJwt, body)
     );
   }
 
   async deleteRecord(
     pdsUrl: string,
     accessJwt: string,
-    body: unknown
+    body: unknown,
+    dpopPrivateKeyJwk?: string
   ): Promise<ExternalPdsResponse<unknown>> {
     return this.requestJson(
       pdsUrl,
       '/xrpc/com.atproto.repo.deleteRecord',
-      withBearerJson(accessJwt, body)
+      dpopPrivateKeyJwk
+        ? withDpopJson(accessJwt, dpopPrivateKeyJwk, body)
+        : withBearerJson(accessJwt, body)
     );
+  }
+
+  /**
+   * Refresh an OAuth-bound session using the token endpoint.
+   *
+   * Unlike the legacy XRPC `com.atproto.server.refreshSession` path, this
+   * method calls the PDS authorization server's token endpoint directly with
+   * a DPoP-bound refresh_token grant.  Use this when the session was created
+   * by an ATProto OAuth linking flow (i.e. StoredExternalAtSession.tokenEndpoint
+   * is set and dpopPrivateKeyJwk is present).
+   */
+  async refreshSessionOAuth(
+    tokenEndpoint: string,
+    refreshToken: string,
+    dpopPrivateKeyJwk: string,
+    clientId: string
+  ): Promise<ExternalPdsSessionResponse> {
+    const htu = tokenEndpoint.split('?')[0];
+    const dpopProof = await buildDpopProof({
+      privateKeyJwk: dpopPrivateKeyJwk,
+      htu,
+      htm: 'POST',
+      // No `ath` for token endpoint calls (no access token being used yet)
+    });
+
+    const formBody = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: clientId,
+    }).toString();
+
+    const response = await this.requestJson<Record<string, unknown>>(
+      tokenEndpoint,
+      '',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+          dpop: dpopProof,
+        },
+        body: formBody,
+        allowRetryOnAuthFailure: false,
+      }
+    );
+
+    const body = response.body;
+
+    if (body.error) {
+      throw new ExternalPdsClientError(
+        String(body.error_description ?? body.error),
+        { status: 400, error: String(body.error), retryable: false }
+      );
+    }
+
+    const accessJwt = String(body.access_token ?? '');
+    const did       = String(body.sub ?? '');
+    if (!accessJwt || !did) {
+      throw new ExternalPdsClientError(
+        'OAuth token refresh did not return access_token or sub',
+        { retryable: false }
+      );
+    }
+
+    return {
+      did,
+      handle: typeof body.handle === 'string' ? body.handle : '',
+      accessJwt,
+      refreshJwt: typeof body.refresh_token === 'string' ? body.refresh_token : undefined,
+    };
   }
 
   async getRecord(
@@ -271,17 +362,42 @@ export class ExternalPdsClient {
     init: RequestJsonOptions,
     parseSuccess: (response: Response) => Promise<T>
   ): Promise<ExternalPdsResponse<T>> {
-    const origin = normalizePdsOrigin(pdsUrl);
-    const url = new URL(pathWithQuery, origin).toString();
+    // When pdsUrl is already the full URL (e.g. an OAuth token endpoint), honor it.
+    const isAbsoluteUrl = /^https?:\/\//i.test(pdsUrl);
+    const url = isAbsoluteUrl && !pathWithQuery
+      ? pdsUrl
+      : new URL(pathWithQuery, normalizePdsOrigin(pdsUrl)).toString();
     let lastError: ExternalPdsClientError | null = null;
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
+      // DPoP proof generation — must happen per-attempt so the `iat` is fresh.
+      let requestInit: RequestJsonOptions = init;
+      if (init.dpopPrivateKeyJwk && init.dpopAccessToken) {
+        const htu = url.split('?')[0];
+        const htm = (init.method ?? 'GET').toUpperCase();
+        const dpopProof = await buildDpopProof({
+          privateKeyJwk: init.dpopPrivateKeyJwk,
+          htu,
+          htm,
+          accessToken: init.dpopAccessToken,
+        });
+        const existingHeaders = (init.headers ?? {}) as Record<string, string>;
+        requestInit = {
+          ...init,
+          headers: {
+            ...existingHeaders,
+            authorization: `DPoP ${init.dpopAccessToken}`,
+            dpop: dpopProof,
+          },
+        };
+      }
+
       try {
         const response = await fetch(url, {
-          ...init,
+          ...requestInit,
           signal: controller.signal,
         });
         clearTimeout(timeout);
@@ -391,6 +507,28 @@ function withBearerJson(accessJwt: string, body: unknown): RequestJsonOptions {
     },
     body: JSON.stringify(body),
     allowRetryOnAuthFailure: false,
+  };
+}
+
+/**
+ * Build a RequestJsonOptions for a POST request authenticated with DPoP.
+ * The actual DPoP proof JWT is generated lazily inside request() so that
+ * each retry gets a fresh `iat` and unique `jti`.
+ */
+function withDpopJson(
+  accessJwt: string,
+  dpopPrivateKeyJwk: string,
+  body: unknown
+): RequestJsonOptions {
+  return {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    allowRetryOnAuthFailure: false,
+    dpopPrivateKeyJwk,
+    dpopAccessToken: accessJwt,
   };
 }
 

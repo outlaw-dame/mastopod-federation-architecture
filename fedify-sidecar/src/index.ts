@@ -551,6 +551,7 @@ async function main() {
         const externalWriteGateway = new ExternalWriteGateway(
           externalPdsClient,
           externalAtSessionStore,
+          process.env.AT_OAUTH_CLIENT_ID ?? config.atOauthIssuer.replace(/\/$/, '') + '/oauth/atproto-sidecar.client.json',
         );
         const externalReadGateway = new ExternalReadGateway(externalPdsClient);
         if (sessionEndpointEnabled) {

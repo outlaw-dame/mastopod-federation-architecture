@@ -9,7 +9,13 @@ import {
 export class ExternalWriteGateway {
   constructor(
     private readonly externalPdsClient: ExternalPdsClient,
-    private readonly externalSessionStore: ExternalAtSessionStore
+    private readonly externalSessionStore: ExternalAtSessionStore,
+    /**
+     * The OAuth client_id registered for this sidecar instance.  Required only
+     * for DPoP-bound sessions (accounts linked via ATProto OAuth). Falls back
+     * to an empty string which is safe for password-linked accounts.
+     */
+    private readonly oauthClientId: string = '',
   ) {}
 
   async createRecord(localSessionTokenId: string, body: unknown): Promise<unknown> {
@@ -17,7 +23,12 @@ export class ExternalWriteGateway {
       localSessionTokenId,
       body,
       (session) =>
-        this.externalPdsClient.createRecord(session.pdsUrl, session.accessJwt, body)
+        this.externalPdsClient.createRecord(
+          session.pdsUrl,
+          session.accessJwt,
+          body,
+          session.dpopPrivateKeyJwk,
+        )
     );
     return response.body;
   }
@@ -27,7 +38,12 @@ export class ExternalWriteGateway {
       localSessionTokenId,
       body,
       (session) =>
-        this.externalPdsClient.putRecord(session.pdsUrl, session.accessJwt, body)
+        this.externalPdsClient.putRecord(
+          session.pdsUrl,
+          session.accessJwt,
+          body,
+          session.dpopPrivateKeyJwk,
+        )
     );
     return response.body;
   }
@@ -37,7 +53,12 @@ export class ExternalWriteGateway {
       localSessionTokenId,
       body,
       (session) =>
-        this.externalPdsClient.deleteRecord(session.pdsUrl, session.accessJwt, body)
+        this.externalPdsClient.deleteRecord(
+          session.pdsUrl,
+          session.accessJwt,
+          body,
+          session.dpopPrivateKeyJwk,
+        )
     );
     return response.body;
   }
@@ -57,10 +78,24 @@ export class ExternalWriteGateway {
         throw mapExternalError(error);
       }
 
-      const refreshed = await this.externalPdsClient.refreshSession(
-        session.pdsUrl,
-        session.refreshJwt
-      );
+      // Choose refresh path: OAuth token endpoint (DPoP-bound) or legacy XRPC
+      let refreshed: { did: string; handle?: string; accessJwt: string; refreshJwt?: string };
+
+      if (session.dpopPrivateKeyJwk && session.tokenEndpoint) {
+        // ATProto OAuth path: DPoP-bound token refresh via token endpoint
+        refreshed = await this.externalPdsClient.refreshSessionOAuth(
+          session.tokenEndpoint,
+          session.refreshJwt,
+          session.dpopPrivateKeyJwk,
+          this.oauthClientId,
+        );
+      } else {
+        // Legacy path: password-linked accounts use the XRPC refreshSession route
+        refreshed = await this.externalPdsClient.refreshSession(
+          session.pdsUrl,
+          session.refreshJwt
+        );
+      }
 
       if (refreshed.did !== session.did) {
         await this.externalSessionStore.delete(localSessionTokenId);
