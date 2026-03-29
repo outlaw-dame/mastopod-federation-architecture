@@ -16,6 +16,9 @@ import { AtRecordReader } from '../../repo/AtRecordReader';
 import { HandleResolutionReader } from '../../identity/HandleResolutionReader';
 import { XrpcErrors } from '../middleware/XrpcErrorMapper';
 import { RepoRevLookup, withRepoRevHeader } from '../middleware/AtRepoRevHeader';
+import type { IdentityBindingRepository } from '../../../core-domain/identity/IdentityBindingRepository.js';
+import type { ExternalReadGateway } from '../../external/ExternalReadGateway.js';
+import { isExternalAtprotoBinding } from '../../external/ExternalAccountMode.js';
 
 /** Lexicon NSID: segments of [a-zA-Z0-9-], joined by dots, 2+ segments. */
 const NSID_RE = /^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9-]*){1,}$/;
@@ -30,7 +33,9 @@ export class RepoGetRecordRoute {
   constructor(
     private readonly recordReader: AtRecordReader,
     private readonly handleResolver: HandleResolutionReader,
-    private readonly revLookup: RepoRevLookup
+    private readonly revLookup: RepoRevLookup,
+    private readonly identityRepo?: IdentityBindingRepository,
+    private readonly externalReadGateway?: ExternalReadGateway
   ) {}
 
   async handle(
@@ -61,6 +66,29 @@ export class RepoGetRecordRoute {
     const resolved = await this.handleResolver.resolveRepoInput(repo.trim());
     if (!resolved) throw XrpcErrors.repoNotFound(repo.trim());
 
+    const binding = this.identityRepo
+      ? await this.identityRepo.getByAtprotoDid(resolved.did)
+      : null;
+
+    if (isExternalAtprotoBinding(binding)) {
+      if (!binding?.atprotoPdsEndpoint || !this.externalReadGateway) {
+        throw XrpcErrors.repoNotFound(resolved.did);
+      }
+
+      const external = await this.externalReadGateway.getRecord(
+        binding.atprotoPdsEndpoint,
+        resolved.handle ?? resolved.did,
+        trimmedCollection,
+        trimmedRkey,
+        cid || undefined
+      );
+
+      return {
+        headers: externalRepoHeaders(external.headers),
+        body: external.body,
+      };
+    }
+
     // 3. Fetch record.
     const record = await this.recordReader.getRecord(
       resolved.did,
@@ -80,4 +108,15 @@ export class RepoGetRecordRoute {
       body: { uri: record.uri, cid: record.cid, value: record.value }
     };
   }
+}
+
+function externalRepoHeaders(headers: Headers): Record<string, string> {
+  const responseHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  const repoRev = headers.get('atproto-repo-rev');
+  if (repoRev) {
+    responseHeaders['Atproto-Repo-Rev'] = repoRev;
+  }
+  return responseHeaders;
 }

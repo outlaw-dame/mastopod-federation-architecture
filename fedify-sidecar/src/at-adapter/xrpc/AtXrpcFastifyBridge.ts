@@ -8,6 +8,7 @@
  * Route categories:
  *   Unauthenticated GET/WS  → xrpcServer.handleRequest()
  *   Session creation (POST) → xrpcServer.handleCreateSession()
+ *   Session refresh  (POST) → xrpcServer.handleRefreshSession()
  *   Authenticated writes    → extract Bearer token
  *                             → sessionService.verifyAccessToken()
  *                             → xrpcServer.handleAuthenticatedRequest()
@@ -22,6 +23,7 @@ import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
 import type { DefaultAtXrpcServer } from './AtXrpcServer.js';
 import type { AtSessionService } from '../auth/AtSessionTypes.js';
+import type { OAuthAccessTokenVerifier } from '../oauth/OAuthTokenVerifier.js';
 
 // ---------------------------------------------------------------------------
 // Bridge options
@@ -39,6 +41,12 @@ export interface AtXrpcFastifyBridgeOptions {
    * server's own behaviour when writeGateway is not configured).
    */
   sessionService?: AtSessionService;
+
+  /**
+   * Optional OAuth verifier for DPoP-bound access tokens.
+   * When provided, write endpoints accept ATProto OAuth DPoP Bearer tokens.
+   */
+  oauthTokenVerifier?: OAuthAccessTokenVerifier;
 
   /**
    * Prefix for all XRPC routes.  Defaults to '/xrpc'.
@@ -69,7 +77,7 @@ export function registerAtXrpcRoutes(
   app: FastifyInstance,
   opts: AtXrpcFastifyBridgeOptions
 ): void {
-  const { xrpcServer, sessionService } = opts;
+  const { xrpcServer, sessionService, oauthTokenVerifier } = opts;
 
   // ---- Unauthenticated GET routes ----------------------------------------
 
@@ -124,13 +132,31 @@ export function registerAtXrpcRoutes(
     }
   );
 
+  app.post(
+    '/xrpc/com.atproto.server.refreshSession',
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const result = await xrpcServer.handleRefreshSession(
+        (req.headers.authorization as string | undefined) ?? undefined
+      );
+
+      return reply
+        .status(result.status)
+        .headers(result.headers)
+        .send(result.body);
+    }
+  );
+
   // ---- Authenticated write routes ----------------------------------------
 
   for (const route of AUTHENTICATED_POST_ROUTES) {
     app.post(route, async (req: FastifyRequest, reply: FastifyReply) => {
-      // Extract and verify Bearer token
       const authHeader = (req.headers.authorization as string | undefined) ?? '';
-      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+      const dpopHeader =
+        typeof req.headers.dpop === 'string'
+          ? req.headers.dpop
+          : undefined;
+
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
 
       if (!token) {
         return reply.status(401).send({
@@ -139,14 +165,44 @@ export function registerAtXrpcRoutes(
         });
       }
 
-      if (!sessionService) {
+      let sessionCtx = null;
+
+      if (oauthTokenVerifier) {
+        const host = req.headers.host ?? 'localhost';
+        const htu = `${req.protocol}://${host}${req.url.split('?')[0]}`;
+        const oauthResult = await oauthTokenVerifier.verify(
+          authHeader,
+          dpopHeader,
+          'POST',
+          htu,
+        );
+
+        if (oauthResult.errorCode === 'use_dpop_nonce') {
+          if (oauthResult.nonce) {
+            reply.header('DPoP-Nonce', oauthResult.nonce);
+          }
+          return reply.status(401).send({
+            error: 'AuthRequired',
+            message: 'DPoP nonce required',
+          });
+        }
+
+        if (oauthResult.session) {
+          sessionCtx = oauthResult.session;
+        }
+      }
+
+      if (!sessionCtx && !sessionService) {
         return reply.status(501).send({
           error: 'MethodNotImplemented',
-          message: 'Session service not configured',
+          message: 'No auth verifier configured',
         });
       }
 
-      const sessionCtx = await sessionService.verifyAccessToken(token);
+      if (!sessionCtx && sessionService) {
+        sessionCtx = await sessionService.verifyAccessToken(token);
+      }
+
       if (!sessionCtx) {
         return reply.status(401).send({
           error: 'AuthRequired',

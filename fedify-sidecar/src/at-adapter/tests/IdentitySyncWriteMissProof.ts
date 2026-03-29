@@ -1,6 +1,26 @@
 import { Redis } from 'ioredis';
 
 type Json = Record<string, unknown>;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_ACCOUNT_CREATE_TIMEOUT_MS = 420_000;
+
+function redact(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(redact);
+
+  const input = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+
+  for (const [key, entry] of Object.entries(input)) {
+    if (key === 'accessJwt' || key === 'refreshJwt' || key === 'password') {
+      output[key] = '[REDACTED]';
+      continue;
+    }
+    output[key] = redact(entry);
+  }
+
+  return output;
+}
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -23,13 +43,27 @@ async function asJson(res: Response): Promise<unknown> {
 
 async function requestJson(
   url: string,
-  init?: RequestInit
+  init?: RequestInit,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
 ): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(url, init);
-  return {
-    status: res.status,
-    body: await asJson(res),
-  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+    return {
+      status: res.status,
+      body: await asJson(res),
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Request failed for ${url}: ${detail}`);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function requestSessionWithRetry(
@@ -68,7 +102,7 @@ async function waitForBackendIdentityReady(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const res = await requestJson(
-      `${backendBase}/api/internal/identity/by-canonical?canonicalAccountId=${encodeURIComponent(canonicalAccountId)}`,
+      `${backendBase}/api/internal/identity/by-canonical-account-id?canonicalAccountId=${encodeURIComponent(canonicalAccountId)}`,
       {
         method: 'GET',
         headers: {
@@ -132,6 +166,10 @@ async function main() {
   const username = process.env['UNIFIED_TEST_USERNAME'] ?? `write-miss-${Date.now()}`;
   const password = process.env['UNIFIED_TEST_PASSWORD'] ?? 'Phase7LivePass123';
   const email = process.env['UNIFIED_TEST_EMAIL'] ?? `${username}@example.com`;
+  const accountCreateTimeoutMs = Number.parseInt(
+    process.env['UNIFIED_ACCOUNT_CREATE_TIMEOUT_MS'] ?? String(DEFAULT_ACCOUNT_CREATE_TIMEOUT_MS),
+    10
+  );
 
   const redis = new Redis(redisUrl);
   const report: Record<string, unknown> = {
@@ -158,7 +196,7 @@ async function main() {
         activitypub: { enabled: true },
         atproto: { enabled: true, didMethod: 'plc' },
       }),
-    });
+    }, accountCreateTimeoutMs);
 
     (report['steps'] as Json)['createAccount'] = createAccount;
 
@@ -269,7 +307,7 @@ async function main() {
       cid,
     };
 
-    console.log(JSON.stringify(report, null, 2));
+    console.log(JSON.stringify(redact(report), null, 2));
   } finally {
     redis.disconnect();
   }

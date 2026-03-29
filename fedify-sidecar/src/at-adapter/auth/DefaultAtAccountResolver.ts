@@ -14,7 +14,7 @@
  */
 
 import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
-import type { AtAccountResolver } from './AtSessionTypes.js';
+import type { AtAccountResolver, ResolvedAtAccount } from './AtSessionTypes.js';
 import type { IdentityBindingSyncService } from '../identity/IdentityBindingSyncService.js';
 import { traceIdentitySync, type IdentitySyncLogger } from '../identity/IdentitySyncTrace.js';
 
@@ -27,7 +27,7 @@ export class DefaultAtAccountResolver implements AtAccountResolver {
 
   async resolveByIdentifier(
     identifier: string
-  ): Promise<{ canonicalAccountId: string; did: string; handle: string } | null> {
+  ): Promise<ResolvedAtAccount | null> {
     if (!identifier?.trim()) return null;
 
     const id = identifier.trim();
@@ -95,7 +95,7 @@ export class DefaultAtAccountResolver implements AtAccountResolver {
 
   async resolveByCanonicalAccountId(
     canonicalAccountId: string
-  ): Promise<{ canonicalAccountId: string; did: string; handle: string } | null> {
+  ): Promise<ResolvedAtAccount | null> {
     traceIdentitySync(this.logger, 'debug', 'resolver:resolveByCanonicalAccountId:start', {
       canonicalAccountId,
     });
@@ -177,19 +177,39 @@ export class DefaultAtAccountResolver implements AtAccountResolver {
   private toResolved(
     binding: {
       canonicalAccountId: string;
+      webId: string;
       atprotoDid: string | null;
       atprotoHandle: string | null;
-      status: 'active' | 'suspended' | 'deactivated';
+      atprotoPdsEndpoint?: string | null;
+      atprotoManaged?: boolean;
+      atprotoSource?: 'local' | 'external';
+      status: 'active' | 'suspended' | 'deactivated' | 'pending';
     } | null
-  ): { canonicalAccountId: string; did: string; handle: string } | null {
+  ): ResolvedAtAccount | null {
     if (!binding) return null;
     if (binding.status !== 'active') return null;
     if (!binding.atprotoDid || !binding.atprotoHandle) return null;
 
+    const atprotoSource = binding.atprotoSource ?? 'local';
+    const atprotoManaged =
+      typeof binding.atprotoManaged === 'boolean'
+        ? binding.atprotoManaged
+        : atprotoSource !== 'external';
+    const atprotoPdsUrl = binding.atprotoPdsEndpoint ?? null;
+
+    if (!atprotoManaged && !atprotoPdsUrl) {
+      return null;
+    }
+
     return {
       canonicalAccountId: binding.canonicalAccountId,
+      webId: binding.webId,
       did: binding.atprotoDid,
       handle: binding.atprotoHandle,
+      status: binding.status,
+      atprotoManaged,
+      atprotoSource,
+      atprotoPdsUrl,
     };
   }
 }

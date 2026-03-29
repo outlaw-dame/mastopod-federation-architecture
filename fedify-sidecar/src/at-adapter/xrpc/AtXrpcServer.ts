@@ -47,6 +47,7 @@ import {
   type ServerDescribeServerConfig,
 } from './routes/ServerDescribeServerRoute';
 import { ServerCreateSessionRoute } from './routes/ServerCreateSessionRoute';
+import { ServerRefreshSessionRoute } from './routes/ServerRefreshSessionRoute';
 import { RepoCreateRecordRoute } from './routes/RepoCreateRecordRoute';
 import { RepoPutRecordRoute } from './routes/RepoPutRecordRoute';
 import { RepoDeleteRecordRoute } from './routes/RepoDeleteRecordRoute';
@@ -54,6 +55,8 @@ import { RepoDescribeRepoRoute } from './routes/RepoDescribeRepoRoute';
 import type { AtSessionService, AtAccountResolver, AtPasswordVerifier } from '../auth/AtSessionTypes';
 import type { AtWriteGateway } from '../writes/AtWriteTypes';
 import type { AtSessionContext } from '../auth/AtSessionTypes';
+import type { ExternalWriteGateway } from '../external/ExternalWriteGateway.js';
+import type { ExternalReadGateway } from '../external/ExternalReadGateway.js';
 
 // ---------------------------------------------------------------------------
 // Dependency injection interface
@@ -73,6 +76,8 @@ export interface AtXrpcServerDeps {
   accountResolver?: AtAccountResolver;
   passwordVerifier?: AtPasswordVerifier;
   writeGateway?: AtWriteGateway;
+  externalWriteGateway?: ExternalWriteGateway;
+  externalReadGateway?: ExternalReadGateway;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +114,7 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
   // Phase 7 routes (null when Phase 7 deps not provided)
   private readonly describeServerRoute: ServerDescribeServerRoute | null;
   private readonly createSessionRoute: ServerCreateSessionRoute | null;
+  private readonly refreshSessionRoute: ServerRefreshSessionRoute | null;
   private readonly createRecordRoute: RepoCreateRecordRoute | null;
   private readonly putRecordRoute: RepoPutRecordRoute | null;
   private readonly deleteRecordRoute: RepoDeleteRecordRoute | null;
@@ -120,25 +126,33 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
     this.getRepoRoute = new SyncGetRepoRoute({
       carExporter: deps.carExporter,
       handleResolutionReader: deps.handleResolutionReader,
-      repoRegistry: deps.repoRegistry
+      repoRegistry: deps.repoRegistry,
+      identityRepo: deps.identityRepo,
+      externalReadGateway: deps.externalReadGateway,
     });
 
     this.getLatestCommitRoute = new SyncGetLatestCommitRoute(
       deps.repoRegistry,
       deps.handleResolutionReader,
-      revLookup
+      revLookup,
+      deps.identityRepo,
+      deps.externalReadGateway
     );
 
     this.getRecordRoute = new RepoGetRecordRoute(
       deps.recordReader,
       deps.handleResolutionReader,
-      revLookup
+      revLookup,
+      deps.identityRepo,
+      deps.externalReadGateway
     );
 
     this.listRecordsRoute = new RepoListRecordsRoute(
       deps.recordReader,
       deps.handleResolutionReader,
-      revLookup
+      revLookup,
+      deps.identityRepo,
+      deps.externalReadGateway
     );
 
     this.resolveHandleRoute = new IdentityResolveHandleRoute(
@@ -155,30 +169,44 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
       : null;
 
     this.createSessionRoute =
-      deps.accountResolver && deps.passwordVerifier && deps.sessionService
-        ? new ServerCreateSessionRoute(
-            deps.accountResolver,
-            deps.passwordVerifier,
-            deps.sessionService
-          )
+      deps.sessionService
+        ? new ServerCreateSessionRoute(deps.sessionService)
+        : null;
+
+    this.refreshSessionRoute =
+      deps.sessionService
+        ? new ServerRefreshSessionRoute(deps.sessionService)
         : null;
 
     this.createRecordRoute = deps.writeGateway
-      ? new RepoCreateRecordRoute(deps.writeGateway)
+      ? new RepoCreateRecordRoute(
+          deps.writeGateway,
+          deps.identityRepo,
+          deps.externalWriteGateway
+        )
       : null;
 
     this.putRecordRoute = deps.writeGateway
-      ? new RepoPutRecordRoute(deps.writeGateway)
+      ? new RepoPutRecordRoute(
+          deps.writeGateway,
+          deps.identityRepo,
+          deps.externalWriteGateway
+        )
       : null;
 
     this.deleteRecordRoute = deps.writeGateway
-      ? new RepoDeleteRecordRoute(deps.writeGateway)
+      ? new RepoDeleteRecordRoute(
+          deps.writeGateway,
+          deps.identityRepo,
+          deps.externalWriteGateway
+        )
       : null;
 
     this.describeRepoRoute = new RepoDescribeRepoRoute(
       deps.repoRegistry,
       deps.handleResolutionReader,
       deps.identityRepo,
+      deps.externalReadGateway,
     );
   }
 
@@ -343,6 +371,33 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
         };
       }
       const result = await this.createSessionRoute.handle(body);
+      return {
+        status: 200,
+        headers: { ...SECURITY_HEADERS, ...result.headers },
+        body: result.body
+      };
+    } catch (err) {
+      const mapped = mapToXrpcError(err);
+      return {
+        status: mapped.status,
+        headers: { ...SECURITY_HEADERS, 'Content-Type': 'application/json' },
+        body: mapped.body
+      };
+    }
+  }
+
+  async handleRefreshSession(
+    authorizationHeader: string | undefined
+  ): Promise<{ status: number; headers: Record<string, string>; body: any }> {
+    try {
+      if (!this.refreshSessionRoute) {
+        return {
+          status: 501,
+          headers: { ...SECURITY_HEADERS },
+          body: { error: 'MethodNotImplemented', message: 'Session endpoints not configured' }
+        };
+      }
+      const result = await this.refreshSessionRoute.handle(authorizationHeader);
       return {
         status: 200,
         headers: { ...SECURITY_HEADERS, ...result.headers },

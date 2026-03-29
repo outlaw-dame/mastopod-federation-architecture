@@ -31,6 +31,19 @@ export interface AtSessionContext {
   handle: string;
 
   /**
+   * Stable refresh-session family identifier.
+   * Used for durable refresh rotation and replay detection.
+   */
+  sessionFamilyId?: string;
+
+  /**
+   * Local sidecar token identifier (JWT jti).
+   * Used to correlate a local session with encrypted upstream session
+   * material for external-PDS proxy mode.
+   */
+  tokenId?: string;
+
+  /**
    * Scope of access:
    * - 'full'                   : primary credentials (full write access)
    * - 'app_password_restricted': app-password credential (limited write access)
@@ -71,6 +84,21 @@ export interface AtSessionCreateResult extends AtSessionTokenPair {
 }
 
 // ---------------------------------------------------------------------------
+// Resolved hosted account
+// ---------------------------------------------------------------------------
+
+export interface ResolvedAtAccount {
+  canonicalAccountId: string;
+  did: string;
+  handle: string;
+  webId: string;
+  status: 'pending' | 'active' | 'disabled' | 'suspended' | 'deactivated';
+  atprotoManaged: boolean;
+  atprotoSource: 'local' | 'external';
+  atprotoPdsUrl: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Session service interface
 // ---------------------------------------------------------------------------
 
@@ -84,6 +112,13 @@ export interface AtSessionService {
     identifier: string,
     password: string
   ): Promise<AtSessionCreateResult>;
+
+  /**
+   * Rotate an existing refresh JWT into a new access/refresh pair.
+   * Implementations must revoke the presented refresh token so it cannot be
+   * replayed after a successful rotation.
+   */
+  refreshSession(refreshJwt: string): Promise<AtSessionCreateResult>;
 
   /**
    * Validate and decode an access JWT.
@@ -112,11 +147,7 @@ export interface AtAccountResolver {
    * Resolve an AT identifier (handle or DID string) to the canonical account.
    * Returns null when the account does not exist or is not hosted here.
    */
-  resolveByIdentifier(identifier: string): Promise<{
-    canonicalAccountId: string;
-    did: string;
-    handle: string;
-  } | null>;
+  resolveByIdentifier(identifier: string): Promise<ResolvedAtAccount | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +171,21 @@ export interface AtPasswordVerifier {
 // ---------------------------------------------------------------------------
 
 export interface AtSessionTokenService {
+  mintSessionPair(
+    ctx: AtSessionContext
+  ): Promise<AtSessionTokenPair & {
+    accessTokenId: string;
+    refreshTokenId: string;
+    sessionFamilyId: string;
+  }>;
+  rotateRefreshSession(
+    refreshJwt: string
+  ): Promise<(AtSessionTokenPair & {
+    accessTokenId: string;
+    refreshTokenId: string;
+    sessionFamilyId: string;
+    previousRefreshTokenId: string;
+  }) | null>;
   mintAccessToken(ctx: AtSessionContext): Promise<string>;
   mintRefreshToken(ctx: AtSessionContext): Promise<string>;
   verifyAccessToken(jwt: string): Promise<AtSessionContext | null>;

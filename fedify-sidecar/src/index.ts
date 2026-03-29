@@ -29,6 +29,19 @@ import { createOutboundWorker, OutboundWorker } from "./delivery/outbound-worker
 import { createInboundWorker, InboundWorker } from "./delivery/inbound-worker.js";
 import { logger } from "./utils/logger.js";
 import { registerAtXrpcRoutes, attachSubscribeReposWebSocket } from "./at-adapter/xrpc/AtXrpcFastifyBridge.js";
+import { registerOAuthRoutes } from "./at-adapter/oauth/OAuthFastifyBridge.js";
+import { OAuthParStore, OAuthAuthorizationCodeStore, OAuthRefreshTokenStore, OAuthGrantStore, OAuthDpopNonceStore, OAuthConsentChallengeStore, OAuthRateLimitStore } from "./at-adapter/oauth/OAuthRedisStores.js";
+import { OAuthAsKeyManager } from "./at-adapter/oauth/OAuthAsKeyManager.js";
+import { OAuthClientMetadataFetcher } from "./at-adapter/oauth/OAuthClientMetadataFetcher.js";
+import { OAuthAuthorizationServer } from "./at-adapter/oauth/OAuthAuthorizationServer.js";
+import { DpopVerifier } from "./at-adapter/oauth/DpopVerifier.js";
+import type { OAuthAccessTokenVerifier } from "./at-adapter/oauth/OAuthTokenVerifier.js";
+import { OAuthTokenVerifier } from "./at-adapter/oauth/OAuthTokenVerifier.js";
+import { CompositeOAuthTokenVerifier } from "./at-adapter/oauth/CompositeOAuthTokenVerifier.js";
+import { BackendIntrospectionTokenVerifier } from "./at-adapter/oauth/BackendIntrospectionTokenVerifier.js";
+import { OAuthExternalDiscoveryBroker } from "./at-adapter/oauth/OAuthExternalDiscoveryBroker.js";
+import { renderOAuthSecurityMetricsLines } from "./at-adapter/oauth/OAuthSecurityMetrics.js";
+import { parseOAuthRouteRateLimitsFromEnv } from "./at-adapter/oauth/OAuthRateLimitConfig.js";
 // AT adapter — identity
 import { RedisIdentityBindingRepository } from "./core-domain/identity/RedisIdentityBindingRepository.js";
 // AT adapter — repo / alias
@@ -45,6 +58,8 @@ import { DefaultAtCommitPersistenceService } from "./at-adapter/repo/AtCommitPer
 import { DefaultHandleResolutionReader } from "./at-adapter/identity/HandleResolutionReader.js";
 import { DefaultAtSubjectResolver } from "./at-adapter/identity/AtSubjectResolver.js";
 import { HttpIdentityBindingSyncService } from "./at-adapter/identity/IdentityBindingSyncService.js";
+import { IdentityWarmupService } from "./at-adapter/identity/IdentityWarmupService.js";
+import { RedisIdentityWarmCursorStore } from "./at-adapter/identity/RedisIdentityWarmCursorStore.js";
 // AT adapter — firehose
 import { DefaultAtFirehoseSubscriptionManager } from "./at-adapter/firehose/AtFirehoseSubscriptionManager.js";
 import { InMemoryAtFirehoseCursorStore } from "./at-adapter/firehose/AtFirehoseCursorStore.js";
@@ -52,8 +67,13 @@ import { InMemoryAtFirehoseCursorStore } from "./at-adapter/firehose/AtFirehoseC
 import { DefaultAtSessionTokenService } from "./at-adapter/auth/DefaultAtSessionTokenService.js";
 import { DefaultAtAccountResolver } from "./at-adapter/auth/DefaultAtAccountResolver.js";
 import { DefaultAtSessionService } from "./at-adapter/auth/DefaultAtSessionService.js";
+import { RedisSessionFamilyStateStore } from "./at-adapter/auth/SessionFamilyStateStore.js";
 import { createHttpAtPasswordVerifier } from "./at-adapter/auth/HttpAtPasswordVerifier.js";
 import { LocalAtPasswordVerifier } from "./at-adapter/auth/LocalAtPasswordVerifier.js";
+import { ExternalPdsClient } from "./at-adapter/external/ExternalPdsClient.js";
+import { RedisExternalAtSessionStore } from "./at-adapter/external/ExternalAtSessionStore.js";
+import { ExternalWriteGateway } from "./at-adapter/external/ExternalWriteGateway.js";
+import { ExternalReadGateway } from "./at-adapter/external/ExternalReadGateway.js";
 // AT local fixture signing (dev/test only — activated by AT_LOCAL_FIXTURE=true)
 import { LocalAtSigningService } from "./signing/LocalAtSigningService.js";
 // AT adapter — projection
@@ -103,6 +123,39 @@ const config = {
   // Phase 7: PDS hostname advertised in server.describeServer
   atPdsHostname: process.env.AT_PDS_HOSTNAME || process.env.DOMAIN || "localhost",
 
+  // ATProto OAuth settings
+  enableAtprotoOauth: process.env.ENABLE_ATPROTO_OAUTH !== "false",
+  atOauthIssuer: process.env.AT_OAUTH_ISSUER || "http://localhost:8080",
+  atOauthAuthorizationServerOrigin:
+    process.env.AT_OAUTH_AUTHORIZATION_SERVER_ORIGIN || "http://localhost:8080",
+  atOauthResourceServerOrigin:
+    process.env.AT_OAUTH_RESOURCE_SERVER_ORIGIN || "http://localhost:8080",
+  atOauthClientMetadataTimeoutMs: Number.parseInt(
+    process.env.AT_OAUTH_CLIENT_METADATA_TIMEOUT_MS || "6000",
+    10
+  ),
+  atOauthClientMetadataMaxAttempts: Number.parseInt(
+    process.env.AT_OAUTH_CLIENT_METADATA_MAX_ATTEMPTS || "4",
+    10
+  ),
+  atOauthExternalDiscoveryTimeoutMs: Number.parseInt(
+    process.env.AT_OAUTH_EXTERNAL_DISCOVERY_TIMEOUT_MS || "6000",
+    10
+  ),
+  atOauthExternalDiscoveryMaxAttempts: Number.parseInt(
+    process.env.AT_OAUTH_EXTERNAL_DISCOVERY_MAX_ATTEMPTS || "4",
+    10
+  ),
+  atOauthAllowLocalhostHttpDiscovery: process.env.AT_OAUTH_ALLOW_LOCALHOST_HTTP_DISCOVERY === "true",
+  atOauthBackendIntrospectionTimeoutMs: Number.parseInt(
+    process.env.AT_OAUTH_BACKEND_INTROSPECTION_TIMEOUT_MS || "3000",
+    10
+  ),
+  atOauthBackendIntrospectionMaxAttempts: Number.parseInt(
+    process.env.AT_OAUTH_BACKEND_INTROSPECTION_MAX_ATTEMPTS || "3",
+    10
+  ),
+
   // Phase 7: durable write-result correlation settings
   atWriteResultTtlSec: Number.parseInt(process.env.AT_WRITE_RESULT_TTL_SEC || "120", 10),
   atWriteResultKeyPrefix: process.env.AT_WRITE_RESULT_KEY_PREFIX || "at:write-result",
@@ -113,6 +166,16 @@ const config = {
   // LocalAtSigningService (secp256k1 signing from Redis-stored fixture keys).
   // NEVER set in production.  Requires provision-test-fixture.ts to have been run.
   atLocalFixture: process.env.AT_LOCAL_FIXTURE === "true",
+
+  identityWarmIntervalMs: Number.parseInt(process.env.IDENTITY_WARM_INTERVAL_MS || "30000", 10),
+  identityWarmBatchLimit: Number.parseInt(process.env.IDENTITY_WARM_BATCH_LIMIT || "100", 10),
+  externalAtSessionTtlSeconds: Number.parseInt(
+    process.env.EXTERNAL_AT_SESSION_TTL_SECONDS || `${60 * 60 * 12}`,
+    10
+  ),
+  externalPdsTimeoutMs: Number.parseInt(process.env.EXTERNAL_PDS_TIMEOUT_MS || "8000", 10),
+  externalPdsMaxAttempts: Number.parseInt(process.env.EXTERNAL_PDS_MAX_ATTEMPTS || "5", 10),
+  atOauthRouteRateLimits: parseOAuthRouteRateLimitsFromEnv(process.env),
 };
 
 // ============================================================================
@@ -125,6 +188,7 @@ let inboundWorker: InboundWorker | null = null;
 let opensearchIndexer: ReturnType<typeof createOpenSearchIndexer> | null = null;
 let atRedisClient: Redis | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
+let identityWarmupService: IdentityWarmupService | null = null;
 let isShuttingDown = false;
 
 // ============================================================================
@@ -143,6 +207,9 @@ async function main() {
     }
     if (!process.env.ACTIVITYPODS_TOKEN) {
       throw new Error("ENABLE_XRPC_SERVER requires ACTIVITYPODS_TOKEN when AT_LOCAL_FIXTURE is false");
+    }
+    if (!process.env.EXTERNAL_AT_SESSION_KEY_HEX) {
+      throw new Error("ENABLE_XRPC_SERVER requires EXTERNAL_AT_SESSION_KEY_HEX when AT_LOCAL_FIXTURE is false");
     }
   }
 
@@ -313,6 +380,7 @@ async function main() {
         `# HELP fedify_uptime_seconds Uptime in seconds`,
         `# TYPE fedify_uptime_seconds gauge`,
         `fedify_uptime_seconds ${Math.floor(process.uptime())}`,
+        ...renderOAuthSecurityMetricsLines(),
       ].join("\n") + "\n";
     });
 
@@ -469,20 +537,40 @@ async function main() {
         let sessionService: any = undefined;
         let accountResolverForSession: any = undefined;
         let passwordVerifierForSession: any = undefined;
+        let oauthTokenVerifier: OAuthAccessTokenVerifier | undefined = undefined;
         let identityBindingSyncService: HttpIdentityBindingSyncService | undefined = undefined;
+        const externalPdsClient = new ExternalPdsClient({
+          timeoutMs: config.externalPdsTimeoutMs,
+          maxAttempts: config.externalPdsMaxAttempts,
+        });
+        const externalAtSessionStore = new RedisExternalAtSessionStore(
+          atRedis,
+          process.env.EXTERNAL_AT_SESSION_KEY_HEX ?? "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          config.externalAtSessionTtlSeconds,
+        );
+        const externalWriteGateway = new ExternalWriteGateway(
+          externalPdsClient,
+          externalAtSessionStore,
+        );
+        const externalReadGateway = new ExternalReadGateway(externalPdsClient);
         if (sessionEndpointEnabled) {
-          const tokenService    = new DefaultAtSessionTokenService({ secret: sessionSecret });
+          const sessionFamilyStateStore = new RedisSessionFamilyStateStore(atRedis);
+          const tokenService    = new DefaultAtSessionTokenService({
+            secret: sessionSecret,
+            sessionStateStore: sessionFamilyStateStore,
+          });
           identityBindingSyncService = config.atLocalFixture
             ? undefined
             : new HttpIdentityBindingSyncService({
                 backendBaseUrl: process.env.ACTIVITYPODS_URL!,
                 bearerToken: process.env.ACTIVITYPODS_TOKEN!,
                 identityBindingRepository: identityRepo,
+                repoRegistry,
                 logger,
               });
 
           if (identityBindingSyncService) {
-            logger.info("AT identity sync enabled", {
+          logger.info("AT identity sync enabled", {
               backendBaseUrl: process.env.ACTIVITYPODS_URL,
             });
           }
@@ -507,6 +595,8 @@ async function main() {
             accountResolver,
             passwordVerifier,
             tokenService,
+            externalPdsClient,
+            externalAtSessionStore,
           );
         }
 
@@ -598,6 +688,88 @@ async function main() {
           logger,
         });
 
+        // ---- OAuth Authorization Server + metadata/route bridge ----
+        if (config.enableAtprotoOauth) {
+          const oauthParStore = new OAuthParStore(atRedis);
+          const oauthCodeStore = new OAuthAuthorizationCodeStore(atRedis);
+          const oauthRefreshStore = new OAuthRefreshTokenStore(atRedis);
+          const oauthGrantStore = new OAuthGrantStore(atRedis);
+          const oauthNonceStore = new OAuthDpopNonceStore(atRedis);
+          const oauthConsentChallengeStore = new OAuthConsentChallengeStore(atRedis);
+          const oauthRateLimitStore = new OAuthRateLimitStore(atRedis);
+          const oauthKeyManager = new OAuthAsKeyManager(atRedis);
+          const oauthClientMetadataFetcher = new OAuthClientMetadataFetcher(
+            config.atOauthClientMetadataTimeoutMs,
+            config.atOauthClientMetadataMaxAttempts,
+            config.atOauthAllowLocalhostHttpDiscovery,
+          );
+          const oauthExternalDiscoveryBroker = new OAuthExternalDiscoveryBroker({
+            timeoutMs: config.atOauthExternalDiscoveryTimeoutMs,
+            maxAttempts: config.atOauthExternalDiscoveryMaxAttempts,
+            allowLocalhostHttp: config.atOauthAllowLocalhostHttpDiscovery,
+          });
+
+          const oauthAuthorizationServer = new OAuthAuthorizationServer({
+            issuer: config.atOauthIssuer,
+            authorizationServerOrigin: config.atOauthAuthorizationServerOrigin,
+            resourceServerOrigin: config.atOauthResourceServerOrigin,
+            keyManager: oauthKeyManager,
+            clientMetadataFetcher: oauthClientMetadataFetcher,
+            parStore: oauthParStore,
+            codeStore: oauthCodeStore,
+            refreshStore: oauthRefreshStore,
+            grantStore: oauthGrantStore,
+            nonceStore: oauthNonceStore,
+          });
+          await oauthAuthorizationServer.initialize();
+
+          const dpopVerifier = new DpopVerifier(oauthNonceStore);
+
+          const localOauthTokenVerifier = new OAuthTokenVerifier({
+            issuer: config.atOauthIssuer,
+            resourceServerOrigin: config.atOauthResourceServerOrigin,
+            keyManager: oauthKeyManager,
+            dpopVerifier,
+            nonceFactory: () => oauthAuthorizationServer.mintDpopNonce(),
+          });
+
+          oauthTokenVerifier = localOauthTokenVerifier;
+
+          if (process.env.ACTIVITYPODS_URL && process.env.ACTIVITYPODS_TOKEN) {
+            const backendOauthTokenVerifier = new BackendIntrospectionTokenVerifier({
+              introspectionUrl: `${process.env.ACTIVITYPODS_URL.replace(/\/$/, '')}/api/internal/oauth/introspect`,
+              introspectionBearerToken: process.env.ACTIVITYPODS_TOKEN,
+              dpopVerifier,
+              nonceFactory: () => oauthAuthorizationServer.mintDpopNonce(),
+              identityBindings: identityRepo,
+              timeoutMs: config.atOauthBackendIntrospectionTimeoutMs,
+              maxAttempts: config.atOauthBackendIntrospectionMaxAttempts,
+            });
+
+            oauthTokenVerifier = new CompositeOAuthTokenVerifier([
+              localOauthTokenVerifier,
+              backendOauthTokenVerifier,
+            ]);
+          }
+
+          registerOAuthRoutes(app, {
+            authorizationServer: oauthAuthorizationServer,
+            dpopVerifier,
+            sessionService,
+            externalDiscoveryBroker: oauthExternalDiscoveryBroker,
+            consentChallengeStore: oauthConsentChallengeStore,
+            rateLimitStore: oauthRateLimitStore,
+            rateLimits: config.atOauthRouteRateLimits,
+          });
+
+          logger.info("AT OAuth routes registered", {
+            issuer: config.atOauthIssuer,
+            authorizationServerOrigin: config.atOauthAuthorizationServerOrigin,
+            resourceServerOrigin: config.atOauthResourceServerOrigin,
+            routeRateLimits: config.atOauthRouteRateLimits,
+          });
+        }
+
         // ---- Assemble XRPC server ----
         const xrpcServer = new DefaultAtXrpcServer({
           recordReader,
@@ -615,10 +787,36 @@ async function main() {
           accountResolver: accountResolverForSession,
           passwordVerifier: passwordVerifierForSession,
           writeGateway,
+          externalWriteGateway,
+          externalReadGateway,
         });
 
-        registerAtXrpcRoutes(app, { xrpcServer, sessionService });
+        registerAtXrpcRoutes(app, {
+          xrpcServer,
+          sessionService,
+          oauthTokenVerifier,
+        });
         xrpcServerForWebSocket = xrpcServer;
+
+        if (!config.atLocalFixture) {
+          identityWarmupService = new IdentityWarmupService({
+            backendBaseUrl: process.env.ACTIVITYPODS_URL!,
+            bearerToken: process.env.ACTIVITYPODS_TOKEN!,
+            identityBindingRepository: identityRepo,
+            cursorStore: new RedisIdentityWarmCursorStore(atRedis),
+            repoRegistry,
+            logger,
+            intervalMs: config.identityWarmIntervalMs,
+            batchLimit: config.identityWarmBatchLimit,
+          });
+          identityWarmupService.start();
+
+          logger.info("AT identity warmup enabled", {
+            backendBaseUrl: process.env.ACTIVITYPODS_URL,
+            intervalMs: config.identityWarmIntervalMs,
+            batchLimit: config.identityWarmBatchLimit,
+          });
+        }
 
         if (config.atLocalFixture) {
           logger.warn(
@@ -723,6 +921,12 @@ async function shutdown(signal: string): Promise<void> {
     if (writeResultStore) {
       await writeResultStore.close();
       logger.info("Write result store closed");
+    }
+
+    if (identityWarmupService) {
+      await identityWarmupService.stop();
+      identityWarmupService = null;
+      logger.info("Identity warmup service stopped");
     }
 
     // Quit shared AT Redis client

@@ -1,6 +1,7 @@
 import { Redis } from 'ioredis';
 import { HttpIdentityBindingSyncService } from '../identity/IdentityBindingSyncService.js';
 import { RedisIdentityBindingRepository } from '../../core-domain/identity/RedisIdentityBindingRepository.js';
+import { RedisAtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -32,10 +33,12 @@ async function main() {
 
   const redis = new Redis(redisUrl);
   const repo = new RedisIdentityBindingRepository(redis);
+  const repoRegistry = new RedisAtprotoRepoRegistry(redis);
   const sync = new HttpIdentityBindingSyncService({
     backendBaseUrl: backendBase,
     bearerToken: token,
     identityBindingRepository: repo,
+    repoRegistry,
   });
 
   try {
@@ -48,6 +51,10 @@ async function main() {
     });
     const backendBody = await asJson(backendRes);
     assert(backendRes.status === 200, `backend endpoint failed: ${backendRes.status} ${JSON.stringify(backendBody)}`);
+    const backendProjection = backendBody as {
+      atprotoDid?: string;
+      repo?: { initialized?: boolean; rootCid?: string | null; rev?: string | null };
+    };
 
     // 2. Sync by canonical account id.
     const synced = await sync.syncByCanonicalAccountId(canonicalAccountId);
@@ -82,11 +89,18 @@ async function main() {
     assert(byHandle, 'local repo missing handle index');
     assert(byHandle.canonicalAccountId === canonicalAccountId, 'handle index canonicalAccountId mismatch');
 
+    let repoState: unknown = null;
+    if (backendProjection.repo?.initialized) {
+      repoState = await repoRegistry.getRepoState(byCanonical.atprotoDid);
+      assert(repoState, 'local repo registry missing warmed bootstrap state');
+    }
+
     const report = {
       ok: true,
       backendBase,
       canonicalAccountId,
       synced,
+      repoProjectionPresent: !!backendProjection.repo?.initialized,
       binding: {
         canonicalAccountId: byCanonical.canonicalAccountId,
         webId: byCanonical.webId,
@@ -94,6 +108,7 @@ async function main() {
         atprotoHandle: byCanonical.atprotoHandle,
         status: byCanonical.status,
       },
+      repoState,
     };
 
     console.log(JSON.stringify(report, null, 2));
