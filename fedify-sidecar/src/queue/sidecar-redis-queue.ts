@@ -61,6 +61,16 @@ export interface OutboundJob {
   attempt: number;
   maxAttempts: number;
   notBeforeMs: number;
+  meta?: {
+    isPublicIndexable?: boolean;
+    isDeleteOrTombstone?: boolean;
+    visibility?: "public" | "unlisted" | "followers" | "direct";
+    searchConsent?: {
+      raw?: string[];
+      isPublic?: boolean;
+      explicitlySet?: boolean;
+    };
+  };
 }
 
 export interface DLQEntry {
@@ -256,6 +266,7 @@ export class RedisStreamsQueue {
         attempt: job.attempt.toString(),
         maxAttempts: job.maxAttempts.toString(),
         notBeforeMs: job.notBeforeMs.toString(),
+        meta: job.meta ? JSON.stringify(job.meta) : "",
       },
       { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxStreamLength } }
     );
@@ -322,6 +333,7 @@ export class RedisStreamsQueue {
       attempt: parseInt(fields.attempt, 10),
       maxAttempts: parseInt(fields.maxAttempts, 10),
       notBeforeMs: parseInt(fields.notBeforeMs, 10),
+      meta: fields.meta ? JSON.parse(fields.meta) : undefined,
     };
   }
 

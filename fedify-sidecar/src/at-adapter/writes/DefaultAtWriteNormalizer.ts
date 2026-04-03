@@ -32,6 +32,7 @@ import { XrpcErrors } from '../xrpc/middleware/XrpcErrorMapper.js';
 
 const CREATE_MUTATION_MAP: Partial<Record<string, CanonicalMutationEnvelope['mutationType']>> = {
   'app.bsky.feed.post':     'post_create',
+  'site.standard.document': 'post_create',
   'app.bsky.actor.profile': 'profile_upsert',
   'app.bsky.graph.follow':  'follow_create',
   'app.bsky.feed.like':     'like_create',
@@ -40,6 +41,7 @@ const CREATE_MUTATION_MAP: Partial<Record<string, CanonicalMutationEnvelope['mut
 
 const DELETE_MUTATION_MAP: Partial<Record<string, CanonicalMutationEnvelope['mutationType']>> = {
   'app.bsky.feed.post':    'post_delete',
+  'site.standard.document': 'post_delete',
   'app.bsky.graph.follow': 'follow_delete',
   'app.bsky.feed.like':    'like_delete',
   'app.bsky.feed.repost':  'repost_delete',
@@ -67,6 +69,7 @@ export class DefaultAtWriteNormalizer implements AtWriteNormalizer {
         ...input.record,
         _atRepo: input.repo,
         _collection: input.collection,
+        _operation: "create",
         ...(input.rkey ? { _rkey: input.rkey } : {}),
       },
       submittedAt: new Date().toISOString(),
@@ -91,6 +94,7 @@ export class DefaultAtWriteNormalizer implements AtWriteNormalizer {
         ...input.record,
         _atRepo: input.repo,
         _collection: input.collection,
+        _operation: "update",
         _rkey: input.rkey,
       },
       submittedAt: new Date().toISOString(),
@@ -115,7 +119,10 @@ export class DefaultAtWriteNormalizer implements AtWriteNormalizer {
       payload: {
         _atRepo: input.repo,
         _collection: input.collection,
+        _operation: "delete",
         _rkey: input.rkey,
+        ...(input.bridgeCanonicalRefId ? { _bridgeCanonicalRefId: input.bridgeCanonicalRefId } : {}),
+        ...(input.bridgeMetadata ? { _bridgeMetadata: input.bridgeMetadata } : {}),
       },
       submittedAt: new Date().toISOString(),
       source: 'xrpc_client',

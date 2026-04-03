@@ -62,6 +62,7 @@ export class PublicContentIndexWriter {
       createdAt: event.content.createdAt,
       langs: event.content.langs,
       tags: event.content.tags,
+      emojis: event.content.emojis,
       replyToStableId: event.relations?.replyToStableId,
       quoteOfStableId: event.relations?.quoteOfStableId,
       hasMedia: event.media?.hasMedia || false,

@@ -56,6 +56,7 @@ import { DefaultImageEmbedBuilder } from '../projection/serializers/ImageEmbedBu
 import { DefaultFollowRecordSerializer } from '../projection/serializers/FollowRecordSerializer.js';
 import { DefaultLikeRecordSerializer } from '../projection/serializers/LikeRecordSerializer.js';
 import { DefaultRepostRecordSerializer } from '../projection/serializers/RepostRecordSerializer.js';
+import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer.js';
 
 // Writes
 import { DefaultAtWriteNormalizer } from '../writes/DefaultAtWriteNormalizer.js';
@@ -282,6 +283,7 @@ async function buildDeps() {
     repoRegistry,
     new DefaultProfileRecordSerializer(),
     new DefaultPostRecordSerializer(),
+    new DefaultStandardDocumentRecordSerializer(),
     rkeyService,
     aliasStore,
     commitBuilder,

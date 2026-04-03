@@ -7,6 +7,7 @@
  * Public endpoints (unauthenticated, per ATProto spec):
  *   GET  /xrpc/com.atproto.sync.getRepo
  *   GET  /xrpc/com.atproto.sync.getLatestCommit
+ *   GET  /xrpc/com.atproto.sync.getBlob
  *   GET  /xrpc/com.atproto.repo.getRecord
  *   GET  /xrpc/com.atproto.repo.listRecords
  *   GET  /xrpc/com.atproto.identity.resolveHandle
@@ -29,12 +30,14 @@
 
 import { AtRecordReader } from '../repo/AtRecordReader';
 import { AtCarExporter } from '../repo/AtCarExporter';
+import type { AtBlobStore } from '../blob/AtBlobStore.js';
 import { HandleResolutionReader } from '../identity/HandleResolutionReader';
 import { AtFirehoseSubscriptionManager } from '../firehose/AtFirehoseSubscriptionManager';
 import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry';
 import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository';
 import { SyncGetRepoRoute } from './routes/SyncGetRepoRoute';
 import { SyncGetLatestCommitRoute } from './routes/SyncGetLatestCommitRoute';
+import { SyncGetBlobRoute } from './routes/SyncGetBlobRoute.js';
 import { RepoGetRecordRoute } from './routes/RepoGetRecordRoute';
 import { RepoListRecordsRoute } from './routes/RepoListRecordsRoute';
 import { IdentityResolveHandleRoute } from './routes/IdentityResolveHandleRoute';
@@ -65,6 +68,7 @@ import type { ExternalReadGateway } from '../external/ExternalReadGateway.js';
 export interface AtXrpcServerDeps {
   recordReader: AtRecordReader;
   carExporter: AtCarExporter;
+  blobStore?: AtBlobStore;
   handleResolutionReader: HandleResolutionReader;
   firehoseSubscriptions: AtFirehoseSubscriptionManager;
   repoRegistry: AtprotoRepoRegistry;
@@ -107,6 +111,7 @@ const SECURITY_HEADERS: Record<string, string> = {
 export class DefaultAtXrpcServer implements AtXrpcServer {
   private readonly getRepoRoute: SyncGetRepoRoute;
   private readonly getLatestCommitRoute: SyncGetLatestCommitRoute;
+  private readonly getBlobRoute: SyncGetBlobRoute | null;
   private readonly getRecordRoute: RepoGetRecordRoute;
   private readonly listRecordsRoute: RepoListRecordsRoute;
   private readonly resolveHandleRoute: IdentityResolveHandleRoute;
@@ -138,6 +143,13 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
       deps.identityRepo,
       deps.externalReadGateway
     );
+
+    this.getBlobRoute = deps.blobStore
+      ? new SyncGetBlobRoute({
+          blobStore: deps.blobStore,
+          handleResolutionReader: deps.handleResolutionReader,
+        })
+      : null;
 
     this.getRecordRoute = new RepoGetRecordRoute(
       deps.recordReader,
@@ -243,6 +255,16 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.sync.getLatestCommit') {
         result = await this.getLatestCommitRoute.handle(query.did);
+
+      } else if (method === 'GET' && path === '/xrpc/com.atproto.sync.getBlob') {
+        if (!this.getBlobRoute) {
+          return {
+            status: 501,
+            headers: { ...SECURITY_HEADERS },
+            body: { error: 'MethodNotImplemented', message: 'Blob reads are not configured' }
+          };
+        }
+        result = await this.getBlobRoute.handle(query.did, query.cid);
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.repo.getRecord') {
         result = await this.getRecordRoute.handle(

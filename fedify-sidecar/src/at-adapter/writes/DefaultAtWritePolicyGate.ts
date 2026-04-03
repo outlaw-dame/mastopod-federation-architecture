@@ -11,8 +11,8 @@
  *      the repo-ownership assertion already in the route handlers.
  *   3. The collection must be in the supported Phase 7 allowlist.
  *   4. putRecord / profile_upsert: always allowed for app.bsky.actor.profile;
- *      post_create is used for both createRecord and putRecord on posts —
- *      reject putRecord on posts if canonical post editing is not enabled.
+ *      post_create is used for both createRecord and putRecord on posts/articles —
+ *      reject putRecord on posts/articles if canonical post editing is not enabled.
  *   5. Deletes: alias must exist and be owned by this canonical account.
  *      Deleting a record that was never projected here returns WriteNotAllowed.
  *
@@ -109,14 +109,15 @@ export class DefaultAtWritePolicyGate implements AtWritePolicyGate {
       return ACCEPT;
     }
 
-    if (mutation.mutationType === 'post_create' && collection === 'app.bsky.feed.post') {
-      // For explicit PUT on posts (an rkey is provided): check editing policy
-      const hasExplicitRkey = typeof mutation.payload._rkey === 'string';
-      if (hasExplicitRkey && !this.allowPostEditing) {
-        // Canonical post editing not enabled; reject putRecord on posts
+    if (
+      mutation.mutationType === 'post_create' &&
+      (collection === 'app.bsky.feed.post' || collection === 'site.standard.document')
+    ) {
+      const operation = _normalizedOperation(mutation.payload);
+      if (operation === 'update' && !this.allowPostEditing) {
         return reject(
           'WriteNotAllowed',
-          'Post editing is not supported; use createRecord without an explicit rkey'
+          'Post editing is not supported on the canonical write path.'
         );
       }
       return ACCEPT;
@@ -186,4 +187,17 @@ function _isDeleteMutation(t: CanonicalMutationEnvelope['mutationType']): boolea
     t === 'like_delete'   ||
     t === 'repost_delete'
   );
+}
+
+function _normalizedOperation(payload: Record<string, unknown>): 'create' | 'update' | 'delete' | 'unknown' {
+  const operation = payload._operation;
+  if (operation === 'create' || operation === 'update' || operation === 'delete') {
+    return operation;
+  }
+
+  if (typeof payload._rkey === 'string') {
+    return 'update';
+  }
+
+  return 'unknown';
 }

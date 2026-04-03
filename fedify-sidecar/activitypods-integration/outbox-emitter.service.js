@@ -12,6 +12,10 @@
 "use strict";
 
 const { ulid } = require("ulid");
+const {
+  getActivityActorUri,
+  resolveDeliveryTargets,
+} = require("./activitypub-recipient-resolution");
 
 module.exports = {
   name: "outbox-emitter",
@@ -35,9 +39,9 @@ module.exports = {
      * committed to an actor's outbox.
      */
     "activitypub.outbox.posted": {
-                async handler(ctx) {
+	                async handler(ctx) {
         const { activity } = ctx.params;
-        const actorUri = typeof activity.actor === 'string' ? activity.actor : activity.actor?.id || null;
+        const actorUri = getActivityActorUri(activity);
 
         // Resolve remote delivery targets (not provided by ActivityPods in this event)
         let deliveryTargets = [];
@@ -65,6 +69,7 @@ module.exports = {
           objectId: this.extractObjectId(activity),
           activityType: activity.type || activity["@type"],
           activity,
+          bridge: ctx.meta?.protocolBridge || null,
 
           // Delivery targets (resolved above)
           deliveryTargets,
@@ -108,6 +113,7 @@ module.exports = {
           objectId: this.extractObjectId(activity),
           activityType: activity.type || activity["@type"],
           activity,
+          bridge: ctx.meta?.protocolBridge || null,
           deliveryTargets: deliveryTargets || [],
           meta: {
             isPublicIndexable: this.isPublicIndexable(activity),
@@ -130,43 +136,36 @@ module.exports = {
         actorUri: { type: "string" },
         activity: { type: "object" },
       },
-      async handler(ctx) {
-        const { actorUri, activity } = ctx.params;
-        
-        // Get recipients from to/cc/bto/bcc
-        const recipients = this.extractRecipients(activity);
-        
-        // Resolve each recipient to inbox URLs
-        const targets = [];
-        
-        for (const recipientUri of recipients) {
-          try {
-            // Skip local actors (handled by internal federation)
-            const isLocal = await ctx.call("activitypub.actor.isLocal", { actorUri: recipientUri });
-            if (isLocal) continue;
-            
-            // Resolve remote actor's inbox
-            const actorDoc = await ctx.call("activitypub.actor.get", { actorUri: recipientUri });
-            if (actorDoc) {
-              const host = new URL(recipientUri).hostname;
-              targets.push({
-                targetDomain: host,
-                inboxUrl: actorDoc.inbox,
-                sharedInboxUrl: actorDoc.endpoints?.sharedInbox || actorDoc.inbox,
-              });
-            }
-          } catch (err) {
-            this.logger.warn("Failed to resolve recipient", { recipientUri, error: err.message });
-          }
-        }
-        
-        // Deduplicate by sharedInbox
-        const deduped = this.deduplicateBySharedInbox(targets);
-        
-        return { targets: deduped };
-      },
-    },
-  },
+	      async handler(ctx) {
+	        const { actorUri, activity } = ctx.params;
+
+	        const activityActorUri = getActivityActorUri(activity);
+	        if (!activityActorUri || activityActorUri !== actorUri) {
+	          throw new Error("activity.actor does not match actorUri");
+	        }
+
+	        const isLocal = await ctx.call("activitypub.actor.isLocal", { actorUri });
+	        if (!isLocal) {
+	          throw new Error("actorUri is not hosted locally");
+	        }
+
+	        const actor = await ctx.call("activitypub.actor.get", { actorUri });
+	        if (!actor) {
+	          throw new Error("Local actor could not be resolved");
+	        }
+
+	        const targets = await resolveDeliveryTargets({
+	          ctx,
+	          actorUri,
+	          actor,
+	          activity,
+	          logger: this.logger,
+	        });
+
+	        return { targets };
+	      },
+	    },
+	  },
 
   methods: {
     /**
@@ -181,6 +180,7 @@ module.exports = {
         actorUri: event.actorUri,
         activityId: event.activityId,
         activity: event.activity,
+        bridge: event.bridge || undefined,
         remoteTargets: event.deliveryTargets,  // sidecar validates body.remoteTargets
       };
 
@@ -287,48 +287,8 @@ module.exports = {
       return "direct";
     },
 
-    /**
-     * Extract all recipients from activity.
-     */
-    extractRecipients(activity) {
-      const recipients = new Set();
-      
-      for (const field of ["to", "cc", "bto", "bcc"]) {
-        const values = activity[field];
-        if (!values) continue;
-        
-        const arr = Array.isArray(values) ? values : [values];
-        for (const v of arr) {
-          if (typeof v === "string" && v.startsWith("http")) {
-            recipients.add(v);
-          }
-        }
-      }
-
-      // Expand followers collection if present
-      // (This would need additional logic to resolve followers)
-
-      return [...recipients];
-    },
-
-    /**
-     * Deduplicate targets by shared inbox.
-     */
-    deduplicateBySharedInbox(targets) {
-      const seen = new Map();
-      
-      for (const target of targets) {
-        const key = target.sharedInboxUrl || target.inboxUrl;
-        if (!seen.has(key)) {
-          seen.set(key, target);
-        }
-      }
-
-      return [...seen.values()];
-    },
-
-    sleep(ms) {
-      return new Promise(resolve => setTimeout(resolve, ms));
-    },
+	    sleep(ms) {
+	      return new Promise(resolve => setTimeout(resolve, ms));
+	    },
   },
 };

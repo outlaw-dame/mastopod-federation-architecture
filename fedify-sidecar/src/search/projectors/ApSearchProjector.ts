@@ -10,6 +10,7 @@ import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchAuthorUpsertV1, Searc
 import { IdentityAliasResolver } from '../identity/IdentityAliasResolver';
 import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
+import { extractHashtagsFromActivityPubTags, extractHashtagsFromText } from '../../utils/hashtags.js';
 
 export class ApSearchProjector {
   constructor(
@@ -86,7 +87,7 @@ export class ApSearchProjector {
         text,
         createdAt: object.published || activity.published || new Date().toISOString(),
         langs: object.contentMap ? Object.keys(object.contentMap) : undefined,
-        tags: this.extractTags(object.tag)
+        tags: this.extractTags(object.tag, object.content)
       },
       relations: inReplyTo ? {
         replyToStableId: SearchDocIdStrategy.forRemoteAp(inReplyTo) // Best effort without full resolution
@@ -165,14 +166,14 @@ export class ApSearchProjector {
     return html.replace(/<[^>]*>?/gm, '').trim();
   }
 
-  private extractTags(tags: any): string[] | undefined {
-    if (!tags) return undefined;
-    const tagArray = Array.isArray(tags) ? tags : [tags];
-    
-    const hashtags = tagArray
-      .filter(t => t.type === 'Hashtag' && t.name)
-      .map(t => t.name.replace(/^#/, ''));
-      
+  private extractTags(tags: any, content?: string): string[] | undefined {
+    const fromTags = extractHashtagsFromActivityPubTags(tags);
+    const fromContent = typeof content === 'string'
+      ? extractHashtagsFromText(this.stripHtml(content))
+      : [];
+
+    const hashtags = Array.from(new Set([...fromTags, ...fromContent]));
+
     return hashtags.length > 0 ? hashtags : undefined;
   }
 }

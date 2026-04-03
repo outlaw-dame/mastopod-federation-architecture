@@ -4,7 +4,7 @@
  * Maps stored blob metadata to ATProto blob references.
  */
 
-import { AtBlobRef, StoredBlobMetadata } from './AtBlobStore';
+import type { AtBlobRef, StoredBlobMetadata } from './AtBlobStore.js';
 
 export interface BlobReferenceMapper {
   toAtBlobRef(meta: StoredBlobMetadata): AtBlobRef;

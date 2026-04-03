@@ -18,7 +18,7 @@
  * and a Redis-backed implementation (durable, multi-instance).
  */
 
-import type Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import type { AtWriteResult } from './AtWriteTypes.js';
 
 // ---------------------------------------------------------------------------
@@ -255,7 +255,7 @@ export class RedisAtWriteResultStore implements AtWriteResultStore {
 // ---------------------------------------------------------------------------
 
 interface PendingEntry {
-  resolve: (result: AtWriteResult) => void;
+  resolve: (result: AtWriteResult | null) => void;
   timeoutHandle: ReturnType<typeof setTimeout>;
 }
 
@@ -316,6 +316,15 @@ export class InMemoryAtWriteResultStore implements AtWriteResultStore {
     setTimeout(() => {
       this.earlyResults.delete(clientMutationId);
     }, this.earlyResultTtlMs);
+  }
+
+  async close(): Promise<void> {
+    for (const [clientMutationId, entry] of this.pending) {
+      clearTimeout(entry.timeoutHandle);
+      entry.resolve(null);
+      this.pending.delete(clientMutationId);
+    }
+    this.earlyResults.clear();
   }
 
   /** Visible for testing: number of open waiters */

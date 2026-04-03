@@ -18,6 +18,7 @@ import { DefaultAtBlobStore } from '../blob/AtBlobStore';
 import { DefaultBlobReferenceMapper } from '../blob/BlobReferenceMapper';
 import { DefaultAtBlobUploadService } from '../blob/AtBlobUploadService';
 import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecordSerializer';
+import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer';
 
 // Mock dependencies
 const mockIdentityRepo = {
@@ -88,6 +89,7 @@ describe('Phase 5 Acceptance Tests', () => {
       mockRepoRegistry as any,
       {} as any, // profileSerializer
       postSerializer,
+      new DefaultStandardDocumentRecordSerializer(),
       mockRkeyService as any,
       aliasStore,
       mockCommitBuilder as any,

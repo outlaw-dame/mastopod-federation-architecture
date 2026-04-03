@@ -74,6 +74,9 @@ import { ExternalPdsClient } from "./at-adapter/external/ExternalPdsClient.js";
 import { RedisExternalAtSessionStore } from "./at-adapter/external/ExternalAtSessionStore.js";
 import { ExternalWriteGateway } from "./at-adapter/external/ExternalWriteGateway.js";
 import { ExternalReadGateway } from "./at-adapter/external/ExternalReadGateway.js";
+import { DefaultAtBlobStore } from "./at-adapter/blob/AtBlobStore.js";
+import { DefaultBlobReferenceMapper } from "./at-adapter/blob/BlobReferenceMapper.js";
+import { DefaultAtBlobUploadService } from "./at-adapter/blob/AtBlobUploadService.js";
 // AT local fixture signing (dev/test only — activated by AT_LOCAL_FIXTURE=true)
 import { LocalAtSigningService } from "./signing/LocalAtSigningService.js";
 // AT adapter — projection
@@ -81,6 +84,7 @@ import { DefaultAtProjectionPolicy } from "./at-adapter/projection/AtProjectionP
 import { DefaultAtProjectionWorker } from "./at-adapter/projection/AtProjectionWorker.js";
 import { DefaultProfileRecordSerializer } from "./at-adapter/projection/serializers/ProfileRecordSerializer.js";
 import { DefaultPostRecordSerializer } from "./at-adapter/projection/serializers/PostRecordSerializer.js";
+import { DefaultStandardDocumentRecordSerializer } from "./at-adapter/projection/serializers/StandardDocumentRecordSerializer.js";
 import { DefaultFacetBuilder } from "./at-adapter/projection/serializers/FacetBuilder.js";
 import { DefaultEmbedBuilder } from "./at-adapter/projection/serializers/EmbedBuilder.js";
 import { DefaultImageEmbedBuilder } from "./at-adapter/projection/serializers/ImageEmbedBuilder.js";
@@ -97,6 +101,30 @@ import type { AtWriteResultStore } from "./at-adapter/writes/AtWriteResultStore.
 // Signing + event contracts
 import type { SigningService } from "./core-domain/contracts/SigningContracts.js";
 import type { EventPublisher } from "./core-domain/events/CoreIdentityEvents.js";
+import { RedpandaEventPublisher } from "./core-domain/events/RedpandaEventPublisher.js";
+import { RedisProjectionLedger } from "./protocol-bridge/idempotency/ProjectionLedger.js";
+import { ActivityPubToCanonicalTranslator } from "./protocol-bridge/activitypub/ActivityPubToCanonicalTranslator.js";
+import { AtprotoToCanonicalTranslator } from "./protocol-bridge/atproto/AtprotoToCanonicalTranslator.js";
+import { CanonicalToActivityPubProjector } from "./protocol-bridge/projectors/CanonicalToActivityPubProjector.js";
+import { CanonicalToAtprotoProjector } from "./protocol-bridge/projectors/CanonicalToAtprotoProjector.js";
+import { AtprotoWriteGatewayPort } from "./protocol-bridge/adapters/AtprotoWriteGatewayPort.js";
+import { EventPublisherActivityPubPort } from "./protocol-bridge/adapters/EventPublisherActivityPubPort.js";
+import { ActivityPubBridgeIngressClient } from "./protocol-bridge/runtime/ActivityPubBridgeIngressClient.js";
+import { ActivityPubBridgeOutboundResolverClient } from "./protocol-bridge/runtime/ActivityPubBridgeOutboundResolverClient.js";
+import { ActivityPubBridgeActivityResolverClient } from "./protocol-bridge/runtime/ActivityPubBridgeActivityResolverClient.js";
+import { ActivityPubBridgeProfileMediaClient } from "./protocol-bridge/runtime/ActivityPubBridgeProfileMediaClient.js";
+import { AtprotoProfileMediaResolver } from "./protocol-bridge/runtime/AtprotoProfileMediaResolver.js";
+import { AtprotoLinkPreviewThumbResolver } from "./protocol-bridge/runtime/AtprotoLinkPreviewThumbResolver.js";
+import { normalizeActivityPubNoteLinkPreviewMode } from "./protocol-bridge/projectors/activitypub/ActivityPubProjectionPolicy.js";
+import {
+  applyActivityPubOutboundDeliveryPolicy,
+  normalizeActivityPubDomainRuleList,
+} from "./protocol-bridge/projectors/activitypub/ActivityPubDeliveryPolicy.js";
+import { ProtocolBridgeRuntime } from "./protocol-bridge/runtime/ProtocolBridgeRuntime.js";
+import { createProtocolBridgeContexts } from "./protocol-bridge/runtime/createProtocolBridgeContexts.js";
+import { RedisBridgeProfileMediaStore } from "./protocol-bridge/profile/BridgeProfileMedia.js";
+import { ApToAtProjectionWorker } from "./protocol-bridge/workers/ApToAtProjectionWorker.js";
+import { AtToApProjectionWorker } from "./protocol-bridge/workers/AtToApProjectionWorker.js";
 
 // ============================================================================
 // Configuration
@@ -115,6 +143,8 @@ const config = {
   enableInboundWorker: process.env.ENABLE_INBOUND_WORKER !== "false",
   enableOpenSearchIndexer: process.env.ENABLE_OPENSEARCH_INDEXER !== "false",
   enableXrpcServer: process.env.ENABLE_XRPC_SERVER !== "false",
+  enableProtocolBridgeApToAt: process.env.ENABLE_PROTOCOL_BRIDGE_AP_TO_AT === "true",
+  enableProtocolBridgeAtToAp: process.env.ENABLE_PROTOCOL_BRIDGE_AT_TO_AP === "true",
 
   // Phase 7: AT session token secret (min 32 chars).
   // Required when ENABLE_XRPC_SERVER is true.
@@ -176,6 +206,53 @@ const config = {
   externalPdsTimeoutMs: Number.parseInt(process.env.EXTERNAL_PDS_TIMEOUT_MS || "8000", 10),
   externalPdsMaxAttempts: Number.parseInt(process.env.EXTERNAL_PDS_MAX_ATTEMPTS || "5", 10),
   atOauthRouteRateLimits: parseOAuthRouteRateLimitsFromEnv(process.env),
+  protocolBridgeConsumerGroupId:
+    process.env.PROTOCOL_BRIDGE_CONSUMER_GROUP_ID || "fedify-sidecar-protocol-bridge",
+  protocolBridgeApSourceTopic:
+    process.env.PROTOCOL_BRIDGE_AP_SOURCE_TOPIC ||
+    process.env.STREAM1_TOPIC ||
+    "ap.stream1.local-public.v1",
+  protocolBridgeAtCommitTopic:
+    process.env.PROTOCOL_BRIDGE_AT_COMMIT_TOPIC || "at.commit.v1",
+  protocolBridgeApIngressTopic:
+    process.env.PROTOCOL_BRIDGE_AP_INGRESS_TOPIC || "ap.atproto-ingress.v1",
+  protocolBridgeLedgerTtlSec: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_LEDGER_TTL_SEC || `${60 * 60 * 24 * 14}`,
+    10,
+  ),
+  protocolBridgeIngressTimeoutMs: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_INGRESS_TIMEOUT_MS || "10000",
+    10,
+  ),
+  protocolBridgeOutboundResolutionTimeoutMs: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_OUTBOUND_RESOLUTION_TIMEOUT_MS || "10000",
+    10,
+  ),
+  protocolBridgeActivityResolutionTimeoutMs: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_ACTIVITY_RESOLUTION_TIMEOUT_MS || "10000",
+    10,
+  ),
+  protocolBridgeProfileMediaTimeoutMs: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_PROFILE_MEDIA_TIMEOUT_MS || "10000",
+    10,
+  ),
+  protocolBridgeProfileMediaMaxBytes: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_PROFILE_MEDIA_MAX_BYTES || `${5 * 1024 * 1024}`,
+    10,
+  ),
+  protocolBridgeProfileMediaTtlSec: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_PROFILE_MEDIA_TTL_SEC || `${60 * 60 * 24}`,
+    10,
+  ),
+  protocolBridgeApNoteLinkPreviewMode: normalizeActivityPubNoteLinkPreviewMode(
+    process.env.PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_MODE,
+  ),
+  protocolBridgeApNoteLinkPreviewRichDomains: normalizeActivityPubDomainRuleList(
+    process.env.PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_RICH_DOMAINS,
+  ),
+  protocolBridgeApNoteLinkPreviewDisabledDomains: normalizeActivityPubDomainRuleList(
+    process.env.PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_DISABLED_DOMAINS,
+  ),
 };
 
 // ============================================================================
@@ -189,6 +266,8 @@ let opensearchIndexer: ReturnType<typeof createOpenSearchIndexer> | null = null;
 let atRedisClient: Redis | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
 let identityWarmupService: IdentityWarmupService | null = null;
+let atEventPublisher: RedpandaEventPublisher | null = null;
+let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
 let isShuttingDown = false;
 
 // ============================================================================
@@ -200,6 +279,12 @@ async function main() {
     version: config.version,
     nodeEnv: config.nodeEnv,
   });
+
+  const activityPubOutboundDeliveryPolicy = {
+    defaultNoteLinkPreviewMode: config.protocolBridgeApNoteLinkPreviewMode,
+    richNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewRichDomains,
+    disabledNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewDisabledDomains,
+  } as const;
 
   if (config.enableXrpcServer && !config.atLocalFixture) {
     if (!process.env.ACTIVITYPODS_URL) {
@@ -461,15 +546,30 @@ async function main() {
         reply.status(400).send({ error: "Bad Request" });
         return;
       }
+
+      const normalizedMeta = body?.meta && typeof body.meta === "object"
+        ? body.meta
+        : undefined;
+
       if (!queue) {
         reply.status(503).send({ error: "Service unavailable" });
         return;
       }
-      const activityJson = JSON.stringify(body.activity);
+      const bridgeHints = body?.bridge?.activityPubHints && typeof body.bridge.activityPubHints === "object"
+        ? body.bridge.activityPubHints
+        : undefined;
       let jobCount = 0;
       for (const target of body.remoteTargets) {
         if (!target.inboxUrl || !target.targetDomain) continue;
         const deliveryUrl = target.sharedInboxUrl || target.inboxUrl;
+        const activityJson = JSON.stringify(
+          applyActivityPubOutboundDeliveryPolicy(
+            body.activity as Record<string, unknown>,
+            String(target.targetDomain),
+            bridgeHints,
+            activityPubOutboundDeliveryPolicy,
+          ),
+        );
         const job: OutboundJob = {
           jobId: `${body.activityId}::${deliveryUrl}`,
           activityId: body.activityId,
@@ -480,6 +580,7 @@ async function main() {
           attempt: 0,
           maxAttempts: 10,
           notBeforeMs: 0,
+          meta: normalizedMeta,
         };
         await queue.enqueueOutbound(job);
         jobCount++;
@@ -615,20 +716,59 @@ async function main() {
               getApPublicKey:       () => { throw new Error("getApPublicKey not available via sidecar"); },
             };
 
-        // ---- Event publisher adapter (no-op logger; AT repo events are
-        //      handled in-process via alias store + repo registry) ----
-        const eventPublisherAdapter: EventPublisher = {
-          publish: async (topic, event) => {
-            logger.debug("AT event published (no-op)", { topic, eventType: (event as any)?.type });
-          },
-          publishBatch: async (events) => {
-            for (const { topic, event } of events) {
-              logger.debug("AT event published (no-op)", { topic, eventType: (event as any)?.type });
-            }
-          },
-        };
+        // ---- Event publisher adapter ----
+        // All AT-native writes and ingress audit events should hit the same
+        // RedPanda-backed event bus implementation so we keep a single durable
+        // audit path and avoid silent write-side drops.
+        atEventPublisher = new RedpandaEventPublisher({
+          brokers: (process.env.REDPANDA_BROKERS || "localhost:9092")
+            .split(",")
+            .map((broker) => broker.trim())
+            .filter(Boolean),
+          clientId: `${process.env.REDPANDA_CLIENT_ID || "fedify-sidecar"}-events`,
+          compression: (process.env.REDPANDA_COMPRESSION || "zstd") as
+            | "none"
+            | "gzip"
+            | "snappy"
+            | "lz4"
+            | "zstd",
+          connectionTimeoutMs: Number.parseInt(
+            process.env.REDPANDA_CONNECTION_TIMEOUT || "10000",
+            10,
+          ),
+          requestTimeoutMs: Number.parseInt(
+            process.env.REDPANDA_REQUEST_TIMEOUT || "30000",
+            10,
+          ),
+          source: "fedify-sidecar.at-native",
+        });
+        await atEventPublisher.connect();
+        const eventPublisherAdapter: EventPublisher = atEventPublisher;
 
         // ---- Projection worker ----
+        const blobStore             = new DefaultAtBlobStore();
+        const blobReferenceMapper   = new DefaultBlobReferenceMapper();
+        const blobUploadService     = new DefaultAtBlobUploadService(blobStore, blobReferenceMapper);
+        const profileMediaStore     = new RedisBridgeProfileMediaStore(atRedis, {
+          ttlSeconds: config.protocolBridgeProfileMediaTtlSec,
+        });
+        const bridgeRasterImageClient = new ActivityPubBridgeProfileMediaClient({
+          activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
+          bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+          timeoutMs: config.protocolBridgeProfileMediaTimeoutMs,
+          maxMediaBytes: config.protocolBridgeProfileMediaMaxBytes,
+        });
+        const profileMediaResolver  = config.enableProtocolBridgeApToAt
+          ? new AtprotoProfileMediaResolver(
+              profileMediaStore,
+              bridgeRasterImageClient,
+              blobUploadService,
+              {
+                warn: (message, meta) => logger.warn(meta || {}, message),
+                error: (message, meta) => logger.error(meta || {}, message),
+              },
+            )
+          : { resolveAvatarBlob: async () => null, resolveBannerBlob: async () => null };
         const rkeyService          = new DefaultAtRkeyService();
         const recordRefResolver    = new DefaultAtRecordRefResolver(aliasStore);
         const subjectResolver      = new DefaultAtSubjectResolver(identityRepo);
@@ -646,13 +786,14 @@ async function main() {
           repoRegistry,
           new DefaultProfileRecordSerializer(),
           new DefaultPostRecordSerializer(),
+          new DefaultStandardDocumentRecordSerializer(),
           rkeyService,
           aliasStore,
           commitBuilder,
           persistenceService,
           eventPublisherAdapter,
           {
-            mediaResolver:       { resolveAvatarBlob: async () => null, resolveBannerBlob: async () => null },
+            mediaResolver:       profileMediaResolver,
             facetBuilder:        new DefaultFacetBuilder(),
             embedBuilder:        new DefaultEmbedBuilder(new DefaultImageEmbedBuilder()),
             recordRefResolver,
@@ -679,6 +820,7 @@ async function main() {
           aliasStore,
           resultStore,
           identityRepo,
+          profileMediaStore,
         });
         const writeGateway  = new DefaultAtWriteGateway({
           normalizer:  new DefaultAtWriteNormalizer(),
@@ -688,6 +830,127 @@ async function main() {
           identityBindingSyncService,
           logger,
         });
+
+        if (
+          config.enableProtocolBridgeApToAt ||
+          config.enableProtocolBridgeAtToAp
+        ) {
+          const { translationContext, projectionContext } = createProtocolBridgeContexts(
+            identityRepo,
+            aliasStore,
+            {
+              localPdsOrigin: config.atOauthResourceServerOrigin,
+              ...(config.enableProtocolBridgeApToAt
+                ? {
+                    activityResolver: new ActivityPubBridgeActivityResolverClient({
+                      activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
+                      bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+                      timeoutMs: config.protocolBridgeActivityResolutionTimeoutMs,
+                    }),
+                  }
+                : {}),
+            },
+          );
+          const projectionLedger = new RedisProjectionLedger(atRedis, {
+            ttlSeconds: config.protocolBridgeLedgerTtlSec,
+          });
+          const allowAllPolicy = {
+            evaluate: async () => ({ allowed: true }),
+          };
+          const bridgeAtWritePort = new AtprotoWriteGatewayPort(
+            writeGateway,
+            accountResolverForSession,
+            config.enableProtocolBridgeApToAt
+              ? {
+                  linkPreviewThumbResolver: new AtprotoLinkPreviewThumbResolver(
+                    bridgeRasterImageClient,
+                    blobUploadService,
+                    {
+                      warn: (message, meta) => logger.warn(meta || {}, message),
+                      error: (message, meta) => logger.error(meta || {}, message),
+                    },
+                  ),
+                  logger: {
+                    warn: (message, meta) => logger.warn(meta || {}, message),
+                  },
+                }
+              : undefined,
+          );
+          const bridgeApPublishPort = config.enableProtocolBridgeAtToAp
+            ? new EventPublisherActivityPubPort(
+                eventPublisherAdapter,
+                {
+                  outboundResolver: new ActivityPubBridgeOutboundResolverClient({
+                    activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
+                    bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+                    timeoutMs: config.protocolBridgeOutboundResolutionTimeoutMs,
+                  }),
+                  deliveryPolicy: activityPubOutboundDeliveryPolicy,
+                },
+              )
+            : undefined;
+          const bridgeApIngressForwarder = config.enableProtocolBridgeAtToAp
+            ? new ActivityPubBridgeIngressClient({
+                activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
+                bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+                timeoutMs: config.protocolBridgeIngressTimeoutMs,
+              })
+            : undefined;
+
+          protocolBridgeRuntime = new ProtocolBridgeRuntime({
+            config: {
+              brokers: (process.env.REDPANDA_BROKERS || "localhost:9092")
+                .split(",")
+                .map((broker) => broker.trim())
+                .filter(Boolean),
+              clientId: process.env.REDPANDA_CLIENT_ID || "fedify-sidecar",
+              consumerGroupId: config.protocolBridgeConsumerGroupId,
+              apSourceTopic: config.protocolBridgeApSourceTopic,
+              atCommitTopic: config.protocolBridgeAtCommitTopic,
+              apIngressTopic: config.protocolBridgeApIngressTopic,
+              enableApToAt: config.enableProtocolBridgeApToAt,
+              enableAtToAp: config.enableProtocolBridgeAtToAp,
+            },
+            translationContext,
+            apToAtWorker: config.enableProtocolBridgeApToAt
+              ? new ApToAtProjectionWorker(
+                  new ActivityPubToCanonicalTranslator(),
+                  new CanonicalToAtprotoProjector(),
+                  allowAllPolicy,
+                  projectionLedger,
+                  bridgeAtWritePort,
+                  projectionContext,
+                )
+              : undefined,
+            atToApWorker: config.enableProtocolBridgeAtToAp
+              ? new AtToApProjectionWorker(
+                  new AtprotoToCanonicalTranslator(),
+                  new CanonicalToActivityPubProjector({
+                    noteLinkPreviewMode: config.protocolBridgeApNoteLinkPreviewMode,
+                  }),
+                  allowAllPolicy,
+                  projectionLedger,
+                  bridgeApPublishPort!,
+                  projectionContext,
+                )
+              : undefined,
+            apIngressForwarder: bridgeApIngressForwarder,
+            logger: {
+              info: (message, meta) => logger.info(meta || {}, message),
+              warn: (message, meta) => logger.warn(meta || {}, message),
+              error: (message, meta) => logger.error(meta || {}, message),
+            },
+          });
+          await protocolBridgeRuntime.start();
+
+          logger.info("Protocol bridge runtime enabled", {
+            enableApToAt: config.enableProtocolBridgeApToAt,
+            enableAtToAp: config.enableProtocolBridgeAtToAp,
+            apSourceTopic: config.protocolBridgeApSourceTopic,
+            atCommitTopic: config.protocolBridgeAtCommitTopic,
+            apIngressTopic: config.protocolBridgeApIngressTopic,
+          });
+        }
 
         // ---- OAuth Authorization Server + metadata/route bridge ----
         if (config.enableAtprotoOauth) {
@@ -775,6 +1038,7 @@ async function main() {
         const xrpcServer = new DefaultAtXrpcServer({
           recordReader,
           carExporter,
+          blobStore,
           handleResolutionReader,
           firehoseSubscriptions,
           repoRegistry,
@@ -930,10 +1194,22 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("Identity warmup service stopped");
     }
 
+    if (protocolBridgeRuntime) {
+      await protocolBridgeRuntime.stop();
+      protocolBridgeRuntime = null;
+      logger.info("Protocol bridge runtime stopped");
+    }
+
     // Quit shared AT Redis client
     if (atRedisClient) {
       await atRedisClient.quit().catch(() => atRedisClient!.disconnect());
       logger.info("AT Redis client disconnected");
+    }
+
+    if (atEventPublisher) {
+      await atEventPublisher.disconnect();
+      atEventPublisher = null;
+      logger.info("AT event publisher disconnected");
     }
 
     clearTimeout(shutdownTimeout);

@@ -16,7 +16,7 @@
  *     store read and does not require backoff in Phase 4.
  */
 
-import { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository';
+import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
 
 // ---------------------------------------------------------------------------
 // Validation helpers

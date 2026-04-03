@@ -18,6 +18,7 @@ import { DefaultLikeRecordSerializer } from '../projection/serializers/LikeRecor
 import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecordSerializer.js';
 import { DefaultProfileRecordSerializer } from '../projection/serializers/ProfileRecordSerializer.js';
 import { DefaultRepostRecordSerializer } from '../projection/serializers/RepostRecordSerializer.js';
+import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer.js';
 import { InMemoryAtAliasStore } from '../repo/AtAliasStore.js';
 import { DefaultAtCarExporter } from '../repo/AtCarExporter.js';
 import { DefaultAtCommitBuilder } from '../repo/AtCommitBuilder.js';
@@ -308,6 +309,7 @@ async function buildHarness(): Promise<Harness> {
     repoRegistry,
     new DefaultProfileRecordSerializer(),
     new DefaultPostRecordSerializer(),
+    new DefaultStandardDocumentRecordSerializer(),
     rkeyService,
     aliasStore,
     commitBuilder,

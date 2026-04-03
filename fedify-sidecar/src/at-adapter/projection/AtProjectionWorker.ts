@@ -1,37 +1,50 @@
-import { AtProjectionPolicy, CanonicalProfile, CanonicalPost } from './AtProjectionPolicy';
-import { ProfileRecordSerializer, ProfileMediaResolver } from './serializers/ProfileRecordSerializer';
-import { PostRecordSerializer, FacetBuilder, EmbedBuilder } from './serializers/PostRecordSerializer';
-import { AtRecordRefResolver } from '../repo/AtRecordRefResolver';
-import { AtCommitBuilder } from '../repo/AtCommitBuilder';
-import { AtCommitPersistenceService } from '../repo/AtCommitPersistenceService';
-import { AtRkeyService } from '../repo/AtRkeyService';
-import { AtAliasStore } from '../repo/AtAliasStore';
-import { AtRepoOpV1 } from '../events/AtRepoEvents';
-import { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository';
-import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry';
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
+import { AtProjectionPolicy, CanonicalProfile, CanonicalPost } from './AtProjectionPolicy.js';
+import { ProfileRecordSerializer, ProfileMediaResolver } from './serializers/ProfileRecordSerializer.js';
+import { PostRecordSerializer, FacetBuilder, EmbedBuilder } from './serializers/PostRecordSerializer.js';
+import { StandardDocumentRecordSerializer } from './serializers/StandardDocumentRecordSerializer.js';
+import { AtRecordRefResolver } from '../repo/AtRecordRefResolver.js';
+import { AtCommitBuilder } from '../repo/AtCommitBuilder.js';
+import { AtCommitPersistenceService } from '../repo/AtCommitPersistenceService.js';
+import { AtRkeyService } from '../repo/AtRkeyService.js';
+import { AtAliasStore, type AtAliasRecord } from '../repo/AtAliasStore.js';
+import {
+  AtRecordLocator,
+  AtRepoBridgeMetadata,
+  AtRepoCollection,
+  AtRepoOpV1,
+} from '../events/AtRepoEvents.js';
+import { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
+import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 
 export interface CoreProfileUpsertedV1 {
   profile: CanonicalProfile;
   identity: any; // CanonicalIdentity
+  bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
 
 export interface CorePostCreatedV1 {
   canonicalPost: CanonicalPost;
   author: any; // CanonicalIdentity
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
 
 export interface CorePostUpdatedV1 {
   canonicalPost: CanonicalPost;
   author: any; // CanonicalIdentity
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
 
 export interface CorePostDeletedV1 {
   canonicalPostId: string;
   canonicalAuthorId: string;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
   deletedAt: string;
   emittedAt: string;
 }
@@ -44,12 +57,12 @@ import {
   CoreRepostCreatedV1,
   CoreRepostDeletedV1,
   AtSocialRepoOpV1
-} from '../events/AtSocialRepoEvents';
-import { AtSubjectResolver } from '../identity/AtSubjectResolver';
-import { AtTargetAliasResolver } from '../repo/AtTargetAliasResolver';
-import { FollowRecordSerializer } from './serializers/FollowRecordSerializer';
-import { LikeRecordSerializer } from './serializers/LikeRecordSerializer';
-import { RepostRecordSerializer } from './serializers/RepostRecordSerializer';
+} from '../events/AtSocialRepoEvents.js';
+import { AtSubjectResolver } from '../identity/AtSubjectResolver.js';
+import { AtTargetAliasResolver } from '../repo/AtTargetAliasResolver.js';
+import { FollowRecordSerializer } from './serializers/FollowRecordSerializer.js';
+import { LikeRecordSerializer } from './serializers/LikeRecordSerializer.js';
+import { RepostRecordSerializer } from './serializers/RepostRecordSerializer.js';
 
 export interface AtProjectionWorker {
   onProfileUpserted(event: CoreProfileUpsertedV1): Promise<void>;
@@ -72,6 +85,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     private readonly repoRegistry: AtprotoRepoRegistry,
     private readonly profileSerializer: ProfileRecordSerializer,
     private readonly postSerializer: PostRecordSerializer,
+    private readonly standardDocumentSerializer: StandardDocumentRecordSerializer,
     private readonly rkeyService: AtRkeyService,
     private readonly aliasStore: AtAliasStore,
     private readonly commitBuilder: AtCommitBuilder,
@@ -158,6 +172,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey,
       canonicalRefId: event.profile.id,
       record,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
@@ -193,9 +208,13 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
-    const record = await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
-    const rkey = this.rkeyService.postRkey(event.canonicalPost.publishedAt);
-    const collection = 'app.bsky.feed.post';
+    const isArticle = event.canonicalPost.kind === 'article';
+    const record = isArticle
+      ? await this.standardDocumentSerializer.serialize(event.canonicalPost, binding)
+      : await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
+    const collection = isArticle ? 'site.standard.document' : 'app.bsky.feed.post';
+    const rkey = this.getRequestedRkey(event.atRecord, collection)
+      ?? this.rkeyService.postRkey(event.canonicalPost.publishedAt);
 
     const op: AtRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -206,6 +225,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey,
       canonicalRefId: event.canonicalPost.id,
       record,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
@@ -216,11 +236,13 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     // Save alias before persist so it has the right URI
     await this.aliasStore.put({
       canonicalRefId: event.canonicalPost.id,
-      canonicalType: 'post',
+      canonicalType: isArticle ? 'article' : 'post',
       did: binding.atprotoDid!,
       collection,
       rkey,
       atUri: `at://${binding.atprotoDid}/${collection}/${rkey}`,
+      canonicalUrl: event.canonicalPost.canonicalUrl ?? this.defaultCanonicalUrl(collection, binding.atprotoDid!, rkey),
+      activityPubObjectId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
@@ -229,9 +251,6 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
   }
 
   async onPostUpdated(event: CorePostUpdatedV1): Promise<void> {
-    const alias = await this.aliasStore.getByCanonicalRefId(event.canonicalPost.id);
-    if (!alias) return;
-
     const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalPost.authorId);
     if (!binding) return;
 
@@ -241,7 +260,18 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
-    const record = await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
+    const alias = await this.ensureAliasForLocator(
+      event.canonicalPost.id,
+      event.canonicalPost.kind === 'article' ? 'site.standard.document' : 'app.bsky.feed.post',
+      event.canonicalPost.kind === 'article' ? 'article' : 'post',
+      binding.atprotoDid!,
+      event.atRecord,
+    );
+    if (!alias) return;
+
+    const record = alias.collection === 'site.standard.document'
+      ? await this.standardDocumentSerializer.serialize(event.canonicalPost, binding)
+      : await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
 
     const op: AtRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -252,24 +282,38 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey: alias.rkey,
       canonicalRefId: event.canonicalPost.id,
       record,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
     await this.eventPublisher.publish('at.repo.op.v1', op as any);
 
     const commitResult = await this.commitBuilder.buildCommit(repoState, [op]);
+    await this.aliasStore.put({
+      ...alias,
+      canonicalUrl: event.canonicalPost.canonicalUrl
+        ?? alias.canonicalUrl
+        ?? this.defaultCanonicalUrl(alias.collection, binding.atprotoDid!, alias.rkey),
+      updatedAt: new Date().toISOString(),
+    });
     await this.persistAndUpdateRepoState(repoState, commitResult);
   }
 
   async onPostDeleted(event: CorePostDeletedV1): Promise<void> {
-    const alias = await this.aliasStore.getByCanonicalRefId(event.canonicalPostId);
-    if (!alias) return;
-
     const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalAuthorId);
     if (!binding) return;
 
     const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
+
+    const alias = await this.ensureAliasForLocator(
+      event.canonicalPostId,
+      event.atRecord?.collection,
+      this.canonicalTypeForCollection(event.atRecord?.collection),
+      binding.atprotoDid!,
+      event.atRecord,
+    );
+    if (!alias) return;
 
     const op: AtRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -280,6 +324,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey: alias.rkey,
       canonicalRefId: event.canonicalPostId,
       record: null,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
@@ -311,8 +356,9 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       subjectDid
     });
 
-    const rkey = this.rkeyService.postRkey(event.follow.createdAt); // Use TID
     const collection = 'app.bsky.graph.follow';
+    const rkey = this.getRequestedRkey(event.atRecord, collection)
+      ?? this.rkeyService.postRkey(event.follow.createdAt);
 
     const op: AtSocialRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -323,6 +369,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey,
       canonicalRefId: event.follow.id,
       record,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
@@ -345,14 +392,20 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
   }
 
   async onFollowDeleted(event: CoreFollowDeletedV1): Promise<void> {
-    const alias = await this.aliasStore.getByCanonicalRefId(event.canonicalFollowId);
-    if (!alias) return;
-
     const binding = await this.identityRepo.getByCanonicalAccountId(event.followerCanonicalId);
     if (!binding) return;
 
     const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
+
+    const alias = await this.ensureAliasForLocator(
+      event.canonicalFollowId,
+      'app.bsky.graph.follow',
+      'follow',
+      binding.atprotoDid!,
+      event.atRecord,
+    );
+    if (!alias) return;
 
     const op: AtSocialRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -363,6 +416,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey: alias.rkey,
       canonicalRefId: event.canonicalFollowId,
       record: null,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
@@ -391,8 +445,9 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       target: targetRef
     });
 
-    const rkey = this.rkeyService.postRkey(event.like.createdAt);
     const collection = 'app.bsky.feed.like';
+    const rkey = this.getRequestedRkey(event.atRecord, collection)
+      ?? this.rkeyService.postRkey(event.like.createdAt);
 
     const op: AtSocialRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -403,6 +458,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey,
       canonicalRefId: event.like.id,
       record,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
@@ -426,14 +482,20 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
   }
 
   async onLikeDeleted(event: CoreLikeDeletedV1): Promise<void> {
-    const alias = await this.aliasStore.getByCanonicalRefId(event.canonicalLikeId);
-    if (!alias) return;
-
     const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalActorId);
     if (!binding) return;
 
     const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
+
+    const alias = await this.ensureAliasForLocator(
+      event.canonicalLikeId,
+      'app.bsky.feed.like',
+      'like',
+      binding.atprotoDid!,
+      event.atRecord,
+    );
+    if (!alias) return;
 
     const op: AtSocialRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -444,6 +506,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey: alias.rkey,
       canonicalRefId: event.canonicalLikeId,
       record: null,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
@@ -472,8 +535,9 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       target: targetRef
     });
 
-    const rkey = this.rkeyService.postRkey(event.repost.createdAt);
     const collection = 'app.bsky.feed.repost';
+    const rkey = this.getRequestedRkey(event.atRecord, collection)
+      ?? this.rkeyService.postRkey(event.repost.createdAt);
 
     const op: AtSocialRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -484,6 +548,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey,
       canonicalRefId: event.repost.id,
       record,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
@@ -507,14 +572,20 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
   }
 
   async onRepostDeleted(event: CoreRepostDeletedV1): Promise<void> {
-    const alias = await this.aliasStore.getByCanonicalRefId(event.canonicalRepostId);
-    if (!alias) return;
-
     const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalActorId);
     if (!binding) return;
 
     const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
+
+    const alias = await this.ensureAliasForLocator(
+      event.canonicalRepostId,
+      'app.bsky.feed.repost',
+      'repost',
+      binding.atprotoDid!,
+      event.atRecord,
+    );
+    if (!alias) return;
 
     const op: AtSocialRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -525,6 +596,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       rkey: alias.rkey,
       canonicalRefId: event.canonicalRepostId,
       record: null,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
 
@@ -533,5 +605,85 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     
     await this.persistAndUpdateRepoState(repoState, commitResult);
     await this.aliasStore.markDeleted(event.canonicalRepostId, event.deletedAt);
+  }
+
+  private getRequestedRkey(
+    atRecord: AtRecordLocator | undefined,
+    expectedCollection: AtRepoCollection,
+  ): string | null {
+    if (!atRecord || atRecord.collection !== expectedCollection) {
+      return null;
+    }
+    return atRecord.rkey;
+  }
+
+  private canonicalTypeForCollection(
+    collection: AtRepoCollection | undefined,
+  ): AtAliasRecord['canonicalType'] | null {
+    switch (collection) {
+      case 'app.bsky.actor.profile':
+        return 'profile';
+      case 'site.standard.document':
+        return 'article';
+      case 'app.bsky.graph.follow':
+        return 'follow';
+      case 'app.bsky.feed.like':
+        return 'like';
+      case 'app.bsky.feed.repost':
+        return 'repost';
+      case 'app.bsky.feed.post':
+        return 'post';
+      default:
+        return null;
+    }
+  }
+
+  private async ensureAliasForLocator(
+    canonicalRefId: string,
+    expectedCollection: AtRepoCollection | undefined,
+    canonicalType: AtAliasRecord['canonicalType'] | null,
+    did: string,
+    atRecord?: AtRecordLocator,
+  ): Promise<AtAliasRecord | null> {
+    const existingAlias = await this.aliasStore.getByCanonicalRefId(canonicalRefId);
+    if (existingAlias && !existingAlias.deletedAt) {
+      return existingAlias;
+    }
+    if (!expectedCollection || !canonicalType || !atRecord || atRecord.collection !== expectedCollection) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const placeholder: AtAliasRecord = {
+      canonicalRefId,
+      canonicalType,
+      did,
+      collection: expectedCollection,
+      rkey: atRecord.rkey,
+      atUri: `at://${did}/${expectedCollection}/${atRecord.rkey}`,
+      cid: existingAlias?.cid ?? null,
+      lastRev: existingAlias?.lastRev ?? null,
+      createdAt: existingAlias?.createdAt ?? now,
+      updatedAt: now,
+      deletedAt: null,
+      subjectDid: existingAlias?.subjectDid ?? null,
+      subjectUri: existingAlias?.subjectUri ?? null,
+      subjectCid: existingAlias?.subjectCid ?? null,
+      canonicalUrl: existingAlias?.canonicalUrl ?? null,
+      activityPubObjectId: existingAlias?.activityPubObjectId ?? null,
+    };
+    await this.aliasStore.put(placeholder);
+    return placeholder;
+  }
+
+  private defaultCanonicalUrl(
+    collection: AtRepoCollection,
+    did: string,
+    rkey: string,
+  ): string | null {
+    if (collection !== 'app.bsky.feed.post') {
+      return null;
+    }
+    return `https://bsky.app/profile/${did}/post/${rkey}`;
   }
 }

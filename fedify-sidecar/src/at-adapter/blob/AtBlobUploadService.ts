@@ -4,8 +4,8 @@
  * Handles uploading canonical media bytes to the AT blob store.
  */
 
-import { AtBlobRef, AtBlobStore } from './AtBlobStore';
-import { BlobReferenceMapper } from './BlobReferenceMapper';
+import type { AtBlobRef, AtBlobStore } from './AtBlobStore.js';
+import type { BlobReferenceMapper } from './BlobReferenceMapper.js';
 
 export interface AtBlobUploadService {
   ensureImageBlob(input: {

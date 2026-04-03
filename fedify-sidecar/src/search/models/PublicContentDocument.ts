@@ -36,6 +36,7 @@ export interface PublicContentDocument {
   updatedAt?: string;
   langs?: string[];
   tags?: string[];
+  emojis?: string[];
 
   replyToStableId?: string;
   quoteOfStableId?: string;

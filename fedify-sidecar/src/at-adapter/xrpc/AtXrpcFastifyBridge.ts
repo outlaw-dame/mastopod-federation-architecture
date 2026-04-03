@@ -81,9 +81,11 @@ export function registerAtXrpcRoutes(
 
   // ---- Unauthenticated GET routes ----------------------------------------
 
-  const getRoutes: string[] = [
+ const getRoutes: string[] = [
     '/xrpc/com.atproto.sync.getRepo',
     '/xrpc/com.atproto.sync.getLatestCommit',
+    // Public immutable blob reads used by profile/avatar and media projection.
+    '/xrpc/com.atproto.sync.getBlob',
     '/xrpc/com.atproto.repo.getRecord',
     '/xrpc/com.atproto.repo.listRecords',
     '/xrpc/com.atproto.identity.resolveHandle',

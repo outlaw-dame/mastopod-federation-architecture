@@ -41,6 +41,12 @@ export interface ActivityDocument {
   actor_uri: string;
   object_id?: string;
   object_type?: string;
+  object_name?: string;
+  object_url?: string;
+  object_published_at?: string;
+  object_updated_at?: string;
+  is_long_form?: boolean;
+  has_preview?: boolean;
   published_at?: string;
   received_at: string;
   indexed_at: string;
@@ -52,6 +58,9 @@ export interface ActivityDocument {
   in_reply_to?: string;
   content?: string;
   summary?: string;
+  preview_content?: string;
+  attachment_urls?: string[];
+  tag_names?: string[];
   
   // Full activity for retrieval
   activity: any;
@@ -115,6 +124,15 @@ export class OpenSearchIndexer {
               actor_uri: { type: "keyword" },
               object_id: { type: "keyword" },
               object_type: { type: "keyword" },
+              object_name: {
+                type: "text",
+                analyzer: "standard",
+              },
+              object_url: { type: "keyword" },
+              object_published_at: { type: "date" },
+              object_updated_at: { type: "date" },
+              is_long_form: { type: "boolean" },
+              has_preview: { type: "boolean" },
               published_at: { type: "date" },
               received_at: { type: "date" },
               indexed_at: { type: "date" },
@@ -130,6 +148,12 @@ export class OpenSearchIndexer {
                 type: "text",
                 analyzer: "standard",
               },
+              preview_content: {
+                type: "text",
+                analyzer: "standard",
+              },
+              attachment_urls: { type: "keyword" },
+              tag_names: { type: "keyword" },
               activity: { 
                 type: "object",
                 enabled: false,  // Store but don't index
@@ -246,12 +270,36 @@ export class OpenSearchIndexer {
     // Extract object info
     let objectId: string | undefined;
     let objectType: string | undefined;
+    let objectName: string | undefined;
+    let objectUrl: string | undefined;
+    let objectPublishedAt: string | undefined;
+    let objectUpdatedAt: string | undefined;
+    let isLongForm = false;
+    let hasPreview = false;
     if (activity.object) {
       if (typeof activity.object === "string") {
         objectId = activity.object;
       } else {
         objectId = activity.object.id;
         objectType = activity.object.type;
+        objectName = typeof activity.object.name === 'string' ? activity.object.name : undefined;
+        objectPublishedAt = typeof activity.object.published === 'string' ? activity.object.published : undefined;
+        objectUpdatedAt = typeof activity.object.updated === 'string' ? activity.object.updated : undefined;
+        isLongForm = activity.object.type === 'Article' || (Array.isArray(activity.object.type) && activity.object.type.includes('Article'));
+        hasPreview = !!activity.object.preview;
+
+        const urlValue = activity.object.url;
+        if (typeof urlValue === 'string') {
+          objectUrl = urlValue;
+        } else if (urlValue && typeof urlValue === 'object' && typeof urlValue.href === 'string') {
+          objectUrl = urlValue.href;
+        } else if (Array.isArray(urlValue)) {
+          const preferred = urlValue.find((u: any) =>
+            typeof u === 'string' || (u && typeof u === 'object' && typeof u.href === 'string'),
+          );
+          if (typeof preferred === 'string') objectUrl = preferred;
+          else if (preferred && typeof preferred === 'object') objectUrl = preferred.href;
+        }
       }
     }
     
@@ -262,9 +310,38 @@ export class OpenSearchIndexer {
     // Extract content
     let content: string | undefined;
     let summary: string | undefined;
+    let previewContent: string | undefined;
+    let attachmentUrls: string[] | undefined;
+    let tagNames: string[] | undefined;
     if (activity.object && typeof activity.object === "object") {
       content = activity.object.content;
       summary = activity.object.summary;
+
+      if (activity.object.preview && typeof activity.object.preview === 'object') {
+        previewContent = activity.object.preview.content;
+      }
+
+      const attachments = Array.isArray(activity.object.attachment)
+        ? activity.object.attachment
+        : activity.object.attachment
+        ? [activity.object.attachment]
+        : [];
+
+      attachmentUrls = attachments
+        .map((a: any) => (typeof a === 'string' ? a : a?.href || a?.id))
+        .filter((v: any) => typeof v === 'string');
+
+      const tags = Array.isArray(activity.object.tag)
+        ? activity.object.tag
+        : activity.object.tag
+        ? [activity.object.tag]
+        : [];
+
+      tagNames = tags
+        .map((t: any) => (typeof t === 'string' ? t : t?.name))
+        .filter((v: any) => typeof v === 'string')
+        .map((v: string) => v.trim())
+        .filter((v: string) => v.length > 0);
     }
     
     // Extract in_reply_to
@@ -281,6 +358,12 @@ export class OpenSearchIndexer {
       actor_uri: event.actorUri || activity.actor,
       object_id: objectId,
       object_type: objectType,
+      object_name: objectName,
+      object_url: objectUrl,
+      object_published_at: objectPublishedAt,
+      object_updated_at: objectUpdatedAt,
+      is_long_form: isLongForm,
+      has_preview: hasPreview,
       published_at: activity.published,
       received_at: new Date(event.receivedAt || event.streamTimestamp).toISOString(),
       indexed_at: new Date().toISOString(),
@@ -290,6 +373,9 @@ export class OpenSearchIndexer {
       in_reply_to: inReplyTo,
       content,
       summary,
+      preview_content: previewContent,
+      attachment_urls: attachmentUrls,
+      tag_names: tagNames,
       activity,
     };
   }
