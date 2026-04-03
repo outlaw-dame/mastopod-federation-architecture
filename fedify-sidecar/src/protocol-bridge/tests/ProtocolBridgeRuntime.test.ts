@@ -22,6 +22,7 @@ describe("protocol bridge runtime", () => {
         consumerGroupId: "runtime-test",
         apSourceTopic: "ap.stream1.local-public.v1",
         atCommitTopic: "at.commit.v1",
+        atVerifiedIngressTopic: "at.ingress.v1",
         apIngressTopic: "ap.atproto-ingress.v1",
         enableApToAt: true,
         enableAtToAp: false,
@@ -78,6 +79,7 @@ describe("protocol bridge runtime", () => {
         consumerGroupId: "runtime-test",
         apSourceTopic: "ap.stream1.local-public.v1",
         atCommitTopic: "at.commit.v1",
+        atVerifiedIngressTopic: "at.ingress.v1",
         apIngressTopic: "ap.atproto-ingress.v1",
         enableApToAt: false,
         enableAtToAp: true,
@@ -141,6 +143,68 @@ describe("protocol bridge runtime", () => {
         collection: "app.bsky.feed.like",
         operation: "delete",
         subjectUri: "at://did:plc:bob/app.bsky.feed.post/3kpost",
+      }),
+      translationContext,
+    );
+  });
+
+  it("maps verified AT ingress commit events into the AT->AP worker shape", async () => {
+    const atToApWorker = {
+      process: vi.fn().mockResolvedValue(null),
+    };
+
+    const runtime = new ProtocolBridgeRuntime({
+      config: {
+        brokers: ["localhost:9092"],
+        clientId: "runtime-test",
+        consumerGroupId: "runtime-test",
+        apSourceTopic: "ap.stream1.local-public.v1",
+        atCommitTopic: "at.commit.v1",
+        atVerifiedIngressTopic: "at.ingress.v1",
+        apIngressTopic: "ap.atproto-ingress.v1",
+        enableApToAt: false,
+        enableAtToAp: true,
+      },
+      translationContext,
+      atToApWorker: atToApWorker as any,
+    });
+
+    await runtime.handleAtVerifiedIngressEvent({
+      seq: 101,
+      did: "did:plc:alice",
+      eventType: "#commit",
+      verifiedAt: "2026-04-03T12:00:00.000Z",
+      source: "wss://relay.example",
+      commit: {
+        rev: "3krev",
+        operation: "update",
+        collection: "app.bsky.feed.post",
+        rkey: "3kpost",
+        cid: "bafy-post",
+        canonicalRefId: "canonical-post-1",
+        signatureValid: true,
+        record: {
+          $type: "app.bsky.feed.post",
+          text: "Updated text",
+          createdAt: "2026-04-03T11:55:00.000Z",
+        },
+      },
+    });
+
+    expect(atToApWorker.process).toHaveBeenCalledTimes(1);
+    expect(atToApWorker.process).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoDid: "did:plc:alice",
+        uri: "at://did:plc:alice/app.bsky.feed.post/3kpost",
+        collection: "app.bsky.feed.post",
+        rkey: "3kpost",
+        cid: "bafy-post",
+        canonicalRefId: "canonical-post-1",
+        operation: "update",
+        record: expect.objectContaining({
+          $type: "app.bsky.feed.post",
+          text: "Updated text",
+        }),
       }),
       translationContext,
     );

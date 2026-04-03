@@ -9,7 +9,10 @@ import type {
   CanonicalFacet,
   CanonicalLinkPreview,
 } from "../../canonical/CanonicalContent.js";
-import type { ProjectionCommandMetadata } from "../../ports/ProtocolBridgePorts.js";
+import type {
+  AtAttachmentMediaHint,
+  ProjectionCommandMetadata,
+} from "../../ports/ProtocolBridgePorts.js";
 import { canonicalFacetsToAtFacets, type AtFacet } from "../../text/CanonicalTextToAtFacets.js";
 
 type CanonicalPostIntent =
@@ -18,6 +21,14 @@ type CanonicalPostIntent =
   | CanonicalPostDeleteIntent;
 
 type CanonicalPostWriteIntent = CanonicalPostCreateIntent | CanonicalPostEditIntent;
+
+export interface PreferredAtMediaSelection {
+  kind: "video" | "images" | null;
+  attachments: CanonicalAttachment[];
+  videoCount: number;
+  imageCount: number;
+  droppedCount: number;
+}
 
 export function buildPostMetadata(intent: CanonicalPostIntent): ProjectionCommandMetadata {
   return {
@@ -106,6 +117,43 @@ export function buildExternalLinkEmbed(
   };
 }
 
+export function selectPreferredAtMediaAttachments(
+  attachments: readonly CanonicalAttachment[],
+): PreferredAtMediaSelection {
+  const videoAttachments = attachments.filter((attachment) =>
+    attachment.mediaType.toLowerCase().startsWith("video/"));
+  if (videoAttachments.length > 0) {
+    return {
+      kind: "video",
+      attachments: videoAttachments.slice(0, 1),
+      videoCount: videoAttachments.length,
+      imageCount: attachments.filter((attachment) =>
+        attachment.mediaType.toLowerCase().startsWith("image/")).length,
+      droppedCount: Math.max(0, videoAttachments.length - 1),
+    };
+  }
+
+  const imageAttachments = attachments.filter((attachment) =>
+    attachment.mediaType.toLowerCase().startsWith("image/"));
+  if (imageAttachments.length > 0) {
+    return {
+      kind: "images",
+      attachments: imageAttachments.slice(0, 4),
+      videoCount: 0,
+      imageCount: imageAttachments.length,
+      droppedCount: Math.max(0, imageAttachments.length - 4),
+    };
+  }
+
+  return {
+    kind: null,
+    attachments: [],
+    videoCount: 0,
+    imageCount: 0,
+    droppedCount: 0,
+  };
+}
+
 export function buildImageEmbedFromAttachments(
   attachments: readonly CanonicalAttachment[],
 ): Record<string, unknown> | null {
@@ -153,6 +201,62 @@ export function buildImageEmbedFromAttachments(
     $type: "app.bsky.embed.images",
     images: imageEntries,
   };
+}
+
+export function buildVideoEmbedFromAttachments(
+  attachments: readonly CanonicalAttachment[],
+): Record<string, unknown> | null {
+  const attachment = attachments.find((candidate) =>
+    candidate.mediaType.toLowerCase().startsWith("video/"));
+  if (!attachment || !attachment.cid || attachment.byteSize == null || attachment.byteSize < 0) {
+    return null;
+  }
+
+  const embed: Record<string, unknown> = {
+    $type: "app.bsky.embed.video",
+    video: {
+      $type: "blob",
+      ref: {
+        $link: attachment.cid,
+      },
+      mimeType: attachment.mediaType,
+      size: Math.floor(attachment.byteSize),
+    },
+  };
+
+  const alt = normalizeAltText(attachment.alt);
+  if (alt) {
+    embed["alt"] = alt;
+  }
+
+  if (
+    Number.isFinite(attachment.width)
+    && Number.isFinite(attachment.height)
+    && (attachment.width ?? 0) > 0
+    && (attachment.height ?? 0) > 0
+  ) {
+    embed["aspectRatio"] = {
+      width: Math.floor(attachment.width!),
+      height: Math.floor(attachment.height!),
+    };
+  }
+
+  return embed;
+}
+
+export function toAttachmentMediaHints(
+  attachments: readonly CanonicalAttachment[],
+): AtAttachmentMediaHint[] {
+  return attachments.map((attachment) => ({
+    attachmentId: attachment.attachmentId,
+    mediaType: attachment.mediaType,
+    url: attachment.url ?? null,
+    cid: attachment.cid ?? null,
+    byteSize: attachment.byteSize ?? null,
+    alt: attachment.alt ?? null,
+    width: attachment.width ?? null,
+    height: attachment.height ?? null,
+  }));
 }
 
 export function normalizeAtText(value: string, limit = 3000): string {

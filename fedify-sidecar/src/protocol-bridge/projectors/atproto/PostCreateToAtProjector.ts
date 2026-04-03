@@ -11,12 +11,15 @@ import {
   articleTeaserCanonicalRefId,
   buildExternalLinkEmbed,
   buildImageEmbedFromAttachments,
+  buildVideoEmbedFromAttachments,
   buildArticleTeaser,
   buildTeaserAtFacets,
   buildPostMetadata,
   deriveArticleTeaserRkey,
   deriveProjectedPostRkey,
   normalizeAtText,
+  selectPreferredAtMediaAttachments,
+  toAttachmentMediaHints,
 } from "./post-shared.js";
 
 export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionCommand> {
@@ -98,10 +101,46 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
       postRecord["reply"] = replyRef;
     }
 
-    const imageEmbed = buildImageEmbedFromAttachments(intent.content.attachments);
+    const mediaSelection = selectPreferredAtMediaAttachments(intent.content.attachments);
+    const videoEmbed = buildVideoEmbedFromAttachments(mediaSelection.attachments);
+    const imageEmbed = buildImageEmbedFromAttachments(mediaSelection.attachments);
     const externalEmbed = buildExternalLinkEmbed(intent.content.linkPreview);
-    if (imageEmbed) {
-      postRecord["embed"] = imageEmbed;
+    if (mediaSelection.kind === "video") {
+      if (videoEmbed) {
+        postRecord["embed"] = videoEmbed;
+      }
+      if (mediaSelection.imageCount > 0) {
+        warnings.push({
+          code: "AT_IMAGE_ATTACHMENTS_SKIPPED_WITH_VIDEO",
+          message: "AT posts support only one media embed; video attachments were prioritized over images.",
+          lossiness: "minor",
+        });
+      }
+      if (mediaSelection.droppedCount > 0) {
+        warnings.push({
+          code: "AT_VIDEO_ATTACHMENT_TRUNCATED",
+          message: "AT posts support only a single video embed; additional videos were omitted.",
+          lossiness: "minor",
+        });
+      }
+      if (externalEmbed) {
+        warnings.push({
+          code: "AT_LINK_PREVIEW_SKIPPED_WITH_VIDEO",
+          message: "AT posts support only one embed; video attachments were prioritized over link previews.",
+          lossiness: "minor",
+        });
+      }
+    } else if (mediaSelection.kind === "images") {
+      if (imageEmbed) {
+        postRecord["embed"] = imageEmbed;
+      }
+      if (mediaSelection.droppedCount > 0) {
+        warnings.push({
+          code: "AT_IMAGE_ATTACHMENT_TRUNCATED",
+          message: "AT posts support up to four images; additional images were omitted.",
+          lossiness: "minor",
+        });
+      }
       if (externalEmbed) {
         warnings.push({
           code: "AT_LINK_PREVIEW_SKIPPED_WITH_IMAGES",
@@ -125,6 +164,9 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
           ? articleTeaserCanonicalRefId(intent.object.canonicalObjectId)
           : intent.object.canonicalObjectId,
       linkPreviewThumbUrlHint: intent.content.linkPreview?.thumbUrl ?? null,
+      ...(mediaSelection.kind
+        ? { attachmentMediaHints: toAttachmentMediaHints(mediaSelection.attachments) }
+        : {}),
       record: postRecord,
       metadata: baseMetadata,
     });

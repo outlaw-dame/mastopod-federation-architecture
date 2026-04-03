@@ -20,8 +20,8 @@
  *     the event payload to prevent information leakage.
  */
 
-import { AtVerifyFailedEvent } from './AtIngressEvents';
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
+import { AtVerifyFailedEvent } from './AtIngressEvents.js';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 
 // ---------------------------------------------------------------------------
 // Topic constant

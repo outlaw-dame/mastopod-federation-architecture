@@ -20,6 +20,19 @@ What is included here:
 - ATProto `site.standard.document` translators for direct envelopes and persisted `at.commit.v1` operations
 - `PostCreate`, `PostEdit`, `PostDelete`, and `ProfileUpdate` projectors for ActivityPub and ATProto, including longform article projection to `site.standard.document` plus a feed teaser
 - social-action projectors for `like`, `repost`, and `follow` add/remove flows in both directions
+- video parity across protocols:
+  - ATProto `app.bsky.embed.video` and `app.bsky.embed.recordWithMedia` video payloads now translate into canonical video attachments with blob-backed public URLs when available
+  - canonical video attachments now project back to ActivityPub as first-class `Video` attachments
+  - ActivityPub video attachments now project to AT through explicit attachment media hints, a trusted internal media-resolution endpoint, and native AT blob uploads before commit
+  - native AT `createRecord` / `putRecord` post writes now preserve video embeds through the canonical write path instead of reserializing them away
+  - the legacy native canonical AT post serializer now also emits `app.bsky.embed.video` directly, and it prefers a single video embed over image galleries to match ATProto's single-media-embed constraint
+  - local native AT post writes now register trusted per-post media descriptors backed by existing AT blob refs, so later canonical post events can rebuild video/image embeds without bridge hints, remote fetches, or duplicate blob uploads
+  - native local post-media descriptor state is now pruned on post update and deleted on post delete, so blob-reference metadata does not linger longer than necessary
+- local longform parity on the AT-native path:
+  - local `site.standard.document` writes now generate, update, and delete a deterministic companion `app.bsky.feed.post` teaser in the same native commit path
+  - the local article teaser uses the same deterministic teaser rkey scheme as mirrored bridge articles, so longform parity stays stable across native and mirrored flows
+  - teaser generation is local-only; bridged article commands still keep explicit control of their own teaser records and do not double-create companions
+  - local article and teaser alias records now also retire with the logical post delete timestamp after native deletes, matching the social-delete lifecycle path
 - article link-preview parity across protocols:
   - ActivityPub `Article` translation now populates canonical link previews from the article URL
   - AT teaser posts now emit `app.bsky.embed.external` for mirrored articles on both create and update
@@ -44,7 +57,12 @@ What is included here:
   - resolving outbound ActivityPub recipients through a trusted internal ActivityPods authority before publishing `ap.outbound.v1`
   - routing projected AT commands through the existing native `DefaultAtWriteGateway`
   - publishing native AT event topics through a real RedPanda-backed `EventPublisher`
-  - consuming `ap.stream1.local-public.v1`, `at.commit.v1`, and `ap.atproto-ingress.v1`
+  - consuming `ap.stream1.local-public.v1`, `at.commit.v1`, verified `at.ingress.v1`, and `ap.atproto-ingress.v1`
+  - fanning out local `at.commit.v1`, `at.identity.v1`, and `at.account.v1` into the hosted-PDS `subscribeRepos` stream through a Redis-backed firehose cursor store and a dedicated local firehose runtime
+  - enforcing strict AT firehose wire compatibility by encoding hosted `subscribeRepos` frames as concatenated DRISL-CBOR header/payload maps and treating malformed external frames as connection-level errors that trigger replay-safe reconnects
+  - resolving external AT identity changes against authoritative DID documents and independently re-confirming handles before trusting them
+  - rebuilding repo-head sync state from authenticated `com.atproto.sync.getRepo` exports plus `com.atproto.sync.getLatestCommit`, including CAR-root validation against the latest commit CID
+  - validating external AT firehose source configuration through a dedicated bootstrap helper, with deterministic source IDs and explicit runtime gating when a production commit verifier is absent
   - forwarding mirrored AT->AP activities into a trusted internal ActivityPods endpoint
   - resolving ActivityPub `Undo` activity references through a trusted internal ActivityPods endpoint when the original social activity is not embedded inline
   - projecting profile avatar/banner media across protocols via explicit canonical attachment roles, a trusted internal ActivityPods raster-image fetch endpoint, native AT blob uploads, and public `com.atproto.sync.getBlob` URLs for ActivityPub consumers
@@ -61,6 +79,7 @@ What is included here:
 What is intentionally still guarded:
 
 - broader native TypeScript hygiene outside the protocol-bridge-focused compilation target
+- external raw AT firehose intake is still guarded at bootstrap time until a production `AtCommitVerifier` is wired into `index.ts`; the bootstrap now validates `AT_EXTERNAL_FIREHOSE_SOURCES` plus source IDs and is ready to assemble the runtime once commit verification exists, but live upstream commit trust would still be misleading without authenticated commit verification
 
 The remaining guarded gaps are intentional:
 

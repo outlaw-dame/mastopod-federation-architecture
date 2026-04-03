@@ -25,12 +25,18 @@ describe("native AT longform write path", () => {
     const resultStore = {
       publishResult: vi.fn().mockResolvedValue(undefined),
     };
+    const identityRepo = {
+      getByCanonicalAccountId: vi.fn().mockResolvedValue({
+        canonicalAccountId: "acct:alice",
+        atprotoDid: "did:plc:alice",
+      }),
+    };
 
     const service = new DefaultCanonicalClientWriteService({
       projectionWorker: projectionWorker as any,
       aliasStore: aliasStore as any,
       resultStore: resultStore as any,
-      identityRepo: {} as any,
+      identityRepo: identityRepo as any,
     });
 
     await service.applyClientMutation({
@@ -166,6 +172,69 @@ describe("native AT longform write path", () => {
       "at.egress.v1",
       expect.objectContaining({
         kind: "article",
+      }),
+    );
+  });
+
+  it("marks local site.standard.document mutations to generate a native teaser companion", async () => {
+    const projectionWorker = {
+      onPostCreated: vi.fn().mockResolvedValue(undefined),
+    };
+    const aliasStore = {
+      getByCanonicalRefId: vi.fn().mockResolvedValue({
+        canonicalRefId: "local-article-1",
+        canonicalType: "article",
+        did: "did:plc:alice",
+        collection: "site.standard.document",
+        rkey: "3klocalarticle",
+        atUri: "at://did:plc:alice/site.standard.document/3klocalarticle",
+        cid: "bafy-local-article",
+        lastRev: "4",
+        createdAt: "2026-04-03T14:00:00.000Z",
+        updatedAt: "2026-04-03T14:00:00.000Z",
+      }),
+    };
+    const resultStore = {
+      publishResult: vi.fn().mockResolvedValue(undefined),
+    };
+    const identityRepo = {
+      getByCanonicalAccountId: vi.fn().mockResolvedValue({
+        canonicalAccountId: "acct:alice",
+        atprotoDid: "did:plc:alice",
+      }),
+    };
+
+    const service = new DefaultCanonicalClientWriteService({
+      projectionWorker: projectionWorker as any,
+      aliasStore: aliasStore as any,
+      resultStore: resultStore as any,
+      identityRepo: identityRepo as any,
+    });
+
+    await service.applyClientMutation({
+      clientMutationId: "mutation-local-article-1",
+      canonicalAccountId: "acct:alice",
+      mutationType: "post_create",
+      payload: {
+        _collection: "site.standard.document",
+        _atRepo: "did:plc:alice",
+        _operation: "create",
+        title: "Local article",
+        summary: "Native article summary",
+        text: "Native article body",
+        url: "https://example.com/articles/local",
+        createdAt: "2026-04-03T14:00:00.000Z",
+      },
+      submittedAt: "2026-04-03T14:00:00.000Z",
+      source: "xrpc_client",
+    });
+
+    expect(projectionWorker.onPostCreated).toHaveBeenCalledWith(
+      expect.objectContaining({
+        canonicalPost: expect.objectContaining({
+          kind: "article",
+        }),
+        generateTeaserCompanion: true,
       }),
     );
   });

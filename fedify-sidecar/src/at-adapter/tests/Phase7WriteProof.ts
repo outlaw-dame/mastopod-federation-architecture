@@ -53,10 +53,14 @@ import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecor
 import { DefaultFacetBuilder } from '../projection/serializers/FacetBuilder.js';
 import { DefaultEmbedBuilder } from '../projection/serializers/EmbedBuilder.js';
 import { DefaultImageEmbedBuilder } from '../projection/serializers/ImageEmbedBuilder.js';
+import { DefaultVideoEmbedBuilder } from '../projection/serializers/VideoEmbedBuilder.js';
 import { DefaultFollowRecordSerializer } from '../projection/serializers/FollowRecordSerializer.js';
 import { DefaultLikeRecordSerializer } from '../projection/serializers/LikeRecordSerializer.js';
 import { DefaultRepostRecordSerializer } from '../projection/serializers/RepostRecordSerializer.js';
 import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer.js';
+import { DefaultAtBlobStore } from '../blob/AtBlobStore.js';
+import { DefaultBlobReferenceMapper } from '../blob/BlobReferenceMapper.js';
+import { DefaultAtBlobUploadService } from '../blob/AtBlobUploadService.js';
 
 // Writes
 import { DefaultAtWriteNormalizer } from '../writes/DefaultAtWriteNormalizer.js';
@@ -276,6 +280,12 @@ async function buildDeps() {
   const commitBuilder      = new DefaultAtCommitBuilder(signingService);
   const persistenceService = new DefaultAtCommitPersistenceService(aliasStore, eventPublisher, mockRedis);
   const rkeyService        = new DefaultAtRkeyService();
+  const blobStore          = new DefaultAtBlobStore();
+  const blobMapper         = new DefaultBlobReferenceMapper();
+  const blobUploadService  = new DefaultAtBlobUploadService(blobStore, blobMapper);
+  const attachmentMediaResolver = {
+    resolveMedia: async (_did: string, _mediaId: string) => null,
+  };
 
   const projectionWorker = new DefaultAtProjectionWorker(
     new DefaultAtProjectionPolicy(),
@@ -292,7 +302,10 @@ async function buildDeps() {
     {
       mediaResolver:       { resolveAvatarBlob: async () => null, resolveBannerBlob: async () => null },
       facetBuilder:        new DefaultFacetBuilder(),
-      embedBuilder:        new DefaultEmbedBuilder(new DefaultImageEmbedBuilder()),
+      embedBuilder:        new DefaultEmbedBuilder(
+        new DefaultImageEmbedBuilder(blobUploadService, attachmentMediaResolver),
+        new DefaultVideoEmbedBuilder(blobUploadService, attachmentMediaResolver),
+      ),
       recordRefResolver:   new DefaultAtRecordRefResolver(aliasStore),
       subjectResolver:     new DefaultAtSubjectResolver(identityRepo),
       targetAliasResolver: new DefaultAtTargetAliasResolver(aliasStore),

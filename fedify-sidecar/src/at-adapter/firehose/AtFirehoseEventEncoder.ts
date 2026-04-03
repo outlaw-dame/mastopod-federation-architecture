@@ -6,21 +6,16 @@
  *
  * Encoding requirement (ATProto spec):
  *   The subscribeRepos stream uses CBOR-encoded messages, NOT JSON.
- *   Each message is a two-element CBOR array: [header, body], where:
+ *   Each message is two concatenated CBOR values: header followed by body.
+ *   The header is a CBOR map containing:
  *     - header is a CBOR map with an "op" field (1 = message, -1 = error)
  *       and a "t" field containing the event type string.
- *     - body is a CBOR map with the event fields.
- *
- * Phase 4 implementation note:
- *   A full CBOR implementation requires the "cborg" or "@ipld/dag-cbor"
- *   library.  The current implementation encodes to JSON-in-Uint8Array as a
- *   structural placeholder.  The interface contract is correct; swap the
- *   private _encode method for real CBOR once the dependency is added.
- *
- * TODO: Install cborg and replace _encode with real CBOR encoding.
+ *     - body is a second CBOR map with the event fields.
  *
  * Ref: https://atproto.com/specs/event-stream
  */
+
+import { encode as encodeCbor } from 'cborg';
 
 export interface FirehoseEventBase {
   seq: number;
@@ -78,12 +73,19 @@ export class DefaultAtFirehoseEventEncoder implements AtFirehoseEventEncoder {
   }
 
   /**
-   * Encodes the event into a CBOR array: [header, body]
+   * Encodes the event into the ATProto wire format: two concatenated
+   * DRISL-CBOR objects (header map, then body map).
    */
-  private _encode(type: string, body: any): Uint8Array {
+  private _encode(type: string, body: Record<string, unknown>): Uint8Array {
     const header = { op: 1, t: type };
-    // We use dynamic import or require for cborg to avoid top-level errors if not installed yet
-    const { encode } = require('cborg');
-    return encode([header, body]);
+    const { $type: _ignoredType, ...payload } = body;
+    return concatBytes(encodeCbor(header), encodeCbor(payload));
   }
+}
+
+function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const combined = new Uint8Array(left.length + right.length);
+  combined.set(left, 0);
+  combined.set(right, left.length);
+  return combined;
 }

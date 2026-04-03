@@ -13,6 +13,7 @@ export interface ProtocolBridgeRuntimeConfig {
   consumerGroupId: string;
   apSourceTopic: string;
   atCommitTopic: string;
+  atVerifiedIngressTopic?: string | null;
   apIngressTopic: string;
   enableApToAt: boolean;
   enableAtToAp: boolean;
@@ -49,6 +50,18 @@ export interface ProtocolBridgeRuntimeOptions {
 interface ApSourceWrapper {
   activity: Record<string, unknown>;
   bridge?: ActivityPubBridgeMetadata;
+}
+
+interface AtVerifiedIngressCommitEvent {
+  did: string;
+  commit: {
+    operation: "create" | "update" | "delete";
+    collection: string;
+    rkey: string;
+    cid?: string | null;
+    canonicalRefId?: string;
+    record?: Record<string, unknown> | null;
+  };
 }
 
 const NOOP_LOGGER: ProtocolBridgeLogger = {
@@ -92,6 +105,20 @@ export class ProtocolBridgeRuntime {
           await this.handleAtCommitEvent(value);
         },
       );
+
+      const verifiedIngressTopic = this.options.config.atVerifiedIngressTopic?.trim();
+      if (
+        verifiedIngressTopic &&
+        verifiedIngressTopic !== this.options.config.atCommitTopic
+      ) {
+        await this.startConsumer(
+          `${this.options.config.consumerGroupId}-at-ingress-to-ap`,
+          verifiedIngressTopic,
+          async (value) => {
+            await this.handleAtVerifiedIngressEvent(value);
+          },
+        );
+      }
     }
 
     if (this.options.config.enableAtToAp && this.options.apIngressForwarder) {
@@ -110,6 +137,7 @@ export class ProtocolBridgeRuntime {
       atToAp: this.options.config.enableAtToAp,
       apSourceTopic: this.options.config.apSourceTopic,
       atCommitTopic: this.options.config.atCommitTopic,
+      atVerifiedIngressTopic: this.options.config.atVerifiedIngressTopic ?? null,
       apIngressTopic: this.options.config.apIngressTopic,
     });
   }
@@ -182,6 +210,33 @@ export class ProtocolBridgeRuntime {
         this.options.translationContext,
       );
     }
+  }
+
+  public async handleAtVerifiedIngressEvent(event: unknown): Promise<void> {
+    if (!this.options.atToApWorker) {
+      return;
+    }
+
+    const ingress = asAtVerifiedIngressEvent(event);
+    if (!ingress?.commit) {
+      return;
+    }
+
+    await this.options.atToApWorker.process(
+      {
+        repoDid: ingress.did,
+        uri: `at://${ingress.did}/${ingress.commit.collection}/${ingress.commit.rkey}`,
+        cid: ingress.commit.cid ?? undefined,
+        rkey: ingress.commit.rkey,
+        collection: ingress.commit.collection,
+        canonicalRefId: ingress.commit.canonicalRefId,
+        operation: ingress.commit.operation,
+        ...(ingress.commit.record && typeof ingress.commit.record === "object"
+          ? { record: ingress.commit.record }
+          : {}),
+      },
+      this.options.translationContext,
+    );
   }
 
   public async handleApIngressEvent(event: unknown): Promise<void> {
@@ -321,6 +376,68 @@ function asAtCommitEvent(event: unknown): AtCommitV1 | null {
   }
 
   return candidate as unknown as AtCommitV1;
+}
+
+function asAtVerifiedIngressEvent(event: unknown): AtVerifiedIngressCommitEvent | null {
+  if (!event || typeof event !== "object" || Array.isArray(event)) {
+    return null;
+  }
+
+  const candidate = event as Record<string, unknown>;
+  const commit = candidate["commit"];
+  if (
+    typeof candidate["did"] !== "string" ||
+    candidate["eventType"] !== "#commit" ||
+    !commit ||
+    typeof commit !== "object" ||
+    Array.isArray(commit)
+  ) {
+    return null;
+  }
+
+  const commitRecord = commit as Record<string, unknown>;
+  const operation = commitRecord["operation"];
+  const collection = commitRecord["collection"];
+  const rkey = commitRecord["rkey"];
+  if (
+    operation !== "create" &&
+    operation !== "update" &&
+    operation !== "delete"
+  ) {
+    return null;
+  }
+  if (typeof collection !== "string" || collection.length === 0) {
+    return null;
+  }
+  if (typeof rkey !== "string" || rkey.length === 0) {
+    return null;
+  }
+
+  const cid = typeof commitRecord["cid"] === "string"
+    ? commitRecord["cid"]
+    : commitRecord["cid"] === null
+      ? null
+      : undefined;
+  const canonicalRefId = typeof commitRecord["canonicalRefId"] === "string"
+    ? commitRecord["canonicalRefId"]
+    : undefined;
+  const record = commitRecord["record"] && typeof commitRecord["record"] === "object" && !Array.isArray(commitRecord["record"])
+    ? commitRecord["record"] as Record<string, unknown>
+    : commitRecord["record"] === null
+      ? null
+      : undefined;
+
+  return {
+    did: candidate["did"],
+    commit: {
+      operation,
+      collection,
+      rkey,
+      cid,
+      canonicalRefId,
+      record,
+    },
+  };
 }
 
 function asActivityPubBridgeIngressEvent(event: unknown): ActivityPubBridgeIngressEvent | null {

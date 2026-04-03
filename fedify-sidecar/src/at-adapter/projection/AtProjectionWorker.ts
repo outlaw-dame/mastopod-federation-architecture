@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto';
 import { AtProjectionPolicy, CanonicalProfile, CanonicalPost } from './AtProjectionPolicy.js';
 import { ProfileRecordSerializer, ProfileMediaResolver } from './serializers/ProfileRecordSerializer.js';
 import { PostRecordSerializer, FacetBuilder, EmbedBuilder } from './serializers/PostRecordSerializer.js';
 import { StandardDocumentRecordSerializer } from './serializers/StandardDocumentRecordSerializer.js';
+import {
+  ArticleTeaserRecordSerializer,
+  DefaultArticleTeaserRecordSerializer,
+} from './serializers/ArticleTeaserRecordSerializer.js';
 import { AtRecordRefResolver } from '../repo/AtRecordRefResolver.js';
 import { AtCommitBuilder } from '../repo/AtCommitBuilder.js';
 import { AtCommitPersistenceService } from '../repo/AtCommitPersistenceService.js';
@@ -28,6 +33,8 @@ export interface CorePostCreatedV1 {
   canonicalPost: CanonicalPost;
   author: any; // CanonicalIdentity
   atRecord?: AtRecordLocator;
+  nativeRecord?: Record<string, unknown>;
+  generateTeaserCompanion?: boolean;
   bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
@@ -36,6 +43,8 @@ export interface CorePostUpdatedV1 {
   canonicalPost: CanonicalPost;
   author: any; // CanonicalIdentity
   atRecord?: AtRecordLocator;
+  nativeRecord?: Record<string, unknown>;
+  generateTeaserCompanion?: boolean;
   bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
@@ -44,6 +53,7 @@ export interface CorePostDeletedV1 {
   canonicalPostId: string;
   canonicalAuthorId: string;
   atRecord?: AtRecordLocator;
+  generateTeaserCompanion?: boolean;
   bridge?: AtRepoBridgeMetadata;
   deletedAt: string;
   emittedAt: string;
@@ -95,6 +105,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       mediaResolver: ProfileMediaResolver;
       facetBuilder: FacetBuilder;
       embedBuilder: EmbedBuilder;
+      articleTeaserSerializer?: ArticleTeaserRecordSerializer;
       recordRefResolver: AtRecordRefResolver;
       replyRefResolver?: any;
       subjectResolver: AtSubjectResolver;
@@ -103,7 +114,11 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       likeSerializer: LikeRecordSerializer;
       repostSerializer: RepostRecordSerializer;
     }
-  ) {}
+  ) {
+    this.articleTeaserSerializer = deps.articleTeaserSerializer ?? new DefaultArticleTeaserRecordSerializer();
+  }
+
+  private readonly articleTeaserSerializer: ArticleTeaserRecordSerializer;
 
   private async getOrCreateRepoState(did: string): Promise<any | null> {
     const existing = await this.repoRegistry.getRepoState(did);
@@ -209,10 +224,12 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     if (!repoState) return;
 
     const isArticle = event.canonicalPost.kind === 'article';
-    const record = isArticle
-      ? await this.standardDocumentSerializer.serialize(event.canonicalPost, binding)
-      : await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
     const collection = isArticle ? 'site.standard.document' : 'app.bsky.feed.post';
+    const record = event.nativeRecord && this.isNativeRecordForCollection(event.nativeRecord, collection)
+      ? cloneNativeRecord(event.nativeRecord)
+      : isArticle
+        ? await this.standardDocumentSerializer.serialize(event.canonicalPost, binding)
+        : await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
     const rkey = this.getRequestedRkey(event.atRecord, collection)
       ?? this.rkeyService.postRkey(event.canonicalPost.publishedAt);
 
@@ -228,10 +245,32 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
+    const ops: AtRepoOpV1[] = [op];
+    const teaserAlias = isArticle && event.generateTeaserCompanion
+      ? buildArticleTeaserAlias(event.canonicalPost.id, binding.atprotoDid!, rkey)
+      : null;
+    if (teaserAlias) {
+      ops.push({
+        did: binding.atprotoDid!,
+        canonicalAccountId: binding.canonicalAccountId,
+        opId: `op-${Date.now()}-teaser`,
+        opType: 'create',
+        collection: 'app.bsky.feed.post',
+        rkey: teaserAlias.rkey,
+        canonicalRefId: teaserAlias.canonicalRefId,
+        record: await this.articleTeaserSerializer.serialize(event.canonicalPost, binding, {
+          embedBuilder: this.deps.embedBuilder,
+        }),
+        ...(event.bridge ? { bridge: event.bridge } : {}),
+        emittedAt: new Date().toISOString(),
+      });
+    }
 
-    await this.eventPublisher.publish('at.repo.op.v1', op as any);
+    for (const pendingOp of ops) {
+      await this.eventPublisher.publish('at.repo.op.v1', pendingOp as any);
+    }
 
-    const commitResult = await this.commitBuilder.buildCommit(repoState, [op]);
+    const commitResult = await this.commitBuilder.buildCommit(repoState, ops);
     
     // Save alias before persist so it has the right URI
     await this.aliasStore.put({
@@ -246,6 +285,20 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     });
+    if (teaserAlias) {
+      await this.aliasStore.put({
+        canonicalRefId: teaserAlias.canonicalRefId,
+        canonicalType: 'post',
+        did: binding.atprotoDid!,
+        collection: 'app.bsky.feed.post',
+        rkey: teaserAlias.rkey,
+        atUri: teaserAlias.atUri,
+        canonicalUrl: teaserAlias.canonicalUrl,
+        activityPubObjectId: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
 
     await this.persistAndUpdateRepoState(repoState, commitResult);
   }
@@ -269,9 +322,11 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     );
     if (!alias) return;
 
-    const record = alias.collection === 'site.standard.document'
-      ? await this.standardDocumentSerializer.serialize(event.canonicalPost, binding)
-      : await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
+    const record = event.nativeRecord && this.isNativeRecordForCollection(event.nativeRecord, alias.collection)
+      ? cloneNativeRecord(event.nativeRecord)
+      : alias.collection === 'site.standard.document'
+        ? await this.standardDocumentSerializer.serialize(event.canonicalPost, binding)
+        : await this.postSerializer.serialize(event.canonicalPost, binding, this.deps);
 
     const op: AtRepoOpV1 = {
       did: binding.atprotoDid!,
@@ -285,10 +340,37 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
+    const ops: AtRepoOpV1[] = [op];
+    let teaserAlias: AtAliasRecord | null = null;
+    if (alias.collection === 'site.standard.document' && event.generateTeaserCompanion) {
+      teaserAlias = await this.ensureArticleTeaserAlias(
+        event.canonicalPost.id,
+        binding.atprotoDid!,
+        alias.rkey,
+      );
+      if (teaserAlias) {
+        ops.push({
+          did: binding.atprotoDid!,
+          canonicalAccountId: binding.canonicalAccountId,
+          opId: `op-${Date.now()}-teaser`,
+          opType: 'update',
+          collection: 'app.bsky.feed.post',
+          rkey: teaserAlias.rkey,
+          canonicalRefId: teaserAlias.canonicalRefId,
+          record: await this.articleTeaserSerializer.serialize(event.canonicalPost, binding, {
+            embedBuilder: this.deps.embedBuilder,
+          }),
+          ...(event.bridge ? { bridge: event.bridge } : {}),
+          emittedAt: new Date().toISOString(),
+        });
+      }
+    }
 
-    await this.eventPublisher.publish('at.repo.op.v1', op as any);
+    for (const pendingOp of ops) {
+      await this.eventPublisher.publish('at.repo.op.v1', pendingOp as any);
+    }
 
-    const commitResult = await this.commitBuilder.buildCommit(repoState, [op]);
+    const commitResult = await this.commitBuilder.buildCommit(repoState, ops);
     await this.aliasStore.put({
       ...alias,
       canonicalUrl: event.canonicalPost.canonicalUrl
@@ -296,6 +378,12 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
         ?? this.defaultCanonicalUrl(alias.collection, binding.atprotoDid!, alias.rkey),
       updatedAt: new Date().toISOString(),
     });
+    if (teaserAlias) {
+      await this.aliasStore.put({
+        ...teaserAlias,
+        updatedAt: new Date().toISOString(),
+      });
+    }
     await this.persistAndUpdateRepoState(repoState, commitResult);
   }
 
@@ -327,11 +415,40 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       ...(event.bridge ? { bridge: event.bridge } : {}),
       emittedAt: new Date().toISOString()
     };
+    const ops: AtRepoOpV1[] = [op];
+    let teaserAlias: AtAliasRecord | null = null;
+    if (alias.collection === 'site.standard.document' && event.generateTeaserCompanion) {
+      teaserAlias = await this.ensureArticleTeaserAlias(
+        event.canonicalPostId,
+        binding.atprotoDid!,
+        alias.rkey,
+      );
+      if (teaserAlias) {
+        ops.push({
+          did: binding.atprotoDid!,
+          canonicalAccountId: binding.canonicalAccountId,
+          opId: `op-${Date.now()}-teaser`,
+          opType: 'delete',
+          collection: 'app.bsky.feed.post',
+          rkey: teaserAlias.rkey,
+          canonicalRefId: teaserAlias.canonicalRefId,
+          record: null,
+          ...(event.bridge ? { bridge: event.bridge } : {}),
+          emittedAt: new Date().toISOString(),
+        });
+      }
+    }
 
-    await this.eventPublisher.publish('at.repo.op.v1', op as any);
+    for (const pendingOp of ops) {
+      await this.eventPublisher.publish('at.repo.op.v1', pendingOp as any);
+    }
 
-    const commitResult = await this.commitBuilder.buildCommit(repoState, [op]);
+    const commitResult = await this.commitBuilder.buildCommit(repoState, ops);
     await this.persistAndUpdateRepoState(repoState, commitResult);
+    await this.aliasStore.markDeleted(event.canonicalPostId, event.deletedAt);
+    if (teaserAlias) {
+      await this.aliasStore.markDeleted(teaserAlias.canonicalRefId, event.deletedAt);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -676,6 +793,39 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     return placeholder;
   }
 
+  private async ensureArticleTeaserAlias(
+    articleCanonicalRefId: string,
+    did: string,
+    articleRkey: string,
+  ): Promise<AtAliasRecord | null> {
+    const teaserAlias = buildArticleTeaserAlias(articleCanonicalRefId, did, articleRkey);
+    const existingAlias = await this.aliasStore.getByCanonicalRefId(teaserAlias.canonicalRefId);
+    if (existingAlias && !existingAlias.deletedAt) {
+      return existingAlias;
+    }
+
+    const now = new Date().toISOString();
+    await this.aliasStore.put({
+      canonicalRefId: teaserAlias.canonicalRefId,
+      canonicalType: 'post',
+      did,
+      collection: 'app.bsky.feed.post',
+      rkey: teaserAlias.rkey,
+      atUri: teaserAlias.atUri,
+      cid: existingAlias?.cid ?? null,
+      lastRev: existingAlias?.lastRev ?? null,
+      createdAt: existingAlias?.createdAt ?? now,
+      updatedAt: now,
+      deletedAt: null,
+      subjectDid: existingAlias?.subjectDid ?? null,
+      subjectUri: existingAlias?.subjectUri ?? null,
+      subjectCid: existingAlias?.subjectCid ?? null,
+      canonicalUrl: existingAlias?.canonicalUrl ?? teaserAlias.canonicalUrl,
+      activityPubObjectId: existingAlias?.activityPubObjectId ?? null,
+    });
+    return await this.aliasStore.getByCanonicalRefId(teaserAlias.canonicalRefId);
+  }
+
   private defaultCanonicalUrl(
     collection: AtRepoCollection,
     did: string,
@@ -686,4 +836,36 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     }
     return `https://bsky.app/profile/${did}/post/${rkey}`;
   }
+
+  private isNativeRecordForCollection(
+    record: Record<string, unknown>,
+    collection: AtRepoCollection,
+  ): boolean {
+    const type = typeof record['$type'] === 'string' ? record['$type'] : null;
+    return (
+      (collection === 'app.bsky.feed.post' && type === 'app.bsky.feed.post') ||
+      (collection === 'site.standard.document' && type === 'site.standard.document')
+    );
+  }
+}
+
+function cloneNativeRecord(record: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
+}
+
+function buildArticleTeaserAlias(
+  articleCanonicalRefId: string,
+  did: string,
+  articleRkey: string,
+): Pick<AtAliasRecord, 'canonicalRefId' | 'rkey' | 'atUri' | 'canonicalUrl'> {
+  const teaserRkey = createHash('sha256')
+    .update(`article-teaser:${articleRkey}`)
+    .digest('hex')
+    .slice(0, 13);
+  return {
+    canonicalRefId: `${articleCanonicalRefId}::teaser`,
+    rkey: teaserRkey,
+    atUri: `at://${did}/app.bsky.feed.post/${teaserRkey}`,
+    canonicalUrl: `https://bsky.app/profile/${did}/post/${teaserRkey}`,
+  };
 }

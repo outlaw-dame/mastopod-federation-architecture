@@ -6,46 +6,46 @@
  */
 
 // Event schemas
-export * from './AtIngressEvents';
+export * from './AtIngressEvents.js';
 
 // Consumer
 export {
   DefaultAtFirehoseConsumer,
-} from './AtFirehoseConsumer';
+} from './AtFirehoseConsumer.js';
 export type {
   AtFirehoseSource,
   AtFirehoseConsumer,
-} from './AtFirehoseConsumer';
+} from './AtFirehoseConsumer.js';
 
 // Decoder
 export {
   DefaultAtFirehoseDecoder,
   FirehoseDecodeError,
-} from './AtFirehoseDecoder';
+} from './AtFirehoseDecoder.js';
 export type {
   DecodedFirehoseHeader,
   AtFirehoseDecoder,
-} from './AtFirehoseDecoder';
+} from './AtFirehoseDecoder.js';
 
 // Cursor management
 export {
   DefaultAtFirehoseCursorManager,
   InMemoryAtFirehoseCursorManager,
   CursorError,
-} from './AtFirehoseCursorManager';
+} from './AtFirehoseCursorManager.js';
 export type {
   AtFirehoseCursorManager,
-} from './AtFirehoseCursorManager';
+} from './AtFirehoseCursorManager.js';
 
 // Checkpoint store
 export {
   RedisAtIngressCheckpointStore,
   InMemoryAtIngressCheckpointStore,
   CheckpointError,
-} from './AtIngressCheckpointStore';
+} from './AtIngressCheckpointStore.js';
 export type {
   AtIngressCheckpointStore,
-} from './AtIngressCheckpointStore';
+} from './AtIngressCheckpointStore.js';
 
 // Event classifier
 export {
@@ -53,38 +53,64 @@ export {
   Phase55BEventClassifier,
   InMemoryAtIngressEventClassifier,
   ClassifierError,
-} from './AtIngressEventClassifier';
+} from './AtIngressEventClassifier.js';
 export type {
   AtIngressEventClassifier,
-} from './AtIngressEventClassifier';
+} from './AtIngressEventClassifier.js';
 
 // Audit publisher
 export {
   DefaultAtIngressAuditPublisher,
   InMemoryAtIngressAuditPublisher,
   AT_VERIFY_FAILED_TOPIC,
-} from './AtIngressAuditPublisher';
+} from './AtIngressAuditPublisher.js';
 export type {
   AtIngressAuditPublisher,
-} from './AtIngressAuditPublisher';
+} from './AtIngressAuditPublisher.js';
 
 // Verifier
 export {
   DefaultAtIngressVerifier,
-} from './AtIngressVerifier';
+} from './AtIngressVerifier.js';
 
 export type {
   AtIngressVerifier,
   AtCommitVerifier,
   AtIdentityResolver,
   AtSyncRebuilder,
-} from './AtIngressVerifier';
+} from './AtIngressVerifier.js';
+
+export {
+  AtIngressHttpClient,
+  AtIngressHttpError,
+} from './AtIngressHttpClient.js';
+export {
+  HttpAtIdentityResolver,
+} from './HttpAtIdentityResolver.js';
+export type {
+  HttpAtIdentityResolverOptions,
+  ResolvedAtIdentityDocument,
+} from './HttpAtIdentityResolver.js';
+export {
+  HttpAtSyncRebuilder,
+} from './HttpAtSyncRebuilder.js';
+export type {
+  HttpAtSyncRebuilderOptions,
+} from './HttpAtSyncRebuilder.js';
+export {
+  buildAtExternalFirehoseBootstrap,
+  parseAtExternalFirehoseSources,
+} from './AtExternalFirehoseBootstrap.js';
+export type {
+  AtExternalFirehoseBootstrapOptions,
+  AtExternalFirehoseBootstrapResult,
+} from './AtExternalFirehoseBootstrap.js';
 
 // Webhook forwarder (memory UI integration)
 export {
   AtIngressWebhookForwarder,
-} from './AtIngressWebhookForwarder';
+} from './AtIngressWebhookForwarder.js';
 export type {
   WebhookEndpoint,
   ForwarderResult,
-} from './AtIngressWebhookForwarder';
+} from './AtIngressWebhookForwarder.js';

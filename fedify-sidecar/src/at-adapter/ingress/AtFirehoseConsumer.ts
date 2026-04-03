@@ -23,10 +23,10 @@
  */
 
 import { WebSocket } from 'ws';
-import { AtFirehoseDecoder, FirehoseDecodeError } from './AtFirehoseDecoder';
-import { AtFirehoseCursorManager } from './AtFirehoseCursorManager';
-import { AtFirehoseRawEnvelope } from './AtIngressEvents';
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
+import { AtFirehoseDecoder, FirehoseDecodeError } from './AtFirehoseDecoder.js';
+import { AtFirehoseCursorManager } from './AtFirehoseCursorManager.js';
+import { AtFirehoseRawEnvelope } from './AtIngressEvents.js';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 
 // ---------------------------------------------------------------------------
 // Constants & Configuration
@@ -240,7 +240,7 @@ class FirehoseConnection {
       // 2. Build raw envelope
       const envelope: AtFirehoseRawEnvelope = {
         seq: header.seq,
-        source: this.source.id,
+        source: this.source.url,
         receivedAt: new Date().toISOString(),
         eventType: header.eventType,
         did: header.did,
@@ -259,8 +259,10 @@ class FirehoseConnection {
 
     } catch (err) {
       if (err instanceof FirehoseDecodeError) {
-        // Log and drop unparseable frames; do not crash the connection.
-        console.error(`[FirehoseConnection] Dropped unparseable frame from ${this.source.id}:`, err.message);
+        // Invalid firehose framing is a connection-level error per spec.
+        // Tear down the socket so we replay from the last acked cursor.
+        console.error(`[FirehoseConnection] Invalid frame from ${this.source.id}; reconnecting:`, err.message);
+        this.ws?.terminate();
       } else {
         // Publish failures or Redis failures.
         // We throw here to force a reconnect and replay from the last acked cursor.

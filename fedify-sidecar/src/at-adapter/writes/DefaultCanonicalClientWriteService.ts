@@ -45,6 +45,13 @@ import type {
   BridgeProfileMediaStore,
 } from '../../protocol-bridge/profile/BridgeProfileMedia.js';
 import type {
+  BridgePostMediaDescriptor,
+  BridgePostMediaStore,
+} from '../../protocol-bridge/post/BridgePostMedia.js';
+import {
+  buildPostMediaDraftsFromRecord,
+} from '../../protocol-bridge/post/BridgePostMedia.js';
+import type {
   CoreFollowCreatedV1,
   CoreFollowDeletedV1,
   CoreLikeCreatedV1,
@@ -69,6 +76,7 @@ export interface DefaultCanonicalClientWriteServiceDeps {
   resultStore:      AtWriteResultStore;
   identityRepo:     IdentityBindingRepository;
   profileMediaStore?: BridgeProfileMediaStore;
+  postMediaStore?: BridgePostMediaStore;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +89,7 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
   private readonly resultStore: AtWriteResultStore;
   private readonly identityRepo: IdentityBindingRepository;
   private readonly profileMediaStore?: BridgeProfileMediaStore;
+  private readonly postMediaStore?: BridgePostMediaStore;
 
   constructor(deps: DefaultCanonicalClientWriteServiceDeps) {
     this.worker      = deps.projectionWorker;
@@ -88,6 +97,7 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     this.resultStore = deps.resultStore;
     this.identityRepo = deps.identityRepo;
     this.profileMediaStore = deps.profileMediaStore;
+    this.postMediaStore = deps.postMediaStore;
   }
 
   async applyClientMutation(
@@ -164,9 +174,22 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     const isArticle = collection === 'site.standard.document';
     const bridge = asBridgeMetadata(p['_bridgeMetadata']);
     const atRecord = extractAtRecordLocator(p);
+    const nativeRecord = extractNativePostRecord(p, collection);
     const canonicalRefId = operation === 'update'
       ? await this._resolveCanonicalRefIdForPostUpdate(mutation)
       : _str(mutation.payload['_bridgeCanonicalRefId']) ?? randomUUID();
+    const ownerDid = await this._resolveManagedDid(mutation);
+    const postMediaDescriptors = ownerDid && nativeRecord && this.postMediaStore
+      ? buildPostMediaDescriptors(canonicalRefId, ownerDid, nativeRecord, now)
+      : [];
+
+    if (ownerDid && nativeRecord && this.postMediaStore) {
+      await this._syncStoredPostMediaDescriptors(
+        canonicalRefId,
+        ownerDid,
+        postMediaDescriptors,
+      );
+    }
 
     const canonicalPost = {
       id: canonicalRefId,
@@ -178,6 +201,17 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
       canonicalUrl: _str(p['url']),
       visibility: 'public' as const,
       publishedAt: _str(p['publishedAt']) ?? _str(p['createdAt']) ?? now,
+      ...(postMediaDescriptors.length > 0
+        ? {
+            attachments: postMediaDescriptors.map((descriptor) => ({
+              kind: descriptor.kind,
+              mediaId: descriptor.mediaId,
+              altText: descriptor.alt ?? undefined,
+              width: descriptor.width ?? undefined,
+              height: descriptor.height ?? undefined,
+            })),
+          }
+        : {}),
     };
 
     if (operation === 'update') {
@@ -185,6 +219,8 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
         canonicalPost,
         author: { id: mutation.canonicalAccountId },
         ...(atRecord ? { atRecord } : {}),
+        ...(nativeRecord ? { nativeRecord } : {}),
+        ...(isArticle && !bridge ? { generateTeaserCompanion: true } : {}),
         ...(bridge ? { bridge } : {}),
         emittedAt: now,
       };
@@ -196,6 +232,8 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
       canonicalPost,
       author: { id: mutation.canonicalAccountId },
       ...(atRecord ? { atRecord } : {}),
+      ...(nativeRecord ? { nativeRecord } : {}),
+      ...(isArticle && !bridge ? { generateTeaserCompanion: true } : {}),
       ...(bridge ? { bridge } : {}),
       emittedAt: now,
     };
@@ -369,16 +407,25 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     if (!canonicalRefId) return;
     const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
     const atRecord = extractAtRecordLocator(mutation.payload);
+    const ownerDid = this.postMediaStore
+      ? await this._resolveManagedDid(mutation)
+      : null;
 
     const event: CorePostDeletedV1 = {
       canonicalPostId:   canonicalRefId,
       canonicalAuthorId: mutation.canonicalAccountId,
       ...(atRecord ? { atRecord } : {}),
+      ...(_str(mutation.payload['_collection']) === 'site.standard.document' && !bridge
+        ? { generateTeaserCompanion: true }
+        : {}),
       ...(bridge ? { bridge } : {}),
       deletedAt:         now,
       emittedAt:         now,
     };
     await this.worker.onPostDeleted(event);
+    if (ownerDid && this.postMediaStore) {
+      await this._deleteStoredPostMediaDescriptors(canonicalRefId, ownerDid);
+    }
   }
 
   private async _applySocialDelete(
@@ -534,6 +581,47 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     const binding = await this.identityRepo.getByCanonicalAccountId(mutation.canonicalAccountId);
     return binding?.atprotoDid ?? null;
   }
+
+  private async _syncStoredPostMediaDescriptors(
+    canonicalPostId: string,
+    ownerDid: string,
+    descriptors: BridgePostMediaDescriptor[],
+  ): Promise<void> {
+    if (!this.postMediaStore) {
+      return;
+    }
+
+    const existingDescriptors = await this.postMediaStore.listByCanonicalPostId(canonicalPostId);
+    const nextMediaIds = new Set(descriptors.map((descriptor) => descriptor.mediaId));
+
+    for (const descriptor of descriptors) {
+      await this.postMediaStore.put(descriptor);
+    }
+
+    for (const descriptor of existingDescriptors) {
+      if (descriptor.ownerDid !== ownerDid || nextMediaIds.has(descriptor.mediaId)) {
+        continue;
+      }
+      await this.postMediaStore.delete(descriptor.mediaId);
+    }
+  }
+
+  private async _deleteStoredPostMediaDescriptors(
+    canonicalPostId: string,
+    ownerDid: string,
+  ): Promise<void> {
+    if (!this.postMediaStore) {
+      return;
+    }
+
+    const existingDescriptors = await this.postMediaStore.listByCanonicalPostId(canonicalPostId);
+    for (const descriptor of existingDescriptors) {
+      if (descriptor.ownerDid !== ownerDid) {
+        continue;
+      }
+      await this.postMediaStore.delete(descriptor.mediaId);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +701,19 @@ function parseBridgeProfileMediaPayload(
   };
 }
 
+function buildPostMediaDescriptors(
+  canonicalPostId: string,
+  ownerDid: string,
+  record: Record<string, unknown>,
+  createdAt: string,
+): BridgePostMediaDescriptor[] {
+  return buildPostMediaDraftsFromRecord(canonicalPostId, record).map((draft) => ({
+    ...draft,
+    ownerDid,
+    createdAt,
+  }));
+}
+
 function extractAtRecordLocator(payload: Record<string, unknown>): AtRecordLocator | undefined {
   const collection = _str(payload['_collection']);
   const rkey = _str(payload['_rkey']);
@@ -620,6 +721,36 @@ function extractAtRecordLocator(payload: Record<string, unknown>): AtRecordLocat
     return undefined;
   }
   return { collection, rkey };
+}
+
+function extractNativePostRecord(
+  payload: Record<string, unknown>,
+  collection: string | undefined,
+): Record<string, unknown> | undefined {
+  const expectedType = collection === 'site.standard.document'
+    ? 'site.standard.document'
+    : collection === 'app.bsky.feed.post'
+      ? 'app.bsky.feed.post'
+      : null;
+  if (!expectedType) {
+    return undefined;
+  }
+
+  const recordEntries = Object.entries(payload).filter(([key]) => !key.startsWith('_'));
+  if (recordEntries.length === 0) {
+    return undefined;
+  }
+
+  const record = Object.fromEntries(recordEntries);
+  const recordType = _str(record['$type']) ?? expectedType;
+  if (recordType !== expectedType) {
+    return undefined;
+  }
+
+  return JSON.parse(JSON.stringify({
+    ...record,
+    $type: recordType,
+  })) as Record<string, unknown>;
 }
 
 function isAtRepoCollection(value: string): value is AtRepoCollection {

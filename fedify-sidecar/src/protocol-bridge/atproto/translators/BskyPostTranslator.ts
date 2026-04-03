@@ -247,22 +247,22 @@ async function parseEmbedAttachments(
   objectUri: string,
   ctx: TranslationContext,
 ): Promise<CanonicalPostCreateIntent["content"]["attachments"]> {
-  const imageEmbeds = collectImageEmbeds(embed).slice(0, 4);
+  const mediaEmbeds = collectMediaEmbeds(embed);
   const attachments = await Promise.all(
-    imageEmbeds.map(async (entry, index) => {
-      const blob = toPlainObject(entry["image"]);
+    mediaEmbeds.map(async (entry, index) => {
+      const blob = entry.blob;
       const cid = extractCid(blob);
       const mediaType = typeof blob?.["mimeType"] === "string"
         ? blob["mimeType"].trim()
-        : "image/*";
+        : entry.defaultMediaType;
       const byteSize = typeof blob?.["size"] === "number" && Number.isFinite(blob["size"])
         ? Math.max(0, Math.floor(blob["size"]))
         : null;
       const url = cid && ctx.resolveBlobUrl ? await ctx.resolveBlobUrl(repoDid, cid) : null;
-      const aspectRatio = toPlainObject(entry["aspectRatio"]);
+      const aspectRatio = entry.aspectRatio;
       const width = toPositiveInteger(aspectRatio?.["width"]);
       const height = toPositiveInteger(aspectRatio?.["height"]);
-      const alt = normalizeAlt(entry["alt"]);
+      const alt = normalizeAlt(entry.alt);
 
       return {
         attachmentId: `${objectUri}#attachment-${index + 1}`,
@@ -280,7 +280,12 @@ async function parseEmbedAttachments(
   return attachments;
 }
 
-function collectImageEmbeds(embed: unknown): Record<string, unknown>[] {
+function collectMediaEmbeds(embed: unknown): Array<{
+  blob: Record<string, unknown> | null;
+  defaultMediaType: string;
+  alt: unknown;
+  aspectRatio: Record<string, unknown> | null;
+}> {
   const obj = toPlainObject(embed);
   if (!obj) {
     return [];
@@ -288,13 +293,29 @@ function collectImageEmbeds(embed: unknown): Record<string, unknown>[] {
 
   const type = typeof obj["$type"] === "string" ? obj["$type"] : "";
   if (type === "app.bsky.embed.images") {
-    return toObjectArray(obj["images"]);
+    return toObjectArray(obj["images"]).map((entry) => ({
+      blob: toPlainObject(entry["image"]),
+      defaultMediaType: "image/*",
+      alt: entry["alt"],
+      aspectRatio: toPlainObject(entry["aspectRatio"]),
+    }));
+  }
+
+  if (type === "app.bsky.embed.video") {
+    return [
+      {
+        blob: toPlainObject(obj["video"]),
+        defaultMediaType: "video/*",
+        alt: obj["alt"],
+        aspectRatio: toPlainObject(obj["aspectRatio"]),
+      },
+    ];
   }
 
   if (type === "app.bsky.embed.recordWithMedia") {
     const media = toPlainObject(obj["media"]);
-    if (media?.["$type"] === "app.bsky.embed.images") {
-      return toObjectArray(media["images"]);
+    if (media) {
+      return collectMediaEmbeds(media);
     }
   }
 

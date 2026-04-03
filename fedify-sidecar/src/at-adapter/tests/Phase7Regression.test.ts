@@ -19,6 +19,7 @@ import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecor
 import { DefaultProfileRecordSerializer } from '../projection/serializers/ProfileRecordSerializer.js';
 import { DefaultRepostRecordSerializer } from '../projection/serializers/RepostRecordSerializer.js';
 import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer.js';
+import { DefaultVideoEmbedBuilder } from '../projection/serializers/VideoEmbedBuilder.js';
 import { InMemoryAtAliasStore } from '../repo/AtAliasStore.js';
 import { DefaultAtCarExporter } from '../repo/AtCarExporter.js';
 import { DefaultAtCommitBuilder } from '../repo/AtCommitBuilder.js';
@@ -27,6 +28,9 @@ import { DefaultAtRecordReader } from '../repo/AtRecordReader.js';
 import { DefaultAtRecordRefResolver } from '../repo/AtRecordRefResolver.js';
 import { DefaultAtRkeyService } from '../repo/AtRkeyService.js';
 import { DefaultAtTargetAliasResolver } from '../repo/AtTargetAliasResolver.js';
+import { DefaultAtBlobStore } from '../blob/AtBlobStore.js';
+import { DefaultBlobReferenceMapper } from '../blob/BlobReferenceMapper.js';
+import { DefaultAtBlobUploadService } from '../blob/AtBlobUploadService.js';
 import { DefaultAtWriteGateway } from '../writes/DefaultAtWriteGateway.js';
 import { InMemoryAtWriteResultStore } from '../writes/AtWriteResultStore.js';
 import { DefaultAtWriteNormalizer } from '../writes/DefaultAtWriteNormalizer.js';
@@ -302,6 +306,12 @@ async function buildHarness(): Promise<Harness> {
   const rkeyService = new DefaultAtRkeyService();
   const persistenceService = new DefaultAtCommitPersistenceService(aliasStore, eventPublisher, mockRedis);
   const commitBuilder = new DefaultAtCommitBuilder(signingService);
+  const blobStore = new DefaultAtBlobStore();
+  const blobMapper = new DefaultBlobReferenceMapper();
+  const blobUploadService = new DefaultAtBlobUploadService(blobStore, blobMapper);
+  const attachmentMediaResolver = {
+    resolveMedia: async (_did: string, _mediaId: string) => null,
+  };
 
   const projectionWorker = new DefaultAtProjectionWorker(
     new DefaultAtProjectionPolicy(),
@@ -318,7 +328,10 @@ async function buildHarness(): Promise<Harness> {
     {
       mediaResolver: { resolveAvatarBlob: async () => null, resolveBannerBlob: async () => null },
       facetBuilder: new DefaultFacetBuilder(),
-      embedBuilder: new DefaultEmbedBuilder(new DefaultImageEmbedBuilder()),
+      embedBuilder: new DefaultEmbedBuilder(
+        new DefaultImageEmbedBuilder(blobUploadService, attachmentMediaResolver),
+        new DefaultVideoEmbedBuilder(blobUploadService, attachmentMediaResolver),
+      ),
       recordRefResolver: new DefaultAtRecordRefResolver(aliasStore),
       subjectResolver: new DefaultAtAccountResolver(identityRepo) as never,
       targetAliasResolver: new DefaultAtTargetAliasResolver(aliasStore),

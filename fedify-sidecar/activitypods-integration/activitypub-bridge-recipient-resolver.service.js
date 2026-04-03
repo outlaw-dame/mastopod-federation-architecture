@@ -13,6 +13,10 @@ const {
   resolveRemoteActivity,
 } = require("./activitypub-activity-resolution");
 const {
+  AttachmentMediaResolutionError,
+  resolveAttachmentMedia,
+} = require("./activitypub-attachment-media-resolution");
+const {
   ProfileMediaResolutionError,
   resolveProfileMedia,
 } = require("./activitypub-profile-media-resolution");
@@ -33,6 +37,10 @@ module.exports = {
     maxProfileMediaBytes: parsePositiveInteger(
       process.env.PROTOCOL_BRIDGE_PROFILE_MEDIA_MAX_BYTES,
       5 * 1024 * 1024,
+    ),
+    maxAttachmentMediaBytes: parsePositiveInteger(
+      process.env.PROTOCOL_BRIDGE_ATTACHMENT_MEDIA_MAX_BYTES,
+      50 * 1024 * 1024,
     ),
   },
 
@@ -59,15 +67,68 @@ module.exports = {
         aliases: {
           "POST /resolve-outbound": "sidecar.activitypub-bridge-recipient-resolver.resolveOutbound",
           "POST /resolve-activity": "sidecar.activitypub-bridge-recipient-resolver.resolveActivity",
+          "POST /resolve-media": "sidecar.activitypub-bridge-recipient-resolver.resolveMedia",
           "POST /resolve-profile-media": "sidecar.activitypub-bridge-recipient-resolver.resolveProfileMedia",
         },
       },
     });
 
-    this.logger.info("[ActivityPubBridgeRecipientResolver] Routes POST /api/internal/activitypub-bridge/{resolve-outbound,resolve-activity,resolve-profile-media} registered");
+    this.logger.info("[ActivityPubBridgeRecipientResolver] Routes POST /api/internal/activitypub-bridge/{resolve-outbound,resolve-activity,resolve-media,resolve-profile-media} registered");
   },
 
   actions: {
+    async resolveMedia(ctx) {
+      const mediaUrl = normalizeUrl(ctx.params?.mediaUrl);
+
+      if (!mediaUrl) {
+        ctx.meta.$statusCode = 400;
+        return {
+          error: "invalid_request",
+          message: "mediaUrl must be a valid https URL or localhost http URL",
+        };
+      }
+
+      try {
+        const resolved = await resolveAttachmentMedia({
+          mediaUrl,
+          timeoutMs: this.settings.fetchTimeoutMs,
+          maxResponseBytes: this.settings.maxAttachmentMediaBytes,
+        });
+
+        ctx.meta.$statusCode = 200;
+        return {
+          ...resolved,
+          resolvedAt: new Date().toISOString(),
+        };
+      } catch (error) {
+        if (error instanceof AttachmentMediaResolutionError) {
+          this.logger.warn("[ActivityPubBridgeRecipientResolver] Attachment media resolution rejected", {
+            mediaUrl,
+            code: error.code,
+            statusCode: error.statusCode,
+            error: error.message,
+          });
+
+          ctx.meta.$statusCode = error.statusCode;
+          return {
+            error: error.code,
+            message: error.message,
+          };
+        }
+
+        this.logger.error("[ActivityPubBridgeRecipientResolver] Unexpected attachment media resolution failure", {
+          mediaUrl,
+          error: error?.message || String(error),
+        });
+
+        ctx.meta.$statusCode = 500;
+        return {
+          error: "processing_error",
+          message: "Unexpected attachment media resolution failure",
+        };
+      }
+    },
+
     async resolveProfileMedia(ctx) {
       const mediaUrl = normalizeUrl(ctx.params?.mediaUrl);
 

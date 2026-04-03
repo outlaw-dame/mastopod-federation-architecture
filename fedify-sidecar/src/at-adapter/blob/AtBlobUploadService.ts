@@ -8,6 +8,12 @@ import type { AtBlobRef, AtBlobStore } from './AtBlobStore.js';
 import type { BlobReferenceMapper } from './BlobReferenceMapper.js';
 
 export interface AtBlobUploadService {
+  ensureBlob(input: {
+    did: string;
+    mediaId: string;
+    mimeType: string;
+    bytes: Uint8Array;
+  }): Promise<AtBlobRef>;
   ensureImageBlob(input: {
     did: string;
     mediaId: string;
@@ -22,15 +28,18 @@ export class DefaultAtBlobUploadService implements AtBlobUploadService {
     private readonly blobMapper: BlobReferenceMapper
   ) {}
 
-  async ensureImageBlob(input: {
+  async ensureBlob(input: {
     did: string;
     mediaId: string;
     mimeType: string;
     bytes: Uint8Array;
   }): Promise<AtBlobRef> {
-    // 1. Validate mime type (images only for Phase 5)
-    if (!input.mimeType.startsWith('image/')) {
-      throw new Error(`Unsupported blob mime type: ${input.mimeType}. Only images are supported in Phase 5.`);
+    if (
+      !input.mimeType.startsWith('image/') &&
+      !input.mimeType.startsWith('video/') &&
+      !input.mimeType.startsWith('audio/')
+    ) {
+      throw new Error(`Unsupported blob mime type: ${input.mimeType}. Only image, video, and audio blobs are supported.`);
     }
 
     // 2. Store blob
@@ -38,5 +47,18 @@ export class DefaultAtBlobUploadService implements AtBlobUploadService {
 
     // 3. Map to AT blob ref
     return this.blobMapper.toAtBlobRef(meta);
+  }
+
+  async ensureImageBlob(input: {
+    did: string;
+    mediaId: string;
+    mimeType: string;
+    bytes: Uint8Array;
+  }): Promise<AtBlobRef> {
+    if (!input.mimeType.startsWith('image/')) {
+      throw new Error(`Unsupported blob mime type: ${input.mimeType}. Only images are supported for ensureImageBlob.`);
+    }
+
+    return this.ensureBlob(input);
   }
 }

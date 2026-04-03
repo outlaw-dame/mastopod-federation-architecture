@@ -28,11 +28,11 @@ import {
   AtFirehoseRawEnvelope,
   AtIngressEvent,
   AtVerifyFailedEvent,
-} from './AtIngressEvents';
-import { AtFirehoseDecoder, FirehoseDecodeError } from './AtFirehoseDecoder';
-import { AtIngressEventClassifier } from './AtIngressEventClassifier';
-import { AtIngressAuditPublisher } from './AtIngressAuditPublisher';
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
+} from './AtIngressEvents.js';
+import { AtFirehoseDecoder, FirehoseDecodeError } from './AtFirehoseDecoder.js';
+import { AtIngressEventClassifier } from './AtIngressEventClassifier.js';
+import { AtIngressAuditPublisher } from './AtIngressAuditPublisher.js';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -60,6 +60,8 @@ export interface AtIngressVerifier {
 export interface AtCommitVerifier {
   verifyCommit(body: any): Promise<{
     isValid: boolean;
+    requiresSync?: boolean;
+    failureReason?: AtVerifyFailedEvent["reason"];
     reason?: string;
     ops?: Array<{
       action: 'create' | 'update' | 'delete';
@@ -81,7 +83,7 @@ export interface AtIdentityResolver {
 }
 
 export interface AtSyncRebuilder {
-  rebuildRepo(did: string): Promise<{
+  rebuildRepo(did: string, options?: { source?: string | null }): Promise<{
     success: boolean;
     reason?: string;
   }>;
@@ -187,7 +189,24 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
     const result = await this.commitVerifier.verifyCommit(body);
 
     if (!result.isValid) {
-      await this.publishFailure(envelope, 'signature_invalid', { reason: result.reason });
+      await this.publishFailure(
+        envelope,
+        result.failureReason ?? 'signature_invalid',
+        { reason: result.reason },
+      );
+      return;
+    }
+
+    if (result.requiresSync) {
+      const syncResult = await this.syncRebuilder.rebuildRepo(did, {
+        source: envelope.source,
+      });
+
+      if (!syncResult.success) {
+        await this.publishFailure(envelope, 'sync_rebuild_failed', {
+          reason: syncResult.reason ?? result.reason ?? 'commit verification requested repo rebuild',
+        });
+      }
       return;
     }
 
@@ -276,7 +295,9 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
     }
 
     // Sync events trigger a full repo rebuild; they are NOT forwarded to ingress.v1
-    const result = await this.syncRebuilder.rebuildRepo(did);
+    const result = await this.syncRebuilder.rebuildRepo(did, {
+      source: envelope.source,
+    });
 
     if (!result.success) {
       await this.publishFailure(envelope, 'sync_rebuild_failed', { reason: result.reason });

@@ -62,7 +62,11 @@ import { IdentityWarmupService } from "./at-adapter/identity/IdentityWarmupServi
 import { RedisIdentityWarmCursorStore } from "./at-adapter/identity/RedisIdentityWarmCursorStore.js";
 // AT adapter — firehose
 import { DefaultAtFirehoseSubscriptionManager } from "./at-adapter/firehose/AtFirehoseSubscriptionManager.js";
-import { InMemoryAtFirehoseCursorStore } from "./at-adapter/firehose/AtFirehoseCursorStore.js";
+import { RedisAtFirehoseCursorStore } from "./at-adapter/firehose/AtFirehoseCursorStore.js";
+import { DefaultAtFirehoseEventEncoder } from "./at-adapter/firehose/AtFirehoseEventEncoder.js";
+import { DefaultAtFirehosePublisher } from "./at-adapter/firehose/AtFirehosePublisher.js";
+import { AtFirehoseRuntime } from "./at-adapter/firehose/AtFirehoseRuntime.js";
+import { DefaultAtRepoDiffBuilder } from "./at-adapter/repo/AtRepoDiffBuilder.js";
 // AT adapter — auth / session
 import { DefaultAtSessionTokenService } from "./at-adapter/auth/DefaultAtSessionTokenService.js";
 import { DefaultAtAccountResolver } from "./at-adapter/auth/DefaultAtAccountResolver.js";
@@ -88,6 +92,8 @@ import { DefaultStandardDocumentRecordSerializer } from "./at-adapter/projection
 import { DefaultFacetBuilder } from "./at-adapter/projection/serializers/FacetBuilder.js";
 import { DefaultEmbedBuilder } from "./at-adapter/projection/serializers/EmbedBuilder.js";
 import { DefaultImageEmbedBuilder } from "./at-adapter/projection/serializers/ImageEmbedBuilder.js";
+import { StoredAttachmentMediaResolver } from "./at-adapter/projection/serializers/StoredAttachmentMediaResolver.js";
+import { DefaultVideoEmbedBuilder } from "./at-adapter/projection/serializers/VideoEmbedBuilder.js";
 import { DefaultFollowRecordSerializer } from "./at-adapter/projection/serializers/FollowRecordSerializer.js";
 import { DefaultLikeRecordSerializer } from "./at-adapter/projection/serializers/LikeRecordSerializer.js";
 import { DefaultRepostRecordSerializer } from "./at-adapter/projection/serializers/RepostRecordSerializer.js";
@@ -112,9 +118,12 @@ import { EventPublisherActivityPubPort } from "./protocol-bridge/adapters/EventP
 import { ActivityPubBridgeIngressClient } from "./protocol-bridge/runtime/ActivityPubBridgeIngressClient.js";
 import { ActivityPubBridgeOutboundResolverClient } from "./protocol-bridge/runtime/ActivityPubBridgeOutboundResolverClient.js";
 import { ActivityPubBridgeActivityResolverClient } from "./protocol-bridge/runtime/ActivityPubBridgeActivityResolverClient.js";
+import { ActivityPubBridgeMediaClient } from "./protocol-bridge/runtime/ActivityPubBridgeMediaClient.js";
 import { ActivityPubBridgeProfileMediaClient } from "./protocol-bridge/runtime/ActivityPubBridgeProfileMediaClient.js";
+import { AtprotoAttachmentMediaResolver } from "./protocol-bridge/runtime/AtprotoAttachmentMediaResolver.js";
 import { AtprotoProfileMediaResolver } from "./protocol-bridge/runtime/AtprotoProfileMediaResolver.js";
 import { AtprotoLinkPreviewThumbResolver } from "./protocol-bridge/runtime/AtprotoLinkPreviewThumbResolver.js";
+import { buildAtExternalFirehoseBootstrap, parseAtExternalFirehoseSources } from "./at-adapter/ingress/AtExternalFirehoseBootstrap.js";
 import { normalizeActivityPubNoteLinkPreviewMode } from "./protocol-bridge/projectors/activitypub/ActivityPubProjectionPolicy.js";
 import {
   applyActivityPubOutboundDeliveryPolicy,
@@ -123,6 +132,7 @@ import {
 import { ProtocolBridgeRuntime } from "./protocol-bridge/runtime/ProtocolBridgeRuntime.js";
 import { createProtocolBridgeContexts } from "./protocol-bridge/runtime/createProtocolBridgeContexts.js";
 import { RedisBridgeProfileMediaStore } from "./protocol-bridge/profile/BridgeProfileMedia.js";
+import { RedisBridgePostMediaStore } from "./protocol-bridge/post/BridgePostMedia.js";
 import { ApToAtProjectionWorker } from "./protocol-bridge/workers/ApToAtProjectionWorker.js";
 import { AtToApProjectionWorker } from "./protocol-bridge/workers/AtToApProjectionWorker.js";
 
@@ -214,8 +224,21 @@ const config = {
     "ap.stream1.local-public.v1",
   protocolBridgeAtCommitTopic:
     process.env.PROTOCOL_BRIDGE_AT_COMMIT_TOPIC || "at.commit.v1",
+  protocolBridgeAtVerifiedIngressTopic:
+    process.env.PROTOCOL_BRIDGE_AT_VERIFIED_INGRESS_TOPIC || "at.ingress.v1",
   protocolBridgeApIngressTopic:
     process.env.PROTOCOL_BRIDGE_AP_INGRESS_TOPIC || "ap.atproto-ingress.v1",
+  atFirehoseConsumerGroupId:
+    process.env.AT_FIREHOSE_CONSUMER_GROUP_ID || "fedify-sidecar-at-firehose",
+  atFirehoseCursorMaxEvents: Number.parseInt(
+    process.env.AT_FIREHOSE_CURSOR_MAX_EVENTS || "10000",
+    10,
+  ),
+  atExternalFirehoseConsumerGroupId:
+    process.env.AT_EXTERNAL_FIREHOSE_CONSUMER_GROUP_ID || "fedify-sidecar-at-firehose-external",
+  atExternalFirehoseRawTopic:
+    process.env.AT_EXTERNAL_FIREHOSE_RAW_TOPIC || "at.firehose.raw.v1",
+  enableAtExternalFirehose: process.env.ENABLE_AT_EXTERNAL_FIREHOSE === "true",
   protocolBridgeLedgerTtlSec: Number.parseInt(
     process.env.PROTOCOL_BRIDGE_LEDGER_TTL_SEC || `${60 * 60 * 24 * 14}`,
     10,
@@ -240,8 +263,20 @@ const config = {
     process.env.PROTOCOL_BRIDGE_PROFILE_MEDIA_MAX_BYTES || `${5 * 1024 * 1024}`,
     10,
   ),
+  protocolBridgeAttachmentMediaTimeoutMs: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_ATTACHMENT_MEDIA_TIMEOUT_MS || "20000",
+    10,
+  ),
+  protocolBridgeAttachmentMediaMaxBytes: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_ATTACHMENT_MEDIA_MAX_BYTES || `${50 * 1024 * 1024}`,
+    10,
+  ),
   protocolBridgeProfileMediaTtlSec: Number.parseInt(
     process.env.PROTOCOL_BRIDGE_PROFILE_MEDIA_TTL_SEC || `${60 * 60 * 24}`,
+    10,
+  ),
+  protocolBridgePostMediaTtlSec: Number.parseInt(
+    process.env.PROTOCOL_BRIDGE_POST_MEDIA_TTL_SEC || `${60 * 60 * 24}`,
     10,
   ),
   protocolBridgeApNoteLinkPreviewMode: normalizeActivityPubNoteLinkPreviewMode(
@@ -267,6 +302,7 @@ let atRedisClient: Redis | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
 let identityWarmupService: IdentityWarmupService | null = null;
 let atEventPublisher: RedpandaEventPublisher | null = null;
+let atFirehoseRuntime: AtFirehoseRuntime | null = null;
 let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
 let isShuttingDown = false;
 
@@ -627,8 +663,16 @@ async function main() {
         const carExporter = new DefaultAtCarExporter(repoRegistry);
 
         // ---- Firehose ----
-        const firehoseCursorStore   = new InMemoryAtFirehoseCursorStore();
+        const firehoseCursorStore   = new RedisAtFirehoseCursorStore(atRedis, {
+          maxEvents: config.atFirehoseCursorMaxEvents,
+        });
         const firehoseSubscriptions = new DefaultAtFirehoseSubscriptionManager(firehoseCursorStore);
+        const firehosePublisher     = new DefaultAtFirehosePublisher(
+          new DefaultAtFirehoseEventEncoder(),
+          firehoseCursorStore,
+          firehoseSubscriptions,
+          new DefaultAtRepoDiffBuilder(),
+        );
 
         // ---- Session service ----
         const sessionSecret =
@@ -745,6 +789,97 @@ async function main() {
         await atEventPublisher.connect();
         const eventPublisherAdapter: EventPublisher = atEventPublisher;
 
+        atFirehoseRuntime = new AtFirehoseRuntime({
+          config: {
+            brokers: (process.env.REDPANDA_BROKERS || "localhost:9092")
+              .split(",")
+              .map((broker) => broker.trim())
+              .filter(Boolean),
+            clientId: process.env.REDPANDA_CLIENT_ID || "fedify-sidecar",
+            consumerGroupId: config.atFirehoseConsumerGroupId,
+            commitTopic: "at.commit.v1",
+            identityTopic: "at.identity.v1",
+            accountTopic: "at.account.v1",
+          },
+          publisher: firehosePublisher,
+          logger: {
+            info: (message, meta) => logger.info(meta || {}, message),
+            warn: (message, meta) => logger.warn(meta || {}, message),
+            error: (message, meta) => logger.error(meta || {}, message),
+          },
+        });
+        await atFirehoseRuntime.start();
+
+        logger.info("AT firehose runtime enabled", {
+          consumerGroupId: config.atFirehoseConsumerGroupId,
+          commitTopic: "at.commit.v1",
+          identityTopic: "at.identity.v1",
+          accountTopic: "at.account.v1",
+          cursorMaxEvents: config.atFirehoseCursorMaxEvents,
+        });
+
+        if (config.enableAtExternalFirehose) {
+          try {
+            const externalFirehoseSources = parseAtExternalFirehoseSources(
+              process.env.AT_EXTERNAL_FIREHOSE_SOURCES,
+            );
+            const externalIngressBootstrap = buildAtExternalFirehoseBootstrap({
+              runtimeConfig: {
+                brokers: (process.env.REDPANDA_BROKERS || "localhost:9092")
+                  .split(",")
+                  .map((broker) => broker.trim())
+                  .filter(Boolean),
+                clientId: process.env.REDPANDA_CLIENT_ID || "fedify-sidecar",
+                consumerGroupId: config.atExternalFirehoseConsumerGroupId,
+                rawTopic: config.atExternalFirehoseRawTopic,
+                sources: externalFirehoseSources,
+              },
+              redis: atRedis as any,
+              eventPublisher: eventPublisherAdapter,
+              repoRegistry,
+              commitVerifier: null,
+              logger: {
+                info: (message, meta) => logger.info(meta || {}, message),
+                warn: (message, meta) => logger.warn(meta || {}, message),
+                error: (message, meta) => logger.error(meta || {}, message),
+              },
+              identityResolverOptions: {
+                timeoutMs: config.externalPdsTimeoutMs,
+                maxAttempts: config.externalPdsMaxAttempts,
+              },
+              syncRebuilderOptions: {
+                fetchImpl: fetch,
+                timeoutMs: config.externalPdsTimeoutMs,
+                maxAttempts: config.externalPdsMaxAttempts,
+              },
+            });
+
+            logger.warn(
+              {
+                enableAtExternalFirehose: true,
+                sourceCount: externalIngressBootstrap.sources.length,
+                rawTopic: config.atExternalFirehoseRawTopic,
+                consumerGroupId: config.atExternalFirehoseConsumerGroupId,
+                bootstrapStatus: externalIngressBootstrap.kind,
+                bootstrapReason: externalIngressBootstrap.kind === "disabled"
+                  ? externalIngressBootstrap.reason
+                  : undefined,
+              },
+              externalIngressBootstrap.kind === "disabled"
+                ? `External AT firehose intake requested but not started: ${externalIngressBootstrap.message}`
+                : "External AT firehose intake bootstrap was prepared",
+            );
+          } catch (error: any) {
+            logger.error(
+              {
+                enableAtExternalFirehose: true,
+                error: error?.message || String(error),
+              },
+              "External AT firehose intake requested but configuration validation failed",
+            );
+          }
+        }
+
         // ---- Projection worker ----
         const blobStore             = new DefaultAtBlobStore();
         const blobReferenceMapper   = new DefaultBlobReferenceMapper();
@@ -752,11 +887,20 @@ async function main() {
         const profileMediaStore     = new RedisBridgeProfileMediaStore(atRedis, {
           ttlSeconds: config.protocolBridgeProfileMediaTtlSec,
         });
+        const postMediaStore        = new RedisBridgePostMediaStore(atRedis, {
+          ttlSeconds: config.protocolBridgePostMediaTtlSec,
+        });
         const bridgeRasterImageClient = new ActivityPubBridgeProfileMediaClient({
           activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
           bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
           timeoutMs: config.protocolBridgeProfileMediaTimeoutMs,
           maxMediaBytes: config.protocolBridgeProfileMediaMaxBytes,
+        });
+        const bridgeAttachmentMediaClient = new ActivityPubBridgeMediaClient({
+          activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
+          bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+          timeoutMs: config.protocolBridgeAttachmentMediaTimeoutMs,
+          maxMediaBytes: config.protocolBridgeAttachmentMediaMaxBytes,
         });
         const profileMediaResolver  = config.enableProtocolBridgeApToAt
           ? new AtprotoProfileMediaResolver(
@@ -769,6 +913,9 @@ async function main() {
               },
             )
           : { resolveAvatarBlob: async () => null, resolveBannerBlob: async () => null };
+        const attachmentMediaResolver = new StoredAttachmentMediaResolver(postMediaStore, {
+          warn: (message, meta) => logger.warn(meta || {}, message),
+        });
         const rkeyService          = new DefaultAtRkeyService();
         const recordRefResolver    = new DefaultAtRecordRefResolver(aliasStore);
         const subjectResolver      = new DefaultAtSubjectResolver(identityRepo);
@@ -795,7 +942,10 @@ async function main() {
           {
             mediaResolver:       profileMediaResolver,
             facetBuilder:        new DefaultFacetBuilder(),
-            embedBuilder:        new DefaultEmbedBuilder(new DefaultImageEmbedBuilder()),
+            embedBuilder:        new DefaultEmbedBuilder(
+              new DefaultImageEmbedBuilder(blobUploadService, attachmentMediaResolver),
+              new DefaultVideoEmbedBuilder(blobUploadService, attachmentMediaResolver),
+            ),
             recordRefResolver,
             subjectResolver,
             targetAliasResolver,
@@ -821,6 +971,7 @@ async function main() {
           resultStore,
           identityRepo,
           profileMediaStore,
+          postMediaStore,
         });
         const writeGateway  = new DefaultAtWriteGateway({
           normalizer:  new DefaultAtWriteNormalizer(),
@@ -862,6 +1013,14 @@ async function main() {
             accountResolverForSession,
             config.enableProtocolBridgeApToAt
               ? {
+                  attachmentMediaResolver: new AtprotoAttachmentMediaResolver(
+                    bridgeAttachmentMediaClient,
+                    blobUploadService,
+                    {
+                      warn: (message, meta) => logger.warn(meta || {}, message),
+                      error: (message, meta) => logger.error(meta || {}, message),
+                    },
+                  ),
                   linkPreviewThumbResolver: new AtprotoLinkPreviewThumbResolver(
                     bridgeRasterImageClient,
                     blobUploadService,
@@ -907,6 +1066,7 @@ async function main() {
               consumerGroupId: config.protocolBridgeConsumerGroupId,
               apSourceTopic: config.protocolBridgeApSourceTopic,
               atCommitTopic: config.protocolBridgeAtCommitTopic,
+              atVerifiedIngressTopic: config.protocolBridgeAtVerifiedIngressTopic,
               apIngressTopic: config.protocolBridgeApIngressTopic,
               enableApToAt: config.enableProtocolBridgeApToAt,
               enableAtToAp: config.enableProtocolBridgeAtToAp,
@@ -948,6 +1108,7 @@ async function main() {
             enableAtToAp: config.enableProtocolBridgeAtToAp,
             apSourceTopic: config.protocolBridgeApSourceTopic,
             atCommitTopic: config.protocolBridgeAtCommitTopic,
+            atVerifiedIngressTopic: config.protocolBridgeAtVerifiedIngressTopic,
             apIngressTopic: config.protocolBridgeApIngressTopic,
           });
         }
@@ -1192,6 +1353,12 @@ async function shutdown(signal: string): Promise<void> {
       await identityWarmupService.stop();
       identityWarmupService = null;
       logger.info("Identity warmup service stopped");
+    }
+
+    if (atFirehoseRuntime) {
+      await atFirehoseRuntime.stop();
+      atFirehoseRuntime = null;
+      logger.info("AT firehose runtime stopped");
     }
 
     if (protocolBridgeRuntime) {

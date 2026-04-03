@@ -20,7 +20,8 @@
  * Ref: https://atproto.com/specs/event-stream
  */
 
-import { AtFirehoseEventType } from './AtIngressEvents';
+import { decodeFirst as decodeCborFirst } from 'cborg';
+import { AtFirehoseEventType } from './AtIngressEvents.js';
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -108,6 +109,11 @@ function validateDid(value: unknown): string | null {
  * The ATProto spec uses 64-bit integers; JavaScript handles up to 2^53 safely.
  */
 function validateSeq(value: unknown): number {
+  if (typeof value === 'bigint') {
+    if (value < 0n) return -1;
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) return Number.MAX_SAFE_INTEGER;
+    return Number(value);
+  }
   if (typeof value !== 'number' || !Number.isFinite(value)) return -1;
   if (value < 0) return -1;
   if (value > Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER;
@@ -125,48 +131,28 @@ export class DefaultAtFirehoseDecoder implements AtFirehoseDecoder {
     }
 
     try {
-      // Lazy-require to avoid bundling issues in test environments.
-      // In production, @ipld/dag-cbor or @atproto/common is the preferred decoder.
-      // We use a two-pass approach: decode header first, then optionally body.
-      const { decode, decodeFirst } = requireCbor();
-
-      // ATProto frames are two concatenated CBOR values: header + body.
-      // decodeFirst returns [value, remainingBytes].
-      const [header, remaining] = decodeFirst(frame);
-
-      if (!header || typeof header !== 'object') {
-        throw new FirehoseDecodeError('Frame header is not a CBOR map');
-      }
-
-      const headerMap = header as Record<string, unknown>;
+      const [header, remaining] = decodeFirstValue(frame);
+      const headerMap = requireMap(header, 'Frame header is not a CBOR map');
+      validateHeaderMap(headerMap);
 
       // "t" is the event type field in the ATProto firehose header.
       const eventType = classifyEventType(headerMap['t']);
 
-      // "seq" may appear in the header or body depending on the event type.
-      // Try header first, then fall through to body decode for seq.
       let seq = validateSeq(headerMap['seq']);
-
-      // For some event types, seq lives in the body.  Attempt a cheap body
-      // decode only when seq was not found in the header.
-      let did: string | null = null;
-      if (seq === -1 || eventType === '#commit' || eventType === '#identity' || eventType === '#account') {
-        try {
-          if (remaining && remaining.length > 0) {
-            const [body] = decodeFirst(remaining);
-            if (body && typeof body === 'object') {
-              const bodyMap = body as Record<string, unknown>;
-              if (seq === -1) {
-                seq = validateSeq(bodyMap['seq']);
-              }
-              // Extract DID cheaply from body
-              did = validateDid(bodyMap['did'] ?? bodyMap['repo']);
-            }
-          }
-        } catch {
-          // Body decode failure is non-fatal for header classification.
-        }
+      if (remaining.length === 0) {
+        throw new FirehoseDecodeError('Frame payload is missing');
       }
+
+      const [body, trailing] = decodeFirstValue(remaining);
+      if (trailing.length > 0) {
+        throw new FirehoseDecodeError('Frame contains trailing bytes after payload');
+      }
+      const bodyMap = requireMap(body, 'Frame payload is not a CBOR map');
+
+      if (seq === -1) {
+        seq = validateSeq(bodyMap['seq']);
+      }
+      const did = validateDid(bodyMap['did'] ?? bodyMap['repo']);
 
       return { eventType, seq, did };
     } catch (err) {
@@ -181,15 +167,21 @@ export class DefaultAtFirehoseDecoder implements AtFirehoseDecoder {
     }
 
     try {
-      const { decodeFirst } = requireCbor();
+      const [header, remaining] = decodeFirstValue(frame);
+      const headerMap = requireMap(header, 'Frame header is not a CBOR map');
+      validateHeaderMap(headerMap);
 
-      const [header, remaining] = decodeFirst(frame);
-      let body: unknown = null;
-      if (remaining && remaining.length > 0) {
-        [body] = decodeFirst(remaining);
+      if (remaining.length === 0) {
+        throw new FirehoseDecodeError('Frame payload is missing');
       }
 
-      return { header, body };
+      const [body, trailing] = decodeFirstValue(remaining);
+      if (trailing.length > 0) {
+        throw new FirehoseDecodeError('Frame contains trailing bytes after payload');
+      }
+      const bodyMap = requireMap(body, 'Frame payload is not a CBOR map');
+
+      return { header: headerMap, body: bodyMap };
     } catch (err) {
       if (err instanceof FirehoseDecodeError) throw err;
       throw new FirehoseDecodeError('Failed to fully decode frame', err);
@@ -197,64 +189,40 @@ export class DefaultAtFirehoseDecoder implements AtFirehoseDecoder {
   }
 }
 
-// ---------------------------------------------------------------------------
-// CBOR loader
-// ---------------------------------------------------------------------------
+const CBOR_DECODE_OPTIONS = {
+  strict: true,
+  allowUndefined: false,
+};
 
-interface CborLib {
-  decode: (data: Uint8Array) => unknown;
-  decodeFirst: (data: Uint8Array) => [unknown, Uint8Array];
-}
-
-/**
- * Lazily load a CBOR library.  Tries @atproto/common first (which uses
- * dag-cbor), then falls back to a minimal inline implementation suitable
- * for testing and environments without the full ATProto SDK.
- */
-function requireCbor(): CborLib {
-  // Try @atproto/common (production path)
+function decodeFirstValue(data: Uint8Array): [unknown, Uint8Array] {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const cborx = require('cbor-x');
-    return {
-      decode: (data: Uint8Array) => cborx.decode(data),
-      decodeFirst: (data: Uint8Array): [unknown, Uint8Array] => {
-        // cbor-x does not expose decodeFirst; implement via decode + offset.
-        // For the ATProto two-value frame format we use a simple heuristic:
-        // decode the full buffer and return the first value.
-        // A production implementation should use @atproto/repo's dag-cbor.
-        const decoded = cborx.decode(data);
-        // Return empty remainder — body will be decoded separately if needed.
-        return [decoded, new Uint8Array(0)];
-      },
-    };
-  } catch {
-    // Fallback: minimal stub for test environments.
-    return buildMinimalCborStub();
+    const [value, remainder] = decodeCborFirst(data, CBOR_DECODE_OPTIONS);
+    return [value, Uint8Array.from(remainder)];
+  } catch (error) {
+    throw new FirehoseDecodeError('Invalid DRISL-CBOR frame', error);
   }
 }
 
-/**
- * Minimal CBOR stub for test environments where cbor-x is not installed.
- * Supports only the subset of CBOR used by ATProto firehose frames.
- */
-function buildMinimalCborStub(): CborLib {
-  return {
-    decode: (data: Uint8Array): unknown => {
-      // Attempt JSON parse of the UTF-8 payload as a last resort.
-      try {
-        return JSON.parse(Buffer.from(data).toString('utf8'));
-      } catch {
-        return {};
-      }
-    },
-    decodeFirst: (data: Uint8Array): [unknown, Uint8Array] => {
-      try {
-        const parsed = JSON.parse(Buffer.from(data).toString('utf8'));
-        return [parsed, new Uint8Array(0)];
-      } catch {
-        return [{}, new Uint8Array(0)];
-      }
-    },
-  };
+function requireMap(value: unknown, message: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value instanceof Uint8Array) {
+    throw new FirehoseDecodeError(message);
+  }
+  return value as Record<string, unknown>;
+}
+
+function validateHeaderMap(header: Record<string, unknown>): void {
+  const op = header['op'];
+  if (typeof op !== 'number' || !Number.isInteger(op)) {
+    throw new FirehoseDecodeError('Frame header is missing a valid op field');
+  }
+  if (op === 1 && typeof header['t'] !== 'string') {
+    throw new FirehoseDecodeError('Message frame header is missing a valid t field');
+  }
+  if (op !== 1 && op !== -1) {
+    // Unknown op values are tolerated and later classified as #info.
+    return;
+  }
+  if (op === -1 && 't' in header && typeof header['t'] !== 'string') {
+    throw new FirehoseDecodeError('Error frame header contains an invalid t field');
+  }
 }

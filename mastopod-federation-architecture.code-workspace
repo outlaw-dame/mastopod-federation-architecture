@@ -1,0 +1,24 @@
+{
+	"folders": [
+		{
+			"name": "mastopod-federation-architecture",
+			"path": "."
+		},
+		{
+			"name": "activity-pods",
+			"path": "../activitypods-work/activity-pods"
+		},
+		{
+			"name": "mastopod-federation-architecture",
+			"path": "../activitypods-work/mastopod-federation-architecture"
+		}
+	],
+	"settings": {
+		"chat.tools.terminal.autoApprove": {
+			"npm --prefix fedify-sidecar": true,
+			"lsof": true,
+			"true": true,
+			"brew": true
+		}
+	}
+}

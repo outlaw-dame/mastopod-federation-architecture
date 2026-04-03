@@ -1,4 +1,5 @@
 import type { CanonicalActorRef } from "../canonical/CanonicalActorRef.js";
+import type { CanonicalAttachment } from "../canonical/CanonicalContent.js";
 import type { CanonicalIntent } from "../canonical/CanonicalIntent.js";
 import type { CanonicalObjectRef } from "../canonical/CanonicalObjectRef.js";
 import type { ProtocolName, CanonicalProvenance } from "../canonical/CanonicalEnvelope.js";
@@ -36,6 +37,11 @@ export interface ProjectionCommandMetadata {
   activityPubHints?: ActivityPubBridgeActivityHints;
 }
 
+export interface AtAttachmentMediaHint extends Pick<
+  CanonicalAttachment,
+  "attachmentId" | "mediaType" | "url" | "cid" | "byteSize" | "alt" | "width" | "height"
+> {}
+
 export interface AtProjectionCommand {
   kind: "createRecord" | "updateRecord" | "deleteRecord";
   collection: string;
@@ -44,6 +50,7 @@ export interface AtProjectionCommand {
   record?: Record<string, unknown>;
   canonicalRefIdHint?: string;
   linkPreviewThumbUrlHint?: string | null;
+  attachmentMediaHints?: AtAttachmentMediaHint[];
   metadata?: ProjectionCommandMetadata;
 }
 

@@ -6,7 +6,11 @@ import {
 } from "../../at-adapter/writes/AtWriteTypes.js";
 import { validateRkey } from "../../at-adapter/repo/AtRkeyService.js";
 import { sanitizeJsonObject } from "../../utils/safe-json.js";
-import type { AtProjectionCommand, AtprotoWritePort } from "../ports/ProtocolBridgePorts.js";
+import type {
+  AtAttachmentMediaHint,
+  AtProjectionCommand,
+  AtprotoWritePort,
+} from "../ports/ProtocolBridgePorts.js";
 import { ProtocolBridgeAdapterError } from "./ProtocolBridgeAdapterError.js";
 
 export interface LinkPreviewThumbResolver {
@@ -21,6 +25,19 @@ export interface LinkPreviewThumbResolver {
   ): Promise<unknown | null>;
 }
 
+export interface AttachmentMediaResolver {
+  resolveAttachmentBlob(
+    did: string,
+    attachment: AtAttachmentMediaHint,
+    scope: {
+      canonicalIntentId?: string | null;
+      canonicalRefIdHint?: string | null;
+      collection: string;
+      rkey?: string | null;
+    },
+  ): Promise<unknown | null>;
+}
+
 export interface AtprotoWriteGatewayPortLogger {
   warn(message: string, meta?: Record<string, unknown>): void;
 }
@@ -30,6 +47,7 @@ export interface AtprotoWriteGatewayPortOptions {
   maxRecordBytes?: number;
   supportedCollections?: ReadonlySet<string>;
   linkPreviewThumbResolver?: LinkPreviewThumbResolver;
+  attachmentMediaResolver?: AttachmentMediaResolver;
   logger?: AtprotoWriteGatewayPortLogger;
 }
 
@@ -38,6 +56,7 @@ export class AtprotoWriteGatewayPort implements AtprotoWritePort {
   private readonly maxRecordBytes: number;
   private readonly supportedCollections: ReadonlySet<string>;
   private readonly linkPreviewThumbResolver?: LinkPreviewThumbResolver;
+  private readonly attachmentMediaResolver?: AttachmentMediaResolver;
   private readonly logger?: AtprotoWriteGatewayPortLogger;
 
   public constructor(
@@ -49,6 +68,7 @@ export class AtprotoWriteGatewayPort implements AtprotoWritePort {
     this.maxRecordBytes = options.maxRecordBytes ?? 256_000;
     this.supportedCollections = options.supportedCollections ?? SUPPORTED_COLLECTIONS;
     this.linkPreviewThumbResolver = options.linkPreviewThumbResolver;
+    this.attachmentMediaResolver = options.attachmentMediaResolver;
     this.logger = options.logger;
   }
 
@@ -207,6 +227,7 @@ export class AtprotoWriteGatewayPort implements AtprotoWritePort {
 
   private async buildNativeRecord(command: AtProjectionCommand): Promise<Record<string, unknown>> {
     const record = command.record ? { ...command.record } : {};
+    await this.attachResolvedMediaEmbed(record, command);
     await this.attachExternalEmbedThumb(record, command);
     if (command.canonicalRefIdHint) {
       record["_bridgeCanonicalRefId"] = command.canonicalRefIdHint;
@@ -217,6 +238,54 @@ export class AtprotoWriteGatewayPort implements AtprotoWritePort {
     return sanitizeJsonObject(record, {
       maxBytes: this.maxRecordBytes,
     });
+  }
+
+  private async attachResolvedMediaEmbed(
+    record: Record<string, unknown>,
+    command: AtProjectionCommand,
+  ): Promise<void> {
+    const hints = command.attachmentMediaHints ?? [];
+    if (hints.length === 0) {
+      return;
+    }
+
+    const existingEmbed = toPlainObject(record["embed"]);
+    const existingType = typeof existingEmbed?.["$type"] === "string" ? existingEmbed["$type"] : null;
+    if (existingType === "app.bsky.embed.images" || existingType === "app.bsky.embed.video") {
+      return;
+    }
+
+    const preferredKind = selectPreferredAttachmentHintKind(hints);
+    if (!preferredKind) {
+      return;
+    }
+
+    const selectedHints = preferredKind === "video"
+      ? hints.filter((attachment) => attachment.mediaType.toLowerCase().startsWith("video/")).slice(0, 1)
+      : hints.filter((attachment) => attachment.mediaType.toLowerCase().startsWith("image/")).slice(0, 4);
+
+    if (selectedHints.length === 0) {
+      return;
+    }
+
+    if (preferredKind === "video") {
+      const attachment = selectedHints[0]!;
+      const blob = await this.resolveAttachmentBlob(command, attachment);
+      record["embed"] = buildVideoEmbed(blob, attachment);
+      return;
+    }
+
+    const images = [];
+    for (const attachment of selectedHints) {
+      const blob = await this.resolveAttachmentBlob(command, attachment);
+      images.push(buildImageEntry(blob, attachment));
+    }
+    if (images.length > 0) {
+      record["embed"] = {
+        $type: "app.bsky.embed.images",
+        images,
+      };
+    }
   }
 
   private async attachExternalEmbedThumb(
@@ -270,6 +339,50 @@ export class AtprotoWriteGatewayPort implements AtprotoWritePort {
       );
     }
   }
+
+  private async resolveAttachmentBlob(
+    command: AtProjectionCommand,
+    attachment: AtAttachmentMediaHint,
+  ): Promise<Record<string, unknown>> {
+    const inlineBlob = toInlineBlobRef(attachment);
+    if (inlineBlob) {
+      return inlineBlob;
+    }
+
+    if (!attachment.url) {
+      throw new ProtocolBridgeAdapterError(
+        "AT_BRIDGE_ATTACHMENT_BLOB_UNRESOLVED",
+        `Attachment ${attachment.attachmentId} for ${command.collection} could not be resolved to an AT blob reference.`,
+      );
+    }
+
+    if (!this.attachmentMediaResolver) {
+      throw new ProtocolBridgeAdapterError(
+        "AT_BRIDGE_ATTACHMENT_RESOLVER_MISSING",
+        `Attachment ${attachment.attachmentId} for ${command.collection} requires bridge media resolution, but no resolver is configured.`,
+      );
+    }
+
+    const resolved = await this.attachmentMediaResolver.resolveAttachmentBlob(
+      command.repoDid,
+      attachment,
+      {
+        canonicalIntentId: command.metadata?.canonicalIntentId ?? null,
+        canonicalRefIdHint: command.canonicalRefIdHint ?? null,
+        collection: command.collection,
+        rkey: command.rkey ?? null,
+      },
+    );
+
+    if (!resolved || !isBlobRefLike(resolved)) {
+      throw new ProtocolBridgeAdapterError(
+        "AT_BRIDGE_ATTACHMENT_BLOB_UNRESOLVED",
+        `Attachment ${attachment.attachmentId} for ${command.collection} could not be uploaded to a native AT blob.`,
+      );
+    }
+
+    return resolved;
+  }
 }
 
 function toPlainObject(value: unknown): Record<string, unknown> | null {
@@ -284,4 +397,103 @@ function deriveFallbackRkey(command: AtProjectionCommand): string {
     .update(`${command.repoDid}:${command.collection}:${command.metadata?.canonicalIntentId ?? ""}`)
     .digest("hex")
     .slice(0, 13);
+}
+
+function selectPreferredAttachmentHintKind(
+  hints: readonly AtAttachmentMediaHint[],
+): "video" | "images" | null {
+  if (hints.some((attachment) => attachment.mediaType.toLowerCase().startsWith("video/"))) {
+    return "video";
+  }
+  if (hints.some((attachment) => attachment.mediaType.toLowerCase().startsWith("image/"))) {
+    return "images";
+  }
+  return null;
+}
+
+function toInlineBlobRef(attachment: AtAttachmentMediaHint): Record<string, unknown> | null {
+  if (!attachment.cid || attachment.byteSize == null || attachment.byteSize < 0) {
+    return null;
+  }
+  const mimeType = attachment.mediaType.trim();
+  if (!mimeType.includes("/") || mimeType.endsWith("/*")) {
+    return null;
+  }
+  return {
+    $type: "blob",
+    ref: {
+      $link: attachment.cid,
+    },
+    mimeType,
+    size: Math.floor(attachment.byteSize),
+  };
+}
+
+function buildImageEntry(
+  blob: Record<string, unknown>,
+  attachment: AtAttachmentMediaHint,
+): Record<string, unknown> {
+  const image: Record<string, unknown> = {
+    alt: normalizeAltText(attachment.alt),
+    image: blob,
+  };
+
+  if (
+    Number.isFinite(attachment.width)
+    && Number.isFinite(attachment.height)
+    && (attachment.width ?? 0) > 0
+    && (attachment.height ?? 0) > 0
+  ) {
+    image["aspectRatio"] = {
+      width: Math.floor(attachment.width!),
+      height: Math.floor(attachment.height!),
+    };
+  }
+
+  return image;
+}
+
+function buildVideoEmbed(
+  blob: Record<string, unknown>,
+  attachment: AtAttachmentMediaHint,
+): Record<string, unknown> {
+  const embed: Record<string, unknown> = {
+    $type: "app.bsky.embed.video",
+    video: blob,
+  };
+
+  const alt = normalizeAltText(attachment.alt);
+  if (alt) {
+    embed["alt"] = alt;
+  }
+
+  if (
+    Number.isFinite(attachment.width)
+    && Number.isFinite(attachment.height)
+    && (attachment.width ?? 0) > 0
+    && (attachment.height ?? 0) > 0
+  ) {
+    embed["aspectRatio"] = {
+      width: Math.floor(attachment.width!),
+      height: Math.floor(attachment.height!),
+    };
+  }
+
+  return embed;
+}
+
+function normalizeAltText(value: string | null | undefined): string {
+  const normalized = (value ?? "").trim();
+  return normalized.length > 1000 ? `${normalized.slice(0, 999)}…` : normalized;
+}
+
+function isBlobRefLike(value: unknown): value is Record<string, unknown> {
+  const blob = toPlainObject(value);
+  const ref = toPlainObject(blob?.["ref"]);
+  return Boolean(
+    blob &&
+    typeof ref?.["$link"] === "string" &&
+    typeof blob["mimeType"] === "string" &&
+    typeof blob["size"] === "number",
+  );
 }
