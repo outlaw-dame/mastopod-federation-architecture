@@ -9,14 +9,20 @@
  *  - Implement onInboundVerified / onOutboundDelivered hooks by forwarding
  *    observability signals into Fedify context (tracing, metrics).
  *  - Expose the Federation instance so index.ts can register it with the
- *    Hono/Fastify HTTP server once ENABLE_FEDIFY_RUNTIME_INTEGRATION=true.
+ *    Fastify HTTP server once ENABLE_FEDIFY_RUNTIME_INTEGRATION=true.
+ *  - Verify canonical ActivityPub inbox HTTP requests and enqueue trusted
+ *    deliveries back into the sidecar's Redis Streams pipeline.
  *
  * Architecture boundary:
  *  - ActivityPods remains the signing authority; keys never leave it.
- *  - This adapter does NOT perform HTTP delivery — that stays in OutboundWorker.
- *  - This adapter does NOT verify HTTP signatures — that stays in InboundWorker.
+ *  - Outbound delivery semantics are centralized here when runtime integration
+ *    is enabled, while OutboundWorker remains the durable queue/rate-limit/
+ *    retry orchestrator and ActivityPods remains the only signer.
+ *  - Canonical inbox verification happens here via Fedify. The InboundWorker
+ *    remains the durable forwarding/event pipeline and still performs raw
+ *    HTTP-signature verification for legacy fallback ingress paths.
  *  - The Federation instance here is used for: actor document dispatch,
- *    WebFinger, NodeInfo, and future inbox handler delegation.
+ *    WebFinger, NodeInfo, and verified inbox delegation.
  *
  * Fedify 2.x migration notes applied here:
  *  - Uses `documentLoaderFactory` / `contextLoaderFactory` (not deprecated
@@ -25,17 +31,36 @@
  *  - KvStore.list() is implemented (required in 2.x).
  *  - Idempotency: explicit `"per-inbox"` (now the default, documented here for
  *    clarity since the sidecar has its own Redis-level idempotency layer).
+ *
+ * Key handling:
+ *  - Private keys never leave ActivityPods; this adapter fetches only the
+ *    public key PEM from the ActivityPods internal API for inclusion in actor
+ *    documents served to the Fediverse.
+ *  - Public keys are imported as verify-only CryptoKey objects (usage:
+ *    ["verify"]) so they can be embedded in the Fedify CryptographicKey
+ *    vocabulary object attached to the Person actor.
+ *  - setActorKeyPairsDispatcher is intentionally NOT called because Fedify
+ *    requires both halves of a CryptographicKeyPair for that dispatcher, and
+ *    private keys are never available on the sidecar side.
  */
 
 import {
   createFederation,
-  type Actor,
   type Context,
   type Federation,
-  Person,
+  type InboxContext,
+  SendActivityError,
 } from "@fedify/fedify";
-import type { FederationRuntimeAdapter } from "../core-domain/contracts/SigningContracts.js";
-import type { FedifyKvStore } from "./FedifyKvAdapter.js";
+import type { KvStore } from "@fedify/fedify";
+import { Activity, CryptographicKey, Person } from "@fedify/vocab";
+import type { Actor } from "@fedify/vocab";
+import { isIP } from "node:net";
+import { request } from "undici";
+import type {
+  FederationRuntimeAdapter,
+  OutboundDeliveryInput,
+  OutboundDeliveryResult,
+} from "../core-domain/contracts/SigningContracts.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -51,6 +76,23 @@ export interface FedifyAdapterConfig {
   activityPodsUrl: string;
   /** Bearer token for ActivityPods internal API calls. */
   activityPodsToken: string;
+  /**
+   * Queue callback for verified inbound ActivityPub deliveries. When present,
+   * Fedify becomes the primary inbox verifier/router and hands trusted
+   * deliveries back to the sidecar's Redis Streams pipeline.
+   */
+  enqueueVerifiedInbox?: (delivery: VerifiedInboxDelivery) => Promise<{ envelopeId: string } | void>;
+  /** Outbound ActivityPub request timeout in milliseconds. */
+  requestTimeoutMs?: number;
+  /** User-Agent for outbound ActivityPub delivery requests. */
+  userAgent?: string;
+  /**
+   * HTTP status codes treated as permanent outbound delivery failures.
+   * Fedify's default behavior is `[404, 410]`.
+   */
+  permanentFailureStatusCodes?: readonly number[];
+  /** Maximum error response body bytes retained for diagnostics. */
+  maxErrorResponseBodyBytes?: number;
 }
 
 export interface FedifyAdapterLogger {
@@ -65,6 +107,28 @@ const NOOP_LOGGER: FedifyAdapterLogger = {
   error: () => undefined,
 };
 
+interface FedifyOutboundRuntimeConfig {
+  requestTimeoutMs: number;
+  userAgent: string;
+  permanentFailureStatusCodes: readonly number[];
+  maxErrorResponseBodyBytes: number;
+}
+
+const DEFAULT_PERMANENT_FAILURE_STATUS_CODES = [404, 410] as const;
+const DEFAULT_MAX_ERROR_RESPONSE_BODY_BYTES = 1024;
+
+// ---------------------------------------------------------------------------
+// Input validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Permitted characters for an ActivityPub actor identifier (local part only).
+ * Allows alphanumeric, dot, underscore, and hyphen; max 128 chars to match
+ * Mastodon's practical limit. This guards against path-traversal injection
+ * before the identifier is interpolated into the ActivityPods internal URL.
+ */
+const IDENTIFIER_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
+
 // ---------------------------------------------------------------------------
 // Adapter context data — passed through every Fedify context callback
 // ---------------------------------------------------------------------------
@@ -73,6 +137,220 @@ interface SidecarContext {
   domain: string;
   activityPodsUrl: string;
   activityPodsToken: string;
+  remoteIp: string;
+  enqueueVerifiedInbox?: (delivery: VerifiedInboxDelivery) => Promise<{ envelopeId: string } | void>;
+}
+
+export interface VerifiedInboxDelivery {
+  path: string;
+  body: string;
+  remoteIp: string;
+  verifiedActorUri: string;
+  verifiedAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// Public key import
+// ---------------------------------------------------------------------------
+
+/**
+ * Import a PEM-encoded RSA public key as a verify-only Web Crypto CryptoKey.
+ *
+ * Accepts SPKI format ("BEGIN PUBLIC KEY") which is the ActivityPub/RSA-SHA256
+ * standard emitted by ActivityPods. Returns null on any parse or import error
+ * so that actor dispatch can degrade gracefully (actor document is still
+ * served, just without an embedded publicKey).
+ *
+ * Security notes:
+ *  - Usage is restricted to ["verify"] — the key can never be used to sign.
+ *  - extractable: true is required so Fedify can re-serialise the key into
+ *    the JSON-LD actor document. The exported form remains the public key only.
+ *  - No private key material ever passes through this function.
+ */
+async function importPublicKeyPem(pem: string): Promise<CryptoKey | null> {
+  try {
+    // Strip PEM headers and all whitespace to get raw base64.
+    const pemBody = pem
+      .replace(/-----BEGIN [^-]+-----/, "")
+      .replace(/-----END [^-]+-----/, "")
+      .replace(/\s+/g, "");
+
+    if (pemBody.length === 0) return null;
+
+    // Decode base64 → DER binary. Use Buffer (Node 20+) for safety.
+    const der = Buffer.from(pemBody, "base64");
+
+    return await crypto.subtle.importKey(
+      "spki",
+      der,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      /* extractable */ true, // required for JSON-LD serialisation
+      ["verify"]              // never sign; this is a public key only
+    );
+  } catch {
+    // Deliberate: import errors are non-fatal; actor dispatch continues.
+    return null;
+  }
+}
+
+function resolveOutboundRuntimeConfig(
+  config: FedifyAdapterConfig,
+): FedifyOutboundRuntimeConfig {
+  return {
+    requestTimeoutMs:
+      Number.isFinite(config.requestTimeoutMs) && (config.requestTimeoutMs ?? 0) > 0
+        ? config.requestTimeoutMs!
+        : 30_000,
+    userAgent:
+      typeof config.userAgent === "string" && config.userAgent.trim().length > 0
+        ? config.userAgent
+        : "Fedify-Sidecar/1.0 (ActivityPods)",
+    permanentFailureStatusCodes:
+      config.permanentFailureStatusCodes && config.permanentFailureStatusCodes.length > 0
+        ? [...new Set(config.permanentFailureStatusCodes.filter(isValidHttpStatusCode))]
+        : DEFAULT_PERMANENT_FAILURE_STATUS_CODES,
+    maxErrorResponseBodyBytes:
+      Number.isFinite(config.maxErrorResponseBodyBytes) && (config.maxErrorResponseBodyBytes ?? 0) > 0
+        ? config.maxErrorResponseBodyBytes!
+        : DEFAULT_MAX_ERROR_RESPONSE_BODY_BYTES,
+  };
+}
+
+function isValidHttpStatusCode(statusCode: number): boolean {
+  return Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599;
+}
+
+function normalizeOutboundTargetUrl(value: string): URL | null {
+  let targetUrl: URL;
+  try {
+    targetUrl = new URL(value);
+  } catch {
+    return null;
+  }
+
+  if (targetUrl.username || targetUrl.password) {
+    return null;
+  }
+
+  const hostname = targetUrl.hostname.toLowerCase();
+  const protocol = targetUrl.protocol.toLowerCase();
+  if (protocol !== "https:" && !(protocol === "http:" && isLoopbackHost(hostname))) {
+    return null;
+  }
+  if (isPrivateLiteralIp(hostname) && !isLoopbackHost(hostname)) {
+    return null;
+  }
+
+  targetUrl.hash = "";
+  return targetUrl;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  if (hostname === "localhost" || hostname === "::1") {
+    return true;
+  }
+
+  const version = isIP(hostname);
+  if (version === 4) {
+    return hostname.startsWith("127.");
+  }
+  return false;
+}
+
+function isPrivateLiteralIp(hostname: string): boolean {
+  const version = isIP(hostname);
+  if (version === 4) {
+    const octets = hostname.split(".").map((part) => Number.parseInt(part, 10));
+    if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+      return false;
+    }
+    const a = octets[0];
+    const b = octets[1];
+    if (a == null || b == null) {
+      return false;
+    }
+    return (
+      a === 10 ||
+      a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168)
+    );
+  }
+
+  if (version === 6) {
+    const normalized = hostname.toLowerCase();
+    return (
+      normalized === "::1" ||
+      normalized.startsWith("fc") ||
+      normalized.startsWith("fd") ||
+      normalized.startsWith("fe80:")
+    );
+  }
+
+  return false;
+}
+
+async function readLimitedResponseBody(
+  body: AsyncIterable<Uint8Array> | null | undefined,
+  maxBytes: number,
+): Promise<string> {
+  if (body == null) {
+    return "";
+  }
+
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let totalBytes = 0;
+  let truncated = false;
+
+  for await (const chunk of body) {
+    const remaining = maxBytes - totalBytes;
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    const slice = chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
+    chunks.push(decoder.decode(slice, { stream: slice.byteLength === chunk.byteLength }));
+    totalBytes += slice.byteLength;
+    if (slice.byteLength !== chunk.byteLength) {
+      truncated = true;
+      break;
+    }
+  }
+
+  const finalChunk = decoder.decode();
+  if (finalChunk.length > 0) {
+    chunks.push(finalChunk);
+  }
+
+  let result = chunks.join("");
+  if (truncated) {
+    result += "… (truncated)";
+  }
+  return result;
+}
+
+function parseRetryAfterMs(value: string | string[] | undefined): number | undefined {
+  if (Array.isArray(value)) {
+    return parseRetryAfterMs(value[0]);
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  const seconds = Number.parseInt(trimmed, 10);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, 12 * 60 * 60 * 1000);
+  }
+
+  const retryAt = Date.parse(trimmed);
+  if (!Number.isFinite(retryAt)) {
+    return undefined;
+  }
+
+  return Math.min(Math.max(retryAt - Date.now(), 0), 12 * 60 * 60 * 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -85,13 +363,15 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
 
   private readonly federation: Federation<SidecarContext>;
   private readonly logger: FedifyAdapterLogger;
+  private readonly outboundRuntimeConfig: FedifyOutboundRuntimeConfig;
 
   constructor(
-    kv: FedifyKvStore,
+    kv: KvStore,
     private readonly config: FedifyAdapterConfig,
     logger?: FedifyAdapterLogger
   ) {
     this.logger = logger ?? NOOP_LOGGER;
+    this.outboundRuntimeConfig = resolveOutboundRuntimeConfig(config);
     this.federation = this.buildFederation(kv);
   }
 
@@ -101,10 +381,9 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
 
   /**
    * Returns the underlying Fedify Federation instance so that index.ts can
-   * register it with Hono/Fastify:
+   * register it with Fastify via FedifyFastifyBridge:
    *
-   *   const handler = federation.fetch.bind(federation);
-   *   app.use("*", (c) => handler(c.req.raw, { ...sidecarContext }));
+   *   registerFedifyRoutes(app, fedifyAdapter);
    */
   getFederation(): Federation<SidecarContext> {
     return this.federation;
@@ -114,11 +393,13 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
    * Build the context object passed to every Fedify handler.
    * Call this from the HTTP middleware layer.
    */
-  buildContext(): SidecarContext {
+  buildContext(request?: { ip?: string }): SidecarContext {
     return {
       domain: this.config.domain,
       activityPodsUrl: this.config.activityPodsUrl,
       activityPodsToken: this.config.activityPodsToken,
+      remoteIp: request?.ip ?? "unknown",
+      enqueueVerifiedInbox: this.config.enqueueVerifiedInbox,
     };
   }
 
@@ -172,15 +453,135 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     }
   }
 
+  async onOutboundPermanentFailure(input: {
+    actorUri: string;
+    activityId: string;
+    targetDomain: string;
+    targetInbox: string;
+    statusCode?: number;
+    error: string;
+    responseBody?: string;
+    attempt: number;
+  }): Promise<void> {
+    try {
+      this.logger.warn("[fedify] outbound permanent failure", {
+        actorUri: input.actorUri,
+        activityId: input.activityId,
+        targetDomain: input.targetDomain,
+        targetInbox: input.targetInbox,
+        statusCode: input.statusCode,
+        error: input.error,
+        responseBody: input.responseBody,
+        attempt: input.attempt,
+      });
+    } catch (err) {
+      this.logger.error("[fedify] onOutboundPermanentFailure error (swallowed)", {
+        err: String(err),
+      });
+    }
+  }
+
+  async deliverOutbound(input: OutboundDeliveryInput): Promise<OutboundDeliveryResult> {
+    const targetUrl = normalizeOutboundTargetUrl(input.targetInbox);
+    if (targetUrl == null) {
+      return {
+        jobId: input.jobId,
+        success: false,
+        error: "Outbound target inbox failed safety validation",
+        permanent: true,
+      };
+    }
+
+    let signResult;
+    try {
+      signResult = await input.signHttpRequest({
+        actorUri: input.actorUri,
+        method: "POST",
+        targetUrl: targetUrl.href,
+        body: input.activity,
+      });
+    } catch (error) {
+      return {
+        jobId: input.jobId,
+        success: false,
+        error: `Signing failed: ${error instanceof Error ? error.message : String(error)}`,
+        permanent: false,
+      };
+    }
+
+    if (!signResult.ok) {
+      return {
+        jobId: input.jobId,
+        success: false,
+        error: `Signing failed: ${signResult.error.code} - ${signResult.error.message}`,
+        permanent: signResult.error.permanent,
+      };
+    }
+
+    try {
+      const response = await request(targetUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/activity+json",
+          accept: "application/activity+json, application/ld+json",
+          "user-agent": input.userAgent || this.outboundRuntimeConfig.userAgent,
+          date: signResult.signedHeaders.date,
+          signature: signResult.signedHeaders.signature,
+          host: targetUrl.host,
+          ...(signResult.signedHeaders.digest ? { digest: signResult.signedHeaders.digest } : {}),
+        },
+        body: input.activity,
+        bodyTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
+        headersTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
+      });
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        await readLimitedResponseBody(response.body, this.outboundRuntimeConfig.maxErrorResponseBodyBytes);
+        return {
+          jobId: input.jobId,
+          success: true,
+          statusCode: response.statusCode,
+        };
+      }
+
+      const responseBody = await readLimitedResponseBody(
+        response.body,
+        this.outboundRuntimeConfig.maxErrorResponseBodyBytes,
+      );
+      const sendError = new SendActivityError(
+        targetUrl,
+        response.statusCode,
+        `Failed to send activity ${input.activityId} to ${targetUrl.href} (${response.statusCode}):\n${responseBody}`,
+        responseBody,
+      );
+      const permanent = this.outboundRuntimeConfig.permanentFailureStatusCodes.includes(response.statusCode);
+
+      return {
+        jobId: input.jobId,
+        success: false,
+        statusCode: response.statusCode,
+        error: sendError.message,
+        responseBody,
+        permanent,
+        retryAfterMs: permanent ? undefined : parseRetryAfterMs(response.headers["retry-after"]),
+      };
+    } catch (error) {
+      return {
+        jobId: input.jobId,
+        success: false,
+        error: `Network error: ${error instanceof Error ? error.message : String(error)}`,
+        permanent: false,
+      };
+    }
+  }
+
   // --------------------------------------------------------------------------
   // Federation setup
   // --------------------------------------------------------------------------
 
-  private buildFederation(kv: FedifyKvStore): Federation<SidecarContext> {
-    // Cast: FedifyKvStore is structurally compatible with Fedify's KvStore.
-    // The package types will validate this at compile time once installed.
+  private buildFederation(kv: KvStore): Federation<SidecarContext> {
     const federation = createFederation<SidecarContext>({
-      kv: kv as Parameters<typeof createFederation>[0]["kv"],
+      kv,
 
       // Fedify 2.x: documentLoaderFactory replaces deprecated documentLoader.
       // The default factory is adequate; override only if you need custom
@@ -212,39 +613,108 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     federation.setActorDispatcher(
       "/users/{identifier}",
       async (ctx: Context<SidecarContext>, identifier: string): Promise<Actor | null> => {
-        // Proxy actor document from ActivityPods so Fedify can serve it.
-        // ActivityPods is the source of truth for actor data.
+        // Guard against path-traversal or injection before interpolating
+        // the identifier into the ActivityPods internal API URL.
+        if (!IDENTIFIER_PATTERN.test(identifier)) {
+          this.logger.warn("[fedify] actor dispatcher: rejected invalid identifier", {
+            identifier: identifier.slice(0, 64), // truncate in log; never log unbounded user input
+          });
+          return null;
+        }
+
+        // Canonical actor URL on the sidecar's public domain.
+        const actorId = `https://${ctx.data.domain}/users/${identifier}`;
+
         try {
+          // Fetch actor data from the ActivityPods INTERNAL API.
+          // This is the correct endpoint — NOT the public /users/ route which
+          // would loop back through the sidecar or serve an incompatible format.
           const resp = await fetch(
-            `${ctx.data.activityPodsUrl}/users/${encodeURIComponent(identifier)}`,
+            `${ctx.data.activityPodsUrl}/api/internal/actors/${encodeURIComponent(identifier)}`,
             {
               headers: {
                 Accept: "application/activity+json",
+                // Authorization header carries the sidecar-to-ActivityPods bearer
+                // token. The token is stored in memory only (never written to disk
+                // by this adapter); it is sourced from the process environment at
+                // startup.
                 Authorization: `Bearer ${ctx.data.activityPodsToken}`,
               },
               signal: AbortSignal.timeout(10_000),
             }
           );
-          if (!resp.ok) return null;
+
+          if (resp.status === 404) return null;
+
+          if (!resp.ok) {
+            this.logger.warn("[fedify] actor dispatcher: ActivityPods non-OK response", {
+              identifier,
+              status: resp.status,
+            });
+            return null;
+          }
+
           const doc = (await resp.json()) as Record<string, unknown>;
 
-          // Build a minimal Person so Fedify can handle WebFinger + key lookup.
-          // The full actor document continues to be served by the proxy handler.
+          // ---------- Public key ----------
+          // Attempt to embed the actor's public key in the returned Person so
+          // that remote servers can verify HTTP signatures.
+          //
+          // ActivityPods may surface the publicKeyPem either at the top level
+          // or nested under a "publicKey" object (both are common AP shapes).
+          // We tolerate both without trusting either blindly — importPublicKeyPem
+          // validates and imports the key with usage: ["verify"] only.
+          const publicKeyPem =
+            (doc["publicKeyPem"] as string | undefined) ??
+            ((doc["publicKey"] as Record<string, unknown> | undefined)?.["publicKeyPem"] as string | undefined);
+
+          let activityPubPublicKey: CryptographicKey | undefined;
+
+          if (publicKeyPem) {
+            const cryptoKey = await importPublicKeyPem(publicKeyPem);
+            if (cryptoKey) {
+              activityPubPublicKey = new CryptographicKey({
+                id: new URL(`${actorId}#main-key`),
+                owner: new URL(actorId),
+                publicKey: cryptoKey,
+              });
+            } else {
+              this.logger.warn("[fedify] actor dispatcher: failed to import publicKeyPem", {
+                identifier,
+              });
+            }
+          }
+
+          // ---------- URL field ----------
+          // Trust the URL returned by ActivityPods only if it is a valid URL.
+          // Fall back to the canonical sidecar URL otherwise.
+          let actorUrl: URL;
+          try {
+            actorUrl = new URL((doc["url"] as string | undefined) ?? actorId);
+          } catch {
+            actorUrl = new URL(actorId);
+          }
+
           return new Person({
-            id: new URL(doc["id"] as string),
+            id: new URL(actorId),
             name: (doc["name"] as string | undefined) ?? identifier,
             preferredUsername: identifier,
-            inbox: new URL(`${ctx.data.activityPodsUrl}/users/${identifier}/inbox`),
-            outbox: new URL(`${ctx.data.activityPodsUrl}/users/${identifier}/outbox`),
-            followers: new URL(
-              `${ctx.data.activityPodsUrl}/users/${identifier}/followers`
-            ),
-            following: new URL(
-              `${ctx.data.activityPodsUrl}/users/${identifier}/following`
-            ),
-            url: new URL(doc["url"] as string ?? `https://${ctx.data.domain}/users/${identifier}`),
+            // All collection/inbox URLs resolve through the sidecar's own domain,
+            // not ActivityPods directly, so remote servers POST to the sidecar.
+            inbox: new URL(`https://${ctx.data.domain}/users/${identifier}/inbox`),
+            outbox: new URL(`https://${ctx.data.domain}/users/${identifier}/outbox`),
+            followers: new URL(`https://${ctx.data.domain}/users/${identifier}/followers`),
+            following: new URL(`https://${ctx.data.domain}/users/${identifier}/following`),
+            url: actorUrl,
+            // Conditionally include publicKey only when successfully imported.
+            ...(activityPubPublicKey != null ? { publicKey: activityPubPublicKey } : {}),
           });
-        } catch {
+        } catch (err: unknown) {
+          // Distinguish fetch/network errors from unexpected bugs.
+          this.logger.error("[fedify] actor dispatcher: unhandled error", {
+            identifier,
+            err: String(err),
+          });
           return null;
         }
       }
@@ -258,16 +728,78 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
   private registerInboxListeners(
     federation: Federation<SidecarContext>
   ): void {
-    // When inbox handler delegation is fully enabled, activity-specific
-    // listeners will be registered here (Create, Follow, Like, Announce, etc.).
-    // For now this is intentionally empty — InboundWorker forwards to
-    // ActivityPods and calls onInboundVerified for observability.
-    //
-    // Example future shape:
-    //   federation
-    //     .setInboxListeners("/users/{identifier}/inbox", "/inbox")
-    //     .on(Create, async (ctx, create) => { ... })
-    //     .on(Follow, async (ctx, follow) => { ... });
+    federation
+      .setInboxListeners("/users/{identifier}/inbox", "/inbox")
+      .withIdempotency("per-inbox")
+      .on(Activity, async (ctx, activity) => {
+        await this.enqueueVerifiedActivity(ctx, activity);
+      })
+      .onUnverifiedActivity((ctx, activity, reason) => {
+        this.logger.warn("[fedify] rejected unverified inbound activity", {
+          activityId: activity.id?.href,
+          activityType: activity.constructor.name,
+          path: ctx.url.pathname,
+          reasonType: reason.type,
+        });
+      })
+      .onError((_ctx, error) => {
+        this.logger.error("[fedify] inbox listener error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+
+  private async enqueueVerifiedActivity(
+    ctx: InboxContext<SidecarContext>,
+    activity: Activity
+  ): Promise<void> {
+    const enqueueVerifiedInbox = ctx.data.enqueueVerifiedInbox;
+    if (!enqueueVerifiedInbox) {
+      throw new Error("Fedify verified inbox queue callback is not configured");
+    }
+
+    const activityActorUri = activity.actorId?.href ?? null;
+    const verifiedActorUri = activityActorUri;
+
+    if (!verifiedActorUri) {
+      throw new Error("Verified inbound activity is missing a resolvable actor URI");
+    }
+
+    const recipient = ctx.recipient;
+    const path = recipient == null
+      ? "/inbox"
+      : this.buildRecipientInboxPath(recipient);
+    const body = JSON.stringify(await activity.toJsonLd());
+    const enqueueResult = await enqueueVerifiedInbox({
+      path,
+      body,
+      remoteIp: ctx.data.remoteIp,
+      verifiedActorUri,
+      verifiedAt: Date.now(),
+    });
+
+    this.logger.info("[fedify] queued verified inbound activity", {
+      activityId: activity.id?.href,
+      activityType: activity.constructor.name,
+      recipient: this.safeRecipientForLog(recipient),
+      actorUri: verifiedActorUri,
+      envelopeId:
+        enqueueResult && typeof enqueueResult === "object" && "envelopeId" in enqueueResult
+          ? enqueueResult.envelopeId
+          : undefined,
+    });
+  }
+
+  private buildRecipientInboxPath(recipient: string): string {
+    if (!IDENTIFIER_PATTERN.test(recipient)) {
+      throw new Error("Inbox recipient identifier failed validation");
+    }
+    return `/users/${recipient}/inbox`;
+  }
+
+  private safeRecipientForLog(recipient: string | null): string | null {
+    if (recipient == null) return null;
+    return recipient.slice(0, 64);
   }
 
   // --------------------------------------------------------------------------
@@ -316,12 +848,11 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
  *   // Pass to workers:
  *   createOutboundWorker(..., { adapter: fedifyAdapter, fedifyRuntimeIntegrationEnabled: true })
  *
- *   // Register with Hono:
- *   const fed = fedifyAdapter.getFederation();
- *   app.use("*", (c) => fed.fetch(c.req.raw, fedifyAdapter.buildContext()));
+ *   // Register with Fastify:
+ *   registerFedifyRoutes(app, fedifyAdapter);
  */
 export function createFedifyAdapter(
-  kv: FedifyKvStore,
+  kv: KvStore,
   config: FedifyAdapterConfig,
   logger?: FedifyAdapterLogger
 ): FedifyFederationAdapter {

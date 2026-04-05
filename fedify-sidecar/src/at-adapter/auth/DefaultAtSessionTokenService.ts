@@ -321,7 +321,7 @@ export class DefaultAtSessionTokenService implements AtSessionTokenService {
         return null;
       }
 
-      if (!this._isMatchingActiveFamily(family, claims)) {
+      if (!this._hasMatchingActiveFamily(family, claims)) {
         if (family.status === 'active') {
           await this.sessionStateStore.markFamilyCompromised(
             sessionFamilyId,
@@ -344,7 +344,7 @@ export class DefaultAtSessionTokenService implements AtSessionTokenService {
 
     if (sessionFamilyId) {
       const family = await this.sessionStateStore.getFamily(sessionFamilyId);
-      if (!this._isMatchingActiveFamily(family, claims)) {
+      if (!family || !this._hasMatchingActiveFamily(family, claims)) {
         return null;
       }
 
@@ -359,7 +359,10 @@ export class DefaultAtSessionTokenService implements AtSessionTokenService {
       const parts = jwt.split('.');
       if (parts.length !== 3) return null;
 
-      const [headerB64, payloadB64, sigB64] = parts;
+      const headerB64 = parts[0];
+      const payloadB64 = parts[1];
+      const sigB64 = parts[2];
+      if (!headerB64 || !payloadB64 || !sigB64) return null;
       const signingInput = `${headerB64}.${payloadB64}`;
 
       // Constant-time HMAC comparison — prevents timing attacks
@@ -382,15 +385,14 @@ export class DefaultAtSessionTokenService implements AtSessionTokenService {
     }
   }
 
-  private _isMatchingActiveFamily(
-    family: SessionFamilyRecord | null,
+  private _hasMatchingActiveFamily(
+    family: SessionFamilyRecord,
     claims: JwtClaims
-  ): family is SessionFamilyRecord {
-    return Boolean(
-      family &&
-        family.status === 'active' &&
-        family.canonicalAccountId === claims.canonicalAccountId &&
-        family.did === claims.sub
+  ): boolean {
+    return (
+      family.status === 'active' &&
+      family.canonicalAccountId === claims.canonicalAccountId &&
+      family.did === claims.sub
     );
   }
 
@@ -428,7 +430,10 @@ function _timingSafeEqual(a: Buffer, b: Buffer): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) {
-    diff |= a[i] ^ b[i];
+    const left = a[i];
+    const right = b[i];
+    if (left === undefined || right === undefined) return false;
+    diff |= left ^ right;
   }
   return diff === 0;
 }

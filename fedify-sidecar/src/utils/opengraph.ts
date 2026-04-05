@@ -11,6 +11,7 @@
  */
 
 import { request } from "undici";
+import { isIP } from "node:net";
 
 export interface OGMetadata {
   /** Canonical page URL (og:url, or the original URL if absent). */
@@ -41,6 +42,9 @@ export async function fetchOpenGraph(url: string): Promise<OGMetadata | null> {
     return null;
   }
   if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    return null;
+  }
+  if (!isPrivatePreviewAllowed() && isDisallowedPreviewHost(parsedUrl.hostname)) {
     return null;
   }
 
@@ -86,6 +90,52 @@ export async function fetchOpenGraph(url: string): Promise<OGMetadata | null> {
   } catch {
     return null;
   }
+}
+
+function isPrivatePreviewAllowed(): boolean {
+  return process.env["ALLOW_PRIVATE_PREVIEW_FETCHES"] === "1";
+}
+
+function isDisallowedPreviewHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  if (!normalized) {
+    return true;
+  }
+
+  if (normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1") {
+    return true;
+  }
+
+  const ipType = isIP(normalized);
+  if (ipType === 4) {
+    return isPrivateIpv4(normalized);
+  }
+  if (ipType === 6) {
+    return isPrivateIpv6(normalized);
+  }
+
+  return false;
+}
+
+function isPrivateIpv4(ip: string): boolean {
+  if (ip.startsWith("10.") || ip.startsWith("127.") || ip.startsWith("192.168.") || ip.startsWith("169.254.")) {
+    return true;
+  }
+  if (!ip.startsWith("172.")) {
+    return false;
+  }
+  const second = Number.parseInt(ip.split(".")[1] ?? "-1", 10);
+  return second >= 16 && second <= 31;
+}
+
+function isPrivateIpv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  return (
+    lower === "::1" ||
+    lower.startsWith("fc") ||
+    lower.startsWith("fd") ||
+    lower.startsWith("fe80:")
+  );
 }
 
 // ---------------------------------------------------------------------------

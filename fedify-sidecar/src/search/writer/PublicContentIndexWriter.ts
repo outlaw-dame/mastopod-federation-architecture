@@ -6,10 +6,10 @@
  * Writes: OpenSearch public-content-v1 index
  */
 
-import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchPublicPartialUpdateV1 } from '../events/SearchEvents';
-import { PublicContentDocument } from '../models/PublicContentDocument';
-import { SearchDocAliasCache } from './SearchDocAliasCache';
-import { SearchDedupService } from '../aliases/SearchDedupService';
+import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchPublicPartialUpdateV1 } from '../events/SearchEvents.js';
+import { PublicContentDocument } from '../models/PublicContentDocument.js';
+import { SearchDocAliasCache } from './SearchDocAliasCache.js';
+import { SearchDedupService } from '../aliases/SearchDedupService.js';
 
 export interface OpenSearchClient {
   get(id: string): Promise<PublicContentDocument | null>;

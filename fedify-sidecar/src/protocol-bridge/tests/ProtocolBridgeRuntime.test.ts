@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../../utils/logger.js", () => {
+  const noop = () => {};
+  const logger = { info: noop, warn: noop, error: noop, debug: noop };
+  return { logger, default: logger };
+});
+
 import { ProtocolBridgeRuntime } from "../runtime/ProtocolBridgeRuntime.js";
 import { ActivityPubBridgeIngressClient } from "../runtime/ActivityPubBridgeIngressClient.js";
 import type { TranslationContext } from "../ports/ProtocolBridgePorts.js";
@@ -65,6 +72,42 @@ describe("protocol bridge runtime", () => {
       }),
       translationContext,
     );
+  });
+
+  it("skips duplicate local AP source events that share the same outbox intent id", async () => {
+    const apToAtWorker = {
+      process: vi.fn().mockResolvedValue(null),
+    };
+
+    const runtime = new ProtocolBridgeRuntime({
+      config: {
+        brokers: ["localhost:9092"],
+        clientId: "runtime-test",
+        consumerGroupId: "runtime-test",
+        apSourceTopic: "ap.stream1.local-public.v1",
+        atCommitTopic: "at.commit.v1",
+        atVerifiedIngressTopic: "at.ingress.v1",
+        apIngressTopic: "ap.atproto-ingress.v1",
+        enableApToAt: true,
+        enableAtToAp: false,
+      },
+      translationContext,
+      apToAtWorker: apToAtWorker as any,
+    });
+
+    const event = {
+      outboxIntentId: "intent-duplicate-1",
+      activity: {
+        id: "https://example.com/activities/1",
+        type: "Create",
+        actor: "https://example.com/users/alice",
+      },
+    };
+
+    await runtime.handleApSourceEvent(event);
+    await runtime.handleApSourceEvent(event);
+
+    expect(apToAtWorker.process).toHaveBeenCalledTimes(1);
   });
 
   it("fans out persisted AT commit create and delete ops into the AT->AP worker", async () => {

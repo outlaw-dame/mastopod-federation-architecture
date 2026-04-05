@@ -10,6 +10,13 @@ import { CanonicalToActivityPubProjector } from "../../protocol-bridge/projector
 import { ActivityPubToCanonicalTranslator } from "../../protocol-bridge/activitypub/ActivityPubToCanonicalTranslator.js";
 import { CanonicalToAtprotoProjector } from "../../protocol-bridge/projectors/CanonicalToAtprotoProjector.js";
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
 function createMockIdentityRepo() {
   const bindings = [
     {
@@ -91,10 +98,11 @@ describe("Inbound Federation: AT Protocol -> ActivityPods", () => {
     expect(apProjection.kind).toBe("success");
     if (apProjection.kind !== "success") return;
 
-    const activity = apProjection.commands[0]?.activity;
-    expect(activity?.type).toBe("Create");
-    expect(activity?.object?.type).toBe("Note");
-    expect(activity?.object?.content).toContain("Hello from Bluesky!");
+    const activity = asRecord(apProjection.commands[0]?.activity);
+    const object = asRecord(activity?.["object"]);
+    expect(activity?.["type"]).toBe("Create");
+    expect(object?.["type"]).toBe("Note");
+    expect(String(object?.["content"] ?? "")).toContain("Hello from Bluesky!");
   });
 
   it("converts AT like/follow into AP Like/Follow", async () => {
@@ -131,7 +139,8 @@ describe("Inbound Federation: AT Protocol -> ActivityPods", () => {
     const likeProjection = await new CanonicalToActivityPubProjector().project(likeIntent!, projectionContext);
     expect(likeProjection.kind).toBe("success");
     if (likeProjection.kind === "success") {
-      expect(likeProjection.commands[0]?.activity?.type).toBe("Like");
+      const activity = asRecord(likeProjection.commands[0]?.activity);
+      expect(activity?.["type"]).toBe("Like");
     }
 
     const atFollow = {
@@ -153,7 +162,8 @@ describe("Inbound Federation: AT Protocol -> ActivityPods", () => {
     const followProjection = await new CanonicalToActivityPubProjector().project(followIntent!, projectionContext);
     expect(followProjection.kind).toBe("success");
     if (followProjection.kind === "success") {
-      expect(followProjection.commands[0]?.activity?.type).toBe("Follow");
+      const activity = asRecord(followProjection.commands[0]?.activity);
+      expect(activity?.["type"]).toBe("Follow");
     }
   });
 
@@ -265,8 +275,9 @@ describe("Outbound Federation: ActivityPods -> AT Protocol", () => {
     const atProjection = await projector.project(canonicalIntent!, projectionContext);
     expect(atProjection.kind).toBe("success");
     if (atProjection.kind === "success") {
-      expect(atProjection.commands[0]?.record?.$type).toBe("app.bsky.feed.post");
-      expect(atProjection.commands[0]?.record?.text).toBe("Hello from ActivityPods!");
+      const record = asRecord(atProjection.commands[0]?.record);
+      expect(record?.["$type"]).toBe("app.bsky.feed.post");
+      expect(record?.["text"]).toBe("Hello from ActivityPods!");
     }
   });
 
@@ -299,7 +310,8 @@ describe("Outbound Federation: ActivityPods -> AT Protocol", () => {
 
     const atProjection = await new CanonicalToAtprotoProjector().project(followIntent!, projectionContext);
     if (atProjection.kind === "success") {
-      expect(atProjection.commands[0]?.record?.$type).toBe("app.bsky.graph.follow");
+      const record = asRecord(atProjection.commands[0]?.record);
+      expect(record?.["$type"]).toBe("app.bsky.graph.follow");
     }
   });
 

@@ -338,7 +338,7 @@ function jsonResponse(body: Record<string, unknown>): Response {
 }
 
 function bytesResponse(body: Uint8Array, contentType: string): Response {
-  return new Response(body, {
+  return new Response(Buffer.from(body), {
     status: 200,
     headers: {
       "content-type": contentType,

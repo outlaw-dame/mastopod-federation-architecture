@@ -50,12 +50,17 @@ import { DefaultAtProjectionPolicy } from '../projection/AtProjectionPolicy.js';
 import { DefaultAtProjectionWorker } from '../projection/AtProjectionWorker.js';
 import { DefaultProfileRecordSerializer } from '../projection/serializers/ProfileRecordSerializer.js';
 import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecordSerializer.js';
+import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer.js';
 import { DefaultFacetBuilder } from '../projection/serializers/FacetBuilder.js';
 import { DefaultEmbedBuilder } from '../projection/serializers/EmbedBuilder.js';
 import { DefaultImageEmbedBuilder } from '../projection/serializers/ImageEmbedBuilder.js';
+import { DefaultVideoEmbedBuilder } from '../projection/serializers/VideoEmbedBuilder.js';
 import { DefaultFollowRecordSerializer } from '../projection/serializers/FollowRecordSerializer.js';
 import { DefaultLikeRecordSerializer } from '../projection/serializers/LikeRecordSerializer.js';
 import { DefaultRepostRecordSerializer } from '../projection/serializers/RepostRecordSerializer.js';
+import { DefaultAtBlobUploadService } from '../blob/AtBlobUploadService.js';
+import { DefaultAtBlobStore } from '../blob/AtBlobStore.js';
+import { DefaultBlobReferenceMapper } from '../blob/BlobReferenceMapper.js';
 
 // Writes
 import { DefaultAtWriteNormalizer } from '../writes/DefaultAtWriteNormalizer.js';
@@ -134,7 +139,7 @@ class InMemoryIdentityBindingRepository implements IdentityBindingRepository {
     for (const id of ids) { const b = this.store.get(id); if (b) m.set(id, b); }
     return m;
   }
-  async transaction<T>(cb: (r: IdentityBindingRepository) => Promise<T>) { return cb(this); }
+  async transaction<T>(cb: (r: IdentityBindingRepository) => Promise<T>): Promise<T> { return cb(this); }
   async health() { return true; }
 
   private _write(b: IdentityBinding) {
@@ -204,8 +209,13 @@ async function buildDeps() {
     did: TEST_DID,
     rev: '0',
     rootCid: null,
-    collections: [{ nsid: 'app.bsky.feed.post' }],
+    commits: [],
+    collections: [{ nsid: 'app.bsky.feed.post', recordCount: 0, lastUpdated: now }],
+    totalRecords: 0,
+    sizeBytes: 0,
     status: 'active',
+    lastCommitAt: now,
+    snapshotAt: now,
     createdAt: now,
     updatedAt: now,
   };
@@ -252,6 +262,13 @@ async function buildDeps() {
   const commitBuilder = new DefaultAtCommitBuilder(signingService);
   const persistenceService = new DefaultAtCommitPersistenceService(aliasStore, eventPublisher, mockRedis);
   const rkeyService = new DefaultAtRkeyService();
+  const blobUploadService = new DefaultAtBlobUploadService(
+    new DefaultAtBlobStore(),
+    new DefaultBlobReferenceMapper(),
+  );
+  const attachmentMediaResolver = {
+    resolveMedia: async () => null,
+  };
 
   const projectionWorker = new DefaultAtProjectionWorker(
     new DefaultAtProjectionPolicy(),
@@ -259,6 +276,7 @@ async function buildDeps() {
     repoRegistry,
     new DefaultProfileRecordSerializer(),
     new DefaultPostRecordSerializer(),
+    new DefaultStandardDocumentRecordSerializer(),
     rkeyService,
     aliasStore,
     commitBuilder,
@@ -267,7 +285,10 @@ async function buildDeps() {
     {
       mediaResolver: { resolveAvatarBlob: async () => null, resolveBannerBlob: async () => null },
       facetBuilder: new DefaultFacetBuilder(),
-      embedBuilder: new DefaultEmbedBuilder(new DefaultImageEmbedBuilder()),
+      embedBuilder: new DefaultEmbedBuilder(
+        new DefaultImageEmbedBuilder(blobUploadService, attachmentMediaResolver),
+        new DefaultVideoEmbedBuilder(blobUploadService, attachmentMediaResolver),
+      ),
       recordRefResolver: new DefaultAtRecordRefResolver(aliasStore),
       subjectResolver: new DefaultAtSubjectResolver(identityRepo),
       targetAliasResolver: new DefaultAtTargetAliasResolver(aliasStore),

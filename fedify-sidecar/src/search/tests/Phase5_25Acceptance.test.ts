@@ -4,14 +4,16 @@
  * Acceptance Tests
  */
 
-import { ApSearchProjector } from '../projectors/ApSearchProjector';
-import { AtSearchProjector } from '../projectors/AtSearchProjector';
-import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter';
-import { InMemoryOpenSearchClient } from '../writer/OpenSearchClient';
-import { InMemorySearchDocAliasCache } from '../writer/SearchDocAliasCache';
-import { IdentityAliasResolver, ResolvedIdentity } from '../identity/IdentityAliasResolver';
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
-import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { ApSearchProjector } from '../projectors/ApSearchProjector.js';
+import { AtSearchProjector } from '../projectors/AtSearchProjector.js';
+import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter.js';
+import { InMemoryOpenSearchClient } from '../writer/OpenSearchClient.js';
+import { InMemorySearchDocAliasCache } from '../writer/SearchDocAliasCache.js';
+import { IdentityAliasResolver, ResolvedIdentity } from '../identity/IdentityAliasResolver.js';
+import { DefaultSearchDedupService } from '../aliases/SearchDedupService.js';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
+import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents.js';
 
 // Mock Identity Resolver
 class MockIdentityResolver implements IdentityAliasResolver {
@@ -66,7 +68,11 @@ describe('Phase 5.25 Acceptance Tests', () => {
   beforeEach(() => {
     osClient = new InMemoryOpenSearchClient();
     aliasCache = new InMemorySearchDocAliasCache();
-    writer = new PublicContentIndexWriter(osClient, aliasCache);
+    writer = new PublicContentIndexWriter(
+      osClient,
+      aliasCache,
+      new DefaultSearchDedupService(aliasCache),
+    );
     publisher = new DirectEventPublisher(writer);
     identityResolver = new MockIdentityResolver();
     apProjector = new ApSearchProjector(identityResolver, publisher);

@@ -285,7 +285,9 @@ describe('Phase 5.5 Acceptance Tests', () => {
 
       expect(eventPublisher.publish).not.toHaveBeenCalledWith('at.ingress.v1', expect.anything());
       expect(auditPublisher.published).toHaveLength(1);
-      expect(auditPublisher.published[0].reason).toBe('did_resolution_failed');
+      const published = auditPublisher.published[0];
+      expect(published).toBeDefined();
+      expect(published?.reason).toBe('did_resolution_failed');
     });
   });
 
@@ -365,7 +367,9 @@ describe('Phase 5.5 Acceptance Tests', () => {
       await verifier.handleRawEvent(envelope);
 
       expect(auditPublisher.published).toHaveLength(1);
-      expect(auditPublisher.published[0].reason).toBe('sync_rebuild_failed');
+      const published = auditPublisher.published[0];
+      expect(published).toBeDefined();
+      expect(published?.reason).toBe('sync_rebuild_failed');
     });
   });
 
@@ -441,7 +445,9 @@ describe('Phase 5.5 Acceptance Tests', () => {
       expect(result).toBe(true);
       expect(eventPublisher.publish).not.toHaveBeenCalledWith('at.ingress.v1', expect.anything());
       expect(auditPublisher.published).toHaveLength(1);
-      expect(auditPublisher.published[0].reason).toBe('decode_failed');
+      const published = auditPublisher.published[0];
+      expect(published).toBeDefined();
+      expect(published?.reason).toBe('decode_failed');
     });
 
     it('should not emit trusted event for duplicate seq', async () => {

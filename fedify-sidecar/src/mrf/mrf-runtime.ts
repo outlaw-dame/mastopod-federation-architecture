@@ -158,6 +158,7 @@ export class MrfRuntime {
   private producer: Producer;
   private config: MrfRuntimeConfig;
   private policies: MrfPolicy[] = [];
+  private isConnected = false;
 
   constructor(config: MrfRuntimeConfig) {
     this.config = config;
@@ -174,6 +175,7 @@ export class MrfRuntime {
    */
   async connect(): Promise<void> {
     await this.producer.connect();
+    this.isConnected = true;
     logger.info('MRF runtime connected to Kafka');
   }
 
@@ -182,6 +184,7 @@ export class MrfRuntime {
    */
   async disconnect(): Promise<void> {
     await this.producer.disconnect();
+    this.isConnected = false;
     logger.info('MRF runtime disconnected from Kafka');
   }
 
@@ -264,7 +267,7 @@ export class MrfRuntime {
   /**
    * Enable/disable a policy
    */
-  setPolicy Enabled(policyName: string, enabled: boolean): void {
+  setPolicyEnabled(policyName: string, enabled: boolean): void {
     const policy = this.policies.find((p) => p.name === policyName);
     if (policy) {
       policy.enabled = enabled;
@@ -282,13 +285,10 @@ export class MrfRuntime {
    * Get health status
    */
   async health(): Promise<{ status: string; connected: boolean }> {
-    try {
-      await this.producer.admin().connect();
-      await this.producer.admin().disconnect();
-      return { status: 'healthy', connected: true };
-    } catch (err) {
-      return { status: 'unhealthy', connected: false };
-    }
+    return {
+      status: this.isConnected ? 'healthy' : 'unhealthy',
+      connected: this.isConnected,
+    };
   }
 }
 
@@ -296,12 +296,12 @@ export class MrfRuntime {
  * Create default MRF runtime configuration
  */
 export function createDefaultMrfConfig(): MrfRuntimeConfig {
-  const blockedDomains = (process.env.MRF_BLOCKED_DOMAINS || '').split(',').filter(Boolean);
+  const blockedDomains = (process.env["MRF_BLOCKED_DOMAINS"] || '').split(',').filter(Boolean);
   
   return {
-    brokers: (process.env.REDPANDA_BROKERS || 'localhost:9092').split(','),
-    clientId: process.env.REDPANDA_CLIENT_ID || 'fedify-mrf',
-    rejectionTopic: process.env.MRF_REJECTION_TOPIC || 'ap.mrf.rejected.v1',
+    brokers: (process.env["REDPANDA_BROKERS"] || 'localhost:9092').split(','),
+    clientId: process.env["REDPANDA_CLIENT_ID"] || 'fedify-mrf',
+    rejectionTopic: process.env["MRF_REJECTION_TOPIC"] || 'ap.mrf.rejected.v1',
     policies: [
       new SignatureValidationPolicy(),
       new BlockedDomainPolicy(blockedDomains),

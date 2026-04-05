@@ -81,14 +81,14 @@ export class DefaultAtWritePolicyGate implements AtWritePolicyGate {
     // ------------------------------------------------------------------
     // Rule 2: caller must own the target repo
     // ------------------------------------------------------------------
-    const atRepo = (mutation.payload._atRepo as string | undefined)?.trim().toLowerCase();
+    const atRepo = (mutation.payload["_atRepo"] as string | undefined)?.trim().toLowerCase();
     if (atRepo) {
       const ownsDid    = binding.atprotoDid?.toLowerCase()    === atRepo;
       const ownsHandle = binding.atprotoHandle?.toLowerCase() === atRepo;
       if (!ownsDid && !ownsHandle) {
         return reject(
           'Forbidden',
-          `Cannot write to repo ${mutation.payload._atRepo}: not the authenticated account`
+          `Cannot write to repo ${mutation.payload["_atRepo"]}: not the authenticated account`
         );
       }
     }
@@ -96,7 +96,7 @@ export class DefaultAtWritePolicyGate implements AtWritePolicyGate {
     // ------------------------------------------------------------------
     // Rule 3: collection must be in the allowlist
     // ------------------------------------------------------------------
-    const collection = mutation.payload._collection as string | undefined;
+    const collection = mutation.payload["_collection"] as string | undefined;
     if (collection && !ALLOWED.has(collection)) {
       return reject('UnsupportedCollection', `Collection not supported: ${collection}`);
     }
@@ -130,8 +130,8 @@ export class DefaultAtWritePolicyGate implements AtWritePolicyGate {
       if (!binding.atprotoDid) {
         return reject('Forbidden', 'Account has no ATProto DID — cannot delete');
       }
-      const rkey       = mutation.payload._rkey       as string | undefined;
-      const targetRepo = mutation.payload._atRepo      as string | undefined;
+      const rkey = mutation.payload["_rkey"] as string | undefined;
+      const targetRepo = mutation.payload["_atRepo"] as string | undefined;
 
       if (!rkey || !collection || !targetRepo) {
         return reject('WriteNotAllowed', 'Delete requires _atRepo, _collection, _rkey in payload');
@@ -190,12 +190,12 @@ function _isDeleteMutation(t: CanonicalMutationEnvelope['mutationType']): boolea
 }
 
 function _normalizedOperation(payload: Record<string, unknown>): 'create' | 'update' | 'delete' | 'unknown' {
-  const operation = payload._operation;
+  const operation = payload["_operation"];
   if (operation === 'create' || operation === 'update' || operation === 'delete') {
     return operation;
   }
 
-  if (typeof payload._rkey === 'string') {
+  if (typeof payload["_rkey"] === 'string') {
     return 'update';
   }
 

@@ -22,31 +22,31 @@ import type { EventPublisher } from "../../core-domain/events/CoreIdentityEvents
 const DEFAULT_SOURCES = [
   "relay|wss://bsky.network",
 ].join("\n");
-const DEFAULT_PDS_HANDLE = process.env.LIVE_FIREHOSE_PROOF_PDS_HANDLE ?? "atproto.com";
+const DEFAULT_PDS_HANDLE = process.env["LIVE_FIREHOSE_PROOF_PDS_HANDLE"] ?? "atproto.com";
 
 const PROOF_TIMEOUT_MS = clampInteger(
-  Number.parseInt(process.env.LIVE_FIREHOSE_PROOF_TIMEOUT_MS ?? "30000", 10),
+  Number.parseInt(process.env["LIVE_FIREHOSE_PROOF_TIMEOUT_MS"] ?? "30000", 10),
   5_000,
   120_000,
 );
 const HTTP_TIMEOUT_MS = clampInteger(
-  Number.parseInt(process.env.LIVE_FIREHOSE_PROOF_HTTP_TIMEOUT_MS ?? "12000", 10),
+  Number.parseInt(process.env["LIVE_FIREHOSE_PROOF_HTTP_TIMEOUT_MS"] ?? "12000", 10),
   1_000,
   60_000,
 );
 const HTTP_MAX_ATTEMPTS = clampInteger(
-  Number.parseInt(process.env.LIVE_FIREHOSE_PROOF_HTTP_MAX_ATTEMPTS ?? "4", 10),
+  Number.parseInt(process.env["LIVE_FIREHOSE_PROOF_HTTP_MAX_ATTEMPTS"] ?? "4", 10),
   1,
   8,
 );
-const FULL_WINDOW_MODE = process.env.LIVE_FIREHOSE_PROOF_FULL_WINDOW === "true";
+const FULL_WINDOW_MODE = process.env["LIVE_FIREHOSE_PROOF_FULL_WINDOW"] === "true";
 const FAILURE_SAMPLE_MAX = clampInteger(
-  Number.parseInt(process.env.LIVE_FIREHOSE_PROOF_FAILURE_SAMPLE_MAX ?? "10", 10),
+  Number.parseInt(process.env["LIVE_FIREHOSE_PROOF_FAILURE_SAMPLE_MAX"] ?? "10", 10),
   0,
   100,
 );
 const FAILED_RESOLUTION_CACHE_TTL_MS = clampInteger(
-  Number.parseInt(process.env.LIVE_FIREHOSE_PROOF_FAILED_RESOLUTION_CACHE_TTL_MS ?? "60000", 10),
+  Number.parseInt(process.env["LIVE_FIREHOSE_PROOF_FAILED_RESOLUTION_CACHE_TTL_MS"] ?? "60000", 10),
   0,
   300_000,
 );
@@ -121,12 +121,12 @@ interface SourceSummary {
 }
 
 async function main(): Promise<void> {
-  const explicitSources = process.env.LIVE_FIREHOSE_PROOF_SOURCES;
+  const explicitSources = process.env["LIVE_FIREHOSE_PROOF_SOURCES"];
   const sources = parseAtExternalFirehoseSources(
     explicitSources ?? DEFAULT_SOURCES,
   );
   const shouldDiscoverPds =
-    !explicitSources || process.env.LIVE_FIREHOSE_PROOF_DISCOVER_PDS === "true";
+    !explicitSources || process.env["LIVE_FIREHOSE_PROOF_DISCOVER_PDS"] === "true";
 
   if (shouldDiscoverPds) {
     const discoveredPdsSource = await discoverPdsSource(DEFAULT_PDS_HANDLE).catch((error) => ({

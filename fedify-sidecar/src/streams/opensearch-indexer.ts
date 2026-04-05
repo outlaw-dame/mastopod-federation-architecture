@@ -492,8 +492,13 @@ export class OpenSearchIndexer {
       
       const response = await this.opensearch.bulk({ body });
       
-      if (response.body.errors) {
-        const errors = response.body.items
+      const bulkBody = response.body as {
+        errors?: boolean;
+        items?: Array<{ index?: { error?: unknown } }>;
+      };
+
+      if (bulkBody.errors) {
+        const errors = (bulkBody.items ?? [])
           .filter((item: any) => item.index?.error)
           .map((item: any) => item.index.error);
         logger.error("Bulk indexing errors", { errors: errors.slice(0, 5) });
@@ -515,15 +520,15 @@ export class OpenSearchIndexer {
 
 export function createOpenSearchIndexer(overrides?: Partial<OpenSearchIndexerConfig>): OpenSearchIndexer {
   const config: OpenSearchIndexerConfig = {
-    opensearchUrl: process.env.OPENSEARCH_URL || "http://localhost:9200",
-    indexName: process.env.OPENSEARCH_INDEX || "activities",
-    brokers: (process.env.REDPANDA_BROKERS || "localhost:9092").split(","),
-    clientId: process.env.REDPANDA_CLIENT_ID || "opensearch-indexer",
-    groupId: process.env.OPENSEARCH_CONSUMER_GROUP || "opensearch-indexer",
-    firehoseTopic: process.env.REDPANDA_FIREHOSE_TOPIC || "ap.firehose.v1",
-    tombstoneTopic: process.env.REDPANDA_TOMBSTONE_TOPIC || "ap.tombstones.v1",
-    batchSize: parseInt(process.env.OPENSEARCH_BATCH_SIZE || "500", 10),
-    flushIntervalMs: parseInt(process.env.OPENSEARCH_FLUSH_INTERVAL_MS || "5000", 10),
+    opensearchUrl: process.env["OPENSEARCH_URL"] || "http://localhost:9200",
+    indexName: process.env["OPENSEARCH_INDEX"] || "activities",
+    brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092").split(","),
+    clientId: process.env["REDPANDA_CLIENT_ID"] || "opensearch-indexer",
+    groupId: process.env["OPENSEARCH_CONSUMER_GROUP"] || "opensearch-indexer",
+    firehoseTopic: process.env["REDPANDA_FIREHOSE_TOPIC"] || "ap.firehose.v1",
+    tombstoneTopic: process.env["REDPANDA_TOMBSTONE_TOPIC"] || "ap.tombstones.v1",
+    batchSize: parseInt(process.env["OPENSEARCH_BATCH_SIZE"] || "500", 10),
+    flushIntervalMs: parseInt(process.env["OPENSEARCH_FLUSH_INTERVAL_MS"] || "5000", 10),
     ...overrides,
   };
 

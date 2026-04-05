@@ -78,11 +78,11 @@ export function extractHashtagsFromActivityPubTags(tags: unknown): string[] {
     }
 
     const tagRecord = tag as Record<string, unknown>;
-    if (tagRecord.type !== "Hashtag" || typeof tagRecord.name !== "string") {
+    if (tagRecord["type"] !== "Hashtag" || typeof tagRecord["name"] !== "string") {
       continue;
     }
 
-    const normalized = normalizeHashtag(tagRecord.name);
+    const normalized = normalizeHashtag(tagRecord["name"]);
     if (normalized) {
       hashtags.add(normalized);
     }

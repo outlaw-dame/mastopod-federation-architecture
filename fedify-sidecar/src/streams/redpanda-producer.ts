@@ -60,6 +60,8 @@ export interface ActivityEvent {
   origin?: "local" | "remote";
   /** Outbox-emitter metadata forwarded verbatim for downstream consumers. */
   meta?: ActivityEventMeta;
+  /** Durable local outbox intent identifier for downstream dedupe/replay diagnostics. */
+  outboxIntentId?: string;
 }
 
 export interface TombstoneEvent {
@@ -67,6 +69,7 @@ export interface TombstoneEvent {
   objectId?: string;
   actorUri: string;
   deletedAt: number;
+  outboxIntentId?: string;
 }
 
 // ============================================================================
@@ -154,6 +157,7 @@ export class RedPandaProducer {
         // Surface consent signal in the Kafka header so consumers can filter
         // before deserialising the full JSON body.
         "search-consent": event.meta?.searchConsent?.isPublic ? "public" : "restricted",
+        ...(event.outboxIntentId ? { "outbox-intent-id": event.outboxIntentId } : {}),
       },
     };
 
@@ -197,6 +201,7 @@ export class RedPandaProducer {
         "actor-uri": event.actorUri,
         "origin": "remote",
         "search-consent": event.meta?.searchConsent?.isPublic ? "public" : "restricted",
+        ...(event.outboxIntentId ? { "outbox-intent-id": event.outboxIntentId } : {}),
       },
     };
 
@@ -231,6 +236,7 @@ export class RedPandaProducer {
         timestamp: event.deletedAt.toString(),
         headers: {
           "actor-uri": event.actorUri,
+          ...(event.outboxIntentId ? { "outbox-intent-id": event.outboxIntentId } : {}),
         },
       }],
     });
@@ -264,6 +270,7 @@ export class RedPandaProducer {
           "actor-uri": event.actorUri,
           "origin": "local",
           "search-consent": event.meta?.searchConsent?.isPublic ? "public" : "restricted",
+          ...(event.outboxIntentId ? { "outbox-intent-id": event.outboxIntentId } : {}),
         },
       };
     });
@@ -305,20 +312,20 @@ export class RedPandaProducer {
 
 export function createRedPandaProducer(overrides?: Partial<RedPandaConfig>): RedPandaProducer {
   const config: RedPandaConfig = {
-    brokers: (process.env.REDPANDA_BROKERS || "localhost:9092").split(","),
-    clientId: process.env.REDPANDA_CLIENT_ID || "fedify-sidecar",
-    connectionTimeout: parseInt(process.env.REDPANDA_CONNECTION_TIMEOUT || "10000", 10),
-    requestTimeout: parseInt(process.env.REDPANDA_REQUEST_TIMEOUT || "30000", 10),
+    brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092").split(","),
+    clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+    connectionTimeout: parseInt(process.env["REDPANDA_CONNECTION_TIMEOUT"] || "10000", 10),
+    requestTimeout: parseInt(process.env["REDPANDA_REQUEST_TIMEOUT"] || "30000", 10),
     // STREAM1_TOPIC is the canonical env var shared with the protocol-bridge
     // consumer (protocolBridgeApSourceTopic in config).  REDPANDA_STREAM1_TOPIC
     // is an alias kept for backwards-compat — prefer the shared name.
-    stream1Topic: process.env.STREAM1_TOPIC || process.env.REDPANDA_STREAM1_TOPIC || "ap.stream1.local-public.v1",
-    stream2Topic: process.env.STREAM2_TOPIC || process.env.REDPANDA_STREAM2_TOPIC || "ap.stream2.remote-public.v1",
-    firehoseTopic: process.env.REDPANDA_FIREHOSE_TOPIC || "apub.public.firehose.v1",
-    tombstoneTopic: process.env.REDPANDA_TOMBSTONE_TOPIC || "apub.tombstone.v1",
+    stream1Topic: process.env["STREAM1_TOPIC"] || process.env["REDPANDA_STREAM1_TOPIC"] || "ap.stream1.local-public.v1",
+    stream2Topic: process.env["STREAM2_TOPIC"] || process.env["REDPANDA_STREAM2_TOPIC"] || "ap.stream2.remote-public.v1",
+    firehoseTopic: process.env["REDPANDA_FIREHOSE_TOPIC"] || "apub.public.firehose.v1",
+    tombstoneTopic: process.env["REDPANDA_TOMBSTONE_TOPIC"] || "apub.tombstone.v1",
     compressionType: CompressionTypes.ZSTD,
-    batchSize: parseInt(process.env.REDPANDA_BATCH_SIZE || "16384", 10),
-    lingerMs: parseInt(process.env.REDPANDA_LINGER_MS || "5", 10),
+    batchSize: parseInt(process.env["REDPANDA_BATCH_SIZE"] || "16384", 10),
+    lingerMs: parseInt(process.env["REDPANDA_LINGER_MS"] || "5", 10),
     ...overrides,
   };
 
@@ -331,7 +338,7 @@ export function createRedPandaProducer(overrides?: Partial<RedPandaConfig>): Red
 
 export const TOPIC_CONFIGS = {
   // Stream1: Local public activities
-  [process.env.STREAM1_TOPIC || process.env.REDPANDA_STREAM1_TOPIC || "ap.stream1.local-public.v1"]: {
+  [process.env["STREAM1_TOPIC"] || process.env["REDPANDA_STREAM1_TOPIC"] || "ap.stream1.local-public.v1"]: {
     numPartitions: 12,
     replicationFactor: 3,
     configEntries: [
@@ -342,7 +349,7 @@ export const TOPIC_CONFIGS = {
   },
   
   // Stream2: Remote public activities
-  [process.env.STREAM2_TOPIC || process.env.REDPANDA_STREAM2_TOPIC || "ap.stream2.remote-public.v1"]: {
+  [process.env["STREAM2_TOPIC"] || process.env["REDPANDA_STREAM2_TOPIC"] || "ap.stream2.remote-public.v1"]: {
     numPartitions: 12,
     replicationFactor: 3,
     configEntries: [
@@ -353,7 +360,7 @@ export const TOPIC_CONFIGS = {
   },
   
   // Firehose: Combined Stream1 + Stream2
-  [process.env.REDPANDA_FIREHOSE_TOPIC || "apub.public.firehose.v1"]: {
+  [process.env["REDPANDA_FIREHOSE_TOPIC"] || "apub.public.firehose.v1"]: {
     numPartitions: 24,
     replicationFactor: 3,
     configEntries: [
@@ -364,7 +371,7 @@ export const TOPIC_CONFIGS = {
   },
   
   // Tombstones: Delete events (compacted)
-  [process.env.REDPANDA_TOMBSTONE_TOPIC || "apub.tombstone.v1"]: {
+  [process.env["REDPANDA_TOMBSTONE_TOPIC"] || "apub.tombstone.v1"]: {
     numPartitions: 6,
     replicationFactor: 3,
     configEntries: [

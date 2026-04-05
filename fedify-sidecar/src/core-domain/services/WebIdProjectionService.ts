@@ -153,7 +153,7 @@ export class WebIdProjectionService {
     };
 
     if (binding.atprotoDid) {
-      jsonLd.sameAs.push(`at://${binding.atprotoDid}`);
+      jsonLd["sameAs"].push(`at://${binding.atprotoDid}`);
       jsonLd['foaf:account'].push(`at://${binding.atprotoHandle}`);
     }
 
@@ -199,11 +199,11 @@ export class WebIdProjectionService {
     const accounts: string[] = [];
 
     // Extract schema:sameAs
-    if (jsonLd.sameAs) {
-      if (Array.isArray(jsonLd.sameAs)) {
-        sameAs.push(...jsonLd.sameAs);
-      } else if (typeof jsonLd.sameAs === 'string') {
-        sameAs.push(jsonLd.sameAs);
+    if (jsonLd["sameAs"]) {
+      if (Array.isArray(jsonLd["sameAs"])) {
+        sameAs.push(...jsonLd["sameAs"]);
+      } else if (typeof jsonLd["sameAs"] === 'string') {
+        sameAs.push(jsonLd["sameAs"]);
       }
     }
 
@@ -238,7 +238,7 @@ export class WebIdProjectionService {
     if (binding.atprotoDid) {
       sameAs.push(`at://${binding.atprotoDid}`);
     }
-    updated.sameAs = sameAs;
+    updated["sameAs"] = sameAs;
 
     // Update foaf:account
     const accounts = [binding.activityPubActorUri];
@@ -261,10 +261,15 @@ export class WebIdProjectionService {
     webIdLinks: { sameAs: string[]; accounts: string[] },
     actorLinks: string[]
   ): boolean {
+    const firstActorLink = actorLinks[0];
+    if (!firstActorLink) {
+      return false;
+    }
+
     // Check if actor appears in WebID
     const actorInWebId =
-      webIdLinks.sameAs.some((link) => link.includes(actorLinks[0])) ||
-      webIdLinks.accounts.some((link) => link.includes(actorLinks[0]));
+      webIdLinks.sameAs.some((link) => link.includes(firstActorLink)) ||
+      webIdLinks.accounts.some((link) => link.includes(firstActorLink));
 
     // Check if WebID appears in actor alsoKnownAs
     const webIdInActor = actorLinks.some((link) => link.includes('profile/card#me'));
@@ -347,6 +352,6 @@ export class WebIdProjectionService {
       '"': '&quot;',
       "'": '&#039;',
     };
-    return text.replace(/[&<>"']/g, (char) => map[char]);
+    return text.replace(/[&<>"']/g, (char) => map[char] ?? char);
   }
 }

@@ -1,0 +1,19 @@
+{
+  admin off
+  auto_https off
+}
+
+https://sidecar {
+  tls /certs/sidecar.crt /certs/sidecar.key
+  reverse_proxy fedify-sidecar:8080
+}
+
+https://gotosocial {
+  tls /certs/gotosocial.crt /certs/gotosocial.key
+  reverse_proxy gotosocial-app:8080
+}
+
+https://mastodon {
+  tls /certs/mastodon.crt /certs/mastodon.key
+  reverse_proxy mastodon-web-app:3000
+}

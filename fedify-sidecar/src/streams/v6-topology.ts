@@ -213,8 +213,8 @@ export function getTopicRetention(topicName: string): number {
  */
 export function createDefaultTopologyConfig(): V6TopologyConfig {
   return {
-    brokers: (process.env.REDPANDA_BROKERS || 'localhost:9092').split(','),
-    clientId: process.env.REDPANDA_CLIENT_ID || 'fedify-sidecar-v6',
-    compression: (process.env.REDPANDA_COMPRESSION || 'zstd') as any,
+    brokers: (process.env["REDPANDA_BROKERS"] || 'localhost:9092').split(','),
+    clientId: process.env["REDPANDA_CLIENT_ID"] || 'fedify-sidecar-v6',
+    compression: (process.env["REDPANDA_COMPRESSION"] || 'zstd') as any,
   };
 }

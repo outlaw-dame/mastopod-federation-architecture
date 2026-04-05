@@ -21,7 +21,6 @@ import { ensureValidDid, ensureValidNsid, ensureValidRecordKey, ensureValidTid }
 import { sha256 } from "multiformats/hashes/sha2";
 import { CID } from "multiformats/cid";
 import { base58btc } from "multiformats/bases/base58";
-import * as multicodec from "multicodec";
 import {
   RegistryError,
   RegistryErrorCode,
@@ -38,6 +37,8 @@ const MAX_COMMITS_TO_KEEP = 100;
 const MST_KEY_REGEX = /^[a-zA-Z0-9_~\-:.]+\/[a-zA-Z0-9_~\-:.]+$/;
 const SECP256K1_ORDER = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 const P256_ORDER = BigInt("0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551");
+const SECP256K1_PUB_MULTICODEC = Uint8Array.from([0xe7, 0x01]);
+const P256_PUB_MULTICODEC = Uint8Array.from([0x80, 0x24]);
 
 type CommitFailureReason =
   | "signature_invalid"
@@ -694,8 +695,9 @@ function buildMultibaseKeyMaterial(keyId: string, publicKeyMultibase: string): S
   }
 
   const prefixedKeyBytes = base58btc.decode(publicKeyMultibase);
-  const keyType = multicodec.getNameFromData(prefixedKeyBytes);
-  const encodedPoint = multicodec.rmPrefix(prefixedKeyBytes);
+  const decoded = decodeKnownKeyMulticodec(prefixedKeyBytes);
+  const keyType = decoded.keyType;
+  const encodedPoint = decoded.encodedPoint;
 
   if (keyType === "secp256k1-pub") {
     return {
@@ -714,6 +716,43 @@ function buildMultibaseKeyMaterial(keyId: string, publicKeyMultibase: string): S
   }
 
   throw invalid("signature_invalid", `Verification method ${keyId} used unsupported multicodec ${keyType}`);
+}
+
+function decodeKnownKeyMulticodec(
+  prefixedKeyBytes: Uint8Array
+): {
+  keyType: "secp256k1-pub" | "p256-pub";
+  encodedPoint: Uint8Array;
+} {
+  if (hasPrefix(prefixedKeyBytes, SECP256K1_PUB_MULTICODEC)) {
+    return {
+      keyType: "secp256k1-pub",
+      encodedPoint: prefixedKeyBytes.slice(SECP256K1_PUB_MULTICODEC.length),
+    };
+  }
+
+  if (hasPrefix(prefixedKeyBytes, P256_PUB_MULTICODEC)) {
+    return {
+      keyType: "p256-pub",
+      encodedPoint: prefixedKeyBytes.slice(P256_PUB_MULTICODEC.length),
+    };
+  }
+
+  throw invalid("signature_invalid", "Verification method used unsupported key multicodec prefix");
+}
+
+function hasPrefix(bytes: Uint8Array, prefix: Uint8Array): boolean {
+  if (bytes.length < prefix.length) {
+    return false;
+  }
+
+  for (let i = 0; i < prefix.length; i += 1) {
+    if (bytes[i] !== prefix[i]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function buildJwkKeyMaterial(keyId: string, jwk: JsonWebKey): SigningKeyMaterial {
@@ -999,6 +1038,9 @@ async function leadingZerosOnHash(key: string): Promise<number> {
   let leadingZeros = 0;
   for (let i = 0; i < hash.length; i += 1) {
     const byte = hash[i];
+    if (byte === undefined) {
+      break;
+    }
     if (byte < 64) leadingZeros += 1;
     if (byte < 16) leadingZeros += 1;
     if (byte < 4) leadingZeros += 1;
@@ -1410,8 +1452,9 @@ class PartialMst {
 
   private async trimTop(): Promise<PartialMst> {
     const entries = await this.getEntries();
-    if (entries.length === 1 && entries[0].isTree()) {
-      return entries[0].trimTop();
+    const firstEntry = entries[0];
+    if (entries.length === 1 && firstEntry?.isTree()) {
+      return firstEntry.trimTop();
     }
     return this;
   }

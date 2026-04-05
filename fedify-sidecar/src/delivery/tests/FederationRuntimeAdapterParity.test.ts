@@ -242,11 +242,71 @@ describe("InboundWorker: flag ON → onInboundVerified called with correct paylo
 
     // hook should have been called exactly once with the correct shape
     expect(hookCalled).toHaveBeenCalledTimes(1);
-    const callArg = hookCalled.mock.calls[0][0];
+    const callArg = hookCalled.mock.calls[0]?.[0];
+    expect(callArg).toBeDefined();
+    if (!callArg) {
+      throw new Error("Expected onInboundVerified to receive an argument");
+    }
     expect(callArg).toMatchObject({
       actorUri: "https://remote.com/users/bob",
       activityType: "Create",
     });
+  });
+
+  it("trusts Fedify-verified envelopes without re-running signature verification", async () => {
+    const hookCalled = vi.fn().mockResolvedValue(undefined);
+    const adapter: FederationRuntimeAdapter = {
+      name: "spy",
+      enabled: true,
+      onInboundVerified: hookCalled,
+    };
+
+    const verifySignatureSpy = vi.fn();
+    const forwardSpy = vi.fn().mockResolvedValue({ success: true });
+
+    class TrustedInboundWorkerStubbed extends InboundWorker {
+      protected override async verifySignature(_envelope: InboundEnvelope) {
+        verifySignatureSpy();
+        return { valid: false, error: "verifySignature should not run for trusted envelopes" };
+      }
+      protected override async forwardToActivityPods(
+        _envelope: InboundEnvelope,
+        _activity: any,
+        actorUri: string
+      ) {
+        return forwardSpy(actorUri);
+      }
+      async runEnvelope(msgId: string, env: InboundEnvelope) {
+        return this.processEnvelope(msgId, env);
+      }
+    }
+
+    const envelope = makeInboundEnvelope({
+      verification: {
+        source: "fedify-v2",
+        actorUri: "https://remote.com/users/bob",
+        verifiedAt: Date.now(),
+      },
+    });
+    const queue = makeQueueWithInbound(envelope);
+    const redpanda = makeRedpanda();
+
+    const worker = new TrustedInboundWorkerStubbed(queue, redpanda, {
+      concurrency: 1,
+      activityPodsUrl: "http://localhost:3000",
+      activityPodsToken: "token",
+      requestTimeoutMs: 5000,
+      userAgent: "test",
+      fedifyRuntimeIntegrationEnabled: true,
+      adapter,
+    });
+
+    await worker.runEnvelope("msg-001", envelope);
+
+    expect(verifySignatureSpy).not.toHaveBeenCalled();
+    expect(forwardSpy).toHaveBeenCalledWith("https://remote.com/users/bob");
+    expect(hookCalled).toHaveBeenCalledTimes(1);
+    expect(queue.moveToDlq).not.toHaveBeenCalled();
   });
 });
 
@@ -295,6 +355,60 @@ describe("InboundWorker: flag ON, adapter throws → error swallowed", () => {
     await expect(worker.start()).resolves.not.toThrow();
     // The message should still have been ack'd
     expect(queue.ack).toHaveBeenCalledWith("inbound", "msg-001");
+  });
+});
+
+describe("InboundWorker: actor consistency safety checks", () => {
+  it("rejects raw verified deliveries when the verified actor does not match activity.actor", async () => {
+    const forwardSpy = vi.fn();
+
+    class InboundWorkerStubbed extends InboundWorker {
+      protected override async verifySignature(_envelope: InboundEnvelope) {
+        return { valid: true, actorUri: "https://remote.com/users/bob" };
+      }
+      protected override async forwardToActivityPods(
+        _envelope: InboundEnvelope,
+        _activity: any,
+        _actorUri: string
+      ) {
+        forwardSpy();
+        return { success: true };
+      }
+      async runEnvelope(msgId: string, env: InboundEnvelope) {
+        return this.processEnvelope(msgId, env);
+      }
+    }
+
+    const envelope = makeInboundEnvelope({
+      body: JSON.stringify({
+        type: "Create",
+        actor: "https://remote.com/users/eve",
+        id: "https://remote.com/activities/1",
+        object: { type: "Note", content: "Hello" },
+      }),
+    });
+    const queue = makeQueueWithInbound(envelope);
+    const redpanda = makeRedpanda();
+
+    const worker = new InboundWorkerStubbed(queue, redpanda, {
+      concurrency: 1,
+      activityPodsUrl: "http://localhost:3000",
+      activityPodsToken: "token",
+      requestTimeoutMs: 5000,
+      userAgent: "test",
+      fedifyRuntimeIntegrationEnabled: true,
+    });
+
+    await worker.runEnvelope("msg-001", envelope);
+
+    expect(forwardSpy).not.toHaveBeenCalled();
+    expect(queue.ack).toHaveBeenCalledWith("inbound", "msg-001");
+    expect(queue.moveToDlq).toHaveBeenCalledTimes(1);
+    expect(queue.moveToDlq).toHaveBeenCalledWith(
+      "inbound",
+      envelope,
+      expect.stringContaining("Verified actor mismatch"),
+    );
   });
 });
 
@@ -378,13 +492,59 @@ describe("OutboundWorker: flag ON → onOutboundDelivered called with correct pa
     await worker.runJob("msg-002", job);
 
     expect(hookCalled).toHaveBeenCalledTimes(1);
-    const callArg = hookCalled.mock.calls[0][0];
+    const callArg = hookCalled.mock.calls[0]?.[0];
+    expect(callArg).toBeDefined();
+    if (!callArg) {
+      throw new Error("Expected onOutboundDelivered to receive an argument");
+    }
     expect(callArg).toMatchObject({
       actorUri: job.actorUri,
       activityId: job.activityId,
       targetDomain: job.targetDomain,
     });
     expect(typeof callArg.statusCode).toBe("number");
+  });
+
+  it("delegates outbound delivery to adapter.deliverOutbound when available", async () => {
+    const deliverOutbound = vi.fn().mockResolvedValue({
+      jobId: "job-001",
+      success: true,
+      statusCode: 202,
+    });
+    const adapter: FederationRuntimeAdapter = {
+      name: "spy",
+      enabled: true,
+      deliverOutbound,
+    };
+
+    class OutboundWorkerDelegating extends OutboundWorker {
+      async runDeliver(job: OutboundJob) {
+        return this.deliver(job);
+      }
+    }
+
+    const job = makeOutboundJob();
+    const signingClient = makeSigningClient();
+    const worker = new OutboundWorkerDelegating(
+      makeQueueWithOutbound(job),
+      signingClient,
+      makeRedpanda(),
+      {
+        concurrency: 1,
+        maxConcurrentPerDomain: 10,
+        requestTimeoutMs: 5000,
+        userAgent: "test",
+        fedifyRuntimeIntegrationEnabled: true,
+        adapter,
+      },
+    );
+
+    await expect(worker.runDeliver(job)).resolves.toMatchObject({
+      success: true,
+      statusCode: 202,
+    });
+    expect(deliverOutbound).toHaveBeenCalledTimes(1);
+    expect(signingClient.signOne).not.toHaveBeenCalled();
   });
 });
 
@@ -427,6 +587,62 @@ describe("OutboundWorker: flag ON, adapter throws → error swallowed", () => {
   });
 });
 
+describe("OutboundWorker: permanent failure hook", () => {
+  it("calls onOutboundPermanentFailure when a permanent delivery failure occurs", async () => {
+    const permanentFailureHook = vi.fn().mockResolvedValue(undefined);
+    const adapter: FederationRuntimeAdapter = {
+      name: "spy",
+      enabled: true,
+      onOutboundPermanentFailure: permanentFailureHook,
+    };
+
+    class OutboundWorkerStubbed extends OutboundWorker {
+      protected override async deliver(_job: OutboundJob): Promise<import("../outbound-worker.js").DeliveryResult> {
+        return {
+          jobId: _job.jobId,
+          success: false,
+          permanent: true,
+          statusCode: 410,
+          error: "Gone",
+          responseBody: "gone",
+        };
+      }
+      async runJob(msgId: string, j: OutboundJob) {
+        return this.processJob(msgId, j);
+      }
+    }
+
+    const job = makeOutboundJob();
+    const worker = new OutboundWorkerStubbed(
+      makeQueueWithOutbound(job),
+      makeSigningClient(),
+      makeRedpanda(),
+      {
+        concurrency: 1,
+        maxConcurrentPerDomain: 10,
+        requestTimeoutMs: 5000,
+        userAgent: "test",
+        fedifyRuntimeIntegrationEnabled: true,
+        adapter,
+      },
+    );
+
+    await worker.runJob("msg-002", job);
+
+    expect(permanentFailureHook).toHaveBeenCalledTimes(1);
+    expect(permanentFailureHook.mock.calls[0]?.[0]).toMatchObject({
+      actorUri: job.actorUri,
+      activityId: job.activityId,
+      targetDomain: job.targetDomain,
+      targetInbox: job.targetInbox,
+      statusCode: 410,
+      error: "Gone",
+      responseBody: "gone",
+      attempt: 1,
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // NoopFederationRuntimeAdapter contract
 // ---------------------------------------------------------------------------
@@ -435,7 +651,9 @@ describe("NoopFederationRuntimeAdapter contract", () => {
   it("has enabled=false so callAdapter short-circuits without invoking any hook", () => {
     expect(NoopFederationRuntimeAdapter.enabled).toBe(false);
     expect(NoopFederationRuntimeAdapter.name).toBe("noop");
+    expect(NoopFederationRuntimeAdapter.deliverOutbound).toBeUndefined();
     expect(NoopFederationRuntimeAdapter.onInboundVerified).toBeUndefined();
     expect(NoopFederationRuntimeAdapter.onOutboundDelivered).toBeUndefined();
+    expect(NoopFederationRuntimeAdapter.onOutboundPermanentFailure).toBeUndefined();
   });
 });

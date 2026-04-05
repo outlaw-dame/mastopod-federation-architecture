@@ -1,13 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { RedisIdentityBindingRepository } from '../../core-domain/identity/RedisIdentityBindingRepository.js';
 
-const SIDEcar_BASE = process.env.UNIFIED_SIDECAR_BASE ?? 'http://localhost:8086';
-const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
-const MOCK_PDS_HOST = process.env.EXTERNAL_PDS_MOCK_HOST ?? '127.0.0.1';
-const MOCK_PDS_PORT = Number.parseInt(process.env.EXTERNAL_PDS_MOCK_PORT ?? '8787', 10);
-const EXTERNAL_PASSWORD = process.env.EXTERNAL_PDS_MOCK_PASSWORD ?? 'ExternalModePass123!';
+const SIDEcar_BASE = process.env["UNIFIED_SIDECAR_BASE"] ?? 'http://localhost:8086';
+const REDIS_URL = process.env["REDIS_URL"] ?? 'redis://localhost:6379';
+const MOCK_PDS_HOST = process.env["EXTERNAL_PDS_MOCK_HOST"] ?? '127.0.0.1';
+const MOCK_PDS_PORT = Number.parseInt(process.env["EXTERNAL_PDS_MOCK_PORT"] ?? '8787', 10);
+const EXTERNAL_PASSWORD = process.env["EXTERNAL_PDS_MOCK_PASSWORD"] ?? 'ExternalModePass123!';
 const MOCK_REPO_CAR = new TextEncoder().encode('mock-car-proof-external-repo');
 
 const BINDING = {

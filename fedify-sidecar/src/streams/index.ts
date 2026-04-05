@@ -251,7 +251,10 @@ export class StreamsService {
     origin: "local" | "remote"
   ): StreamActivity {
     const act = activity as Record<string, unknown>;
-    const actorId = (typeof act.actor === "string" ? act.actor : (act.actor as any)?.id) ?? "";
+    const actorValue = act["actor"];
+    const actorId = (
+      typeof actorValue === "string" ? actorValue : (actorValue as any)?.id
+    ) ?? "";
     
     let actorDomain = "";
     try {
@@ -261,12 +264,12 @@ export class StreamsService {
     }
 
     return {
-      id: (act.id ?? act["@id"] ?? "") as string,
-      type: (act.type ?? act["@type"] ?? "Unknown") as string,
+      id: (act["id"] ?? act["@id"] ?? "") as string,
+      type: (act["type"] ?? act["@type"] ?? "Unknown") as string,
       actor: actorId,
       actorDomain,
-      object: act.object,
-      published: (act.published ?? new Date().toISOString()) as string,
+      object: act["object"],
+      published: (act["published"] ?? new Date().toISOString()) as string,
       receivedAt: Date.now(),
       origin,
       visibility: this.determineVisibility(act),
@@ -283,8 +286,8 @@ export class StreamsService {
     const PUBLIC = "https://www.w3.org/ns/activitystreams#Public";
     const PUBLIC_ALT = "as:Public";
 
-    const to = this.normalizeRecipients(activity.to);
-    const cc = this.normalizeRecipients(activity.cc);
+    const to = this.normalizeRecipients(activity["to"]);
+    const cc = this.normalizeRecipients(activity["cc"]);
     const allRecipients = [...to, ...cc];
 
     if (to.includes(PUBLIC) || to.includes(PUBLIC_ALT)) {

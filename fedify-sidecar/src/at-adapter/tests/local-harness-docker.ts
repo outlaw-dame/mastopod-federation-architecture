@@ -34,9 +34,9 @@ import type { EventPublisher } from '../../core-domain/events/CoreIdentityEvents
 // Configuration from environment
 // ---------------------------------------------------------------------------
 
-const WEBHOOK_URL = process.env.MEMORY_WEBHOOK_URL || 'http://localhost:8794/at/webhook/ingress';
-const SECRET = process.env.FIREHOSE_BRIDGE_SECRET || 'local-bridge-secret-123';
-const USE_REAL_FIREHOSE = process.env.USE_REAL_FIREHOSE === 'true';
+const WEBHOOK_URL = process.env["MEMORY_WEBHOOK_URL"] || 'http://localhost:8794/at/webhook/ingress';
+const SECRET = process.env["FIREHOSE_BRIDGE_SECRET"] || 'local-bridge-secret-123';
+const USE_REAL_FIREHOSE = process.env["USE_REAL_FIREHOSE"] === 'true';
 const MOCK_WS_PORT = 8999;
 const MOCK_FIREHOSE_URL = `ws://localhost:${MOCK_WS_PORT}`;
 const REAL_FIREHOSE_URL = 'wss://relay.bsky.network';

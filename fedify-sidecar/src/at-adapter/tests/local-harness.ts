@@ -30,9 +30,9 @@ import {
   AtCommitVerifier,
   AtIdentityResolver,
   AtSyncRebuilder,
-} from '../ingress';
+} from '../ingress/index.js';
 
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 
 // ---------------------------------------------------------------------------
 // Configuration

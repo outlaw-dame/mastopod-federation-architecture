@@ -83,7 +83,7 @@ export class ActivityPodsClient {
         throw new Error(`Failed to fetch actor: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as Record<string, unknown>;
       const actorData = this.mapToActorData(data);
 
       // Cache the result
@@ -117,7 +117,7 @@ export class ActivityPodsClient {
         throw new Error(`Failed to fetch actor: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as Record<string, unknown>;
       return this.mapToActorData(data);
     } catch (error) {
       logger.error("Failed to fetch actor by URI", { uri, error });
@@ -149,12 +149,17 @@ export class ActivityPodsClient {
         throw new Error(`Failed to fetch key pair: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as Record<string, unknown>;
+      const publicKeyPem = data["publicKeyPem"];
+      const privateKeyPem = data["privateKeyPem"];
+      if (typeof publicKeyPem !== "string" || typeof privateKeyPem !== "string") {
+        throw new Error("ActivityPods key response missing PEM material");
+      }
 
       // Import the keys
       const publicKey = await crypto.subtle.importKey(
         "spki",
-        this.pemToArrayBuffer(data.publicKeyPem),
+        this.pemToArrayBuffer(publicKeyPem),
         { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
         true,
         ["verify"]
@@ -162,7 +167,7 @@ export class ActivityPodsClient {
 
       const privateKey = await crypto.subtle.importKey(
         "pkcs8",
-        this.pemToArrayBuffer(data.privateKeyPem),
+        this.pemToArrayBuffer(privateKeyPem),
         { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
         true,
         ["sign"]
@@ -204,8 +209,8 @@ export class ActivityPodsClient {
       }
 
       logger.debug("Activity forwarded to ActivityPods", {
-        id: act.id ?? act["@id"],
-        type: act.type ?? act["@type"],
+        id: act["id"] ?? act["@id"],
+        type: act["type"] ?? act["@type"],
       });
     } catch (error) {
       logger.error("Failed to forward inbox activity", { error });
@@ -243,8 +248,12 @@ export class ActivityPodsClient {
         throw new Error(`Failed to request signature: ${response.status}`);
       }
 
-      const data = await response.json();
-      return data.signature;
+      const data = (await response.json()) as Record<string, unknown>;
+      const signature = data["signature"];
+      if (typeof signature !== "string") {
+        throw new Error("ActivityPods signing response missing signature");
+      }
+      return signature;
     } catch (error) {
       logger.error("Failed to request signature from ActivityPods", { actorId, error });
       throw error;
@@ -256,19 +265,19 @@ export class ActivityPodsClient {
    */
   private mapToActorData(data: Record<string, unknown>): ActorData {
     return {
-      id: (data.id ?? data["@id"]) as string,
-      type: (data.type ?? data["@type"] ?? "Person") as string,
-      preferredUsername: data.preferredUsername as string,
-      name: data.name as string | undefined,
-      summary: data.summary as string | undefined,
-      url: data.url as string | undefined,
-      inbox: data.inbox as string,
-      outbox: data.outbox as string,
-      followers: data.followers as string | undefined,
-      following: data.following as string | undefined,
-      publicKey: data.publicKey as ActorData["publicKey"],
-      icon: data.icon as ActorData["icon"],
-      image: data.image as ActorData["image"],
+      id: (data["id"] ?? data["@id"]) as string,
+      type: (data["type"] ?? data["@type"] ?? "Person") as string,
+      preferredUsername: data["preferredUsername"] as string,
+      name: data["name"] as string | undefined,
+      summary: data["summary"] as string | undefined,
+      url: data["url"] as string | undefined,
+      inbox: data["inbox"] as string,
+      outbox: data["outbox"] as string,
+      followers: data["followers"] as string | undefined,
+      following: data["following"] as string | undefined,
+      publicKey: data["publicKey"] as ActorData["publicKey"],
+      icon: data["icon"] as ActorData["icon"],
+      image: data["image"] as ActorData["image"],
     };
   }
 

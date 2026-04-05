@@ -4,10 +4,7 @@
 			"path": "../../.."
 		},
 		{
-			"path": "../../../../activitypods-work/activity-pods"
-		},
-		{
-			"path": "../../../../activitypods-work/mastopod-federation-architecture"
+			"path": "../../../../activity-pods"
 		}
 	],
 	"settings": {

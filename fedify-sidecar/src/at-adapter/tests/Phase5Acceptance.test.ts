@@ -4,59 +4,60 @@
  * Tests A-I covering follow, like, repost, image blobs, and reply roots.
  */
 
-import { DefaultAtProjectionWorker } from '../projection/AtProjectionWorker';
-import { DefaultAtProjectionPolicy } from '../projection/AtProjectionPolicy';
-import { InMemoryAtAliasStore } from '../repo/AtAliasStore';
-import { DefaultFollowRecordSerializer } from '../projection/serializers/FollowRecordSerializer';
-import { DefaultLikeRecordSerializer } from '../projection/serializers/LikeRecordSerializer';
-import { DefaultRepostRecordSerializer } from '../projection/serializers/RepostRecordSerializer';
-import { DefaultAtSubjectResolver } from '../identity/AtSubjectResolver';
-import { DefaultAtTargetAliasResolver } from '../repo/AtTargetAliasResolver';
-import { DefaultReplyRefResolver } from '../projection/serializers/ReplyRefResolver';
-import { DefaultImageEmbedBuilder } from '../projection/serializers/ImageEmbedBuilder';
-import { DefaultVideoEmbedBuilder } from '../projection/serializers/VideoEmbedBuilder';
-import { DefaultAtBlobStore } from '../blob/AtBlobStore';
-import { DefaultBlobReferenceMapper } from '../blob/BlobReferenceMapper';
-import { DefaultAtBlobUploadService } from '../blob/AtBlobUploadService';
-import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecordSerializer';
-import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { DefaultAtProjectionWorker } from '../projection/AtProjectionWorker.js';
+import { DefaultAtProjectionPolicy } from '../projection/AtProjectionPolicy.js';
+import { InMemoryAtAliasStore } from '../repo/AtAliasStore.js';
+import { DefaultFollowRecordSerializer } from '../projection/serializers/FollowRecordSerializer.js';
+import { DefaultLikeRecordSerializer } from '../projection/serializers/LikeRecordSerializer.js';
+import { DefaultRepostRecordSerializer } from '../projection/serializers/RepostRecordSerializer.js';
+import { DefaultAtSubjectResolver } from '../identity/AtSubjectResolver.js';
+import { DefaultAtTargetAliasResolver } from '../repo/AtTargetAliasResolver.js';
+import { DefaultReplyRefResolver } from '../projection/serializers/ReplyRefResolver.js';
+import { DefaultImageEmbedBuilder } from '../projection/serializers/ImageEmbedBuilder.js';
+import { DefaultVideoEmbedBuilder } from '../projection/serializers/VideoEmbedBuilder.js';
+import { DefaultAtBlobStore } from '../blob/AtBlobStore.js';
+import { DefaultBlobReferenceMapper } from '../blob/BlobReferenceMapper.js';
+import { DefaultAtBlobUploadService } from '../blob/AtBlobUploadService.js';
+import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecordSerializer.js';
+import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer.js';
 
 // Mock dependencies
 const mockIdentityRepo = {
-  findByCanonicalId: jest.fn(),
-  getByCanonicalAccountId: jest.fn(),
+  findByCanonicalId: vi.fn(),
+  getByCanonicalAccountId: vi.fn(),
 };
 
 const mockRepoRegistry = {
-  getRepoState: jest.fn(),
+  getRepoState: vi.fn(),
 };
 
 const mockRkeyService = {
-  postRkey: jest.fn(() => 'mockrkey'),
-  profileRkey: jest.fn(() => 'self'),
+  postRkey: vi.fn(() => 'mockrkey'),
+  profileRkey: vi.fn(() => 'self'),
 };
 
 const mockCommitBuilder = {
-  buildCommit: jest.fn(),
+  buildCommit: vi.fn(),
 };
 
 const mockPersistenceService = {
-  persist: jest.fn(),
+  persist: vi.fn(),
 };
 
 const mockEventPublisher = {
-  publish: jest.fn().mockResolvedValue(undefined),
-  publishBatch: jest.fn().mockResolvedValue(undefined),
+  publish: vi.fn().mockResolvedValue(undefined),
+  publishBatch: vi.fn().mockResolvedValue(undefined),
 };
 
 const mockMediaResolver = {
-  resolveMedia: jest.fn(),
-  resolveAvatarBlob: jest.fn(),
-  resolveBannerBlob: jest.fn(),
+  resolveMedia: vi.fn(),
+  resolveAvatarBlob: vi.fn(),
+  resolveBannerBlob: vi.fn(),
 };
 
 const mockPostRepository = {
-  getById: jest.fn(),
+  getById: vi.fn(),
 };
 
 describe('Phase 5 Acceptance Tests', () => {
@@ -65,7 +66,7 @@ describe('Phase 5 Acceptance Tests', () => {
   let blobStore: DefaultAtBlobStore;
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     aliasStore = new InMemoryAtAliasStore();
     blobStore = new DefaultAtBlobStore();
 

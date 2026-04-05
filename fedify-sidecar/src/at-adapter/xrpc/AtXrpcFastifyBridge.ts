@@ -104,7 +104,7 @@ export function registerAtXrpcRoutes(
 
       const result = await xrpcServer.handleRequest(
         'GET',
-        req.url.split('?')[0],
+        req.url.split('?')[0] ?? req.url,
         query,
         req.ip
       );
@@ -154,8 +154,8 @@ export function registerAtXrpcRoutes(
     app.post(route, async (req: FastifyRequest, reply: FastifyReply) => {
       const authHeader = (req.headers.authorization as string | undefined) ?? '';
       const dpopHeader =
-        typeof req.headers.dpop === 'string'
-          ? req.headers.dpop
+        typeof req.headers["dpop"] === 'string'
+          ? req.headers["dpop"]
           : undefined;
 
       const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
@@ -218,7 +218,7 @@ export function registerAtXrpcRoutes(
 
       const result = await xrpcServer.handleAuthenticatedRequest(
         'POST',
-        req.url.split('?')[0],
+        req.url.split('?')[0] ?? req.url,
         body,
         sessionCtx
       );

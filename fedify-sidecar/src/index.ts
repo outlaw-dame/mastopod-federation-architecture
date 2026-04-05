@@ -14,13 +14,14 @@
  * - ActivityPods: Signing API (keys never leave), inbox forwarding
  */
 
-import Fastify from "fastify";
-import Redis from "ioredis";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import { Redis } from "ioredis";
 import {
   RedisStreamsQueue,
   createDefaultConfig as createQueueConfig,
   createInboundEnvelope,
-  OutboundJob,
+  createOutboxIntent,
+  createVerifiedInboundEnvelope,
 } from "./queue/sidecar-redis-queue.js";
 import { createSigningClient } from "./signing/signing-client.js";
 import { createRedPandaProducer } from "./streams/redpanda-producer.js";
@@ -31,6 +32,10 @@ import {
 } from "./streams/redpanda-topic-governance.js";
 import { createOutboundWorker, OutboundWorker } from "./delivery/outbound-worker.js";
 import { createInboundWorker, InboundWorker } from "./delivery/inbound-worker.js";
+import {
+  createOutboxIntentWorker,
+  OutboxIntentWorker,
+} from "./delivery/outbox-intent-worker.js";
 import { logger } from "./utils/logger.js";
 import { registerAtXrpcRoutes, attachSubscribeReposWebSocket } from "./at-adapter/xrpc/AtXrpcFastifyBridge.js";
 import { registerOAuthRoutes } from "./at-adapter/oauth/OAuthFastifyBridge.js";
@@ -45,6 +50,10 @@ import { CompositeOAuthTokenVerifier } from "./at-adapter/oauth/CompositeOAuthTo
 import { BackendIntrospectionTokenVerifier } from "./at-adapter/oauth/BackendIntrospectionTokenVerifier.js";
 import { OAuthExternalDiscoveryBroker } from "./at-adapter/oauth/OAuthExternalDiscoveryBroker.js";
 import { renderOAuthSecurityMetricsLines } from "./at-adapter/oauth/OAuthSecurityMetrics.js";
+import {
+  getMetrics as renderPrometheusMetrics,
+  metrics as promMetrics,
+} from "./metrics/index.js";
 import { parseOAuthRouteRateLimitsFromEnv } from "./at-adapter/oauth/OAuthRateLimitConfig.js";
 // AT adapter — identity
 import { RedisIdentityBindingRepository } from "./core-domain/identity/RedisIdentityBindingRepository.js";
@@ -133,7 +142,6 @@ import { HttpAtIdentityResolver } from "./at-adapter/ingress/HttpAtIdentityResol
 import { ProductionAtCommitVerifier } from "./at-adapter/ingress/ProductionAtCommitVerifier.js";
 import { normalizeActivityPubNoteLinkPreviewMode } from "./protocol-bridge/projectors/activitypub/ActivityPubProjectionPolicy.js";
 import {
-  applyActivityPubOutboundDeliveryPolicy,
   normalizeActivityPubDomainRuleList,
 } from "./protocol-bridge/projectors/activitypub/ActivityPubDeliveryPolicy.js";
 import { ProtocolBridgeRuntime } from "./protocol-bridge/runtime/ProtocolBridgeRuntime.js";
@@ -146,167 +154,179 @@ import { AtToApProjectionWorker } from "./protocol-bridge/workers/AtToApProjecti
 import { FedifyKvAdapter } from "./federation/FedifyKvAdapter.js";
 import { createFedifyAdapter, type FedifyFederationAdapter } from "./federation/FedifyFederationAdapter.js";
 import { registerFedifyRoutes } from "./federation/FedifyFastifyBridge.js";
+import {
+  evaluateOutboundWebhookBackpressure,
+  normalizeAndDedupeOutboundTargets,
+  OutboundWebhookValidationError,
+  resolveOutboundWebhookBackpressureConfigFromEnv,
+} from "./delivery/outbound-webhook.js";
 
 // ============================================================================
 // Configuration
 // ============================================================================
 
 const config = {
-  version: process.env.VERSION || "5.0.0",
-  nodeEnv: process.env.NODE_ENV || "development",
-  port: parseInt(process.env.PORT || "8080", 10),
-  host: process.env.HOST || "0.0.0.0",
-  domain: process.env.DOMAIN || "localhost",
-  sidecarToken: process.env.SIDECAR_TOKEN || "",
+  version: process.env["VERSION"] || "5.0.0",
+  nodeEnv: process.env["NODE_ENV"] || "development",
+  port: parseInt(process.env["PORT"] || "8080", 10),
+  host: process.env["HOST"] || "0.0.0.0",
+  domain: process.env["DOMAIN"] || "localhost",
+  sidecarToken: process.env["SIDECAR_TOKEN"] || "",
   
   // Feature flags
-  enableOutboundWorker: process.env.ENABLE_OUTBOUND_WORKER !== "false",
-  enableInboundWorker: process.env.ENABLE_INBOUND_WORKER !== "false",
-  enableOpenSearchIndexer: process.env.ENABLE_OPENSEARCH_INDEXER !== "false",
-  enableXrpcServer: process.env.ENABLE_XRPC_SERVER !== "false",
+  enableOutboundWorker: process.env["ENABLE_OUTBOUND_WORKER"] !== "false",
+  enableInboundWorker: process.env["ENABLE_INBOUND_WORKER"] !== "false",
+  enableOutboxIntentWorker: process.env["ENABLE_OUTBOX_INTENT_WORKER"] !== "false",
+  enableOpenSearchIndexer: process.env["ENABLE_OPENSEARCH_INDEXER"] !== "false",
+  enableXrpcServer: process.env["ENABLE_XRPC_SERVER"] !== "false",
   enableFedifyRuntimeIntegration:
-    process.env.ENABLE_FEDIFY_RUNTIME_INTEGRATION === "true",
-  enableProtocolBridgeApToAt: process.env.ENABLE_PROTOCOL_BRIDGE_AP_TO_AT === "true",
-  enableProtocolBridgeAtToAp: process.env.ENABLE_PROTOCOL_BRIDGE_AT_TO_AP === "true",
+    process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
+  enableProtocolBridgeApToAt: process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true",
+  enableProtocolBridgeAtToAp: process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true",
 
   // Phase 7: AT session token secret (min 32 chars).
   // Required when ENABLE_XRPC_SERVER is true.
-  atSessionSecret: process.env.AT_SESSION_SECRET || "",
+  atSessionSecret: process.env["AT_SESSION_SECRET"] || "",
 
   // Phase 7: PDS hostname advertised in server.describeServer
-  atPdsHostname: process.env.AT_PDS_HOSTNAME || process.env.DOMAIN || "localhost",
+  atPdsHostname: process.env["AT_PDS_HOSTNAME"] || process.env["DOMAIN"] || "localhost",
 
   // ATProto OAuth settings
-  enableAtprotoOauth: process.env.ENABLE_ATPROTO_OAUTH !== "false",
-  atOauthIssuer: process.env.AT_OAUTH_ISSUER || "http://localhost:8080",
+  enableAtprotoOauth: process.env["ENABLE_ATPROTO_OAUTH"] !== "false",
+  atOauthIssuer: process.env["AT_OAUTH_ISSUER"] || "http://localhost:8080",
   atOauthAuthorizationServerOrigin:
-    process.env.AT_OAUTH_AUTHORIZATION_SERVER_ORIGIN || "http://localhost:8080",
+    process.env["AT_OAUTH_AUTHORIZATION_SERVER_ORIGIN"] || "http://localhost:8080",
   atOauthResourceServerOrigin:
-    process.env.AT_OAUTH_RESOURCE_SERVER_ORIGIN || "http://localhost:8080",
+    process.env["AT_OAUTH_RESOURCE_SERVER_ORIGIN"] || "http://localhost:8080",
   atOauthClientMetadataTimeoutMs: Number.parseInt(
-    process.env.AT_OAUTH_CLIENT_METADATA_TIMEOUT_MS || "6000",
+    process.env["AT_OAUTH_CLIENT_METADATA_TIMEOUT_MS"] || "6000",
     10
   ),
   atOauthClientMetadataMaxAttempts: Number.parseInt(
-    process.env.AT_OAUTH_CLIENT_METADATA_MAX_ATTEMPTS || "4",
+    process.env["AT_OAUTH_CLIENT_METADATA_MAX_ATTEMPTS"] || "4",
     10
   ),
   atOauthExternalDiscoveryTimeoutMs: Number.parseInt(
-    process.env.AT_OAUTH_EXTERNAL_DISCOVERY_TIMEOUT_MS || "6000",
+    process.env["AT_OAUTH_EXTERNAL_DISCOVERY_TIMEOUT_MS"] || "6000",
     10
   ),
   atOauthExternalDiscoveryMaxAttempts: Number.parseInt(
-    process.env.AT_OAUTH_EXTERNAL_DISCOVERY_MAX_ATTEMPTS || "4",
+    process.env["AT_OAUTH_EXTERNAL_DISCOVERY_MAX_ATTEMPTS"] || "4",
     10
   ),
-  atOauthAllowLocalhostHttpDiscovery: process.env.AT_OAUTH_ALLOW_LOCALHOST_HTTP_DISCOVERY === "true",
+  atOauthAllowLocalhostHttpDiscovery: process.env["AT_OAUTH_ALLOW_LOCALHOST_HTTP_DISCOVERY"] === "true",
   atOauthBackendIntrospectionTimeoutMs: Number.parseInt(
-    process.env.AT_OAUTH_BACKEND_INTROSPECTION_TIMEOUT_MS || "3000",
+    process.env["AT_OAUTH_BACKEND_INTROSPECTION_TIMEOUT_MS"] || "3000",
     10
   ),
   atOauthBackendIntrospectionMaxAttempts: Number.parseInt(
-    process.env.AT_OAUTH_BACKEND_INTROSPECTION_MAX_ATTEMPTS || "3",
+    process.env["AT_OAUTH_BACKEND_INTROSPECTION_MAX_ATTEMPTS"] || "3",
     10
   ),
 
   // Phase 7: durable write-result correlation settings
-  atWriteResultTtlSec: Number.parseInt(process.env.AT_WRITE_RESULT_TTL_SEC || "120", 10),
-  atWriteResultKeyPrefix: process.env.AT_WRITE_RESULT_KEY_PREFIX || "at:write-result",
-  atWriteResultChannelPrefix: process.env.AT_WRITE_RESULT_CHANNEL_PREFIX || "at:write-result:ch",
+  atWriteResultTtlSec: Number.parseInt(process.env["AT_WRITE_RESULT_TTL_SEC"] || "120", 10),
+  atWriteResultKeyPrefix: process.env["AT_WRITE_RESULT_KEY_PREFIX"] || "at:write-result",
+  atWriteResultChannelPrefix: process.env["AT_WRITE_RESULT_CHANNEL_PREFIX"] || "at:write-result:ch",
 
   // Local fixture mode — for development / integration testing ONLY.
   // When true: uses LocalAtPasswordVerifier (no ActivityPods auth call) and
   // LocalAtSigningService (secp256k1 signing from Redis-stored fixture keys).
   // NEVER set in production.  Requires provision-test-fixture.ts to have been run.
-  atLocalFixture: process.env.AT_LOCAL_FIXTURE === "true",
+  atLocalFixture: process.env["AT_LOCAL_FIXTURE"] === "true",
 
-  identityWarmIntervalMs: Number.parseInt(process.env.IDENTITY_WARM_INTERVAL_MS || "30000", 10),
-  identityWarmBatchLimit: Number.parseInt(process.env.IDENTITY_WARM_BATCH_LIMIT || "100", 10),
+  identityWarmIntervalMs: Number.parseInt(process.env["IDENTITY_WARM_INTERVAL_MS"] || "30000", 10),
+  identityWarmBatchLimit: Number.parseInt(process.env["IDENTITY_WARM_BATCH_LIMIT"] || "100", 10),
   externalAtSessionTtlSeconds: Number.parseInt(
-    process.env.EXTERNAL_AT_SESSION_TTL_SECONDS || `${60 * 60 * 12}`,
+    process.env["EXTERNAL_AT_SESSION_TTL_SECONDS"] || `${60 * 60 * 12}`,
     10
   ),
-  externalPdsTimeoutMs: Number.parseInt(process.env.EXTERNAL_PDS_TIMEOUT_MS || "8000", 10),
-  externalPdsMaxAttempts: Number.parseInt(process.env.EXTERNAL_PDS_MAX_ATTEMPTS || "5", 10),
+  externalPdsTimeoutMs: Number.parseInt(process.env["EXTERNAL_PDS_TIMEOUT_MS"] || "8000", 10),
+  externalPdsMaxAttempts: Number.parseInt(process.env["EXTERNAL_PDS_MAX_ATTEMPTS"] || "5", 10),
   atOauthRouteRateLimits: parseOAuthRouteRateLimitsFromEnv(process.env),
   protocolBridgeConsumerGroupId:
-    process.env.PROTOCOL_BRIDGE_CONSUMER_GROUP_ID || "fedify-sidecar-protocol-bridge",
+    process.env["PROTOCOL_BRIDGE_CONSUMER_GROUP_ID"] || "fedify-sidecar-protocol-bridge",
   protocolBridgeApSourceTopic:
-    process.env.PROTOCOL_BRIDGE_AP_SOURCE_TOPIC ||
-    process.env.STREAM1_TOPIC ||
+    process.env["PROTOCOL_BRIDGE_AP_SOURCE_TOPIC"] ||
+    process.env["STREAM1_TOPIC"] ||
     "ap.stream1.local-public.v1",
   protocolBridgeAtCommitTopic:
-    process.env.PROTOCOL_BRIDGE_AT_COMMIT_TOPIC || "at.commit.v1",
+    process.env["PROTOCOL_BRIDGE_AT_COMMIT_TOPIC"] || "at.commit.v1",
   protocolBridgeAtVerifiedIngressTopic:
-    process.env.PROTOCOL_BRIDGE_AT_VERIFIED_INGRESS_TOPIC || "at.ingress.v1",
+    process.env["PROTOCOL_BRIDGE_AT_VERIFIED_INGRESS_TOPIC"] || "at.ingress.v1",
   protocolBridgeApIngressTopic:
-    process.env.PROTOCOL_BRIDGE_AP_INGRESS_TOPIC || "ap.atproto-ingress.v1",
+    process.env["PROTOCOL_BRIDGE_AP_INGRESS_TOPIC"] || "ap.atproto-ingress.v1",
   atFirehoseConsumerGroupId:
-    process.env.AT_FIREHOSE_CONSUMER_GROUP_ID || "fedify-sidecar-at-firehose",
+    process.env["AT_FIREHOSE_CONSUMER_GROUP_ID"] || "fedify-sidecar-at-firehose",
   atFirehoseCursorMaxEvents: Number.parseInt(
-    process.env.AT_FIREHOSE_CURSOR_MAX_EVENTS || "10000",
+    process.env["AT_FIREHOSE_CURSOR_MAX_EVENTS"] || "10000",
     10,
   ),
   atExternalFirehoseConsumerGroupId:
-    process.env.AT_EXTERNAL_FIREHOSE_CONSUMER_GROUP_ID || "fedify-sidecar-at-firehose-external",
+    process.env["AT_EXTERNAL_FIREHOSE_CONSUMER_GROUP_ID"] || "fedify-sidecar-at-firehose-external",
   atExternalFirehoseRawTopic:
-    process.env.AT_EXTERNAL_FIREHOSE_RAW_TOPIC || "at.firehose.raw.v1",
-  enableAtExternalFirehose: process.env.ENABLE_AT_EXTERNAL_FIREHOSE === "true",
+    process.env["AT_EXTERNAL_FIREHOSE_RAW_TOPIC"] || "at.firehose.raw.v1",
+  enableAtExternalFirehose: process.env["ENABLE_AT_EXTERNAL_FIREHOSE"] === "true",
   protocolBridgeLedgerTtlSec: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_LEDGER_TTL_SEC || `${60 * 60 * 24 * 14}`,
+    process.env["PROTOCOL_BRIDGE_LEDGER_TTL_SEC"] || `${60 * 60 * 24 * 14}`,
     10,
   ),
   protocolBridgeIngressTimeoutMs: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_INGRESS_TIMEOUT_MS || "10000",
+    process.env["PROTOCOL_BRIDGE_INGRESS_TIMEOUT_MS"] || "10000",
     10,
   ),
   protocolBridgeOutboundResolutionTimeoutMs: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_OUTBOUND_RESOLUTION_TIMEOUT_MS || "10000",
+    process.env["PROTOCOL_BRIDGE_OUTBOUND_RESOLUTION_TIMEOUT_MS"] || "10000",
     10,
   ),
   protocolBridgeActivityResolutionTimeoutMs: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_ACTIVITY_RESOLUTION_TIMEOUT_MS || "10000",
+    process.env["PROTOCOL_BRIDGE_ACTIVITY_RESOLUTION_TIMEOUT_MS"] || "10000",
     10,
   ),
   protocolBridgeProfileMediaTimeoutMs: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_PROFILE_MEDIA_TIMEOUT_MS || "10000",
+    process.env["PROTOCOL_BRIDGE_PROFILE_MEDIA_TIMEOUT_MS"] || "10000",
     10,
   ),
   protocolBridgeProfileMediaMaxBytes: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_PROFILE_MEDIA_MAX_BYTES || `${5 * 1024 * 1024}`,
+    process.env["PROTOCOL_BRIDGE_PROFILE_MEDIA_MAX_BYTES"] || `${5 * 1024 * 1024}`,
     10,
   ),
   protocolBridgeAttachmentMediaTimeoutMs: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_ATTACHMENT_MEDIA_TIMEOUT_MS || "20000",
+    process.env["PROTOCOL_BRIDGE_ATTACHMENT_MEDIA_TIMEOUT_MS"] || "20000",
     10,
   ),
   protocolBridgeAttachmentMediaMaxBytes: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_ATTACHMENT_MEDIA_MAX_BYTES || `${50 * 1024 * 1024}`,
+    process.env["PROTOCOL_BRIDGE_ATTACHMENT_MEDIA_MAX_BYTES"] || `${50 * 1024 * 1024}`,
     10,
   ),
   protocolBridgeProfileMediaTtlSec: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_PROFILE_MEDIA_TTL_SEC || `${60 * 60 * 24}`,
+    process.env["PROTOCOL_BRIDGE_PROFILE_MEDIA_TTL_SEC"] || `${60 * 60 * 24}`,
     10,
   ),
   protocolBridgePostMediaTtlSec: Number.parseInt(
-    process.env.PROTOCOL_BRIDGE_POST_MEDIA_TTL_SEC || `${60 * 60 * 24}`,
+    process.env["PROTOCOL_BRIDGE_POST_MEDIA_TTL_SEC"] || `${60 * 60 * 24}`,
     10,
   ),
   protocolBridgeApNoteLinkPreviewMode: normalizeActivityPubNoteLinkPreviewMode(
-    process.env.PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_MODE,
+    process.env["PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_MODE"],
   ),
   protocolBridgeApNoteLinkPreviewRichDomains: normalizeActivityPubDomainRuleList(
-    process.env.PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_RICH_DOMAINS,
+    process.env["PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_RICH_DOMAINS"],
   ),
   protocolBridgeApNoteLinkPreviewDisabledDomains: normalizeActivityPubDomainRuleList(
-    process.env.PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_DISABLED_DOMAINS,
+    process.env["PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_DISABLED_DOMAINS"],
   ),
 };
+
+const outboundWebhookBackpressureConfig = resolveOutboundWebhookBackpressureConfigFromEnv();
 
 // ============================================================================
 // Global State
 // ============================================================================
+let queue: RedisStreamsQueue | null = null;
+let outboundWorker: OutboundWorker | null = null;
 let inboundWorker: InboundWorker | null = null;
+let outboxIntentWorker: OutboxIntentWorker | null = null;
 let opensearchIndexer: SearchIndexerService | null = null;
 let atRedisClient: Redis | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
@@ -315,6 +335,7 @@ let atEventPublisher: RedpandaEventPublisher | null = null;
 let atFirehoseRuntime: AtFirehoseRuntime | null = null;
 let atExternalFirehoseRuntime: AtIngressRuntime | null = null;
 let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
+let searchIndexerRedis: Redis | null = null;
 let fedifyAdapter: FedifyFederationAdapter | null = null;
 let isShuttingDown = false;
 
@@ -335,8 +356,9 @@ async function main() {
   } as const;
 
   const redpandaRequired =
-    config.enableOpenSearchIndexer
+    config.enableOutboxIntentWorker
     || config.enableOutboundWorker
+    || config.enableOpenSearchIndexer
     || config.enableInboundWorker
     || config.enableXrpcServer
     || config.enableProtocolBridgeApToAt
@@ -345,13 +367,13 @@ async function main() {
   const enforceTopicGovernance = process.env["REDPANDA_ENFORCE_TOPIC_GOVERNANCE"] !== "false";
 
   if (config.enableXrpcServer && !config.atLocalFixture) {
-    if (!process.env.ACTIVITYPODS_URL) {
+    if (!process.env["ACTIVITYPODS_URL"]) {
       throw new Error("ENABLE_XRPC_SERVER requires ACTIVITYPODS_URL when AT_LOCAL_FIXTURE is false");
     }
-    if (!process.env.ACTIVITYPODS_TOKEN) {
+    if (!process.env["ACTIVITYPODS_TOKEN"]) {
       throw new Error("ENABLE_XRPC_SERVER requires ACTIVITYPODS_TOKEN when AT_LOCAL_FIXTURE is false");
     }
-    if (!process.env.EXTERNAL_AT_SESSION_KEY_HEX) {
+    if (!process.env["EXTERNAL_AT_SESSION_KEY_HEX"]) {
       throw new Error("ENABLE_XRPC_SERVER requires EXTERNAL_AT_SESSION_KEY_HEX when AT_LOCAL_FIXTURE is false");
     }
   }
@@ -425,7 +447,7 @@ async function main() {
 
     // Initialize Fedify 2.x runtime adapter (feature-flagged)
     if (config.enableFedifyRuntimeIntegration) {
-      const fedifyRedis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
+      const fedifyRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
       fedifyRedis.on("error", (err: Error) =>
         logger.error("Fedify KV Redis error", { error: err.message }),
       );
@@ -434,8 +456,25 @@ async function main() {
         kv,
         {
           domain: config.domain,
-          activityPodsUrl: process.env.ACTIVITYPODS_URL ?? "http://localhost:3000",
-          activityPodsToken: process.env.ACTIVITYPODS_TOKEN ?? "",
+          activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://localhost:3000",
+          activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+          requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+          userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+          enqueueVerifiedInbox: async (delivery) => {
+            if (!queue) {
+              throw new Error("Redis queue not initialized");
+            }
+
+            const envelope = createVerifiedInboundEnvelope({
+              path: delivery.path,
+              body: delivery.body,
+              remoteIp: delivery.remoteIp,
+              verifiedActorUri: delivery.verifiedActorUri,
+              verifiedAt: delivery.verifiedAt,
+            });
+            await queue.enqueueInbound(envelope);
+            return { envelopeId: envelope.envelopeId };
+          },
         },
         logger,
       );
@@ -444,7 +483,13 @@ async function main() {
 
     // Initialize OpenSearch indexer (dedicated search indexer service)
     if (config.enableOpenSearchIndexer) {
-      opensearchIndexer = createSearchIndexerService();
+      searchIndexerRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      searchIndexerRedis.on("error", (err: Error) =>
+        logger.error("Search indexer Redis client error", { error: err.message }),
+      );
+      opensearchIndexer = createSearchIndexerService({
+        redis: searchIndexerRedis as any,
+      });
       await opensearchIndexer.initialize();
       opensearchIndexer.start().catch(err => {
         logger.error("OpenSearch indexer error", { error: err.message });
@@ -462,6 +507,16 @@ async function main() {
         logger.error("Outbound worker error", { error: err.message });
       });
       logger.info("Outbound worker started");
+    }
+
+    if (config.enableOutboxIntentWorker) {
+      outboxIntentWorker = createOutboxIntentWorker(queue, redpanda, {
+        activityPubOutboundDeliveryPolicy,
+      });
+      outboxIntentWorker.start().catch((err) => {
+        logger.error("Outbox intent worker error", { error: err.message });
+      });
+      logger.info("Outbox intent worker started");
     }
 
     // Initialize inbound worker
@@ -508,18 +563,23 @@ async function main() {
         return { status: "not_ready", reason: "Queue not initialized" };
       }
       
-      const outboundPending = await queue.getPendingCount("outbound");
-      const inboundPending = await queue.getPendingCount("inbound");
+      const [outboundPending, inboundPending, outboxIntentPending] = await Promise.all([
+        queue.getPendingCount("outbound"),
+        queue.getPendingCount("inbound"),
+        queue.getPendingCount("outbox_intent"),
+      ]);
       
       return {
         status: "ready",
         queues: {
           outbound: { pending: outboundPending },
           inbound: { pending: inboundPending },
+          outboxIntent: { pending: outboxIntentPending },
         },
         workers: {
           outbound: config.enableOutboundWorker,
           inbound: config.enableInboundWorker,
+          outboxIntent: config.enableOutboxIntentWorker,
           opensearch: config.enableOpenSearchIndexer,
         },
       };
@@ -531,209 +591,263 @@ async function main() {
         return "# Queue not initialized\n";
       }
       
-      const outboundPending = await queue.getPendingCount("outbound");
-      const inboundPending = await queue.getPendingCount("inbound");
-      const outboundLength = await queue.getStreamLength("outbound");
-      const inboundLength = await queue.getStreamLength("inbound");
-      
+      const [
+        outboundPending,
+        inboundPending,
+        outboxIntentPending,
+        outboundLength,
+        inboundLength,
+        outboxIntentLength,
+      ] = await Promise.all([
+        queue.getPendingCount("outbound"),
+        queue.getPendingCount("inbound"),
+        queue.getPendingCount("outbox_intent"),
+        queue.getStreamLength("outbound"),
+        queue.getStreamLength("inbound"),
+        queue.getStreamLength("outbox_intent"),
+      ]);
+
+      promMetrics.queueDepth.set({ topic: "outbound" }, outboundLength);
+      promMetrics.queueDepth.set({ topic: "inbound" }, inboundLength);
+      promMetrics.queueDepth.set({ topic: "outbox_intent" }, outboxIntentLength);
+      const prometheusMetrics = (await renderPrometheusMetrics()).trimEnd();
+
       return [
+        prometheusMetrics,
         `# HELP fedify_outbound_pending Number of pending outbound jobs`,
         `# TYPE fedify_outbound_pending gauge`,
         `fedify_outbound_pending ${outboundPending}`,
         `# HELP fedify_inbound_pending Number of pending inbound envelopes`,
         `# TYPE fedify_inbound_pending gauge`,
         `fedify_inbound_pending ${inboundPending}`,
+        `# HELP fedify_outbox_intent_pending Number of pending outbox intents`,
+        `# TYPE fedify_outbox_intent_pending gauge`,
+        `fedify_outbox_intent_pending ${outboxIntentPending}`,
         `# HELP fedify_outbound_stream_length Total outbound stream length`,
         `# TYPE fedify_outbound_stream_length gauge`,
         `fedify_outbound_stream_length ${outboundLength}`,
         `# HELP fedify_inbound_stream_length Total inbound stream length`,
         `# TYPE fedify_inbound_stream_length gauge`,
         `fedify_inbound_stream_length ${inboundLength}`,
+        `# HELP fedify_outbox_intent_stream_length Total outbox intent stream length`,
+        `# TYPE fedify_outbox_intent_stream_length gauge`,
+        `fedify_outbox_intent_stream_length ${outboxIntentLength}`,
         `# HELP fedify_uptime_seconds Uptime in seconds`,
         `# TYPE fedify_uptime_seconds gauge`,
         `fedify_uptime_seconds ${Math.floor(process.uptime())}`,
         ...renderOAuthSecurityMetricsLines(),
-      ].join("\n") + "\n";
+      ].filter((line) => line.length > 0).join("\n") + "\n";
     });
 
     // Shared inbox endpoint
-    app.post("/inbox", async (request, reply) => {
+    const enqueueRawInboundRequest = async (
+      request: FastifyRequest,
+      reply: FastifyReply,
+      path: string,
+    ): Promise<void> => {
       if (!queue) {
         reply.status(503).send({ error: "Service unavailable" });
         return;
       }
-      
+
       const envelope = createInboundEnvelope({
         method: "POST",
-        path: "/inbox",
+        path,
         headers: normalizeHeaders(request.headers),
         body: request.body as string,
         remoteIp: request.ip,
       });
 
       await queue.enqueueInbound(envelope);
-      
       reply.status(202).send({ accepted: true, envelopeId: envelope.envelopeId });
-    if (xrpcServerForWebSocket) {
-      attachSubscribeReposWebSocket(app, xrpcServerForWebSocket);
+    };
+
+    // Shared inbox uses Fedify as the primary verifier/router when enabled.
+    // Actor-specific inboxes stay on the sidecar-native verifier so the sidecar
+    // never needs local private keys to satisfy Fedify's authenticated
+    // document-loading path.
+    if (!fedifyAdapter) {
+      app.post("/inbox", async (request, reply) => {
+        await enqueueRawInboundRequest(request, reply, "/inbox");
+      });
     }
 
-    // Start HTTP server only after all HTTP and WebSocket routes are registered.
-    await app.listen({ port: config.port, host: config.host });
-    });
-
-    // Per-user inbox endpoint
     app.post("/users/:username/inbox", async (request, reply) => {
-      if (!queue) {
-        reply.status(503).send({ error: "Service unavailable" });
-        return;
-      }
-      
       const { username } = request.params as { username: string };
-      
-      const envelope = createInboundEnvelope({
-        method: "POST",
-        path: `/users/${username}/inbox`,
-        headers: normalizeHeaders(request.headers),
-        body: request.body as string,
-        remoteIp: request.ip,
-      });
-
-      await queue.enqueueInbound(envelope);
-      
-      reply.status(202).send({ accepted: true, envelopeId: envelope.envelopeId });
+      await enqueueRawInboundRequest(request, reply, `/users/${username}/inbox`);
     });
 
-    // Alternative inbox path format
+    // Legacy compatibility alias. Canonical actor documents advertise
+    // /users/:identifier/inbox, but we keep this fallback route to avoid
+    // breaking older callers during the Fedify ingress migration.
     app.post("/:username/inbox", async (request, reply) => {
-      if (!queue) {
-        reply.status(503).send({ error: "Service unavailable" });
-        return;
-      }
-      
       const { username } = request.params as { username: string };
-      
-      const envelope = createInboundEnvelope({
-        method: "POST",
-        path: `/${username}/inbox`,
-        headers: normalizeHeaders(request.headers),
-        body: request.body as string,
-        remoteIp: request.ip,
-      });
-
-      await queue.enqueueInbound(envelope);
-      
-      reply.status(202).send({ accepted: true, envelopeId: envelope.envelopeId });
+      await enqueueRawInboundRequest(request, reply, `/${username}/inbox`);
     });
 
     // Outbound webhook — receives delivery work from ActivityPods
     app.post("/webhook/outbox", async (request, reply) => {
+      const requestStartedAt = Date.now();
       const authHeader = (request.headers["authorization"] as string) || "";
       const [scheme, token] = authHeader.split(" ");
       if (scheme !== "Bearer" || token !== config.sidecarToken) {
+        promMetrics.outboundWebhookRequestsTotal.inc({ status: "unauthorized" });
         reply.status(401).send({ error: "Unauthorized" });
         return;
       }
-      const body = request.body as any;
-      if (!body?.actorUri || !body?.activity || !Array.isArray(body?.remoteTargets)) {
+      let body: Record<string, unknown> | null = null;
+      if (typeof request.body === "string") {
+        try {
+          const parsed = JSON.parse(request.body) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            body = parsed as Record<string, unknown>;
+          }
+        } catch {
+          body = null;
+        }
+      } else if (request.body && typeof request.body === "object" && !Array.isArray(request.body)) {
+        body = request.body as Record<string, unknown>;
+      }
+
+      const actorUri = body?.["actorUri"];
+      const activity = body?.["activity"];
+      const remoteTargets = body?.["remoteTargets"];
+      if (
+        typeof actorUri !== "string"
+        || actorUri.length === 0
+        || !activity
+        || typeof activity !== "object"
+        || Array.isArray(activity)
+        || !Array.isArray(remoteTargets)
+      ) {
+        promMetrics.outboundWebhookRequestsTotal.inc({ status: "invalid" });
         reply.status(400).send({ error: "Bad Request" });
         return;
       }
 
-      const normalizedMeta = body?.meta && typeof body.meta === "object"
-        ? body.meta
+      const bodyRecord = body as Record<string, unknown>;
+      const activityRecord = activity as Record<string, unknown>;
+      const metaValue = bodyRecord["meta"];
+      const normalizedMeta = metaValue && typeof metaValue === "object" && !Array.isArray(metaValue)
+        ? metaValue
         : undefined;
 
-      if (!queue) {
+      if (!queue || !config.enableOutboxIntentWorker) {
+        promMetrics.outboundWebhookRequestsTotal.inc({ status: "unavailable" });
         reply.status(503).send({ error: "Service unavailable" });
         return;
       }
-      const bridgeHints = body?.bridge?.activityPubHints && typeof body.bridge.activityPubHints === "object"
-        ? body.bridge.activityPubHints
-        : undefined;
-      // ── Immutable event log (RedPanda) ──────────────────────────────────────
-      // Publish once per activity to the event log BEFORE the per-domain
-      // delivery loop. We use the original body.activity (not the per-domain
-      // policy-stripped copy) so Stream1 holds the canonical record.
-      // Fire-and-forget: delivery queue correctness does not depend on this.
-      if (redpanda) {
-        const activity = body.activity as Record<string, unknown>;
-        const actorUri = body.actorUri as string;
-        const activityType = activity.type as string | undefined;
 
-        if (activityType === "Delete" || activityType === "Tombstone") {
-          // Hard delete — publish tombstone so OpenSearch can remove any
-          // previously indexed document for this object.
-          const objectVal = activity.object;
-          const objectId =
-            typeof objectVal === "string"
-              ? objectVal
-              : ((objectVal as Record<string, unknown>)?.id as string | undefined);
-          (redpanda as import("./streams/redpanda-producer.js").RedPandaProducer)
-            .publishTombstone({
-              activityId: body.activityId as string,
-              objectId,
-              actorUri,
-              deletedAt: Date.now(),
-            })
-            .catch((err: Error) =>
-              logger.error("Failed to publish tombstone to RedPanda", {
-                activityId: body.activityId,
-                error: err.message,
-              }),
-            );
-        } else if (normalizedMeta?.isPublicIndexable) {
-          // Public activity — publish to Stream1 → Firehose → OpenSearch.
-          // The inbound path publishes remote activities to Stream2 in the
-          // InboundWorker; this covers the local (outbound) side.
-          (redpanda as import("./streams/redpanda-producer.js").RedPandaProducer)
-            .publishToStream1({
-              activity,
-              actorUri,
-              publishedAt: Date.now(),
-              origin: "local",
-              meta: normalizedMeta,
-            })
-            .catch((err: Error) =>
-              logger.error("Failed to publish to Stream1", {
-                activityId: body.activityId,
-                error: err.message,
-              }),
-            );
-        }
-      }
-
-      // ── Outbound delivery queue (Redis Streams) ──────────────────────────────
-      // One job per remote target.  The activity body is re-serialised here
-      // after per-domain delivery policy (bcc stripping, etc.) is applied.
-      let jobCount = 0;
-      for (const target of body.remoteTargets) {
-        if (!target.inboxUrl || !target.targetDomain) continue;
-        const deliveryUrl = target.sharedInboxUrl || target.inboxUrl;
-        const activityJson = JSON.stringify(
-          applyActivityPubOutboundDeliveryPolicy(
-            body.activity as Record<string, unknown>,
-            String(target.targetDomain),
-            bridgeHints,
-            activityPubOutboundDeliveryPolicy,
-          ),
+      try {
+        const normalizedTargets = normalizeAndDedupeOutboundTargets(
+          remoteTargets,
+          outboundWebhookBackpressureConfig,
         );
-        const job: OutboundJob = {
-          jobId: `${body.activityId}::${deliveryUrl}`,
-          activityId: body.activityId,
-          actorUri: body.actorUri,
-          activity: activityJson,
-          targetInbox: deliveryUrl,
-          targetDomain: target.targetDomain,
-          attempt: 0,
-          maxAttempts: 10,
-          notBeforeMs: 0,
-          meta: normalizedMeta,
-        };
-        await queue.enqueueOutbound(job);
-        jobCount++;
+        promMetrics.outboundWebhookTargetCount.observe(normalizedTargets.inputTargetCount);
+        if (normalizedTargets.invalidTargetCount > 0) {
+          promMetrics.outboundWebhookTargetsDedupedTotal.inc(
+            { reason: "invalid" },
+            normalizedTargets.invalidTargetCount,
+          );
+        }
+        if (normalizedTargets.duplicateTargetCount > 0) {
+          promMetrics.outboundWebhookTargetsDedupedTotal.inc(
+            { reason: "duplicate" },
+            normalizedTargets.duplicateTargetCount,
+          );
+        }
+
+        const activityIdValue = bodyRecord["activityId"];
+        const activityId = typeof activityIdValue === "string" && activityIdValue.trim().length > 0
+          ? activityIdValue
+          : typeof activityRecord["id"] === "string" && activityRecord["id"].trim().length > 0
+            ? activityRecord["id"]
+            : null;
+        if (!activityId) {
+          throw new OutboundWebhookValidationError(
+            "OUTBOUND_ACTIVITY_ID_MISSING",
+            400,
+            "activityId is required when activity.id is not present.",
+          );
+        }
+
+        const [outboundPending, outboundLength, outboxIntentPending, outboxIntentLength] = await Promise.all([
+          queue.getPendingCount("outbound"),
+          queue.getStreamLength("outbound"),
+          queue.getPendingCount("outbox_intent"),
+          queue.getStreamLength("outbox_intent"),
+        ]);
+        const backpressure = evaluateOutboundWebhookBackpressure(
+          {
+            pendingCount: Math.max(outboundPending, outboxIntentPending),
+            streamLength: Math.max(outboundLength, outboxIntentLength),
+          },
+          outboundWebhookBackpressureConfig,
+        );
+
+        if (backpressure.reject) {
+          promMetrics.outboundWebhookRequestsTotal.inc({ status: "backpressure" });
+          promMetrics.outboundWebhookBackpressureRejectionsTotal.inc({
+            reason: backpressure.reason ?? "pending",
+          });
+          if (backpressure.retryAfterSeconds) {
+            reply.header("retry-after", backpressure.retryAfterSeconds.toString());
+          }
+          reply.status(503).send({
+            error: "Outbound delivery queue is under backpressure",
+            reason: backpressure.reason,
+            retryAfterSeconds: backpressure.retryAfterSeconds,
+          });
+          return;
+        }
+
+        const bridgeValue = bodyRecord["bridge"];
+        const activityPubHints =
+          bridgeValue && typeof bridgeValue === "object" && !Array.isArray(bridgeValue)
+            ? (bridgeValue as Record<string, unknown>)["activityPubHints"]
+            : undefined;
+        const bridgeHints = activityPubHints && typeof activityPubHints === "object" && !Array.isArray(activityPubHints)
+          ? activityPubHints as Record<string, unknown>
+          : undefined;
+        const intent = createOutboxIntent({
+          activityId,
+          actorUri,
+          activity: JSON.stringify(activityRecord),
+          targets: normalizedTargets.targets,
+          ...(normalizedMeta ? { meta: normalizedMeta } : {}),
+          ...(bridgeHints ? { bridgeHints } : {}),
+        });
+
+        await queue.enqueueOutboxIntent(intent);
+
+        const queueingLatencySeconds = (Date.now() - requestStartedAt) / 1000;
+        promMetrics.outboundWebhookQueueingLatency.observe(queueingLatencySeconds);
+        promMetrics.outboundWebhookRequestsTotal.inc({ status: "accepted" });
+
+        reply.status(202).send({
+          accepted: true,
+          intentId: intent.intentId,
+          jobCount: normalizedTargets.targets.length,
+          inputTargetCount: normalizedTargets.inputTargetCount,
+          duplicateTargetCount: normalizedTargets.duplicateTargetCount,
+          invalidTargetCount: normalizedTargets.invalidTargetCount,
+          queueingLatencyMs: Math.round(queueingLatencySeconds * 1000),
+        });
+      } catch (error) {
+        if (error instanceof OutboundWebhookValidationError) {
+          promMetrics.outboundWebhookRequestsTotal.inc({ status: "invalid" });
+          reply.status(error.statusCode).send({
+            error: error.message,
+            code: error.code,
+          });
+          return;
+        }
+        promMetrics.outboundWebhookRequestsTotal.inc({ status: "error" });
+        logger.error("Outbound webhook processing failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        reply.status(500).send({ error: "Internal server error" });
       }
-      reply.status(202).send({ accepted: true, jobCount });
     });
 
     // -----------------------------------------------------------------------
@@ -742,7 +856,9 @@ async function main() {
     // -----------------------------------------------------------------------
     if (fedifyAdapter) {
       registerFedifyRoutes(app, fedifyAdapter);
-      logger.info("Fedify HTTP routes registered (WebFinger, NodeInfo, actor dispatch)");
+      logger.info(
+        "Fedify HTTP routes registered (WebFinger, NodeInfo, actor dispatch, verified inbox ingress)",
+      );
     }
 
     // -----------------------------------------------------------------------
@@ -759,7 +875,7 @@ async function main() {
         const { DefaultAtXrpcServer } = await import("./at-adapter/xrpc/AtXrpcServer.js");
 
         // ---- Shared Redis client for AT adapter stores ----
-        const atRedis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
+        const atRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
         atRedisClient = atRedis;
         atRedis.on("error", (err: Error) =>
           logger.error("AT Redis client error", { error: err.message }),
@@ -811,13 +927,13 @@ async function main() {
         });
         const externalAtSessionStore = new RedisExternalAtSessionStore(
           atRedis,
-          process.env.EXTERNAL_AT_SESSION_KEY_HEX ?? "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          process.env["EXTERNAL_AT_SESSION_KEY_HEX"] ?? "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           config.externalAtSessionTtlSeconds,
         );
         const externalWriteGateway = new ExternalWriteGateway(
           externalPdsClient,
           externalAtSessionStore,
-          process.env.AT_OAUTH_CLIENT_ID ?? config.atOauthIssuer.replace(/\/$/, '') + '/oauth/atproto-sidecar.client.json',
+          process.env["AT_OAUTH_CLIENT_ID"] ?? config.atOauthIssuer.replace(/\/$/, '') + '/oauth/atproto-sidecar.client.json',
         );
         const externalReadGateway = new ExternalReadGateway(externalPdsClient);
         if (sessionEndpointEnabled) {
@@ -829,8 +945,8 @@ async function main() {
           identityBindingSyncService = config.atLocalFixture
             ? undefined
             : new HttpIdentityBindingSyncService({
-                backendBaseUrl: process.env.ACTIVITYPODS_URL!,
-                bearerToken: process.env.ACTIVITYPODS_TOKEN!,
+                backendBaseUrl: process.env["ACTIVITYPODS_URL"]!,
+                bearerToken: process.env["ACTIVITYPODS_TOKEN"]!,
                 identityBindingRepository: identityRepo,
                 repoRegistry,
                 logger,
@@ -838,7 +954,7 @@ async function main() {
 
           if (identityBindingSyncService) {
           logger.info("AT identity sync enabled", {
-              backendBaseUrl: process.env.ACTIVITYPODS_URL,
+              backendBaseUrl: process.env["ACTIVITYPODS_URL"],
             });
           }
 
@@ -852,8 +968,8 @@ async function main() {
           const passwordVerifier = config.atLocalFixture
             ? new LocalAtPasswordVerifier()
             : createHttpAtPasswordVerifier({
-                baseUrl: process.env.ACTIVITYPODS_URL ?? "http://localhost:3000",
-                token:   process.env.ACTIVITYPODS_TOKEN ?? "",
+                baseUrl: process.env["ACTIVITYPODS_URL"] ?? "http://localhost:3000",
+                token:   process.env["ACTIVITYPODS_TOKEN"] ?? "",
               });
 
           accountResolverForSession  = accountResolver;
@@ -886,23 +1002,23 @@ async function main() {
         // RedPanda-backed event bus implementation so we keep a single durable
         // audit path and avoid silent write-side drops.
         atEventPublisher = new RedpandaEventPublisher({
-          brokers: (process.env.REDPANDA_BROKERS || "localhost:9092")
+          brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
             .split(",")
             .map((broker) => broker.trim())
             .filter(Boolean),
-          clientId: `${process.env.REDPANDA_CLIENT_ID || "fedify-sidecar"}-events`,
-          compression: (process.env.REDPANDA_COMPRESSION || "zstd") as
+          clientId: `${process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar"}-events`,
+          compression: (process.env["REDPANDA_COMPRESSION"] || "zstd") as
             | "none"
             | "gzip"
             | "snappy"
             | "lz4"
             | "zstd",
           connectionTimeoutMs: Number.parseInt(
-            process.env.REDPANDA_CONNECTION_TIMEOUT || "10000",
+            process.env["REDPANDA_CONNECTION_TIMEOUT"] || "10000",
             10,
           ),
           requestTimeoutMs: Number.parseInt(
-            process.env.REDPANDA_REQUEST_TIMEOUT || "30000",
+            process.env["REDPANDA_REQUEST_TIMEOUT"] || "30000",
             10,
           ),
           source: "fedify-sidecar.at-native",
@@ -912,11 +1028,11 @@ async function main() {
 
         atFirehoseRuntime = new AtFirehoseRuntime({
           config: {
-            brokers: (process.env.REDPANDA_BROKERS || "localhost:9092")
+            brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
               .split(",")
               .map((broker) => broker.trim())
               .filter(Boolean),
-            clientId: process.env.REDPANDA_CLIENT_ID || "fedify-sidecar",
+            clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
             consumerGroupId: config.atFirehoseConsumerGroupId,
             commitTopic: "at.commit.v1",
             identityTopic: "at.identity.v1",
@@ -942,7 +1058,7 @@ async function main() {
         if (config.enableAtExternalFirehose) {
           try {
             const externalFirehoseSources = parseAtExternalFirehoseSources(
-              process.env.AT_EXTERNAL_FIREHOSE_SOURCES,
+              process.env["AT_EXTERNAL_FIREHOSE_SOURCES"],
             );
             const externalDidFailureCacheTtlMs = 60_000;
             const externalIdentityResolver = new HttpAtIdentityResolver({
@@ -957,11 +1073,11 @@ async function main() {
             });
             const externalIngressBootstrap = buildAtExternalFirehoseBootstrap({
               runtimeConfig: {
-                brokers: (process.env.REDPANDA_BROKERS || "localhost:9092")
+                brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
                   .split(",")
                   .map((broker) => broker.trim())
                   .filter(Boolean),
-                clientId: process.env.REDPANDA_CLIENT_ID || "fedify-sidecar",
+                clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
                 consumerGroupId: config.atExternalFirehoseConsumerGroupId,
                 rawTopic: config.atExternalFirehoseRawTopic,
                 sources: externalFirehoseSources,
@@ -1035,14 +1151,14 @@ async function main() {
           ttlSeconds: config.protocolBridgePostMediaTtlSec,
         });
         const bridgeRasterImageClient = new ActivityPubBridgeProfileMediaClient({
-          activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
-          bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+          activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+          bearerToken: process.env["ACTIVITYPODS_TOKEN"] || "",
           timeoutMs: config.protocolBridgeProfileMediaTimeoutMs,
           maxMediaBytes: config.protocolBridgeProfileMediaMaxBytes,
         });
         const bridgeAttachmentMediaClient = new ActivityPubBridgeMediaClient({
-          activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
-          bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+          activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+          bearerToken: process.env["ACTIVITYPODS_TOKEN"] || "",
           timeoutMs: config.protocolBridgeAttachmentMediaTimeoutMs,
           maxMediaBytes: config.protocolBridgeAttachmentMediaMaxBytes,
         });
@@ -1138,8 +1254,8 @@ async function main() {
               ...(config.enableProtocolBridgeApToAt
                 ? {
                     activityResolver: new ActivityPubBridgeActivityResolverClient({
-                      activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
-                      bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+                      activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+                      bearerToken: process.env["ACTIVITYPODS_TOKEN"] || "",
                       timeoutMs: config.protocolBridgeActivityResolutionTimeoutMs,
                     }),
                   }
@@ -1184,8 +1300,8 @@ async function main() {
                 eventPublisherAdapter,
                 {
                   outboundResolver: new ActivityPubBridgeOutboundResolverClient({
-                    activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
-                    bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+                    activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+                    bearerToken: process.env["ACTIVITYPODS_TOKEN"] || "",
                     timeoutMs: config.protocolBridgeOutboundResolutionTimeoutMs,
                   }),
                   deliveryPolicy: activityPubOutboundDeliveryPolicy,
@@ -1194,19 +1310,19 @@ async function main() {
             : undefined;
           const bridgeApIngressForwarder = config.enableProtocolBridgeAtToAp
             ? new ActivityPubBridgeIngressClient({
-                activityPodsBaseUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
-                bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
+                activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+                bearerToken: process.env["ACTIVITYPODS_TOKEN"] || "",
                 timeoutMs: config.protocolBridgeIngressTimeoutMs,
               })
             : undefined;
 
           protocolBridgeRuntime = new ProtocolBridgeRuntime({
             config: {
-              brokers: (process.env.REDPANDA_BROKERS || "localhost:9092")
+              brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
                 .split(",")
                 .map((broker) => broker.trim())
                 .filter(Boolean),
-              clientId: process.env.REDPANDA_CLIENT_ID || "fedify-sidecar",
+              clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
               consumerGroupId: config.protocolBridgeConsumerGroupId,
               apSourceTopic: config.protocolBridgeApSourceTopic,
               atCommitTopic: config.protocolBridgeAtCommitTopic,
@@ -1304,10 +1420,10 @@ async function main() {
 
           oauthTokenVerifier = localOauthTokenVerifier;
 
-          if (process.env.ACTIVITYPODS_URL && process.env.ACTIVITYPODS_TOKEN) {
+          if (process.env["ACTIVITYPODS_URL"] && process.env["ACTIVITYPODS_TOKEN"]) {
             const backendOauthTokenVerifier = new BackendIntrospectionTokenVerifier({
-              introspectionUrl: `${process.env.ACTIVITYPODS_URL.replace(/\/$/, '')}/api/internal/oauth/introspect`,
-              introspectionBearerToken: process.env.ACTIVITYPODS_TOKEN,
+              introspectionUrl: `${process.env["ACTIVITYPODS_URL"].replace(/\/$/, '')}/api/internal/oauth/introspect`,
+              introspectionBearerToken: process.env["ACTIVITYPODS_TOKEN"],
               dpopVerifier,
               nonceFactory: () => oauthAuthorizationServer.mintDpopNonce(),
               identityBindings: identityRepo,
@@ -1370,8 +1486,8 @@ async function main() {
 
         if (!config.atLocalFixture) {
           identityWarmupService = new IdentityWarmupService({
-            backendBaseUrl: process.env.ACTIVITYPODS_URL!,
-            bearerToken: process.env.ACTIVITYPODS_TOKEN!,
+            backendBaseUrl: process.env["ACTIVITYPODS_URL"]!,
+            bearerToken: process.env["ACTIVITYPODS_TOKEN"]!,
             identityBindingRepository: identityRepo,
             cursorStore: new RedisIdentityWarmCursorStore(atRedis),
             repoRegistry,
@@ -1382,7 +1498,7 @@ async function main() {
           identityWarmupService.start();
 
           logger.info("AT identity warmup enabled", {
-            backendBaseUrl: process.env.ACTIVITYPODS_URL,
+            backendBaseUrl: process.env["ACTIVITYPODS_URL"],
             intervalMs: config.identityWarmIntervalMs,
             batchLimit: config.identityWarmBatchLimit,
           });
@@ -1466,6 +1582,11 @@ async function shutdown(signal: string): Promise<void> {
 
   try {
     // Stop workers first
+    if (outboxIntentWorker) {
+      await outboxIntentWorker.stop();
+      logger.info("Outbox intent worker stopped");
+    }
+
     if (outboundWorker) {
       await outboundWorker.stop();
       logger.info("Outbound worker stopped");
@@ -1515,6 +1636,12 @@ async function shutdown(signal: string): Promise<void> {
       await protocolBridgeRuntime.stop();
       protocolBridgeRuntime = null;
       logger.info("Protocol bridge runtime stopped");
+    }
+
+    if (searchIndexerRedis) {
+      await searchIndexerRedis.quit().catch(() => searchIndexerRedis!.disconnect());
+      searchIndexerRedis = null;
+      logger.info("Search indexer Redis client disconnected");
     }
 
     // Quit shared AT Redis client

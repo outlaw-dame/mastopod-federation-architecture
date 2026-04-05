@@ -1,0 +1,57 @@
+name: AP Interop Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "fedify-sidecar/**"
+      - ".github/workflows/ap-interop-smoke.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "fedify-sidecar/**"
+      - ".github/workflows/ap-interop-smoke.yml"
+
+concurrency:
+  group: ap-interop-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ap-interop-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install Sidecar Dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Run AP Interop Smoke Lane
+        run: npm --prefix fedify-sidecar run smoke:interop:ap
+
+      - name: Collect Interop Logs On Failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/ap-interop-logs
+          docker compose -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml ps > /tmp/ap-interop-logs/compose-ps.txt || true
+          docker compose -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml logs --no-color > /tmp/ap-interop-logs/compose.log || true
+
+      - name: Upload Interop Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ap-interop-logs
+          path: /tmp/ap-interop-logs

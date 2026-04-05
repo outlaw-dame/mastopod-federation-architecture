@@ -6,11 +6,7 @@
 		},
 		{
 			"name": "activity-pods",
-			"path": "../activitypods-work/activity-pods"
-		},
-		{
-			"name": "mastopod-federation-architecture",
-			"path": "../activitypods-work/mastopod-federation-architecture"
+			"path": "../activity-pods"
 		}
 	],
 	"settings": {

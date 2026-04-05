@@ -17,7 +17,15 @@
  *   // as the Authorization header (NOT Bearer)
  */
 
-import { generateKeyPair, exportJWK, importJWK, SignJWT, calculateJwkThumbprint } from 'jose';
+import {
+  calculateJwkThumbprint,
+  exportJWK,
+  generateKeyPair,
+  importJWK,
+  SignJWT,
+  type JWK,
+  type JWTPayload,
+} from 'jose';
 import { randomBytes, createHash } from 'node:crypto';
 
 /**
@@ -29,7 +37,7 @@ export interface DpopKeypair {
   /** JSON-serialized ES256 private JWK (includes the `d` parameter). */
   privateKeyJwk: string;
   /** ES256 public JWK (no `d`). Suitable for inclusion in DPoP proof headers. */
-  publicKeyJwk: Record<string, unknown>;
+  publicKeyJwk: JWK;
   /**
    * SHA-256 thumbprint of the public key (base64url).
    * Use this as the `dpop_jkt` value when requesting authorization — the
@@ -85,18 +93,27 @@ export interface BuildDpopProofOptions {
   nonce?: string;
 }
 
+interface DpopProofPayload extends JWTPayload {
+  jti: string;
+  htm: string;
+  htu: string;
+  iat: number;
+  ath?: string;
+  nonce?: string;
+}
+
 /**
  * Build a signed DPoP proof JWT for a single request.
  * Returns the compact JWT string to be sent as the `DPoP` HTTP header.
  */
 export async function buildDpopProof(opts: BuildDpopProofOptions): Promise<string> {
-  const privateJwk  = JSON.parse(opts.privateKeyJwk) as Record<string, unknown>;
-  const privateKey  = await importJWK(privateJwk, 'ES256');
+  const privateJwk = JSON.parse(opts.privateKeyJwk) as JWK;
+  const privateKey = await importJWK(privateJwk, 'ES256');
 
   // Strip private key material for the header jwk (MUST be public key only)
   const { d: _d, ...publicJwk } = privateJwk;
 
-  const payload: Record<string, unknown> = {
+  const payload: DpopProofPayload = {
     jti: randomBytes(16).toString('hex'),
     htm: opts.htm.toUpperCase(),
     htu: opts.htu,
@@ -115,6 +132,10 @@ export async function buildDpopProof(opts: BuildDpopProofOptions): Promise<strin
   }
 
   return new SignJWT(payload)
-    .setProtectedHeader({ alg: 'ES256', typ: 'dpop+jwt', jwk: publicJwk })
+    .setProtectedHeader({
+      alg: 'ES256',
+      typ: 'dpop+jwt',
+      jwk: publicJwk as Pick<JWK, 'kty' | 'crv' | 'x' | 'y' | 'e' | 'n'>,
+    })
     .sign(privateKey);
 }

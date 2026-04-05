@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { DefaultAtSessionTokenService } from '../auth/DefaultAtSessionTokenService.js';
 import { RedisSessionFamilyStateStore } from '../auth/SessionFamilyStateStore.js';
 
-const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
+const REDIS_URL = process.env["REDIS_URL"] ?? 'redis://localhost:6379';
 const AT_SESSION_SECRET =
-  process.env.AT_SESSION_SECRET ?? 'dev-session-secret-at-least-32-characters';
+  process.env["AT_SESSION_SECRET"] ?? 'dev-session-secret-at-least-32-characters';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {

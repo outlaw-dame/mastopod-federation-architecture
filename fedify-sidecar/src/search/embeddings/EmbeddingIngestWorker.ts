@@ -5,7 +5,7 @@
  * Async vector enrichment pipeline.
  */
 
-import { OpenSearchClient } from '../writer/PublicContentIndexWriter';
+import { OpenSearchClient } from '../writer/PublicContentIndexWriter.js';
 
 export interface EmbeddingService {
   embedText(text: string): Promise<number[]>;

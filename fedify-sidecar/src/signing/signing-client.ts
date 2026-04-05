@@ -237,7 +237,11 @@ export class SigningClient {
   async signOne(req: Omit<SignRequest, "requestId">): Promise<SignResult> {
     const requestId = `sig-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const results = await this.signBatch([{ ...req, requestId }]);
-    return results[0];
+    const first = results[0];
+    if (!first) {
+      throw new Error("SigningClient: signBatch returned no results for signOne");
+    }
+    return first;
   }
 
   /**
@@ -375,7 +379,7 @@ export class SigningClient {
     }
 
     throw new Error(
-      `ATProto signing API unavailable after ${this.config.maxRetries} attempts — ${path}: ${lastErr?.message}`
+      `ATProto signing API unavailable after ${this.config.maxRetries} attempts — ${path}: ${this._getErrorMessage(lastErr, "Unknown error")}`
     );
   }
 
@@ -538,9 +542,10 @@ export class SigningClient {
     }
 
     // All retries exhausted
+    const lastErrMessage = this._getErrorMessage(lastErr, "Signing API unavailable");
     logger.error("Signing API: unavailable after retries", {
       attempts: this.config.maxRetries,
-      error: lastErr?.message,
+      error: lastErrMessage,
     });
     return [
       ...earlyErrors,
@@ -549,7 +554,7 @@ export class SigningClient {
         ok: false as const,
         error: {
           code: "INTERNAL_ERROR" as SigningErrorCode,
-          message: lastErr?.message ?? "Signing API unavailable",
+          message: lastErrMessage,
           retryable: true,
         },
       })),
@@ -720,6 +725,13 @@ export class SigningClient {
   private _sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+
+  private _getErrorMessage(error: unknown, fallback: string): string {
+    if (error instanceof Error && typeof error.message === "string" && error.message.length > 0) {
+      return error.message;
+    }
+    return fallback;
+  }
 }
 
 // ============================================================================
@@ -730,8 +742,8 @@ export function createSigningClient(
   overrides?: Partial<SigningClientConfig>
 ): SigningClient {
   const config: SigningClientConfig = {
-    baseUrl:      process.env.ACTIVITYPODS_URL   ?? "http://localhost:3000",
-    token:        process.env.ACTIVITYPODS_TOKEN  ?? "",
+    baseUrl:      process.env["ACTIVITYPODS_URL"]   ?? "http://localhost:3000",
+    token:        process.env["ACTIVITYPODS_TOKEN"]  ?? "",
     maxBatchSize: 200,
     maxBodyBytes: 512 * 1024,   // 512 KB — matches ActivityPods default
     timeoutMs:    30_000,

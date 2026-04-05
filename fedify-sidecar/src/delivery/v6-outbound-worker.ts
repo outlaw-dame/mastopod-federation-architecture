@@ -162,7 +162,10 @@ export class V6OutboundWorker {
     }
 
     // Resolve offset after processing batch
-    resolveOffset(batch.messages[batch.messages.length - 1].offset);
+    const lastMessage = batch.messages[batch.messages.length - 1];
+    if (lastMessage) {
+      resolveOffset(lastMessage.offset);
+    }
   }
 
   /**
@@ -188,7 +191,12 @@ export class V6OutboundWorker {
       }
 
       // Check domain blocking
-      const domain = new URL(event.recipients[0]).hostname;
+      const firstRecipient = event.recipients[0];
+      if (!firstRecipient) {
+        logger.warn('Outbound event had no recipients', { jobId: event.jobId });
+        return;
+      }
+      const domain = new URL(firstRecipient).hostname;
       const isBlocked = await this.deliveryState.isDomainBlocked(domain);
       if (isBlocked) {
         logger.info('Domain is blocked', { domain, jobId: event.jobId });
@@ -319,7 +327,8 @@ export class V6OutboundWorker {
           body: JSON.stringify({
             requests: [signingRequest],
           }),
-          timeout: this.config.requestTimeoutMs,
+          headersTimeout: this.config.requestTimeoutMs,
+          bodyTimeout: this.config.requestTimeoutMs,
         }
       );
 
@@ -371,7 +380,8 @@ export class V6OutboundWorker {
           ...signedHeaders,
         },
         body: JSON.stringify(activity),
-        timeout: this.config.requestTimeoutMs,
+        headersTimeout: this.config.requestTimeoutMs,
+        bodyTimeout: this.config.requestTimeoutMs,
       });
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
@@ -423,17 +433,17 @@ export class V6OutboundWorker {
  */
 export function createDefaultOutboundWorkerConfig(): V6OutboundWorkerConfig {
   return {
-    concurrency: parseInt(process.env.OUTBOUND_CONCURRENCY || '20', 10),
-    brokers: (process.env.REDPANDA_BROKERS || 'localhost:9092').split(','),
-    clientId: process.env.REDPANDA_CLIENT_ID || 'fedify-outbound-v6',
-    groupId: process.env.OUTBOUND_CONSUMER_GROUP || 'fedify-outbound-v6',
-    outboundTopic: process.env.OUTBOUND_TOPIC || 'ap.outbound.v1',
-    stream1Topic: process.env.STREAM1_TOPIC || 'ap.stream1.local-public.v1',
-    activityPodsUrl: process.env.ACTIVITYPODS_URL || 'http://localhost:3000',
-    activityPodsToken: process.env.ACTIVITYPODS_TOKEN || '',
-    requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '30000', 10),
-    userAgent: process.env.USER_AGENT || 'Fedify-Sidecar/v6',
-    maxRetries: parseInt(process.env.MAX_RETRIES || '10', 10),
-    retryDelayMs: parseInt(process.env.RETRY_DELAY_MS || '60000', 10),
+    concurrency: parseInt(process.env["OUTBOUND_CONCURRENCY"] || '20', 10),
+    brokers: (process.env["REDPANDA_BROKERS"] || 'localhost:9092').split(','),
+    clientId: process.env["REDPANDA_CLIENT_ID"] || 'fedify-outbound-v6',
+    groupId: process.env["OUTBOUND_CONSUMER_GROUP"] || 'fedify-outbound-v6',
+    outboundTopic: process.env["OUTBOUND_TOPIC"] || 'ap.outbound.v1',
+    stream1Topic: process.env["STREAM1_TOPIC"] || 'ap.stream1.local-public.v1',
+    activityPodsUrl: process.env["ACTIVITYPODS_URL"] || 'http://localhost:3000',
+    activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] || '',
+    requestTimeoutMs: parseInt(process.env["REQUEST_TIMEOUT_MS"] || '30000', 10),
+    userAgent: process.env["USER_AGENT"] || 'Fedify-Sidecar/v6',
+    maxRetries: parseInt(process.env["MAX_RETRIES"] || '10', 10),
+    retryDelayMs: parseInt(process.env["RETRY_DELAY_MS"] || '60000', 10),
   };
 }

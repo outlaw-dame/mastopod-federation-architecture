@@ -227,6 +227,12 @@ export interface IdentityBinding {
      * Account references in RDF
      */
     webIdAccounts: string[];
+
+    /**
+     * Optional cached verification records for account-link checks.
+     * Runtime code must tolerate this being absent.
+     */
+    verificationRecords?: AccountLinkVerificationRecord[];
   };
 
   /**

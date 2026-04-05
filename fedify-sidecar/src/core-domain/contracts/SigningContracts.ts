@@ -18,6 +18,7 @@
 export interface FederationRuntimeAdapter {
   readonly name: string;
   readonly enabled: boolean;
+  deliverOutbound?(input: OutboundDeliveryInput): Promise<OutboundDeliveryResult> | OutboundDeliveryResult;
   onInboundVerified?(input: {
     actorUri: string;
     activityId?: string;
@@ -30,12 +31,71 @@ export interface FederationRuntimeAdapter {
     targetDomain: string;
     statusCode?: number;
   }): Promise<void> | void;
+  onOutboundPermanentFailure?(input: {
+    actorUri: string;
+    activityId: string;
+    targetDomain: string;
+    targetInbox: string;
+    statusCode?: number;
+    error: string;
+    responseBody?: string;
+    attempt: number;
+  }): Promise<void> | void;
 }
 
 export const NoopFederationRuntimeAdapter: FederationRuntimeAdapter = {
   name: "noop",
   enabled: false,
 };
+
+export interface OutboundDeliverySignatureHeaders {
+  date: string;
+  digest?: string;
+  signature: string;
+}
+
+export type OutboundDeliverySignResult =
+  | {
+      ok: true;
+      signedHeaders: OutboundDeliverySignatureHeaders;
+    }
+  | {
+      ok: false;
+      error: {
+        code: string;
+        message: string;
+        permanent: boolean;
+      };
+    };
+
+export interface OutboundDeliveryInput {
+  jobId: string;
+  actorUri: string;
+  activityId: string;
+  activity: string;
+  targetInbox: string;
+  targetDomain: string;
+  attempt: number;
+  maxAttempts: number;
+  requestTimeoutMs: number;
+  userAgent: string;
+  signHttpRequest(input: {
+    actorUri: string;
+    method: "POST";
+    targetUrl: string;
+    body: string;
+  }): Promise<OutboundDeliverySignResult>;
+}
+
+export interface OutboundDeliveryResult {
+  jobId: string;
+  success: boolean;
+  statusCode?: number;
+  error?: string;
+  responseBody?: string;
+  permanent?: boolean;
+  retryAfterMs?: number;
+}
 
 /**
  * Request to generate a new ActivityPub signing key

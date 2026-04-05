@@ -5,8 +5,8 @@
  * Writes to the public-author-v1 index.
  */
 
-import { SearchAuthorUpsertV1, SearchAuthorDeleteV1 } from '../events/SearchEvents';
-import { PublicAuthorDocument } from '../models/PublicAuthorDocument';
+import { SearchAuthorUpsertV1, SearchAuthorDeleteV1 } from '../events/SearchEvents.js';
+import { PublicAuthorDocument } from '../models/PublicAuthorDocument.js';
 
 export interface OpenSearchAuthorClient {
   get(id: string): Promise<PublicAuthorDocument | null>;

@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "lint": "eslint src --ext .ts",
+    "check:fast": "sh ./scripts/run-fast-checks.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest",
     "test:coverage": "vitest --coverage",
@@ -30,6 +31,11 @@
     "inspect:identity-redis": "tsx src/at-adapter/tests/IdentityRedisInspector.ts",
     "smoke:phase7:primary": "tsx src/at-adapter/tests/Phase7PrimarySmoke.ts",
     "smoke:ap:outbound-topic": "tsx src/protocol-bridge/tests/ApOutboundTopicSmokeProof.ts",
+    "proof:ap:interop": "tsx src/interop/ap/ApInteropHarnessProof.ts",
+    "interop:ap:gotosocial": "sh ./interop/ap/scripts/run-gotosocial-proof.sh",
+    "interop:ap:mastodon": "sh ./interop/ap/scripts/run-mastodon-proof.sh",
+    "smoke:interop:ap": "sh ./interop/ap/scripts/run-ap-interop-smoke.sh",
+    "interop:ap:authority": "tsx src/interop/ap/MockActivityPodsAuthority.ts",
     "provision:test:fixture": "tsx scripts/provision-test-fixture.ts",
     "smoke:phase7:full": "npm run provision:test:fixture && npm run smoke:phase7:primary"
   },
@@ -57,6 +63,7 @@
     "redis": "^5.11.0",
     "ulid": "^2.3.0",
     "undici": "^6.6.2",
+    "ws": "^8.20.0",
     "zod": "^3.22.4"
   },
   "devDependencies": {
@@ -69,8 +76,7 @@
     "ts-jest": "^29.4.6",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
-    "vitest": "^4.1.1",
-    "ws": "^8.20.0"
+    "vitest": "^4.1.1"
   },
   "engines": {
     "node": ">=20.0.0"

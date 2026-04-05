@@ -123,9 +123,9 @@ export class AliasProjectionService {
       .map((p) => p.uri);
 
     if (verifiedAliases.length > 0) {
-      updated.alsoKnownAs = verifiedAliases;
+      updated["alsoKnownAs"] = verifiedAliases;
     } else {
-      delete updated.alsoKnownAs;
+      delete updated["alsoKnownAs"];
     }
 
     return updated;
@@ -138,16 +138,16 @@ export class AliasProjectionService {
    * @returns Array of alias URIs
    */
   extractAliasesFromActor(actorDocument: Record<string, any>): string[] {
-    if (!actorDocument.alsoKnownAs) {
+    if (!actorDocument["alsoKnownAs"]) {
       return [];
     }
 
-    if (Array.isArray(actorDocument.alsoKnownAs)) {
-      return actorDocument.alsoKnownAs;
+    if (Array.isArray(actorDocument["alsoKnownAs"])) {
+      return actorDocument["alsoKnownAs"];
     }
 
-    if (typeof actorDocument.alsoKnownAs === 'string') {
-      return [actorDocument.alsoKnownAs];
+    if (typeof actorDocument["alsoKnownAs"] === 'string') {
+      return [actorDocument["alsoKnownAs"]];
     }
 
     return [];

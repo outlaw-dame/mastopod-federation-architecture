@@ -14,13 +14,13 @@
  *   GET  /users/:identifier/outbox
  *   GET  /users/:identifier/followers
  *   GET  /users/:identifier/following
- *
- * Inbox POST routes are NOT registered here — they remain in index.ts because
- * they enqueue to Redis Streams before any Fedify delegation occurs.
+ *   POST /.well-known/webfinger       (not used; omitted)
+ *   POST /inbox                       (shared inbox, verified by Fedify)
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { FedifyFederationAdapter } from "./FedifyFederationAdapter.js";
+import { logger } from "../utils/logger.js";
 
 // ---------------------------------------------------------------------------
 // Internal bridge helper
@@ -50,13 +50,22 @@ async function fedifyHandler(
   }
 
   const webRequest = new Request(rawUrl, init);
-  const context = adapter.buildContext();
+  const contextData = adapter.buildContext(request);
   const federation = adapter.getFederation();
 
   let response: Response;
   try {
-    response = await federation.fetch(webRequest, context);
+    response = await federation.fetch(webRequest, { contextData });
   } catch (err: unknown) {
+    logger.error(
+      {
+        method: request.method,
+        url: rawUrl,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      },
+      "Fedify bridge request failed",
+    );
     reply.status(500).send({ error: "Federation handler error" });
     return;
   }
@@ -100,9 +109,18 @@ export function registerFedifyRoutes(
   app.get("/.well-known/nodeinfo", handler);
   app.get("/nodeinfo/2.1", handler);
 
-  // Actor document + collections (GET only; POST inboxes stay in index.ts)
+  // Actor document + collections
   app.get("/users/:identifier", handler);
   app.get("/users/:identifier/outbox", handler);
   app.get("/users/:identifier/followers", handler);
   app.get("/users/:identifier/following", handler);
+
+  // Verified shared inbox ingress. Fedify validates signatures and routes
+  // these requests before the sidecar persists them into Redis Streams.
+  //
+  // Per-actor inboxes remain on the sidecar-native verification path because
+  // Fedify's actor-specific inbox flow expects locally available actor key
+  // pairs for authenticated document loading, while ActivityPods is the sole
+  // signing authority and private keys never leave it.
+  app.post("/inbox", handler);
 }

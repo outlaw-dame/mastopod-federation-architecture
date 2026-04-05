@@ -43,6 +43,7 @@ import {
 import { SearchEventBus } from './SearchEventBus.js';
 import type { IdentityAliasResolver, ResolvedIdentity } from '../identity/IdentityAliasResolver.js';
 import type { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents.js';
+import { OutboxIntentDeduper, extractOutboxIntentId } from '../../utils/OutboxIntentDeduper.js';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -69,10 +70,15 @@ export interface SearchIndexerServiceConfig {
   opensearchSslVerify: boolean;
 
   /** Redis client for alias cache (provide `null` to use in-memory fallback) */
-  redis: { get(key: string): Promise<string | null>; set(key: string, value: string): Promise<unknown> } | null;
+  redis: {
+    get(key: string): Promise<string | null>;
+    set(key: string, value: string, ...args: Array<string | number>): Promise<unknown>;
+  } | null;
 
   /** How long to wait before retrying after an OpenSearch bulk failure (ms) */
   backpressureRetryDelayMs: number;
+  /** TTL for local outbox-intent dedupe keys. */
+  outboxIntentDedupTtlSec: number;
 }
 
 // ─── No-op identity resolver ────────────────────────────────────────────────
@@ -101,6 +107,7 @@ export class SearchIndexerService {
   private readonly projector: ApSearchProjector;
   private readonly writer: PublicContentIndexWriter;
   private readonly osClient: DefaultOpenSearchClient;
+  private readonly outboxIntentDeduper: OutboxIntentDeduper;
 
   private isRunning = false;
   private backpressureActive = false;
@@ -143,6 +150,11 @@ export class SearchIndexerService {
       : new InMemorySearchDocAliasCache();
 
     const dedupService = new DefaultSearchDedupService(aliasCache);
+    this.outboxIntentDeduper = new OutboxIntentDeduper({
+      prefix: "search:outbox-intent",
+      ttlSeconds: config.outboxIntentDedupTtlSec,
+      store: config.redis,
+    });
 
     // ── In-process event bus ──────────────────────────────────────────────
     this.bus = new SearchEventBus();
@@ -227,15 +239,32 @@ export class SearchIndexerService {
         }
 
         const event = JSON.parse(raw) as Record<string, unknown>;
+        const outboxIntentId = extractOutboxIntentId(
+          event,
+          message.headers as Record<string, Buffer | string | undefined> | undefined,
+        );
+        if (outboxIntentId) {
+          const claimed = await this.outboxIntentDeduper.claim(outboxIntentId);
+          if (!claimed) {
+            logger.debug("[SearchIndexerService] Skipping duplicate local outbox intent replay", {
+              outboxIntentId,
+              topic: batch.topic,
+              offset: message.offset,
+            });
+            resolveOffset(message.offset);
+            await heartbeat();
+            continue;
+          }
+        }
 
         if (batch.topic === this.config.tombstoneTopic) {
           await this.projector.onApTombstoneEvent(event);
         } else {
           // FEP-268d consent gate: explicit opt-out skips indexing.
-          const consent = (event.meta as any)?.searchConsent;
+          const consent = (event["meta"] as any)?.searchConsent;
           if (consent?.explicitlySet === true && consent?.isPublic === false) {
             logger.debug('[SearchIndexerService] Skipping non-searchable activity (FEP-268d)', {
-              activityId: (event.activity as any)?.id,
+              activityId: (event["activity"] as any)?.id,
             });
             resolveOffset(message.offset);
             await heartbeat();
@@ -293,6 +322,10 @@ export function createSearchIndexerService(
     redis: null, // callers inject a Redis client if available
     backpressureRetryDelayMs: parseInt(
       process.env['SEARCH_INDEXER_BACKPRESSURE_RETRY_MS'] ?? '10000',
+      10,
+    ),
+    outboxIntentDedupTtlSec: parseInt(
+      process.env["SEARCH_INDEXER_OUTBOX_INTENT_DEDUP_TTL_SEC"] ?? `${60 * 60 * 24 * 7}`,
       10,
     ),
     ...overrides,

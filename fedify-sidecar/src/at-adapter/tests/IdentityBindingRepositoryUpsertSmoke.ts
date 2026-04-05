@@ -7,7 +7,7 @@ function assert(condition: unknown, message: string): asserts condition {
 }
 
 async function main() {
-  const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
+  const redis = new Redis(process.env["REDIS_URL"] ?? 'redis://localhost:6379');
   const repo = new RedisIdentityBindingRepository(redis);
 
   try {

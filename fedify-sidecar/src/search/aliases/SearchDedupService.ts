@@ -5,9 +5,9 @@
  * Handles deterministic local merge and conservative remote merge logic.
  */
 
-import { SearchPublicUpsertV1 } from '../events/SearchEvents';
-import { PublicContentDocument } from '../models/PublicContentDocument';
-import { SearchDocAliasCache } from '../writer/SearchDocAliasCache';
+import { SearchPublicUpsertV1 } from '../events/SearchEvents.js';
+import { PublicContentDocument } from '../models/PublicContentDocument.js';
+import { SearchDocAliasCache } from '../writer/SearchDocAliasCache.js';
 
 export interface SearchDedupService {
   resolveStableDocId(input: SearchPublicUpsertV1): Promise<string>;

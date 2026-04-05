@@ -16,36 +16,19 @@
  * with a warning, which is safe for correctness but not for cache eviction.
  */
 
-import type Redis from "ioredis";
+import type { Redis } from "ioredis";
+import type {
+  KvKey,
+  KvStore,
+  KvStoreListEntry,
+  KvStoreSetOptions,
+} from "@fedify/fedify";
 
 // ---------------------------------------------------------------------------
 // Fedify 2.x KvStore interface
-// (re-declared here so we don't import from @fedify/fedify at the type level,
-//  keeping this file compilable before the package is installed.)
+// Imported from the installed package so the adapter stays aligned with the
+// exact runtime contract.
 // ---------------------------------------------------------------------------
-
-export type KvKey = readonly string[];
-
-export interface KvKeySelector {
-  prefix: KvKey;
-}
-
-export interface KvListOptions {
-  cursor?: string;
-  limit?: number;
-}
-
-export interface KvEntry {
-  key: KvKey;
-  value: unknown;
-}
-
-export interface FedifyKvStore {
-  get(key: KvKey): Promise<unknown>;
-  set(key: KvKey, value: unknown, options?: { ttl?: unknown }): Promise<void>;
-  delete(key: KvKey): Promise<void>;
-  list(selector: KvKeySelector, options?: KvListOptions): AsyncIterable<KvEntry>;
-}
 
 // ---------------------------------------------------------------------------
 // Adapter implementation
@@ -54,7 +37,7 @@ export interface FedifyKvStore {
 const DEFAULT_NAMESPACE = "fedify:kv";
 const SCAN_COUNT = 100;
 
-export class FedifyKvAdapter implements FedifyKvStore {
+export class FedifyKvAdapter implements KvStore {
   private readonly namespace: string;
 
   constructor(
@@ -74,7 +57,8 @@ export class FedifyKvAdapter implements FedifyKvStore {
 
   private decodeKey(raw: string): KvKey {
     const withoutNs = raw.slice(this.namespace.length + 1);
-    return withoutNs.split(":").map(decodeURIComponent);
+    const parts = withoutNs.split(":").map(decodeURIComponent);
+    return (parts.length > 0 ? parts : [""]) as unknown as KvKey;
   }
 
   private ttlSeconds(ttl: unknown): number | null {
@@ -100,17 +84,17 @@ export class FedifyKvAdapter implements FedifyKvStore {
   // KvStore interface
   // --------------------------------------------------------------------------
 
-  async get(key: KvKey): Promise<unknown> {
+  async get<T = unknown>(key: KvKey): Promise<T | undefined> {
     const raw = await this.redis.get(this.encodeKey(key));
     if (raw == null) return undefined;
     try {
-      return JSON.parse(raw);
+      return JSON.parse(raw) as T;
     } catch {
-      return raw;
+      return raw as T;
     }
   }
 
-  async set(key: KvKey, value: unknown, options?: { ttl?: unknown }): Promise<void> {
+  async set(key: KvKey, value: unknown, options?: KvStoreSetOptions): Promise<void> {
     const encoded = this.encodeKey(key);
     const serialized = JSON.stringify(value);
     const ttl = options?.ttl != null ? this.ttlSeconds(options.ttl) : null;
@@ -127,18 +111,10 @@ export class FedifyKvAdapter implements FedifyKvStore {
 
   // list() is required in Fedify 2.x (was optional in 1.x).
   // Uses Redis SCAN to page through keys matching the given prefix.
-  async *list(
-    selector: KvKeySelector,
-    options?: KvListOptions
-  ): AsyncIterable<KvEntry> {
-    const prefixKey = this.encodeKey(selector.prefix);
+  async *list(prefix?: KvKey): AsyncIterable<KvStoreListEntry> {
+    const prefixKey = this.encodeKey(prefix ?? [""]);
     const pattern = `${prefixKey}*`;
-    const limit = options?.limit ?? Infinity;
-    let yielded = 0;
-
-    // SCAN cursor: options.cursor carries the Redis cursor string across pages.
-    // On the first call it is "0" (or undefined).
-    let cursor = options?.cursor ?? "0";
+    let cursor = "0";
 
     do {
       const [nextCursor, keys] = await this.redis.scan(
@@ -151,7 +127,6 @@ export class FedifyKvAdapter implements FedifyKvStore {
       cursor = nextCursor;
 
       for (const rawKey of keys) {
-        if (yielded >= limit) return;
         const raw = await this.redis.get(rawKey);
         if (raw == null) continue;
         let value: unknown;
@@ -161,8 +136,7 @@ export class FedifyKvAdapter implements FedifyKvStore {
           value = raw;
         }
         yield { key: this.decodeKey(rawKey), value };
-        yielded++;
       }
-    } while (cursor !== "0" && yielded < limit);
+    } while (cursor !== "0");
   }
 }

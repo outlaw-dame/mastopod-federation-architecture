@@ -1,5 +1,7 @@
 # Mastopod + ActivityPods Federation Architecture Overview
 
+Historical overview. The current authoritative baseline is [ARCHITECTURE-BASELINE.md](./ARCHITECTURE-BASELINE.md).
+
 ## Executive Summary
 
 This architecture enables **Mastopod** (a Mastodon-compatible ActivityPub client) to work with **ActivityPods** (a Solid-based pod provider) while achieving high-performance federation with the broader Fediverse. The key innovation is a **Fedify Sidecar** that handles all remote HTTP federation, combined with an **event-driven streaming layer** that captures all public activities into queryable streams.

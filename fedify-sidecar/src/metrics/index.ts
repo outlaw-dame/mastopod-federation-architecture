@@ -275,6 +275,45 @@ export const inboundLatency = new Histogram({
 });
 
 // ============================================================================
+// Outbound Webhook Metrics
+// ============================================================================
+
+export const outboundWebhookRequestsTotal = new Counter({
+  name: "fedify_outbound_webhook_requests_total",
+  help: "Total outbound webhook requests by terminal status",
+  labelNames: ["status"] as const,
+  registers: [registry],
+});
+
+export const outboundWebhookTargetCount = new Histogram({
+  name: "fedify_outbound_webhook_target_count",
+  help: "Number of delivery targets submitted per outbound webhook request",
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+  registers: [registry],
+});
+
+export const outboundWebhookQueueingLatency = new Histogram({
+  name: "fedify_outbound_webhook_queueing_latency_seconds",
+  help: "Time spent validating and enqueueing outbound delivery jobs per webhook request",
+  buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
+
+export const outboundWebhookTargetsDedupedTotal = new Counter({
+  name: "fedify_outbound_webhook_targets_deduped_total",
+  help: "Number of duplicate or invalid outbound webhook targets skipped before enqueue",
+  labelNames: ["reason"] as const,
+  registers: [registry],
+});
+
+export const outboundWebhookBackpressureRejectionsTotal = new Counter({
+  name: "fedify_outbound_webhook_backpressure_rejections_total",
+  help: "Number of outbound webhook requests rejected due to queue backpressure",
+  labelNames: ["reason"] as const,
+  registers: [registry],
+});
+
+// ============================================================================
 // Aggregated Metrics Object
 // ============================================================================
 
@@ -329,6 +368,13 @@ export const metrics = {
   inboundErrors,
   inboundSignatureFailures,
   inboundLatency,
+
+  // Outbound webhook
+  outboundWebhookRequestsTotal,
+  outboundWebhookTargetCount,
+  outboundWebhookQueueingLatency,
+  outboundWebhookTargetsDedupedTotal,
+  outboundWebhookBackpressureRejectionsTotal,
 };
 
 /**

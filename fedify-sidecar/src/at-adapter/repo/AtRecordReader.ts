@@ -10,9 +10,9 @@
  *     information leakage.
  */
 
-import { HandleResolutionReader } from '../identity/HandleResolutionReader';
-import { AtAliasStore } from './AtAliasStore';
-import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry';
+import { HandleResolutionReader } from '../identity/HandleResolutionReader.js';
+import { AtAliasStore } from './AtAliasStore.js';
+import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
 
 export interface AtStoredRecord {
   did: string;
@@ -108,9 +108,10 @@ export class DefaultAtRecordReader implements AtRecordReader {
     const limit = input.limit ?? 50;
     const paginated = filtered.slice(0, limit);
 
+    const lastRecord = paginated[paginated.length - 1];
     const nextCursor =
-      paginated.length === limit && filtered.length > limit
-        ? paginated[paginated.length - 1].rkey
+      paginated.length === limit && filtered.length > limit && lastRecord
+        ? lastRecord.rkey
         : undefined;
 
     const records: AtStoredRecord[] = paginated.map(alias => ({
