@@ -47,9 +47,6 @@ const config = {
 // ============================================================================
 // Global State
 // ============================================================================
-
-let queue: RedisStreamsQueue | null = null;
-let outboundWorker: OutboundWorker | null = null;
 let inboundWorker: InboundWorker | null = null;
 let opensearchIndexer: ReturnType<typeof createOpenSearchIndexer> | null = null;
 let isShuttingDown = false;
@@ -216,6 +213,12 @@ async function main() {
       await queue.enqueueInbound(envelope);
       
       reply.status(202).send({ accepted: true, envelopeId: envelope.envelopeId });
+    if (xrpcServerForWebSocket) {
+      attachSubscribeReposWebSocket(app, xrpcServerForWebSocket);
+    }
+
+    // Start HTTP server only after all HTTP and WebSocket routes are registered.
+    await app.listen({ port: config.port, host: config.host });
     });
 
     // Per-user inbox endpoint

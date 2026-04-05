@@ -10,6 +10,12 @@ import { logger } from "../utils/logger.js";
 import { config } from "../config/index.js";
 import { metrics } from "../metrics/index.js";
 import type { StreamActivity } from "../streams/index.js";
+import {
+  extractHashtagsFromActivityPubTags,
+  extractHashtagsFromText,
+  normalizeHashtag,
+} from "../utils/hashtags.js";
+import { extractApEmojiReactionContent } from "../utils/apEmojiReactions.js";
 
 // Index mapping for activities
 const ACTIVITY_INDEX_MAPPING = {
@@ -34,6 +40,7 @@ const ACTIVITY_INDEX_MAPPING = {
       // Extracted fields for common queries
       in_reply_to: { type: "keyword" },
       hashtags: { type: "keyword" },
+      reaction_content: { type: "keyword" },
       mentions: { type: "keyword" },
       attachments: {
         type: "nested",
@@ -69,6 +76,7 @@ export interface ActivityDocument {
   raw: unknown;
   in_reply_to?: string;
   hashtags?: string[];
+  reaction_content?: string;
   mentions?: string[];
   attachments?: Array<{
     type: string;
@@ -121,6 +129,15 @@ export class OpenSearchService {
         await this.client.indices.create({
           index: this.indexName,
           body: ACTIVITY_INDEX_MAPPING,
+        });
+      } else {
+        await this.client.indices.putMapping({
+          index: this.indexName,
+          body: {
+            properties: {
+              reaction_content: { type: "keyword" },
+            },
+          },
         });
       }
 
@@ -240,6 +257,13 @@ export class OpenSearchService {
     // Extract hashtags
     const hashtags = this.extractHashtags(object);
 
+    // Extract AP EmojiReact / Like+content reaction token
+    const reactionContent = extractApEmojiReactionContent(raw);
+
+    if (!objectContent && reactionContent) {
+      objectContent = reactionContent;
+    }
+
     // Extract mentions
     const mentions = this.extractMentions(object);
 
@@ -262,6 +286,7 @@ export class OpenSearchService {
       raw: activity.raw,
       in_reply_to: inReplyTo,
       hashtags,
+      reaction_content: reactionContent,
       mentions,
       attachments,
     };
@@ -271,15 +296,11 @@ export class OpenSearchService {
    * Extract hashtags from object
    */
   private extractHashtags(object?: Record<string, unknown>): string[] {
-    if (!object?.tag) {
-      return [];
-    }
+    const fromTags = extractHashtagsFromActivityPubTags(object?.tag);
+    const fromContent =
+      typeof object?.content === "string" ? extractHashtagsFromText(object.content) : [];
 
-    const tags = Array.isArray(object.tag) ? object.tag : [object.tag];
-    
-    return tags
-      .filter((tag: any) => tag.type === "Hashtag" && tag.name)
-      .map((tag: any) => tag.name.replace(/^#/, "").toLowerCase());
+    return Array.from(new Set([...fromTags, ...fromContent]));
   }
 
   /**
@@ -329,6 +350,7 @@ export class OpenSearchService {
     actor?: string;
     actorDomain?: string;
     hashtag?: string;
+    reaction?: string;
     from?: string;
     to?: string;
     limit?: number;
@@ -355,7 +377,19 @@ export class OpenSearchService {
     }
 
     if (query.hashtag) {
-      must.push({ term: { hashtags: query.hashtag.toLowerCase() } });
+      const normalizedHashtag = normalizeHashtag(query.hashtag, {
+        allowMissingHash: true,
+      });
+      if (normalizedHashtag) {
+        must.push({ term: { hashtags: normalizedHashtag } });
+      }
+    }
+
+    if (query.reaction) {
+      const reaction = extractApEmojiReactionContent({ type: 'Like', content: query.reaction });
+      if (reaction) {
+        must.push({ term: { reaction_content: reaction } });
+      }
     }
 
     if (query.from || query.to) {

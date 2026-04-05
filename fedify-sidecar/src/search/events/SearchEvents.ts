@@ -41,6 +41,7 @@ export interface SearchPublicUpsertV1 {
     createdAt: string;
     langs?: string[];
     tags?: string[];
+    emojis?: string[];
   };
 
   relations?: {

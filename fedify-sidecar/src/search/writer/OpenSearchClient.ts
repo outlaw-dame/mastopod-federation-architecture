@@ -112,6 +112,7 @@ export class DefaultOpenSearchClient implements IOpenSearchClient {
               createdAt: { type: 'date' },
               langs: { type: 'keyword' },
               tags: { type: 'keyword' },
+              emojis: { type: 'keyword' },
               
               replyToStableId: { type: 'keyword' },
               quoteOfStableId: { type: 'keyword' },

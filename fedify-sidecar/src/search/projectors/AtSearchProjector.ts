@@ -11,6 +11,8 @@ import { IdentityAliasResolver } from '../identity/IdentityAliasResolver';
 import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
 import { AtCommitV1 } from '../../at-adapter/events/AtRepoEvents';
+import { extractAtprotoTagsFromFacets, extractAtprotoTagsFromRecordTags } from '../../utils/hashtags.js';
+import { extractEmojisFromText } from '../../utils/emojis.js';
 
 export class AtSearchProjector {
   constructor(
@@ -75,17 +77,11 @@ export class AtSearchProjector {
         }
       }
 
-      // Extract tags from facets
-      const tags: string[] = [];
-      if (record.facets) {
-        for (const facet of record.facets) {
-          for (const feature of facet.features) {
-            if (feature.$type === 'app.bsky.richtext.facet#tag') {
-              tags.push(feature.tag);
-            }
-          }
-        }
-      }
+      // ATProto hashtags can come from facets and post.tags.
+      const tagsFromFacets = extractAtprotoTagsFromFacets(record.facets);
+      const tagsFromRecord = extractAtprotoTagsFromRecordTags(record.tags);
+      const tags = Array.from(new Set([...tagsFromFacets, ...tagsFromRecord]));
+      const emojis = extractEmojisFromText(record.text || '');
 
       const upsert: SearchPublicUpsertV1 = {
         stableDocId,
@@ -107,7 +103,8 @@ export class AtSearchProjector {
           text: record.text || '',
           createdAt: record.createdAt || event.emittedAt || new Date().toISOString(),
           langs: record.langs,
-          tags: tags.length > 0 ? tags : undefined
+          tags: tags.length > 0 ? tags : undefined,
+          emojis: emojis.length > 0 ? emojis : undefined
         },
         relations: record.reply ? {
           replyToStableId: SearchDocIdStrategy.forRemoteAt(record.reply.parent.uri),

@@ -1,5 +1,7 @@
 import { IdentityBinding } from '../../../core-domain/identity/IdentityBinding';
 import { CanonicalPost } from '../AtProjectionPolicy';
+import { extractAtprotoTagsFromFacets } from '../../../utils/hashtags.js';
+import { clampAtprotoText } from '../../../utils/emojis.js';
 
 export interface StrongRef {
   uri: string;
@@ -12,6 +14,7 @@ export interface AppBskyFeedPostRecord {
   createdAt: string;
   langs?: string[];
   facets?: unknown[];
+  tags?: string[];
   embed?: unknown;
   reply?: {
     root: StrongRef;
@@ -47,15 +50,7 @@ export interface AtRecordRefResolver {
 }
 
 export function normalizeAtPostText(text: string): string {
-  // Truncate to 3000 characters (ATProto limit)
-  // Ensure it's valid UTF-8
-  if (!text) return '';
-  
-  // A simple truncation for now, in a real app we'd need to be careful about grapheme clusters
-  if (text.length > 3000) {
-    return text.substring(0, 2997) + '...';
-  }
-  return text;
+  return clampAtprotoText(text || '');
 }
 
 export class DefaultPostRecordSerializer implements PostRecordSerializer {
@@ -80,6 +75,12 @@ export class DefaultPostRecordSerializer implements PostRecordSerializer {
     const facets = await deps.facetBuilder.build(post);
     if (facets && facets.length > 0) {
       record.facets = facets;
+
+      // Keep a compact deduplicated tag list (max 8) in addition to facets.
+      const tags = extractAtprotoTagsFromFacets(facets).slice(0, 8);
+      if (tags.length > 0) {
+        record.tags = tags;
+      }
     }
 
     const embed = await deps.embedBuilder.build(post, binding.atprotoDid!);
