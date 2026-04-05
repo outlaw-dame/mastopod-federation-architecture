@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/protocol-bridge/**/*",
+    "src/core-domain/identity/IdentityBinding.ts",
+    "src/core-domain/identity/IdentityBindingRepository.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/protocol-bridge/tests/NativeAtLongformWritePath.test.ts",
+    "src/protocol-bridge/tests/NativeAtSocialWritePath.test.ts",
+    "src/protocol-bridge/tests/NativeAtPostEditWritePath.test.ts"
+  ]
+}

@@ -4,8 +4,8 @@
  * Resolves root and parent strong refs for ATProto reply threads.
  */
 
-import { CanonicalPost } from '../AtProjectionPolicy';
-import { AtTargetAliasResolver, StrongRef } from '../../repo/AtTargetAliasResolver';
+import type { CanonicalPost } from '../AtProjectionPolicy.js';
+import type { AtTargetAliasResolver, StrongRef } from '../../repo/AtTargetAliasResolver.js';
 
 export interface ReplyStrongRefs {
   root: StrongRef;

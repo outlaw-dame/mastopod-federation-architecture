@@ -1,0 +1,16 @@
+{
+  "client_id": "https://example.com/oauth/atproto-sidecar.client.json",
+  "client_name": "ActivityPods Fedify Sidecar",
+  "client_uri": "https://example.com",
+  "application_type": "web",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "atproto",
+  "token_endpoint_auth_method": "private_key_jwt",
+  "token_endpoint_auth_signing_alg": "ES256",
+  "dpop_bound_access_tokens": true,
+  "jwks_uri": "https://example.com/oauth/jwks.json",
+  "redirect_uris": ["https://example.com/api/accounts/link-atproto/oauth/callback"],
+  "policy_uri": "https://example.com/privacy",
+  "tos_uri": "https://example.com/terms"
+}

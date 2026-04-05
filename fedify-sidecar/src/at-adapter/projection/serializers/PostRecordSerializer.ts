@@ -1,5 +1,5 @@
-import { IdentityBinding } from '../../../core-domain/identity/IdentityBinding';
-import { CanonicalPost } from '../AtProjectionPolicy';
+import type { IdentityBinding } from '../../../core-domain/identity/IdentityBinding.js';
+import type { CanonicalPost } from '../AtProjectionPolicy.js';
 import { extractAtprotoTagsFromFacets } from '../../../utils/hashtags.js';
 import { clampAtprotoText } from '../../../utils/emojis.js';
 
@@ -22,7 +22,7 @@ export interface AppBskyFeedPostRecord {
   };
 }
 
-import { ReplyRefResolver } from './ReplyRefResolver';
+import type { ReplyRefResolver } from './ReplyRefResolver.js';
 
 export interface PostRecordSerializer {
   serialize(

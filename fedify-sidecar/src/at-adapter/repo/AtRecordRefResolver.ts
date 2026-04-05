@@ -1,5 +1,5 @@
-import { AtAliasStore } from './AtAliasStore';
-import { StrongRef } from '../projection/serializers/PostRecordSerializer';
+import type { AtAliasStore } from './AtAliasStore.js';
+import type { StrongRef } from '../projection/serializers/PostRecordSerializer.js';
 
 export interface AtRecordRefResolver {
   resolvePostStrongRef(canonicalPostId: string): Promise<StrongRef | null>;

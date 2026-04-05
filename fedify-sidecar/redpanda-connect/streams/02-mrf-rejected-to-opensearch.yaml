@@ -1,0 +1,63 @@
+# Pipeline: ap.mrf.rejected.v1 → OpenSearch (ap-mrf-rejections index)
+#
+# Indexes every MRF rejection event for compliance search and policy auditing.
+# On OpenSearch write failure, messages are routed to ap.mrf.rejected.dlq.v1.
+# DLQ retention is 30 days (matching the source topic) to preserve audit trail.
+#
+# Consumer group: rpconnect-mrf-indexer-v1
+# Throughput target: ~100 docs/batch, flush every 10 s (low-volume topic)
+#
+# Required env vars: same as 01-firehose-to-opensearch.yaml
+
+input:
+  kafka_franz:
+    seed_brokers:
+      - "${REDPANDA_BROKER:redpanda:9092}"
+    topics:
+      - ap.mrf.rejected.v1
+    consumer_group: rpconnect-mrf-indexer-v1
+    start_from_oldest: false
+    auto_replay_nacks: false
+    commit_period: 5s
+    tls:
+      enabled: false
+
+pipeline:
+  processors:
+    - bloblang: |
+        root = this
+        root._connect_indexed_at = now().format("2006-01-02T15:04:05Z07:00")
+
+output:
+  fallback:
+    - label: os_mrf_rejections
+      elasticsearch:
+        urls:
+          - "${OPENSEARCH_URL:http://opensearch:9200}"
+        index: ap-mrf-rejections
+        # jobId is the natural idempotency key for MRF rejection events.
+        id: "${!this.jobId | this.activity.id | uuid_v4()}"
+        action: index
+        auth:
+          enabled: ${OPENSEARCH_AUTH_ENABLED:false}
+          username: "${OPENSEARCH_USER:admin}"
+          password: "${OPENSEARCH_PASSWORD:admin}"
+        tls:
+          enabled: false
+        max_in_flight: 32
+        batching:
+          count: 100
+          period: 10s
+
+    - label: mrf_dlq
+      kafka_franz:
+        seed_brokers:
+          - "${REDPANDA_BROKER:redpanda:9092}"
+        topic: ap.mrf.rejected.dlq.v1
+        compression: zstd
+        metadata:
+          include_patterns:
+            - kafka_topic
+            - kafka_partition
+            - kafka_offset
+            - kafka_timestamp

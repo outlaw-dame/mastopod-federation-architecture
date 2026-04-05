@@ -22,6 +22,7 @@ export interface StoredBlobMetadata {
 export interface AtBlobStore {
   putBlob(did: string, bytes: Uint8Array, mimeType: string): Promise<StoredBlobMetadata>;
   getBlob(did: string, cid: string): Promise<Uint8Array | null>;
+  getBlobMetadata(did: string, cid: string): Promise<StoredBlobMetadata | null>;
 }
 
 export class DefaultAtBlobStore implements AtBlobStore {
@@ -52,5 +53,11 @@ export class DefaultAtBlobStore implements AtBlobStore {
     const key = `${did}:${cid}`;
     const entry = this.blobs.get(key);
     return entry ? entry.bytes : null;
+  }
+
+  async getBlobMetadata(did: string, cid: string): Promise<StoredBlobMetadata | null> {
+    const key = `${did}:${cid}`;
+    const entry = this.blobs.get(key);
+    return entry ? entry.meta : null;
   }
 }

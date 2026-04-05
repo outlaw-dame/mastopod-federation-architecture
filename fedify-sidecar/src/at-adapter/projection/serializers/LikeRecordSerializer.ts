@@ -4,8 +4,8 @@
  * Serializes a CanonicalLike into an app.bsky.feed.like record.
  */
 
-import { CanonicalLike } from '../../events/AtSocialRepoEvents';
-import { StrongRef } from '../../repo/AtTargetAliasResolver';
+import type { CanonicalLike } from '../../events/AtSocialRepoEvents.js';
+import type { StrongRef } from '../../repo/AtTargetAliasResolver.js';
 
 export interface AppBskyFeedLikeRecord {
   $type: 'app.bsky.feed.like';

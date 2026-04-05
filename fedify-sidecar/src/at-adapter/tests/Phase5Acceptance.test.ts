@@ -14,10 +14,12 @@ import { DefaultAtSubjectResolver } from '../identity/AtSubjectResolver';
 import { DefaultAtTargetAliasResolver } from '../repo/AtTargetAliasResolver';
 import { DefaultReplyRefResolver } from '../projection/serializers/ReplyRefResolver';
 import { DefaultImageEmbedBuilder } from '../projection/serializers/ImageEmbedBuilder';
+import { DefaultVideoEmbedBuilder } from '../projection/serializers/VideoEmbedBuilder';
 import { DefaultAtBlobStore } from '../blob/AtBlobStore';
 import { DefaultBlobReferenceMapper } from '../blob/BlobReferenceMapper';
 import { DefaultAtBlobUploadService } from '../blob/AtBlobUploadService';
 import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecordSerializer';
+import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer';
 
 // Mock dependencies
 const mockIdentityRepo = {
@@ -76,8 +78,10 @@ describe('Phase 5 Acceptance Tests', () => {
     const blobUploadService = new DefaultAtBlobUploadService(blobStore, blobMapper);
     const imageEmbedBuilder = new DefaultImageEmbedBuilder(blobUploadService, mockMediaResolver);
     
+    const videoEmbedBuilder = new DefaultVideoEmbedBuilder(blobUploadService, mockMediaResolver);
     const embedBuilder = {
-      build: async (post: any, did: string) => imageEmbedBuilder.build(post, did)
+      build: async (post: any, did: string) =>
+        (await videoEmbedBuilder.build(post, did)) ?? imageEmbedBuilder.build(post, did)
     };
 
     const postSerializer = new DefaultPostRecordSerializer();
@@ -88,6 +92,7 @@ describe('Phase 5 Acceptance Tests', () => {
       mockRepoRegistry as any,
       {} as any, // profileSerializer
       postSerializer,
+      new DefaultStandardDocumentRecordSerializer(),
       mockRkeyService as any,
       aliasStore,
       mockCommitBuilder as any,

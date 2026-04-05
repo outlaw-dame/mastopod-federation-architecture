@@ -74,17 +74,121 @@ function signRsaSha256(privateKeyPem, signingString) {
 }
 
 // ============================================================================
+// secp256k1 (ATProto) Utilities
+// ============================================================================
+
+// secp256k1 group order n — used for low-S normalization (ATProto requirement)
+const SECP256K1_N = BigInt(
+  "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
+);
+
+// Multicodec varint prefix for secp256k1-pub (0xe7 = 231 in varint → [0xe7, 0x01])
+const SECP256K1_MULTICODEC = Buffer.from([0xe7, 0x01]);
+
+const BASE58_CHARS = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/**
+ * Convert a DER-encoded ECDSA signature to compact (IEEE P1363) 64-byte format
+ * and normalize s to low-S as required by ATProto.
+ * DER layout: 0x30 <totalLen> 0x02 <rLen> <r…> 0x02 <sLen> <s…>
+ */
+function derToCompact(derBuf) {
+  let offset = 2; // skip 0x30 + total-length byte
+  if (derBuf[offset++] !== 0x02) throw new Error("DER: expected 0x02 for r");
+  const rLen = derBuf[offset++];
+  const rBytes = derBuf.slice(offset, offset + rLen);
+  offset += rLen;
+  if (derBuf[offset++] !== 0x02) throw new Error("DER: expected 0x02 for s");
+  const sLen = derBuf[offset++];
+  const sBytes = derBuf.slice(offset, offset + sLen);
+
+  // Pad each component to exactly 32 bytes (DER may prefix a 0x00 sign byte)
+  const r = Buffer.alloc(32);
+  const s = Buffer.alloc(32);
+  rBytes.copy(r, 32 - rBytes.length);
+  sBytes.copy(s, 32 - sBytes.length);
+
+  // Low-S normalization: if s > n/2, replace with n - s
+  const sInt = BigInt("0x" + s.toString("hex"));
+  let finalS = s;
+  if (sInt > SECP256K1_N >> 1n) {
+    const lowS = SECP256K1_N - sInt;
+    finalS = Buffer.from(lowS.toString(16).padStart(64, "0"), "hex");
+  }
+
+  return Buffer.concat([r, finalS]);
+}
+
+/**
+ * Encode a Buffer as base58 (Bitcoin alphabet, no checksum).
+ */
+function toBase58(buf) {
+  if (buf.length === 0) return "";
+  let num = BigInt("0x" + buf.toString("hex"));
+  let result = "";
+  while (num > 0n) {
+    result = BASE58_CHARS[Number(num % 58n)] + result;
+    num /= 58n;
+  }
+  for (let i = 0; i < buf.length && buf[i] === 0; i++) {
+    result = "1" + result;
+  }
+  return result;
+}
+
+/**
+ * Encode a secp256k1 compressed public key (33 bytes) as multibase base58btc.
+ * Format: 'z' + base58( [0xe7, 0x01] + compressedKey )
+ * This is the did:key / ATProto standard for secp256k1 public keys.
+ */
+function secp256k1PubkeyToMultibase(compressedKeyBytes) {
+  return "z" + toBase58(Buffer.concat([SECP256K1_MULTICODEC, compressedKeyBytes]));
+}
+
+/**
+ * Given a PEM-encoded EC public key, return the 33-byte compressed point.
+ * Node exports SPKI DER with an uncompressed 65-byte point (0x04 x y).
+ * Compression: prefix 0x02 (y even) or 0x03 (y odd) + x.
+ */
+function getCompressedPublicKey(publicKeyPem) {
+  const pubKey = crypto.createPublicKey(publicKeyPem);
+  const der = pubKey.export({ type: "spki", format: "der" });
+  // Last 65 bytes of SPKI DER for an uncompressed EC point are 0x04 + x(32) + y(32)
+  const raw = der.slice(-65);
+  if (raw[0] !== 0x04) throw new Error("Expected uncompressed EC point (0x04 prefix)");
+  const x = raw.slice(1, 33);
+  const y = raw.slice(33, 65);
+  const prefix = (y[31] & 1) === 0 ? 0x02 : 0x03;
+  return Buffer.concat([Buffer.from([prefix]), x]);
+}
+
+/**
+ * Sign arbitrary bytes with a secp256k1 private key.
+ * Returns the compact signature as a base64url string (ATProto wire format).
+ */
+function signSecp256k1(privateKeyPem, dataBytes) {
+  const signer = crypto.createSign("SHA256");
+  signer.update(dataBytes);
+  signer.end();
+  const derSig = signer.sign(privateKeyPem);
+  const compact = derToCompact(derSig);
+  return compact.toString("base64url");
+}
+
+// ============================================================================
 // Moleculer Service
 // ============================================================================
 
 module.exports = {
   name: "signing",
 
-  dependencies: ["keys", "activitypub.actor", "actors"],
+  dependencies: ["keys", "activitypub.actor", "actors", "identitybindings"],
 
   settings: {
     auth: {
-      bearerToken: process.env.SIGNING_API_TOKEN || "",
+      // Must match ACTIVITYPODS_TOKEN in the sidecar's environment.
+      // Both sides MUST reference the same shared secret value.
+      bearerToken: process.env.ACTIVITYPODS_TOKEN || "",
       // Strong recommendation: also enforce mTLS at the reverse proxy / mesh
     },
     limits: {
@@ -220,6 +324,264 @@ module.exports = {
         }
 
         return { results };
+      },
+    },
+
+    // =========================================================================
+    // ATProto Signing Actions (V6.5 extensions)
+    // =========================================================================
+
+    /**
+     * Sign an ATProto repository commit using the account's secp256k1 signing key.
+     *
+     * Called by the AT adapter's AtCommitBuilder during repo projection.
+     * Keys never leave ActivityPods — only the base64url signature is returned.
+     *
+     * REST: POST /api/internal/atproto/commit-sign
+     */
+    signAtprotoCommit: {
+      rest: {
+        method: "POST",
+        path: "/api/internal/atproto/commit-sign",
+      },
+      params: {
+        canonicalAccountId: { type: "string", min: 1 },
+        did: { type: "string", min: 1 },
+        unsignedCommitBytesBase64: { type: "string", min: 1 },
+        rev: { type: "string", min: 1 },
+      },
+
+      async handler(ctx) {
+        this._auth(ctx);
+
+        const { canonicalAccountId, did, unsignedCommitBytesBase64, rev } = ctx.params;
+
+        // Resolve IdentityBinding to get atSigningKeyRef
+        // Assumption: identitybindings.getByCanonicalAccountId returns the IdentityBinding
+        let binding;
+        try {
+          binding = await ctx.call("identitybindings.getByCanonicalAccountId", { canonicalAccountId });
+        } catch (e) {
+          throw new MoleculerError("IdentityBinding lookup failed", 500, "KEY_UNAVAILABLE", { message: e?.message });
+        }
+        if (!binding) {
+          throw new MoleculerError("IdentityBinding not found", 404, "ACTOR_NOT_FOUND", { canonicalAccountId });
+        }
+        if (!binding.atSigningKeyRef) {
+          throw new MoleculerError("atSigningKeyRef not set — AT keys not yet provisioned", 422, "KEY_UNAVAILABLE", { canonicalAccountId });
+        }
+
+        // Fetch secp256k1 key pair
+        // Assumption: keys.getAtprotoKeyPair({ keyRef }) returns { privateKey: <PEM>, publicKey: <PEM> }
+        let keyPair;
+        try {
+          keyPair = await ctx.call("keys.getAtprotoKeyPair", { keyRef: binding.atSigningKeyRef });
+        } catch (e) {
+          throw new MoleculerError("AT key lookup failed", 500, "KEY_UNAVAILABLE", { message: e?.message });
+        }
+        const commitPrivateKeyPem = keyPair?.privateKeyPem || keyPair?.privateKey;
+        if (!commitPrivateKeyPem) {
+          throw new MoleculerError("AT private key not available", 500, "KEY_UNAVAILABLE", { keyRef: binding.atSigningKeyRef });
+        }
+
+        // Validate caller-supplied DID matches the binding
+        const resolvedDid = binding.atprotoDid || did;
+        if (binding.atprotoDid && did !== binding.atprotoDid) {
+          throw new MoleculerError(
+            "Caller DID does not match bound DID",
+            400,
+            "INVALID_INPUT",
+            { supplied: did, bound: binding.atprotoDid }
+          );
+        }
+
+        const keyId = `${resolvedDid}#atproto`;
+
+        // Sign the commit bytes
+        let signatureBase64Url;
+        try {
+          const commitBytes = Buffer.from(unsignedCommitBytesBase64, "base64");
+          signatureBase64Url = signSecp256k1(commitPrivateKeyPem, commitBytes);
+        } catch (e) {
+          throw new MoleculerError("Commit signing failed", 500, "SIGNING_FAILED", { message: e?.message });
+        }
+
+        return {
+          did: resolvedDid,
+          keyId,
+          signatureBase64Url,
+          algorithm: "k256",
+          signedAt: new Date().toISOString(),
+        };
+      },
+    },
+
+    /**
+     * Sign a did:plc operation using the account's secp256k1 rotation key.
+     *
+     * Called by the PLC state machine during DID provisioning and rotation.
+     * The rotation key is distinct from the commit signing key.
+     *
+     * REST: POST /api/internal/atproto/plc-sign
+     */
+    signAtprotoPlcOp: {
+      rest: {
+        method: "POST",
+        path: "/api/internal/atproto/plc-sign",
+      },
+      params: {
+        canonicalAccountId: { type: "string", min: 1 },
+        did: { type: "string", min: 1 },
+        operationBytesBase64: { type: "string", min: 1 },
+      },
+
+      async handler(ctx) {
+        this._auth(ctx);
+
+        const { canonicalAccountId, did, operationBytesBase64 } = ctx.params;
+
+        let binding;
+        try {
+          binding = await ctx.call("identitybindings.getByCanonicalAccountId", { canonicalAccountId });
+        } catch (e) {
+          throw new MoleculerError("IdentityBinding lookup failed", 500, "KEY_UNAVAILABLE", { message: e?.message });
+        }
+        if (!binding) {
+          throw new MoleculerError("IdentityBinding not found", 404, "ACTOR_NOT_FOUND", { canonicalAccountId });
+        }
+        if (!binding.atRotationKeyRef) {
+          throw new MoleculerError("atRotationKeyRef not set — rotation key not yet provisioned", 422, "KEY_UNAVAILABLE", { canonicalAccountId });
+        }
+
+        let keyPair;
+        try {
+          keyPair = await ctx.call("keys.getAtprotoKeyPair", { keyRef: binding.atRotationKeyRef });
+        } catch (e) {
+          throw new MoleculerError("AT rotation key lookup failed", 500, "KEY_UNAVAILABLE", { message: e?.message });
+        }
+        const rotationPrivateKeyPem = keyPair?.privateKeyPem || keyPair?.privateKey;
+        if (!rotationPrivateKeyPem) {
+          throw new MoleculerError("AT rotation private key not available", 500, "KEY_UNAVAILABLE", { keyRef: binding.atRotationKeyRef });
+        }
+
+        // Validate caller-supplied DID matches the binding
+        if (binding.atprotoDid && did !== binding.atprotoDid) {
+          throw new MoleculerError(
+            "Caller DID does not match bound DID",
+            400,
+            "INVALID_INPUT",
+            { supplied: did, bound: binding.atprotoDid }
+          );
+        }
+
+        // PLC signing is only valid for did:plc — reject did:web and all other methods
+        const resolvedDid = binding.atprotoDid || did;
+        if (!resolvedDid.startsWith("did:plc:")) {
+          throw new MoleculerError(
+            "PLC signing only valid for did:plc DIDs",
+            400,
+            "INVALID_INPUT",
+            { did: resolvedDid }
+          );
+        }
+
+        const keyId = `${resolvedDid}#atproto-rotation-key`;
+
+        let signatureBase64Url;
+        try {
+          const opBytes = Buffer.from(operationBytesBase64, "base64");
+          signatureBase64Url = signSecp256k1(rotationPrivateKeyPem, opBytes);
+        } catch (e) {
+          throw new MoleculerError("PLC op signing failed", 500, "SIGNING_FAILED", { message: e?.message });
+        }
+
+        return {
+          did: resolvedDid,
+          keyId,
+          signatureBase64Url,
+          algorithm: "k256",
+          signedAt: new Date().toISOString(),
+        };
+      },
+    },
+
+    /**
+     * Return the ATProto public key for an account in multibase format.
+     *
+     * Called during DID document construction and at provisioning time.
+     * Returns the compressed secp256k1 public key as multibase base58btc.
+     *
+     * REST: GET /api/internal/atproto/public-key
+     */
+    getAtprotoPublicKey: {
+      rest: {
+        method: "GET",
+        path: "/api/internal/atproto/public-key",
+      },
+      params: {
+        canonicalAccountId: { type: "string", min: 1 },
+        purpose: { type: "enum", values: ["commit", "rotation"] },
+      },
+
+      async handler(ctx) {
+        this._auth(ctx);
+
+        const { canonicalAccountId, purpose } = ctx.params;
+
+        let binding;
+        try {
+          binding = await ctx.call("identitybindings.getByCanonicalAccountId", { canonicalAccountId });
+        } catch (e) {
+          throw new MoleculerError("IdentityBinding lookup failed", 500, "KEY_UNAVAILABLE", { message: e?.message });
+        }
+        if (!binding) {
+          throw new MoleculerError("IdentityBinding not found", 404, "ACTOR_NOT_FOUND", { canonicalAccountId });
+        }
+
+        const keyRef = purpose === "commit" ? binding.atSigningKeyRef : binding.atRotationKeyRef;
+        if (!keyRef) {
+          throw new MoleculerError(
+            `${purpose === "commit" ? "atSigningKeyRef" : "atRotationKeyRef"} not set`,
+            422,
+            "KEY_UNAVAILABLE",
+            { canonicalAccountId, purpose }
+          );
+        }
+
+        let keyPair;
+        try {
+          keyPair = await ctx.call("keys.getAtprotoKeyPair", { keyRef });
+        } catch (e) {
+          throw new MoleculerError("AT key lookup failed", 500, "KEY_UNAVAILABLE", { message: e?.message });
+        }
+        const publicKeyPem = keyPair?.publicKeyPem || keyPair?.publicKey;
+        if (!keyPair?.publicKeyMultibase && !publicKeyPem) {
+          throw new MoleculerError("AT public key not available", 500, "KEY_UNAVAILABLE", { keyRef });
+        }
+
+        // Prefer pre-computed multibase from keys service; fall back to PEM conversion
+        let publicKeyMultibase;
+        if (keyPair.publicKeyMultibase) {
+          publicKeyMultibase = keyPair.publicKeyMultibase;
+        } else {
+          try {
+            const compressed = getCompressedPublicKey(publicKeyPem);
+            publicKeyMultibase = secp256k1PubkeyToMultibase(compressed);
+          } catch (e) {
+            throw new MoleculerError("Public key conversion failed", 500, "KEY_UNAVAILABLE", { message: e?.message });
+          }
+        }
+
+        const resolvedDid = binding.atprotoDid || null;
+        const keyFragment = purpose === "commit" ? "atproto" : "atproto-rotation-key";
+        const keyId = resolvedDid ? `${resolvedDid}#${keyFragment}` : `#${keyFragment}`;
+
+        return {
+          ...(resolvedDid ? { did: resolvedDid } : {}),
+          keyId,
+          publicKeyMultibase,
+          algorithm: "k256",
+        };
       },
     },
   },

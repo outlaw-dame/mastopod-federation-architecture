@@ -22,7 +22,7 @@ export interface AtAliasRecord {
   /**
    * Type of canonical entity
    */
-  canonicalType: 'profile' | 'post' | 'follow' | 'like' | 'repost';
+  canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost';
   
   /**
    * Repository DID
@@ -35,6 +35,7 @@ export interface AtAliasRecord {
   collection:
     | 'app.bsky.actor.profile'
     | 'app.bsky.feed.post'
+    | 'site.standard.document'
     | 'app.bsky.graph.follow'
     | 'app.bsky.feed.like'
     | 'app.bsky.feed.repost';
@@ -88,6 +89,16 @@ export interface AtAliasRecord {
    * Subject CID (for likes/reposts)
    */
   subjectCid?: string | null;
+
+  /**
+   * Canonical public URL for AP/article projection parity
+   */
+  canonicalUrl?: string | null;
+
+  /**
+   * Stable ActivityPub object identifier when known
+   */
+  activityPubObjectId?: string | null;
 }
 
 /**

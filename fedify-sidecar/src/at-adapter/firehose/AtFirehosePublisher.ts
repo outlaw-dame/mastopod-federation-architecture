@@ -76,7 +76,8 @@ export interface AtFirehosePublisher {
 
 export class DefaultAtFirehosePublisher implements AtFirehosePublisher {
   /** Global monotonic sequence counter. */
-  private seqCounter = 0;
+  private seqCounter: number | null = null;
+  private seqInitialisation: Promise<void> | null = null;
 
   /**
    * Per-DID serialisation queues.
@@ -97,18 +98,19 @@ export class DefaultAtFirehosePublisher implements AtFirehosePublisher {
   // ---------------------------------------------------------------------------
 
   async publishCommit(evt: AtCommitV1): Promise<void> {
+    await this.ensureSeqCounterInitialised();
+
     // Serialise per DID to preserve per-account ordering.
     const prior = this.didQueues.get(evt.did) ?? Promise.resolve();
-    const next = prior.then(() => this._doPublishCommit(evt)).catch(err => {
-      if (process.env.NODE_ENV !== 'test') {
-        console.error(`[AtFirehosePublisher] publishCommit failed for ${evt.did}:`, err);
-      }
-    });
-    this.didQueues.set(evt.did, next);
+    const next = prior
+      .catch(() => undefined)
+      .then(() => this._doPublishCommit(evt));
+    this.didQueues.set(evt.did, next.catch(() => undefined));
     return next;
   }
 
   async publishIdentity(evt: AtIdentityV1): Promise<void> {
+    await this.ensureSeqCounterInitialised();
     const seq = this._nextSeq();
     const time = new Date().toISOString();
 
@@ -125,6 +127,7 @@ export class DefaultAtFirehosePublisher implements AtFirehosePublisher {
   }
 
   async publishAccount(evt: AtAccountV1): Promise<void> {
+    await this.ensureSeqCounterInitialised();
     const seq = this._nextSeq();
     const time = new Date().toISOString();
 
@@ -187,7 +190,28 @@ export class DefaultAtFirehosePublisher implements AtFirehosePublisher {
   }
 
   private _nextSeq(): number {
+    if (this.seqCounter === null) {
+      throw new Error('Firehose sequence counter used before initialisation');
+    }
     this.seqCounter++;
     return this.seqCounter;
+  }
+
+  private async ensureSeqCounterInitialised(): Promise<void> {
+    if (this.seqCounter !== null) {
+      return;
+    }
+    if (!this.seqInitialisation) {
+      this.seqInitialisation = (async () => {
+        const latest = await this.cursorStore.latestSeq();
+        this.seqCounter = Number.isFinite(latest) && latest >= 0
+          ? Math.trunc(latest)
+          : 0;
+      })().finally(() => {
+        this.seqInitialisation = null;
+      });
+    }
+
+    await this.seqInitialisation;
   }
 }

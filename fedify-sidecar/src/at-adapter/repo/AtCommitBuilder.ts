@@ -1,6 +1,6 @@
-import { AtRepoOpV1 } from '../events/AtRepoEvents';
-import { RepositoryState } from '../../atproto/repo/AtprotoRepoState';
-import { SigningService } from '../../core-domain/contracts/SigningContracts';
+import type { AtRepoOpV1 } from '../events/AtRepoEvents.js';
+import type { RepositoryState } from '../../atproto/repo/AtprotoRepoState.js';
+import type { SigningService } from '../../core-domain/contracts/SigningContracts.js';
 
 export interface BuildCommitResult {
   did: string;
@@ -55,7 +55,13 @@ export class DefaultAtCommitBuilder implements AtCommitBuilder {
     })).toString('base64');
 
     // 6. Call SigningService signCommit
+    const canonicalAccountId = ops[0]?.canonicalAccountId;
+    if (!canonicalAccountId) {
+      throw new Error('Cannot sign commit without canonicalAccountId');
+    }
+
     const signResponse = await this.signingService.signAtprotoCommit({
+      canonicalAccountId,
       did,
       unsignedCommitBytesBase64,
       rev: newRev

@@ -4,9 +4,10 @@
  * Builds app.bsky.embed.images from canonical post attachments.
  */
 
-import { CanonicalPost } from '../AtProjectionPolicy';
-import { AtBlobRef } from '../../blob/AtBlobStore';
-import { AtBlobUploadService } from '../../blob/AtBlobUploadService';
+import { CanonicalPost } from '../AtProjectionPolicy.js';
+import { AtBlobRef } from '../../blob/AtBlobStore.js';
+import { AtBlobUploadService } from '../../blob/AtBlobUploadService.js';
+import type { AttachmentMediaResolver } from './AttachmentMediaResolver.js';
 
 export interface AppBskyEmbedImages {
   $type: 'app.bsky.embed.images';
@@ -27,13 +28,13 @@ export interface ImageEmbedBuilder {
 export class DefaultImageEmbedBuilder implements ImageEmbedBuilder {
   constructor(
     private readonly blobUploadService: AtBlobUploadService,
-    private readonly mediaResolver: any // Mocked dependency to fetch bytes
+    private readonly mediaResolver: AttachmentMediaResolver,
   ) {}
 
   async build(post: CanonicalPost, did: string): Promise<AppBskyEmbedImages | undefined> {
     // 1. Filter attachments (images only)
     const attachments = post.attachments || [];
-    const imageAttachments = attachments.filter(a => a.kind === 'image');
+    const imageAttachments = attachments.filter((attachment) => attachment.kind === 'image');
 
     if (imageAttachments.length === 0) {
       return undefined;
@@ -42,22 +43,26 @@ export class DefaultImageEmbedBuilder implements ImageEmbedBuilder {
     // 2. Cap at 4 images
     const cappedAttachments = imageAttachments.slice(0, 4);
 
-    const images = [];
+    const images: AppBskyEmbedImages["images"] = [];
 
     // 3. Process each image
     for (const attachment of cappedAttachments) {
       try {
         // Fetch bytes + mime
-        const media = await this.mediaResolver.resolveMedia(attachment.mediaId);
+        const media = await this.mediaResolver.resolveMedia(did, attachment.mediaId);
         if (!media) continue;
 
-        // Upload/store via AtBlobUploadService
-        const blobRef = await this.blobUploadService.ensureImageBlob({
-          did,
-          mediaId: attachment.mediaId,
-          mimeType: media.mimeType,
-          bytes: media.bytes
-        });
+        const blobRef = media.blobRef
+          ? media.blobRef
+          : media.bytes
+            ? await this.blobUploadService.ensureImageBlob({
+                did,
+                mediaId: attachment.mediaId,
+                mimeType: media.mimeType,
+                bytes: media.bytes
+              })
+            : null;
+        if (!blobRef) continue;
 
         // Map alt text and aspect ratio
         images.push({

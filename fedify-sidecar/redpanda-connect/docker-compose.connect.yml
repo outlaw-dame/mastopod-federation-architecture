@@ -1,0 +1,144 @@
+# Redpanda Connect overlay — adds OpenSearch, LocalStack, and the Connect service.
+#
+# Usage (local dev, compose v2):
+#   docker compose \
+#     -f docker-compose.v6.yml \
+#     -f redpanda-connect/docker-compose.connect.yml \
+#     up
+#
+# The Connect service loads all pipelines from redpanda-connect/streams/ at
+# startup. Individual pipelines can be hot-reloaded via the streams REST API:
+#   curl -X PUT http://localhost:4195/streams/01-firehose-to-opensearch \
+#     -d @redpanda-connect/streams/01-firehose-to-opensearch.yaml
+#
+# Prometheus metrics:  http://localhost:4195/metrics
+# OpenSearch Dashboards UI is NOT included here; add OpenSearch Dashboards
+# (port 5601) separately if needed.
+
+version: "3.8"
+
+services:
+  # ============================================================================
+  # OpenSearch (activity index + MRF rejection index)
+  # ============================================================================
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: fedify-opensearch
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Admin1234!}
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qv '\"status\":\"red\"'"]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+    networks:
+      - fedify
+
+  # ============================================================================
+  # LocalStack (S3 emulation for local dev / CI)
+  # Set S3_ENDPOINT=http://localstack:4566 in .env to use this instead of AWS.
+  # ============================================================================
+  localstack:
+    image: localstack/localstack:3
+    container_name: fedify-localstack
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=${AWS_REGION:-us-east-1}
+      - AWS_DEFAULT_REGION=${AWS_REGION:-us-east-1}
+      # Disable LocalStack Pro features — only OSS S3 is needed.
+      - DISABLE_PRO_FEATURES=1
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"s3\": \"available\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+    networks:
+      - fedify
+
+  # ============================================================================
+  # Init — creates the S3 archive bucket in LocalStack on first start.
+  # Exits immediately after creation. Safe to re-run; bucket-already-exists
+  # errors are ignored.
+  # ============================================================================
+  init-localstack:
+    image: amazon/aws-cli:latest
+    container_name: fedify-init-localstack
+    entrypoint: sh
+    command: >
+      -c "aws --endpoint-url http://localstack:4566 s3 mb s3://${S3_ARCHIVE_BUCKET:-fedify-archive} 2>/dev/null || true &&
+          echo '[init-localstack] bucket ready: ${S3_ARCHIVE_BUCKET:-fedify-archive}'"
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=${AWS_REGION:-us-east-1}
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - fedify
+    restart: "no"
+
+  # ============================================================================
+  # Redpanda Connect
+  # ============================================================================
+  redpanda-connect:
+    image: redpandadata/connect:latest
+    container_name: fedify-rpconnect
+    # Run in streams mode so each pipeline YAML is a hot-reloadable unit.
+    command: ["streams", "--config", "/redpanda-connect/config.yaml", "/redpanda-connect/streams/*.yaml"]
+    volumes:
+      - ./config.yaml:/redpanda-connect/config.yaml:ro
+      - ./streams:/redpanda-connect/streams:ro
+    environment:
+      # Redpanda
+      REDPANDA_BROKER: "redpanda:9092"
+      # OpenSearch
+      OPENSEARCH_URL: "http://opensearch:9200"
+      OPENSEARCH_AUTH_ENABLED: "false"
+      OPENSEARCH_USER: "${OPENSEARCH_USER:-admin}"
+      OPENSEARCH_PASSWORD: "${OPENSEARCH_PASSWORD:-admin}"
+      # S3 / LocalStack
+      S3_ARCHIVE_BUCKET: "${S3_ARCHIVE_BUCKET:-fedify-archive}"
+      S3_ENDPOINT: "${S3_ENDPOINT:-http://localstack:4566}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-test}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-test}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+      # Logging
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    ports:
+      - "4195:4195"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      init-localstack:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4195/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fedify
+    restart: unless-stopped
+
+volumes:
+  opensearch_data:
+  localstack_data:
+
+networks:
+  fedify:
+    driver: bridge

@@ -1,0 +1,2 @@
+Direct repo write check from ChatGPT on 2026-04-03.
+This file exists only to verify that the direct GitHub contents write path is functioning again.

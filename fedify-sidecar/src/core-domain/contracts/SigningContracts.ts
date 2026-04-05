@@ -9,6 +9,35 @@
  */
 
 /**
+ * Phase 1 scaffolding for Fedify runtime integration.
+ *
+ * This adapter is intentionally narrow and side-effect free by default.
+ * Implementations can emit metrics/traces or delegate to Fedify framework
+ * primitives when ENABLE_FEDIFY_RUNTIME_INTEGRATION=true.
+ */
+export interface FederationRuntimeAdapter {
+  readonly name: string;
+  readonly enabled: boolean;
+  onInboundVerified?(input: {
+    actorUri: string;
+    activityId?: string;
+    activityType?: string;
+    isPublic?: boolean;
+  }): Promise<void> | void;
+  onOutboundDelivered?(input: {
+    actorUri: string;
+    activityId: string;
+    targetDomain: string;
+    statusCode?: number;
+  }): Promise<void> | void;
+}
+
+export const NoopFederationRuntimeAdapter: FederationRuntimeAdapter = {
+  name: "noop",
+  enabled: false,
+};
+
+/**
  * Request to generate a new ActivityPub signing key
  */
 export interface GenerateApSigningKeyRequest {

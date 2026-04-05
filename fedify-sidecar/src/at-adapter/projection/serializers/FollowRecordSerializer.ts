@@ -4,7 +4,7 @@
  * Serializes a CanonicalFollow into an app.bsky.graph.follow record.
  */
 
-import { CanonicalFollow } from '../../events/AtSocialRepoEvents';
+import type { CanonicalFollow } from '../../events/AtSocialRepoEvents.js';
 
 export interface AppBskyGraphFollowRecord {
   $type: 'app.bsky.graph.follow';

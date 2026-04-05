@@ -11,18 +11,20 @@
  *   7. Verify failure path: invalid signature → at.verify-failed.v1
  */
 
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { encode } from "cborg";
 import {
   DefaultAtIngressVerifier,
   AtCommitVerifier,
   AtIdentityResolver,
   AtSyncRebuilder,
-} from '../ingress/AtIngressVerifier';
-import { DefaultAtFirehoseDecoder } from '../ingress/AtFirehoseDecoder';
-import { InMemoryAtIngressEventClassifier } from '../ingress/AtIngressEventClassifier';
-import { InMemoryAtIngressAuditPublisher } from '../ingress/AtIngressAuditPublisher';
-import { InMemoryAtFirehoseCursorManager } from '../ingress/AtFirehoseCursorManager';
-import { InMemoryAtIngressCheckpointStore } from '../ingress/AtIngressCheckpointStore';
-import { AtFirehoseRawEnvelope } from '../ingress/AtIngressEvents';
+} from '../ingress/AtIngressVerifier.js';
+import { DefaultAtFirehoseDecoder } from '../ingress/AtFirehoseDecoder.js';
+import { InMemoryAtIngressEventClassifier } from '../ingress/AtIngressEventClassifier.js';
+import { InMemoryAtIngressAuditPublisher } from '../ingress/AtIngressAuditPublisher.js';
+import { InMemoryAtFirehoseCursorManager } from '../ingress/AtFirehoseCursorManager.js';
+import { InMemoryAtIngressCheckpointStore } from '../ingress/AtIngressCheckpointStore.js';
+import { AtFirehoseRawEnvelope } from '../ingress/AtIngressEvents.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,26 +44,36 @@ function buildRawEnvelope(
     receivedAt: '2024-01-01T00:00:00.000Z',
     eventType: '#commit',
     did: 'did:plc:testactor123',
-    rawCborBase64: Buffer.from(
-      JSON.stringify({
-        header: { t: '#commit', op: 1 },
-        body: {
-          seq: 1001,
-          did: 'did:plc:testactor123',
-          repo: 'did:plc:testactor123',
-          rev: '3jqfcqzm3fx2j',
-          ops: [
-            {
-              action: 'create',
-              path: 'app.bsky.feed.post/3jqfcqzm3fx2j',
-              cid: 'bafyreidtest',
-            },
-          ],
-        },
-      }),
-    ).toString('base64'),
+    rawCborBase64: encodeFirehoseFrameBase64(
+      { t: '#commit', op: 1 },
+      {
+        seq: 1001,
+        did: 'did:plc:testactor123',
+        repo: 'did:plc:testactor123',
+        rev: '3jqfcqzm3fx2j',
+        ops: [
+          {
+            action: 'create',
+            path: 'app.bsky.feed.post/3jqfcqzm3fx2j',
+            cid: 'bafyreidtest',
+          },
+        ],
+      },
+    ),
   };
   return { ...defaults, ...overrides };
+}
+
+function encodeFirehoseFrameBase64(
+  header: Record<string, unknown>,
+  body: Record<string, unknown>,
+): string {
+  const headerBytes = encode(header);
+  const bodyBytes = encode(body);
+  const frame = new Uint8Array(headerBytes.length + bodyBytes.length);
+  frame.set(headerBytes, 0);
+  frame.set(bodyBytes, headerBytes.length);
+  return Buffer.from(frame).toString("base64");
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +85,7 @@ function buildMockCommitVerifier(
   reason?: string,
 ): AtCommitVerifier {
   return {
-    verifyCommit: jest.fn().mockResolvedValue({
+    verifyCommit: vi.fn().mockResolvedValue({
       isValid,
       reason,
       ops: isValid
@@ -93,7 +105,7 @@ function buildMockCommitVerifier(
 
 function buildMockIdentityResolver(success = true): AtIdentityResolver {
   return {
-    resolveIdentity: jest.fn().mockResolvedValue({
+    resolveIdentity: vi.fn().mockResolvedValue({
       success,
       handle: success ? 'alice.bsky.social' : undefined,
       didDocument: success ? { id: 'did:plc:testactor123', '@context': ['https://www.w3.org/ns/did/v1'] } : undefined,
@@ -104,7 +116,7 @@ function buildMockIdentityResolver(success = true): AtIdentityResolver {
 
 function buildMockSyncRebuilder(success = true): AtSyncRebuilder {
   return {
-    rebuildRepo: jest.fn().mockResolvedValue({
+    rebuildRepo: vi.fn().mockResolvedValue({
       success,
       reason: success ? undefined : 'CAR fetch failed',
     }),
@@ -113,8 +125,8 @@ function buildMockSyncRebuilder(success = true): AtSyncRebuilder {
 
 function buildMockEventPublisher() {
   return {
-    publish: jest.fn().mockResolvedValue(undefined),
-    publishBatch: jest.fn().mockResolvedValue(undefined),
+    publish: vi.fn().mockResolvedValue(undefined),
+    publishBatch: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -133,7 +145,7 @@ describe('Phase 5.5 Acceptance Tests', () => {
   let verifier: DefaultAtIngressVerifier;
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     decoder = new DefaultAtFirehoseDecoder();
     classifier = new InMemoryAtIngressEventClassifier({ acceptAll: true });
     auditPublisher = new InMemoryAtIngressAuditPublisher();
@@ -230,12 +242,10 @@ describe('Phase 5.5 Acceptance Tests', () => {
     it('should re-resolve DID/handle and emit trusted identity event', async () => {
       const envelope = buildRawEnvelope({
         eventType: '#identity',
-        rawCborBase64: Buffer.from(
-          JSON.stringify({
-            header: { t: '#identity', op: 1 },
-            body: { seq: 1002, did: 'did:plc:testactor123' },
-          }),
-        ).toString('base64'),
+        rawCborBase64: encodeFirehoseFrameBase64(
+          { t: '#identity', op: 1 },
+          { seq: 1002, did: 'did:plc:testactor123' },
+        ),
         seq: 1002,
       });
 
@@ -264,12 +274,10 @@ describe('Phase 5.5 Acceptance Tests', () => {
 
       const envelope = buildRawEnvelope({
         eventType: '#identity',
-        rawCborBase64: Buffer.from(
-          JSON.stringify({
-            header: { t: '#identity', op: 1 },
-            body: { seq: 1003, did: 'did:plc:testactor123' },
-          }),
-        ).toString('base64'),
+        rawCborBase64: encodeFirehoseFrameBase64(
+          { t: '#identity', op: 1 },
+          { seq: 1003, did: 'did:plc:testactor123' },
+        ),
         seq: 1003,
       });
 
@@ -288,17 +296,15 @@ describe('Phase 5.5 Acceptance Tests', () => {
     it('should emit normalised account status event for active=false', async () => {
       const envelope = buildRawEnvelope({
         eventType: '#account',
-        rawCborBase64: Buffer.from(
-          JSON.stringify({
-            header: { t: '#account', op: 1 },
-            body: {
-              seq: 1004,
-              did: 'did:plc:testactor123',
-              active: false,
-              status: 'suspended',
-            },
-          }),
-        ).toString('base64'),
+        rawCborBase64: encodeFirehoseFrameBase64(
+          { t: '#account', op: 1 },
+          {
+            seq: 1004,
+            did: 'did:plc:testactor123',
+            active: false,
+            status: 'suspended',
+          },
+        ),
         seq: 1004,
       });
 
@@ -324,18 +330,18 @@ describe('Phase 5.5 Acceptance Tests', () => {
     it('should trigger repo rebuild and NOT emit to at.ingress.v1', async () => {
       const envelope = buildRawEnvelope({
         eventType: '#sync',
-        rawCborBase64: Buffer.from(
-          JSON.stringify({
-            header: { t: '#sync', op: 1 },
-            body: { seq: 1005, did: 'did:plc:testactor123' },
-          }),
-        ).toString('base64'),
+        rawCborBase64: encodeFirehoseFrameBase64(
+          { t: '#sync', op: 1 },
+          { seq: 1005, did: 'did:plc:testactor123' },
+        ),
         seq: 1005,
       });
 
       await verifier.handleRawEvent(envelope);
 
-      expect(syncRebuilder.rebuildRepo).toHaveBeenCalledWith('did:plc:testactor123');
+      expect(syncRebuilder.rebuildRepo).toHaveBeenCalledWith('did:plc:testactor123', {
+        source: 'wss://relay.bsky.network',
+      });
       // #sync must NOT be forwarded to at.ingress.v1
       expect(eventPublisher.publish).not.toHaveBeenCalledWith('at.ingress.v1', expect.anything());
     });
@@ -349,12 +355,10 @@ describe('Phase 5.5 Acceptance Tests', () => {
 
       const envelope = buildRawEnvelope({
         eventType: '#sync',
-        rawCborBase64: Buffer.from(
-          JSON.stringify({
-            header: { t: '#sync', op: 1 },
-            body: { seq: 1006, did: 'did:plc:testactor123' },
-          }),
-        ).toString('base64'),
+        rawCborBase64: encodeFirehoseFrameBase64(
+          { t: '#sync', op: 1 },
+          { seq: 1006, did: 'did:plc:testactor123' },
+        ),
         seq: 1006,
       });
 
@@ -445,17 +449,43 @@ describe('Phase 5.5 Acceptance Tests', () => {
 
       // First processing
       await verifier.handleRawEvent(envelope);
-      const firstPublishCount = (eventPublisher.publish as jest.Mock).mock.calls.length;
+      const firstPublishCount = vi.mocked(eventPublisher.publish).mock.calls.length;
 
       // Second processing (replay)
       await verifier.handleRawEvent(envelope);
-      const secondPublishCount = (eventPublisher.publish as jest.Mock).mock.calls.length;
+      const secondPublishCount = vi.mocked(eventPublisher.publish).mock.calls.length;
 
       // No additional trusted events should have been published
       expect(secondPublishCount).toBe(firstPublishCount);
       // The second attempt should result in a dedupe failure
       const dedupeFailures = auditPublisher.published.filter(e => e.reason === 'dedupe_rejected');
       expect(dedupeFailures).toHaveLength(1);
+    });
+
+    it('should request retry and avoid dedupe mark when failure audit publish fails', async () => {
+      commitVerifier = buildMockCommitVerifier(false, 'signature_mismatch');
+      const throwingAuditPublisher = {
+        publishVerifyFailed: vi.fn().mockRejectedValue(new Error('failure topic unavailable')),
+      };
+      verifier = new DefaultAtIngressVerifier(
+        decoder,
+        classifier,
+        throwingAuditPublisher as any,
+        eventPublisher as any,
+        commitVerifier,
+        identityResolver,
+        syncRebuilder,
+      );
+
+      const envelope = buildRawEnvelope({ seq: 3456, eventType: '#commit' });
+
+      const first = await verifier.handleRawEvent(envelope);
+      const second = await verifier.handleRawEvent(envelope);
+
+      expect(first).toBe(false);
+      expect(second).toBe(false);
+      expect(throwingAuditPublisher.publishVerifyFailed).toHaveBeenCalledTimes(2);
+      expect(eventPublisher.publish).not.toHaveBeenCalledWith('at.ingress.v1', expect.anything());
     });
   });
 

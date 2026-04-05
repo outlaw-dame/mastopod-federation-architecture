@@ -49,6 +49,10 @@ export interface InboundEnvelope {
   body: string;
   remoteIp: string;
   receivedAt: number;
+  /** Number of forward attempts made so far (0 on first attempt). */
+  attempt: number;
+  /** Earliest timestamp (ms) at which this envelope should be processed. 0 = immediate. */
+  notBeforeMs: number;
 }
 
 export interface OutboundJob {
@@ -61,6 +65,8 @@ export interface OutboundJob {
   attempt: number;
   maxAttempts: number;
   notBeforeMs: number;
+  /** Error message from the last delivery attempt, carried forward for DLQ diagnostics. */
+  lastError?: string;
   meta?: {
     isPublicIndexable?: boolean;
     isDeleteOrTombstone?: boolean;
@@ -179,6 +185,8 @@ export class RedisStreamsQueue {
         body: envelope.body,
         remoteIp: envelope.remoteIp,
         receivedAt: envelope.receivedAt.toString(),
+        attempt: envelope.attempt.toString(),
+        notBeforeMs: envelope.notBeforeMs.toString(),
       },
       { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxStreamLength } }
     );
@@ -243,6 +251,8 @@ export class RedisStreamsQueue {
       body: fields.body,
       remoteIp: fields.remoteIp,
       receivedAt: parseInt(fields.receivedAt, 10),
+      attempt: parseInt(fields.attempt || "0", 10),
+      notBeforeMs: parseInt(fields.notBeforeMs || "0", 10),
     };
   }
 
@@ -266,6 +276,7 @@ export class RedisStreamsQueue {
         attempt: job.attempt.toString(),
         maxAttempts: job.maxAttempts.toString(),
         notBeforeMs: job.notBeforeMs.toString(),
+        lastError: job.lastError ?? "",
         meta: job.meta ? JSON.stringify(job.meta) : "",
       },
       { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxStreamLength } }
@@ -333,6 +344,7 @@ export class RedisStreamsQueue {
       attempt: parseInt(fields.attempt, 10),
       maxAttempts: parseInt(fields.maxAttempts, 10),
       notBeforeMs: parseInt(fields.notBeforeMs, 10),
+      lastError: fields["lastError"] || undefined,
       meta: fields.meta ? JSON.parse(fields.meta) : undefined,
     };
   }
@@ -405,12 +417,20 @@ export class RedisStreamsQueue {
   async checkDomainRateLimit(domain: string, limit: number = 100, windowSeconds: number = 60): Promise<boolean> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
+    // Atomic: INCR + EXPIRE in a single Lua script to eliminate the TOCTOU
+    // race between the INCR and the conditional EXPIRE.
+    const script = `
+      local current = redis.call('INCR', KEYS[1])
+      if current == 1 then
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+      end
+      return current
+    `;
     const key = `ap:ratelimit:${domain}`;
-    const current = await this.redis.incr(key);
-
-    if (current === 1) {
-      await this.redis.expire(key, windowSeconds);
-    }
+    const current = await this.redis.eval(script, {
+      keys: [key],
+      arguments: [windowSeconds.toString()],
+    }) as number;
 
     return current <= limit;
   }
@@ -418,20 +438,27 @@ export class RedisStreamsQueue {
   async acquireDomainSlot(domain: string, maxConcurrent: number = 10): Promise<boolean> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
+    // Atomic: INCR + EXPIRE + conditional DECR in a single Lua script to
+    // eliminate the TOCTOU race between the INCR and the conditional EXPIRE,
+    // and to keep the counter coherent when the slot is denied.
+    const script = `
+      local current = redis.call('INCR', KEYS[1])
+      if current == 1 then
+        redis.call('EXPIRE', KEYS[1], 3600)
+      end
+      if current > tonumber(ARGV[1]) then
+        redis.call('DECR', KEYS[1])
+        return 0
+      end
+      return 1
+    `;
     const key = `ap:domain:slots:${domain}`;
-    const current = await this.redis.incr(key);
+    const result = await this.redis.eval(script, {
+      keys: [key],
+      arguments: [maxConcurrent.toString()],
+    }) as number;
 
-    if (current === 1) {
-      // Set a 1-hour TTL to prevent stale slots
-      await this.redis.expire(key, 3600);
-    }
-
-    if (current > maxConcurrent) {
-      await this.redis.decr(key);
-      return false;
-    }
-
-    return true;
+    return result === 1;
   }
 
   async releaseDomainSlot(domain: string): Promise<void> {
@@ -522,6 +549,8 @@ export function createInboundEnvelope(params: {
     body: params.body,
     remoteIp: params.remoteIp,
     receivedAt: Date.now(),
+    attempt: 0,
+    notBeforeMs: 0,
   };
 }
 

@@ -18,8 +18,12 @@ import {
   OutboundJob, 
   backoffMs,
 } from "../queue/sidecar-redis-queue.js";
-import { SigningClient, SignResult } from "../signing/signing-client.js";
+import { SigningClient, SignResult, SignErrorResult } from "../signing/signing-client.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
+import {
+  FederationRuntimeAdapter,
+  NoopFederationRuntimeAdapter,
+} from "../core-domain/contracts/SigningContracts.js";
 import { logger } from "../utils/logger.js";
 
 // ============================================================================
@@ -31,6 +35,9 @@ export interface OutboundWorkerConfig {
   maxConcurrentPerDomain: number;
   requestTimeoutMs: number;
   userAgent: string;
+  fedifyRuntimeIntegrationEnabled: boolean;
+  /** Injected adapter — defaults to NoopFederationRuntimeAdapter when flag is off. */
+  adapter?: FederationRuntimeAdapter;
 }
 
 export interface DeliveryResult {
@@ -50,6 +57,7 @@ export class OutboundWorker {
   private signingClient: SigningClient;
   private redpanda: RedPandaProducer;
   private config: OutboundWorkerConfig;
+  private adapter: FederationRuntimeAdapter;
   private isRunning = false;
   private activeJobs = 0;
 
@@ -63,6 +71,31 @@ export class OutboundWorker {
     this.signingClient = signingClient;
     this.redpanda = redpanda;
     this.config = config;
+    this.adapter = config.fedifyRuntimeIntegrationEnabled
+      ? (config.adapter ?? NoopFederationRuntimeAdapter)
+      : NoopFederationRuntimeAdapter;
+  }
+
+  /**
+   * Invoke a FederationRuntimeAdapter hook inside a noop-safe circuit-breaker.
+   * Errors thrown by the adapter are logged and swallowed — they must never
+   * affect the calling business-logic path.
+   */
+  private async callAdapter(
+    hook: "onOutboundDelivered",
+    input: NonNullable<Parameters<NonNullable<FederationRuntimeAdapter["onOutboundDelivered"]>>[0]>
+  ): Promise<void> {
+    if (!this.adapter.enabled) return;
+    const fn = this.adapter[hook];
+    if (!fn) return;
+    try {
+      await fn.call(this.adapter, input);
+    } catch (err: any) {
+      logger.warn("FederationRuntimeAdapter hook threw (swallowed)", {
+        hook,
+        error: err.message,
+      });
+    }
   }
 
   /**
@@ -70,7 +103,10 @@ export class OutboundWorker {
    */
   async start(): Promise<void> {
     this.isRunning = true;
-    logger.info("Outbound worker started", { concurrency: this.config.concurrency });
+    logger.info("Outbound worker started", {
+      concurrency: this.config.concurrency,
+      fedifyRuntimeIntegrationEnabled: this.config.fedifyRuntimeIntegrationEnabled,
+    });
 
     for await (const { messageId, job } of this.queue.consumeOutbound()) {
       if (!this.isRunning) break;
@@ -105,7 +141,7 @@ export class OutboundWorker {
   /**
    * Process a single delivery job
    */
-  private async processJob(messageId: string, job: OutboundJob): Promise<void> {
+  protected async processJob(messageId: string, job: OutboundJob): Promise<void> {
     this.activeJobs++;
     
     try {
@@ -163,8 +199,14 @@ export class OutboundWorker {
 
         // Step 7: Handle result
         if (result.success) {
-          // Success - ack and we're done
+          // Success - ack and notify integration adapter
           await this.queue.ack("outbound", messageId);
+          await this.callAdapter("onOutboundDelivered", {
+            actorUri: job.actorUri,
+            activityId: job.activityId,
+            targetDomain: job.targetDomain,
+            statusCode: result.statusCode,
+          });
           logger.info("Delivery successful", { 
             jobId: job.jobId, 
             activityId: job.activityId,
@@ -230,7 +272,7 @@ export class OutboundWorker {
   /**
    * Deliver an activity to a remote inbox
    */
-  private async deliver(job: OutboundJob): Promise<DeliveryResult> {
+  protected async deliver(job: OutboundJob): Promise<DeliveryResult> {
     // Step 1: Request signature from ActivityPods
     const targetUrl = new URL(job.targetInbox);
     
@@ -238,15 +280,12 @@ export class OutboundWorker {
       actorUri: job.actorUri,
       method: "POST",
       targetUrl: job.targetInbox,
-      headers: {
-        "content-type": "application/activity+json",
-      },
       body: job.activity,  // Immutable - signed as-is
     });
 
     if (!signResult.ok) {
-      const errorResult = signResult as { ok: false; error: { code: string; message: string } };
-      const isPermanent = SigningClient.isPermanentError(errorResult.error.code as any);
+      const errorResult = signResult as SignErrorResult;
+      const isPermanent = SigningClient.isPermanentError(errorResult);
       return {
         jobId: job.jobId,
         success: false,
@@ -345,6 +384,8 @@ export function createOutboundWorker(
     maxConcurrentPerDomain: parseInt(process.env.MAX_CONCURRENT_PER_DOMAIN || "10", 10),
     requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || "30000", 10),
     userAgent: process.env.USER_AGENT || "Fedify-Sidecar/1.0 (ActivityPods)",
+    fedifyRuntimeIntegrationEnabled:
+      process.env.ENABLE_FEDIFY_RUNTIME_INTEGRATION === "true",
     ...overrides,
   };
 

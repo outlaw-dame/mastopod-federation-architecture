@@ -5,8 +5,13 @@
  * (follow, like, repost).
  */
 
-import { CanonicalIdentity } from '../../core-domain/events/CoreIdentityEvents';
-import { CanonicalPost } from '../projection/AtProjectionPolicy';
+import type { CanonicalPost } from '../projection/AtProjectionPolicy.js';
+import type { AtRecordLocator, AtRepoBridgeMetadata } from './AtRepoEvents.js';
+
+export interface CanonicalIdentity {
+  id: string;
+  atprotoDid?: string | null;
+}
 
 // ---------------------------------------------------------------------------
 // Canonical Social Entities
@@ -41,6 +46,8 @@ export interface CoreFollowCreatedV1 {
   follow: CanonicalFollow;
   follower: CanonicalIdentity;
   followed: CanonicalIdentity;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
 
@@ -48,6 +55,8 @@ export interface CoreFollowDeletedV1 {
   canonicalFollowId: string;
   followerCanonicalId: string;
   followedCanonicalId: string;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
   deletedAt: string;
   emittedAt: string;
 }
@@ -56,6 +65,8 @@ export interface CoreLikeCreatedV1 {
   like: CanonicalLike;
   actor: CanonicalIdentity;
   targetPost: CanonicalPost;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
 
@@ -63,6 +74,8 @@ export interface CoreLikeDeletedV1 {
   canonicalLikeId: string;
   canonicalActorId: string;
   canonicalPostId: string;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
   deletedAt: string;
   emittedAt: string;
 }
@@ -71,6 +84,8 @@ export interface CoreRepostCreatedV1 {
   repost: CanonicalRepost;
   actor: CanonicalIdentity;
   targetPost: CanonicalPost;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
 
@@ -78,6 +93,8 @@ export interface CoreRepostDeletedV1 {
   canonicalRepostId: string;
   canonicalActorId: string;
   canonicalPostId: string;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
   deletedAt: string;
   emittedAt: string;
 }
@@ -100,5 +117,6 @@ export interface AtSocialRepoOpV1 {
   rkey: string;
   canonicalRefId: string;
   record: unknown | null;
+  bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }

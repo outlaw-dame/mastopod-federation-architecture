@@ -22,7 +22,7 @@
  * Ref: https://atproto.com/specs/event-stream
  */
 
-import { AtIngressCheckpointStore } from './AtIngressCheckpointStore';
+import { AtIngressCheckpointStore } from './AtIngressCheckpointStore.js';
 
 // ---------------------------------------------------------------------------
 // Interfaces

@@ -1,10 +1,12 @@
-import { IdentityBinding } from '../../core-domain/identity/IdentityBinding';
+import type { IdentityBinding } from '../../core-domain/identity/IdentityBinding.js';
 
 // Mocking CanonicalProfile and CanonicalPost since they might not exist yet
 export interface CanonicalProfile {
   id: string;
   displayName?: string;
   summaryPlaintext?: string;
+  avatarBlobRef?: unknown;
+  bannerBlobRef?: unknown;
   avatarMediaId?: string;
   bannerMediaId?: string;
 }
@@ -12,7 +14,11 @@ export interface CanonicalProfile {
 export interface CanonicalPost {
   id: string;
   authorId: string;
+  kind?: 'note' | 'article';
+  title?: string;
+  summaryPlaintext?: string;
   bodyPlaintext: string;
+  canonicalUrl?: string;
   visibility: 'public' | 'unlisted' | 'private' | 'direct';
   publishedAt: string;
   deletedAt?: string;

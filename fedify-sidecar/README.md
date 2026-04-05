@@ -129,6 +129,37 @@ npm start
 docker-compose up -d
 ```
 
+### RedPanda Topic Bootstrap (Required)
+
+Automatic topic creation is disabled for producers and consumers. Bootstrap topics explicitly before starting workers:
+
+```bash
+npm run topics:bootstrap
+```
+
+Validate topic governance (CI/startup parity check):
+
+```bash
+npm run topics:verify
+```
+
+Recommended profile and defaults:
+
+- `REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development|staging|production`
+- `REDPANDA_COMPRESSION=zstd`
+- `REDPANDA_TOPIC_BOOTSTRAP_RETRIES=5`
+- `REDPANDA_TOPIC_BOOTSTRAP_RETRY_BASE_MS=250`
+- `REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true`
+
+The bootstrap script applies exponential backoff with jitter and enforces topic-name sanitization to reduce unsafe or accidental topic creation.
+The verify command fails if topics are missing or if governance-critical settings drift (compression type, cleanup policy, retention, min ISR, partitions/replication floor).
+
+Production startup behavior:
+
+- `npm start` runs a prestart gate that executes `npm run topics:verify` when `NODE_ENV=production`.
+- If verification fails, startup is aborted (fail-fast).
+- You can explicitly bypass this with `REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false`.
+
 ## Configuration
 
 ### Environment Variables
@@ -140,8 +171,8 @@ docker-compose up -d
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
 | `REDPANDA_BROKERS` | RedPanda broker addresses | `localhost:9092` |
 | `ACTIVITYPODS_URL` | ActivityPods base URL | `http://localhost:3000` |
-| `SIGNING_API_TOKEN` | Token for Signing API | (required) |
-| `FORWARDING_TOKEN` | Token for forwarding to ActivityPods | (required) |
+| `ACTIVITYPODS_TOKEN` | Shared secret for Sidecar → ActivityPods APIs (signing + inbox receive) | (required) |
+| `SIDECAR_TOKEN` | Shared secret for ActivityPods → Sidecar outbox webhook | (required) |
 
 ## Signing API Contract
 

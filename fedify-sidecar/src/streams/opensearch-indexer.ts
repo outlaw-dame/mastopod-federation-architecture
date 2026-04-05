@@ -51,7 +51,21 @@ export interface ActivityDocument {
   received_at: string;
   indexed_at: string;
   origin: "local" | "remote" | "unknown";
-  
+
+  /**
+   * True when the actor has explicitly granted public search consent via
+   * FEP-268d searchableBy (or when no explicit signal is present and the
+   * activity is publicly addressed — i.e., we follow the liberal default).
+   * False only when the actor has explicitly OPTED OUT.
+   */
+  is_searchable: boolean;
+  /**
+   * True when the actor provided an explicit searchableBy value.
+   * False means we inferred from audience (to/cc).  Query consumers can use
+   * this to apply stricter filtering policies.
+   */
+  search_consent_explicit: boolean;
+
   // Denormalized fields for querying
   to?: string[];
   cc?: string[];
@@ -60,8 +74,11 @@ export interface ActivityDocument {
   summary?: string;
   preview_content?: string;
   attachment_urls?: string[];
+  /** Structured hashtag names from activity.object.tag (includes # prefix). */
   tag_names?: string[];
-  
+  /** Hashtags extracted from HTML content — no # prefix, lower-cased. */
+  hashtags?: string[];
+
   // Full activity for retrieval
   activity: any;
 }
@@ -137,14 +154,16 @@ export class OpenSearchIndexer {
               received_at: { type: "date" },
               indexed_at: { type: "date" },
               origin: { type: "keyword" },
+              is_searchable: { type: "boolean" },
+              search_consent_explicit: { type: "boolean" },
               to: { type: "keyword" },
               cc: { type: "keyword" },
               in_reply_to: { type: "keyword" },
-              content: { 
+              content: {
                 type: "text",
                 analyzer: "standard",
               },
-              summary: { 
+              summary: {
                 type: "text",
                 analyzer: "standard",
               },
@@ -154,7 +173,8 @@ export class OpenSearchIndexer {
               },
               attachment_urls: { type: "keyword" },
               tag_names: { type: "keyword" },
-              activity: { 
+              hashtags: { type: "keyword" },
+              activity: {
                 type: "object",
                 enabled: false,  // Store but don't index
               },
@@ -236,11 +256,24 @@ export class OpenSearchIndexer {
           // Handle tombstone (delete)
           await this.handleTombstone(event);
         } else {
-          // Handle activity
+          // Honour explicit FEP-268d opt-out: if the actor has explicitly set
+          // searchableBy to something OTHER than as:Public, do not index.
+          // (Activities that reach the Firehose with no explicit signal are
+          // publicly addressed and are indexed under the liberal default.)
+          const consent = event.meta?.searchConsent;
+          if (consent?.explicitlySet === true && consent?.isPublic === false) {
+            logger.debug("Skipping non-searchable activity per FEP-268d opt-out", {
+              activityId: event.activity?.id,
+            });
+            resolveOffset(message.offset);
+            await heartbeat();
+            continue;
+          }
+
           const doc = this.mapActivityToDocument(event);
           if (doc) {
             this.batch.push(doc);
-            
+
             if (this.batch.length >= this.config.batchSize) {
               await this.flush();
             }
@@ -343,15 +376,32 @@ export class OpenSearchIndexer {
         .map((v: string) => v.trim())
         .filter((v: string) => v.length > 0);
     }
-    
+
     // Extract in_reply_to
     let inReplyTo: string | undefined;
     if (activity.object?.inReplyTo) {
-      inReplyTo = typeof activity.object.inReplyTo === "string" 
-        ? activity.object.inReplyTo 
+      inReplyTo = typeof activity.object.inReplyTo === "string"
+        ? activity.object.inReplyTo
         : activity.object.inReplyTo.id;
     }
-    
+
+    // Resolve search consent fields from event metadata (populated by the
+    // outbox-emitter via FEP-268d searchableBy; absent for legacy events).
+    const consent = event.meta?.searchConsent;
+    const isSearchable = consent?.explicitlySet
+      ? (consent.isPublic ?? false)
+      : true;  // liberal default: publicly-addressed with no explicit signal
+    const searchConsentExplicit = consent?.explicitlySet ?? false;
+
+    // Prefer pre-parsed hashtags from event.meta (avoids re-parsing HTML).
+    // Fall back to extracting from structured tag objects on the activity.
+    const hashtags: string[] | undefined =
+      event.meta?.hashtags && event.meta.hashtags.length > 0
+        ? event.meta.hashtags
+        : tagNames
+        ? tagNames.map((t: string) => t.replace(/^#/, "").toLowerCase()).filter(Boolean)
+        : undefined;
+
     return {
       activity_id: activity.id,
       activity_type: activity.type,
@@ -368,6 +418,8 @@ export class OpenSearchIndexer {
       received_at: new Date(event.receivedAt || event.streamTimestamp).toISOString(),
       indexed_at: new Date().toISOString(),
       origin: (event.origin as "local" | "remote" | "unknown") || "unknown",
+      is_searchable: isSearchable,
+      search_consent_explicit: searchConsentExplicit,
       to,
       cc,
       in_reply_to: inReplyTo,
@@ -376,6 +428,7 @@ export class OpenSearchIndexer {
       preview_content: previewContent,
       attachment_urls: attachmentUrls,
       tag_names: tagNames,
+      hashtags,
       activity,
     };
   }
@@ -467,8 +520,8 @@ export function createOpenSearchIndexer(overrides?: Partial<OpenSearchIndexerCon
     brokers: (process.env.REDPANDA_BROKERS || "localhost:9092").split(","),
     clientId: process.env.REDPANDA_CLIENT_ID || "opensearch-indexer",
     groupId: process.env.OPENSEARCH_CONSUMER_GROUP || "opensearch-indexer",
-    firehoseTopic: process.env.REDPANDA_FIREHOSE_TOPIC || "apub.public.firehose.v1",
-    tombstoneTopic: process.env.REDPANDA_TOMBSTONE_TOPIC || "apub.tombstone.v1",
+    firehoseTopic: process.env.REDPANDA_FIREHOSE_TOPIC || "ap.firehose.v1",
+    tombstoneTopic: process.env.REDPANDA_TOMBSTONE_TOPIC || "ap.tombstones.v1",
     batchSize: parseInt(process.env.OPENSEARCH_BATCH_SIZE || "500", 10),
     flushIntervalMs: parseInt(process.env.OPENSEARCH_FLUSH_INTERVAL_MS || "5000", 10),
     ...overrides,
