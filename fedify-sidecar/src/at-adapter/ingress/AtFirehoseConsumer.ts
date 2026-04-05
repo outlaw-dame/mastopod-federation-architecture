@@ -101,6 +101,10 @@ export class DefaultAtFirehoseConsumer implements AtFirehoseConsumer {
     // Fire and forget the connection loop
     connection.startLoop().catch((err) => {
       console.error(`[AtFirehoseConsumer] Fatal error in connection loop for ${source.id}:`, err);
+    }).finally(() => {
+      if (this.activeConnections.get(source.id) === connection) {
+        this.activeConnections.delete(source.id);
+      }
     });
   }
 
@@ -143,26 +147,30 @@ class FirehoseConnection {
       this.commitCursorSafely();
     }, CURSOR_COMMIT_INTERVAL_MS);
 
-    while (this.isRunning) {
-      try {
-        await this.connectAndWait();
-        // If connectAndWait returns normally, it means the socket closed cleanly.
-        // We reset reconnect attempts and loop around to reconnect.
-        this.reconnectAttempts = 0;
-      } catch (err) {
-        if (!this.isRunning) break;
+    try {
+      while (this.isRunning) {
+        try {
+          await this.connectAndWait();
+          // If connectAndWait returns normally, it means the socket closed cleanly.
+          // We reset reconnect attempts and loop around to reconnect.
+          this.reconnectAttempts = 0;
+        } catch (err) {
+          if (!this.isRunning) break;
 
-        this.reconnectAttempts++;
-        const delay = this.calculateBackoff();
-        
-        console.error(
-          `[FirehoseConnection] Connection to ${this.source.id} failed. ` +
-          `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}). Error:`,
-          err instanceof Error ? err.message : String(err),
-        );
+          this.reconnectAttempts++;
+          const delay = this.calculateBackoff();
+          
+          console.error(
+            `[FirehoseConnection] Connection to ${this.source.id} failed. ` +
+            `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}). Error:`,
+            err instanceof Error ? err.message : String(err),
+          );
 
-        await new Promise((resolve) => setTimeout(resolve, delay));
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
       }
+    } finally {
+      this.cleanupTimers();
     }
   }
 
@@ -301,8 +309,10 @@ class FirehoseConnection {
   private cleanupTimers(): void {
     if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.pongTimeout) clearTimeout(this.pongTimeout);
+    if (this.commitInterval) clearInterval(this.commitInterval);
     this.pingInterval = null;
     this.pongTimeout = null;
+    this.commitInterval = null;
   }
 
   private async commitCursorSafely(): Promise<void> {

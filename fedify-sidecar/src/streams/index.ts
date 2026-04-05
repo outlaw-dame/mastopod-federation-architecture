@@ -74,7 +74,7 @@ export class StreamsService {
 
     // Create producer
     this.producer = this.kafka.producer({
-      allowAutoTopicCreation: true,
+      allowAutoTopicCreation: false,
     });
     await this.producer.connect();
 
@@ -95,6 +95,7 @@ export class StreamsService {
           configEntries: [
             { name: "retention.ms", value: "604800000" }, // 7 days
             { name: "cleanup.policy", value: "delete" },
+            { name: "compression.type", value: "zstd" },
           ],
         })),
       });
@@ -138,7 +139,7 @@ export class StreamsService {
     try {
       await this.producer.send({
         topic,
-        compression: CompressionTypes.Snappy,
+        compression: CompressionTypes.ZSTD,
         messages: [{
           key: activity.actorDomain, // Partition by actor domain
           value: JSON.stringify(activity),

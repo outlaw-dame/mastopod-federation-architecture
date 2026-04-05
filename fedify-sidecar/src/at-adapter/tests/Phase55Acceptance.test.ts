@@ -461,6 +461,32 @@ describe('Phase 5.5 Acceptance Tests', () => {
       const dedupeFailures = auditPublisher.published.filter(e => e.reason === 'dedupe_rejected');
       expect(dedupeFailures).toHaveLength(1);
     });
+
+    it('should request retry and avoid dedupe mark when failure audit publish fails', async () => {
+      commitVerifier = buildMockCommitVerifier(false, 'signature_mismatch');
+      const throwingAuditPublisher = {
+        publishVerifyFailed: vi.fn().mockRejectedValue(new Error('failure topic unavailable')),
+      };
+      verifier = new DefaultAtIngressVerifier(
+        decoder,
+        classifier,
+        throwingAuditPublisher as any,
+        eventPublisher as any,
+        commitVerifier,
+        identityResolver,
+        syncRebuilder,
+      );
+
+      const envelope = buildRawEnvelope({ seq: 3456, eventType: '#commit' });
+
+      const first = await verifier.handleRawEvent(envelope);
+      const second = await verifier.handleRawEvent(envelope);
+
+      expect(first).toBe(false);
+      expect(second).toBe(false);
+      expect(throwingAuditPublisher.publishVerifyFailed).toHaveBeenCalledTimes(2);
+      expect(eventPublisher.publish).not.toHaveBeenCalledWith('at.ingress.v1', expect.anything());
+    });
   });
 
   // -------------------------------------------------------------------------

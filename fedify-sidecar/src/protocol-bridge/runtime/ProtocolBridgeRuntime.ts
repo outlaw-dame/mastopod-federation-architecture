@@ -338,7 +338,7 @@ function buildKafkaConsumerFactory(
 
   return (groupId: string) => kafka.consumer({
     groupId,
-    allowAutoTopicCreation: true,
+    allowAutoTopicCreation: false,
   });
 }
 

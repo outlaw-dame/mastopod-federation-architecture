@@ -1,0 +1,25 @@
+# Redpanda Connect — service-level configuration.
+# This file is not a pipeline. It sets up the HTTP API, metrics, and logging.
+#
+# Run all streams with:
+#   redpanda-connect streams --config /redpanda-connect/config.yaml /redpanda-connect/streams/*.yaml
+#
+# Prometheus metrics endpoint: http://localhost:4195/metrics
+# Healthcheck endpoint:        http://localhost:4195/ping
+# Streams management API:      http://localhost:4195/streams
+
+http:
+  enabled: true
+  address: "0.0.0.0:4195"
+  debug_endpoints: false
+
+logger:
+  level: "${LOG_LEVEL:INFO}"
+  format: json
+  add_timestamp: true
+  static_fields:
+    service: fedify-sidecar-connect
+
+metrics:
+  prometheus:
+    prefix: rpconnect

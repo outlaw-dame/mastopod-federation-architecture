@@ -24,7 +24,11 @@ import {
 } from "./queue/sidecar-redis-queue.js";
 import { createSigningClient } from "./signing/signing-client.js";
 import { createRedPandaProducer } from "./streams/redpanda-producer.js";
-import { createOpenSearchIndexer } from "./streams/opensearch-indexer.js";
+import { createSearchIndexerService, SearchIndexerService } from "./search/service/SearchIndexerService.js";
+import {
+  resolveTopicGovernanceOptionsFromEnv,
+  verifyRedpandaTopics,
+} from "./streams/redpanda-topic-governance.js";
 import { createOutboundWorker, OutboundWorker } from "./delivery/outbound-worker.js";
 import { createInboundWorker, InboundWorker } from "./delivery/inbound-worker.js";
 import { logger } from "./utils/logger.js";
@@ -123,7 +127,10 @@ import { ActivityPubBridgeProfileMediaClient } from "./protocol-bridge/runtime/A
 import { AtprotoAttachmentMediaResolver } from "./protocol-bridge/runtime/AtprotoAttachmentMediaResolver.js";
 import { AtprotoProfileMediaResolver } from "./protocol-bridge/runtime/AtprotoProfileMediaResolver.js";
 import { AtprotoLinkPreviewThumbResolver } from "./protocol-bridge/runtime/AtprotoLinkPreviewThumbResolver.js";
+import { AtIngressRuntime } from "./at-adapter/ingress/AtIngressRuntime.js";
 import { buildAtExternalFirehoseBootstrap, parseAtExternalFirehoseSources } from "./at-adapter/ingress/AtExternalFirehoseBootstrap.js";
+import { HttpAtIdentityResolver } from "./at-adapter/ingress/HttpAtIdentityResolver.js";
+import { ProductionAtCommitVerifier } from "./at-adapter/ingress/ProductionAtCommitVerifier.js";
 import { normalizeActivityPubNoteLinkPreviewMode } from "./protocol-bridge/projectors/activitypub/ActivityPubProjectionPolicy.js";
 import {
   applyActivityPubOutboundDeliveryPolicy,
@@ -135,6 +142,10 @@ import { RedisBridgeProfileMediaStore } from "./protocol-bridge/profile/BridgePr
 import { RedisBridgePostMediaStore } from "./protocol-bridge/post/BridgePostMedia.js";
 import { ApToAtProjectionWorker } from "./protocol-bridge/workers/ApToAtProjectionWorker.js";
 import { AtToApProjectionWorker } from "./protocol-bridge/workers/AtToApProjectionWorker.js";
+// Fedify runtime integration (feature-flagged: ENABLE_FEDIFY_RUNTIME_INTEGRATION=true)
+import { FedifyKvAdapter } from "./federation/FedifyKvAdapter.js";
+import { createFedifyAdapter, type FedifyFederationAdapter } from "./federation/FedifyFederationAdapter.js";
+import { registerFedifyRoutes } from "./federation/FedifyFastifyBridge.js";
 
 // ============================================================================
 // Configuration
@@ -153,6 +164,8 @@ const config = {
   enableInboundWorker: process.env.ENABLE_INBOUND_WORKER !== "false",
   enableOpenSearchIndexer: process.env.ENABLE_OPENSEARCH_INDEXER !== "false",
   enableXrpcServer: process.env.ENABLE_XRPC_SERVER !== "false",
+  enableFedifyRuntimeIntegration:
+    process.env.ENABLE_FEDIFY_RUNTIME_INTEGRATION === "true",
   enableProtocolBridgeApToAt: process.env.ENABLE_PROTOCOL_BRIDGE_AP_TO_AT === "true",
   enableProtocolBridgeAtToAp: process.env.ENABLE_PROTOCOL_BRIDGE_AT_TO_AP === "true",
 
@@ -297,13 +310,15 @@ const config = {
 let queue: RedisStreamsQueue | null = null;
 let outboundWorker: OutboundWorker | null = null;
 let inboundWorker: InboundWorker | null = null;
-let opensearchIndexer: ReturnType<typeof createOpenSearchIndexer> | null = null;
+let opensearchIndexer: SearchIndexerService | null = null;
 let atRedisClient: Redis | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
 let identityWarmupService: IdentityWarmupService | null = null;
 let atEventPublisher: RedpandaEventPublisher | null = null;
 let atFirehoseRuntime: AtFirehoseRuntime | null = null;
+let atExternalFirehoseRuntime: AtIngressRuntime | null = null;
 let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
+let fedifyAdapter: FedifyFederationAdapter | null = null;
 let isShuttingDown = false;
 
 // ============================================================================
@@ -321,6 +336,16 @@ async function main() {
     richNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewRichDomains,
     disabledNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewDisabledDomains,
   } as const;
+
+  const redpandaRequired =
+    config.enableOpenSearchIndexer
+    || config.enableOutboundWorker
+    || config.enableInboundWorker
+    || config.enableXrpcServer
+    || config.enableProtocolBridgeApToAt
+    || config.enableProtocolBridgeAtToAp;
+
+  const enforceTopicGovernance = process.env["REDPANDA_ENFORCE_TOPIC_GOVERNANCE"] !== "false";
 
   if (config.enableXrpcServer && !config.atLocalFixture) {
     if (!process.env.ACTIVITYPODS_URL) {
@@ -372,6 +397,15 @@ async function main() {
   });
 
   try {
+    if (redpandaRequired && enforceTopicGovernance) {
+      const topicGovernanceOptions = resolveTopicGovernanceOptionsFromEnv();
+      await verifyRedpandaTopics(topicGovernanceOptions);
+      logger.info("Redpanda topic governance verification passed", {
+        profile: topicGovernanceOptions.profile,
+        brokers: topicGovernanceOptions.brokers,
+      });
+    }
+
     // Initialize Redis Streams queue
     const queueConfig = createQueueConfig();
     queue = new RedisStreamsQueue(queueConfig);
@@ -383,11 +417,6 @@ async function main() {
     logger.info("Signing client initialized");
 
     // Initialize RedPanda producer only when worker/indexer features need it.
-    const redpandaRequired =
-      config.enableOpenSearchIndexer ||
-      config.enableOutboundWorker ||
-      config.enableInboundWorker;
-
     let redpanda: any = null;
     if (redpandaRequired) {
       redpanda = createRedPandaProducer();
@@ -397,9 +426,28 @@ async function main() {
       logger.info("RedPanda producer skipped (workers/indexer disabled)");
     }
 
-    // Initialize OpenSearch indexer
+    // Initialize Fedify 2.x runtime adapter (feature-flagged)
+    if (config.enableFedifyRuntimeIntegration) {
+      const fedifyRedis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
+      fedifyRedis.on("error", (err: Error) =>
+        logger.error("Fedify KV Redis error", { error: err.message }),
+      );
+      const kv = new FedifyKvAdapter(fedifyRedis);
+      fedifyAdapter = createFedifyAdapter(
+        kv,
+        {
+          domain: config.domain,
+          activityPodsUrl: process.env.ACTIVITYPODS_URL ?? "http://localhost:3000",
+          activityPodsToken: process.env.ACTIVITYPODS_TOKEN ?? "",
+        },
+        logger,
+      );
+      logger.info("Fedify runtime adapter initialized", { domain: config.domain });
+    }
+
+    // Initialize OpenSearch indexer (dedicated search indexer service)
     if (config.enableOpenSearchIndexer) {
-      opensearchIndexer = createOpenSearchIndexer();
+      opensearchIndexer = createSearchIndexerService();
       await opensearchIndexer.initialize();
       opensearchIndexer.start().catch(err => {
         logger.error("OpenSearch indexer error", { error: err.message });
@@ -409,7 +457,10 @@ async function main() {
 
     // Initialize outbound worker
     if (config.enableOutboundWorker) {
-      outboundWorker = createOutboundWorker(queue, signingClient, redpanda);
+      outboundWorker = createOutboundWorker(queue, signingClient, redpanda, {
+        fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
+        ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
+      });
       outboundWorker.start().catch(err => {
         logger.error("Outbound worker error", { error: err.message });
       });
@@ -418,7 +469,10 @@ async function main() {
 
     // Initialize inbound worker
     if (config.enableInboundWorker) {
-      inboundWorker = createInboundWorker(queue, redpanda);
+      inboundWorker = createInboundWorker(queue, redpanda, {
+        fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
+        ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
+      });
       inboundWorker.start().catch(err => {
         logger.error("Inbound worker error", { error: err.message });
       });
@@ -594,6 +648,61 @@ async function main() {
       const bridgeHints = body?.bridge?.activityPubHints && typeof body.bridge.activityPubHints === "object"
         ? body.bridge.activityPubHints
         : undefined;
+      // ── Immutable event log (RedPanda) ──────────────────────────────────────
+      // Publish once per activity to the event log BEFORE the per-domain
+      // delivery loop. We use the original body.activity (not the per-domain
+      // policy-stripped copy) so Stream1 holds the canonical record.
+      // Fire-and-forget: delivery queue correctness does not depend on this.
+      if (redpanda) {
+        const activity = body.activity as Record<string, unknown>;
+        const actorUri = body.actorUri as string;
+        const activityType = activity.type as string | undefined;
+
+        if (activityType === "Delete" || activityType === "Tombstone") {
+          // Hard delete — publish tombstone so OpenSearch can remove any
+          // previously indexed document for this object.
+          const objectVal = activity.object;
+          const objectId =
+            typeof objectVal === "string"
+              ? objectVal
+              : ((objectVal as Record<string, unknown>)?.id as string | undefined);
+          (redpanda as import("./streams/redpanda-producer.js").RedPandaProducer)
+            .publishTombstone({
+              activityId: body.activityId as string,
+              objectId,
+              actorUri,
+              deletedAt: Date.now(),
+            })
+            .catch((err: Error) =>
+              logger.error("Failed to publish tombstone to RedPanda", {
+                activityId: body.activityId,
+                error: err.message,
+              }),
+            );
+        } else if (normalizedMeta?.isPublicIndexable) {
+          // Public activity — publish to Stream1 → Firehose → OpenSearch.
+          // The inbound path publishes remote activities to Stream2 in the
+          // InboundWorker; this covers the local (outbound) side.
+          (redpanda as import("./streams/redpanda-producer.js").RedPandaProducer)
+            .publishToStream1({
+              activity,
+              actorUri,
+              publishedAt: Date.now(),
+              origin: "local",
+              meta: normalizedMeta,
+            })
+            .catch((err: Error) =>
+              logger.error("Failed to publish to Stream1", {
+                activityId: body.activityId,
+                error: err.message,
+              }),
+            );
+        }
+      }
+
+      // ── Outbound delivery queue (Redis Streams) ──────────────────────────────
+      // One job per remote target.  The activity body is re-serialised here
+      // after per-domain delivery policy (bcc stripping, etc.) is applied.
       let jobCount = 0;
       for (const target of body.remoteTargets) {
         if (!target.inboxUrl || !target.targetDomain) continue;
@@ -623,6 +732,15 @@ async function main() {
       }
       reply.status(202).send({ accepted: true, jobCount });
     });
+
+    // -----------------------------------------------------------------------
+    // Fedify 2.x HTTP routes (WebFinger, NodeInfo, actor documents)
+    // Only registered when the runtime integration flag is on.
+    // -----------------------------------------------------------------------
+    if (fedifyAdapter) {
+      registerFedifyRoutes(app, fedifyAdapter);
+      logger.info("Fedify HTTP routes registered (WebFinger, NodeInfo, actor dispatch)");
+    }
 
     // -----------------------------------------------------------------------
     // Phase 7: AT XRPC Server
@@ -823,6 +941,17 @@ async function main() {
             const externalFirehoseSources = parseAtExternalFirehoseSources(
               process.env.AT_EXTERNAL_FIREHOSE_SOURCES,
             );
+            const externalDidFailureCacheTtlMs = 60_000;
+            const externalIdentityResolver = new HttpAtIdentityResolver({
+              fetchImpl: fetch,
+              timeoutMs: config.externalPdsTimeoutMs,
+              maxAttempts: config.externalPdsMaxAttempts,
+              failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
+            });
+            const externalCommitVerifier = new ProductionAtCommitVerifier({
+              identityResolver: externalIdentityResolver,
+              repoRegistry,
+            });
             const externalIngressBootstrap = buildAtExternalFirehoseBootstrap({
               runtimeConfig: {
                 brokers: (process.env.REDPANDA_BROKERS || "localhost:9092")
@@ -837,7 +966,7 @@ async function main() {
               redis: atRedis as any,
               eventPublisher: eventPublisherAdapter,
               repoRegistry,
-              commitVerifier: null,
+              commitVerifier: externalCommitVerifier,
               logger: {
                 info: (message, meta) => logger.info(meta || {}, message),
                 warn: (message, meta) => logger.warn(meta || {}, message),
@@ -846,6 +975,7 @@ async function main() {
               identityResolverOptions: {
                 timeoutMs: config.externalPdsTimeoutMs,
                 maxAttempts: config.externalPdsMaxAttempts,
+                failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
               },
               syncRebuilderOptions: {
                 fetchImpl: fetch,
@@ -854,21 +984,32 @@ async function main() {
               },
             });
 
-            logger.warn(
-              {
-                enableAtExternalFirehose: true,
-                sourceCount: externalIngressBootstrap.sources.length,
-                rawTopic: config.atExternalFirehoseRawTopic,
-                consumerGroupId: config.atExternalFirehoseConsumerGroupId,
-                bootstrapStatus: externalIngressBootstrap.kind,
-                bootstrapReason: externalIngressBootstrap.kind === "disabled"
-                  ? externalIngressBootstrap.reason
-                  : undefined,
-              },
-              externalIngressBootstrap.kind === "disabled"
-                ? `External AT firehose intake requested but not started: ${externalIngressBootstrap.message}`
-                : "External AT firehose intake bootstrap was prepared",
-            );
+            if (externalIngressBootstrap.kind === "ready") {
+              await externalIngressBootstrap.runtime.start();
+              atExternalFirehoseRuntime = externalIngressBootstrap.runtime;
+
+              logger.info(
+                {
+                  enableAtExternalFirehose: true,
+                  sourceCount: externalIngressBootstrap.sources.length,
+                  rawTopic: config.atExternalFirehoseRawTopic,
+                  consumerGroupId: config.atExternalFirehoseConsumerGroupId,
+                },
+                "External AT firehose intake started",
+              );
+            } else {
+              logger.warn(
+                {
+                  enableAtExternalFirehose: true,
+                  sourceCount: externalIngressBootstrap.sources.length,
+                  rawTopic: config.atExternalFirehoseRawTopic,
+                  consumerGroupId: config.atExternalFirehoseConsumerGroupId,
+                  bootstrapStatus: externalIngressBootstrap.kind,
+                  bootstrapReason: externalIngressBootstrap.reason,
+                },
+                `External AT firehose intake requested but not started: ${externalIngressBootstrap.message}`,
+              );
+            }
           } catch (error: any) {
             logger.error(
               {
@@ -1359,6 +1500,12 @@ async function shutdown(signal: string): Promise<void> {
       await atFirehoseRuntime.stop();
       atFirehoseRuntime = null;
       logger.info("AT firehose runtime stopped");
+    }
+
+    if (atExternalFirehoseRuntime) {
+      await atExternalFirehoseRuntime.stop();
+      atExternalFirehoseRuntime = null;
+      logger.info("External AT firehose runtime stopped");
     }
 
     if (protocolBridgeRuntime) {

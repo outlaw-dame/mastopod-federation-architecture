@@ -8,8 +8,8 @@
  * trusted at.ingress.v1 stream.
  *
  * Design principles:
- *   - Publish failures are non-fatal: a failure to publish a failure event
- *     is logged but does not crash the verifier.
+ *   - Publish failures are surfaced to the caller so retry semantics can be
+ *     enforced by the verifier/runtime instead of silently dropping evidence.
  *   - All published events include a failedAt timestamp for temporal ordering.
  *   - The publisher is intentionally narrow: it only writes to the failure
  *     topic and never to the trusted ingress topic.
@@ -39,7 +39,7 @@ const MAX_DETAILS_SIZE_BYTES = 4096;
 export interface AtIngressAuditPublisher {
   /**
    * Publish a structured verification failure event.
-   * Non-throwing: logs errors internally rather than propagating them.
+   * Throws when publishing fails so callers can decide whether to retry.
    */
   publishVerifyFailed(event: AtVerifyFailedEvent): Promise<void>;
 }
@@ -57,14 +57,14 @@ export class DefaultAtIngressAuditPublisher implements AtIngressAuditPublisher {
     try {
       await this.eventPublisher.publish(AT_VERIFY_FAILED_TOPIC, sanitised as any);
     } catch (err) {
-      // Failure to publish a failure event is non-fatal.
-      // Log with structured context for observability.
+      // Failure to publish a failure event must surface to the caller.
       console.error('[AtIngressAuditPublisher] Failed to publish verify-failed event', {
         seq: event.seq,
         source: event.source,
         reason: event.reason,
         error: err instanceof Error ? err.message : String(err),
       });
+      throw err;
     }
   }
 }

@@ -194,7 +194,7 @@ export class RedPandaStreams {
     
     await this.producer.send({
       topic: this.config.localPublicTopic,
-      compression: CompressionTypes.LZ4,
+      compression: CompressionTypes.ZSTD,
       messages: [
         {
           key,
@@ -225,7 +225,7 @@ export class RedPandaStreams {
     
     await this.producer.send({
       topic: this.config.remotePublicTopic,
-      compression: CompressionTypes.LZ4,
+      compression: CompressionTypes.ZSTD,
       messages: [
         {
           key,
@@ -260,7 +260,7 @@ export class RedPandaStreams {
     
     await this.producer.send({
       topic: this.config.firehoseTopic,
-      compression: CompressionTypes.LZ4,
+      compression: CompressionTypes.ZSTD,
       messages: [
         {
           key,
@@ -285,7 +285,7 @@ export class RedPandaStreams {
     
     await this.producer.send({
       topic: this.config.tombstoneTopic,
-      compression: CompressionTypes.LZ4,
+      compression: CompressionTypes.ZSTD,
       messages: [
         {
           key,

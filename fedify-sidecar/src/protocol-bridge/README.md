@@ -60,9 +60,10 @@ What is included here:
   - consuming `ap.stream1.local-public.v1`, `at.commit.v1`, verified `at.ingress.v1`, and `ap.atproto-ingress.v1`
   - fanning out local `at.commit.v1`, `at.identity.v1`, and `at.account.v1` into the hosted-PDS `subscribeRepos` stream through a Redis-backed firehose cursor store and a dedicated local firehose runtime
   - enforcing strict AT firehose wire compatibility by encoding hosted `subscribeRepos` frames as concatenated DRISL-CBOR header/payload maps and treating malformed external frames as connection-level errors that trigger replay-safe reconnects
+  - verifying external AT `#commit` frames with a production verifier that checks the signed commit block against the DID signing key, validates the CAR slice, and proves advertised ops by inverting them over the current MST root back to `prevData`
   - resolving external AT identity changes against authoritative DID documents and independently re-confirming handles before trusting them
   - rebuilding repo-head sync state from authenticated `com.atproto.sync.getRepo` exports plus `com.atproto.sync.getLatestCommit`, including CAR-root validation against the latest commit CID
-  - validating external AT firehose source configuration through a dedicated bootstrap helper, with deterministic source IDs and explicit runtime gating when a production commit verifier is absent
+  - validating external AT firehose source configuration through a dedicated bootstrap helper, with deterministic source IDs and explicit fail-closed runtime gating whenever a verifier is not supplied
   - forwarding mirrored AT->AP activities into a trusted internal ActivityPods endpoint
   - resolving ActivityPub `Undo` activity references through a trusted internal ActivityPods endpoint when the original social activity is not embedded inline
   - projecting profile avatar/banner media across protocols via explicit canonical attachment roles, a trusted internal ActivityPods raster-image fetch endpoint, native AT blob uploads, and public `com.atproto.sync.getBlob` URLs for ActivityPub consumers

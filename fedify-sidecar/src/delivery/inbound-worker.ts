@@ -14,11 +14,16 @@
 
 import { request } from "undici";
 import { createVerify, createHash } from "node:crypto";
-import { 
-  RedisStreamsQueue, 
+import {
+  RedisStreamsQueue,
   InboundEnvelope,
+  backoffMs,
 } from "../queue/sidecar-redis-queue.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
+import {
+  FederationRuntimeAdapter,
+  NoopFederationRuntimeAdapter,
+} from "../core-domain/contracts/SigningContracts.js";
 import { logger } from "../utils/logger.js";
 
 // ============================================================================
@@ -31,6 +36,9 @@ export interface InboundWorkerConfig {
   activityPodsToken: string;
   requestTimeoutMs: number;
   userAgent: string;
+  fedifyRuntimeIntegrationEnabled: boolean;
+  /** Injected adapter — defaults to NoopFederationRuntimeAdapter when flag is off. */
+  adapter?: FederationRuntimeAdapter;
 }
 
 export interface VerificationResult {
@@ -38,6 +46,8 @@ export interface VerificationResult {
   actorUri?: string;
   error?: string;
 }
+
+const MAX_INBOUND_ATTEMPTS = 8;
 
 // ============================================================================
 // Inbound Worker
@@ -47,6 +57,7 @@ export class InboundWorker {
   private queue: RedisStreamsQueue;
   private redpanda: RedPandaProducer;
   private config: InboundWorkerConfig;
+  private adapter: FederationRuntimeAdapter;
   private isRunning = false;
   private activeJobs = 0;
 
@@ -58,6 +69,31 @@ export class InboundWorker {
     this.queue = queue;
     this.redpanda = redpanda;
     this.config = config;
+    this.adapter = config.fedifyRuntimeIntegrationEnabled
+      ? (config.adapter ?? NoopFederationRuntimeAdapter)
+      : NoopFederationRuntimeAdapter;
+  }
+
+  /**
+   * Invoke a FederationRuntimeAdapter hook inside a noop-safe circuit-breaker.
+   * Errors thrown by the adapter are logged and swallowed — they must never
+   * affect the calling business-logic path.
+   */
+  private async callAdapter(
+    hook: "onInboundVerified",
+    input: NonNullable<Parameters<NonNullable<FederationRuntimeAdapter["onInboundVerified"]>>[0]>
+  ): Promise<void> {
+    if (!this.adapter.enabled) return;
+    const fn = this.adapter[hook];
+    if (!fn) return;
+    try {
+      await fn.call(this.adapter, input);
+    } catch (err: any) {
+      logger.warn("FederationRuntimeAdapter hook threw (swallowed)", {
+        hook,
+        error: err.message,
+      });
+    }
   }
 
   /**
@@ -65,7 +101,10 @@ export class InboundWorker {
    */
   async start(): Promise<void> {
     this.isRunning = true;
-    logger.info("Inbound worker started", { concurrency: this.config.concurrency });
+    logger.info("Inbound worker started", {
+      concurrency: this.config.concurrency,
+      fedifyRuntimeIntegrationEnabled: this.config.fedifyRuntimeIntegrationEnabled,
+    });
 
     for await (const { messageId, envelope } of this.queue.consumeInbound()) {
       if (!this.isRunning) break;
@@ -102,10 +141,17 @@ export class InboundWorker {
   /**
    * Process a single inbound envelope
    */
-  private async processEnvelope(messageId: string, envelope: InboundEnvelope): Promise<void> {
+  protected async processEnvelope(messageId: string, envelope: InboundEnvelope): Promise<void> {
     this.activeJobs++;
-    
+
     try {
+      // Step 0: Honour delayed retry — re-enqueue and ack if not yet due.
+      if (envelope.notBeforeMs > 0 && Date.now() < envelope.notBeforeMs) {
+        await this.queue.enqueueInbound(envelope);
+        await this.queue.ack("inbound", messageId);
+        return;
+      }
+
       // Step 1: Parse the activity
       let activity: any;
       try {
@@ -145,18 +191,37 @@ export class InboundWorker {
       const forwardResult = await this.forwardToActivityPods(envelope, activity, verification.actorUri!);
       
       if (!forwardResult.success) {
-        // Forwarding failed - requeue or DLQ based on error type
         await this.queue.ack("inbound", messageId);
-        if (forwardResult.permanent) {
-          await this.queue.moveToDlq("inbound", envelope, forwardResult.error || "Forward failed");
+
+        if (forwardResult.permanent || envelope.attempt >= MAX_INBOUND_ATTEMPTS) {
+          await this.queue.moveToDlq(
+            "inbound",
+            envelope,
+            forwardResult.permanent
+              ? (forwardResult.error || "Forward failed (permanent)")
+              : `Exhausted ${MAX_INBOUND_ATTEMPTS} attempts: ${forwardResult.error}`,
+          );
+          logger.warn("Inbound envelope moved to DLQ", {
+            envelopeId: envelope.envelopeId,
+            attempt: envelope.attempt,
+            permanent: forwardResult.permanent,
+            error: forwardResult.error,
+          });
         } else {
-          // Requeue for retry (simple retry - could be more sophisticated)
-          await this.queue.enqueueInbound(envelope);
+          const nextAttempt = envelope.attempt + 1;
+          const delay = backoffMs(nextAttempt);
+          await this.queue.enqueueInbound({
+            ...envelope,
+            attempt: nextAttempt,
+            notBeforeMs: Date.now() + delay,
+          });
+          logger.warn("Inbound envelope requeued with backoff", {
+            envelopeId: envelope.envelopeId,
+            attempt: nextAttempt,
+            retryAt: new Date(Date.now() + delay).toISOString(),
+            error: forwardResult.error,
+          });
         }
-        logger.warn("Failed to forward to ActivityPods", { 
-          envelopeId: envelope.envelopeId, 
-          error: forwardResult.error 
-        });
         return;
       }
 
@@ -184,6 +249,15 @@ export class InboundWorker {
 
       // Step 7: Ack the message
       await this.queue.ack("inbound", messageId);
+
+      // Step 8: Notify integration adapter (fault-isolated — errors are swallowed)
+      await this.callAdapter("onInboundVerified", {
+        actorUri: verification.actorUri!,
+        activityId: activity.id,
+        activityType: activity.type,
+        isPublic,
+      });
+
       logger.info("Inbound activity processed", { 
         envelopeId: envelope.envelopeId,
         activityId: activity.id,
@@ -206,7 +280,7 @@ export class InboundWorker {
   /**
    * Verify HTTP signature on an inbound envelope
    */
-  private async verifySignature(envelope: InboundEnvelope): Promise<VerificationResult> {
+  protected async verifySignature(envelope: InboundEnvelope): Promise<VerificationResult> {
     try {
       const signatureHeader = envelope.headers["signature"];
       if (!signatureHeader) {
@@ -364,7 +438,8 @@ export class InboundWorker {
   /**
    * Forward activity to ActivityPods
    */
-  private async forwardToActivityPods(
+  /** Forward a verified activity to ActivityPods internal inbox receiver. */
+  protected async forwardToActivityPods(
     envelope: InboundEnvelope, 
     activity: any,
     verifiedActorUri: string
@@ -443,6 +518,8 @@ export function createInboundWorker(
     activityPodsToken: process.env.ACTIVITYPODS_TOKEN || "",
     requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || "30000", 10),
     userAgent: process.env.USER_AGENT || "Fedify-Sidecar/1.0 (ActivityPods)",
+    fedifyRuntimeIntegrationEnabled:
+      process.env.ENABLE_FEDIFY_RUNTIME_INTEGRATION === "true",
     ...overrides,
   };
 

@@ -136,16 +136,38 @@ export class PublicContentIndexWriter {
   }
 
   async onDelete(event: SearchPublicDeleteV1): Promise<void> {
+    // Tombstones from the AP projector are emitted with ap:objectUri as the
+    // stableDocId, but local content was indexed under its canonicalContentId
+    // (the raw objectUri, without the ap: prefix).  Resolve via alias cache so
+    // deletes always hit the right document.
+    const resolvedId = await this.resolveDeleteStableDocId(event.stableDocId);
+
     if (event.deleteMode === 'hard') {
-      await this.osClient.delete(event.stableDocId);
+      await this.osClient.delete(resolvedId);
     } else {
-      const existingDoc = await this.osClient.get(event.stableDocId);
+      const existingDoc = await this.osClient.get(resolvedId);
       if (existingDoc) {
-        await this.osClient.upsert(event.stableDocId, {
+        await this.osClient.upsert(resolvedId, {
           isDeleted: true,
           indexedAt: new Date().toISOString()
         });
       }
     }
+  }
+
+  /**
+   * Resolve the actual stableDocId to use for a delete operation.
+   * Tombstones may arrive with ap: or at: prefixed IDs; if the alias cache
+   * has a mapping for the underlying URI, use that instead.
+   */
+  private async resolveDeleteStableDocId(stableDocId: string): Promise<string> {
+    if (stableDocId.startsWith('ap:')) {
+      const resolved = await this.aliasCache.getByApUri(stableDocId.slice(3));
+      if (resolved) return resolved;
+    } else if (stableDocId.startsWith('at:')) {
+      const resolved = await this.aliasCache.getByAtUri(stableDocId.slice(3));
+      if (resolved) return resolved;
+    }
+    return stableDocId;
   }
 }

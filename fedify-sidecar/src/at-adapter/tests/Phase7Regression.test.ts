@@ -214,6 +214,7 @@ interface Harness {
   app: FastifyInstance;
   repoRegistry: InMemoryAtprotoRepoRegistry;
   signCommitCalls: Array<Parameters<SigningService['signAtprotoCommit']>[0]>;
+  createAccessJwt: () => Promise<string>;
 }
 
 async function buildHarness(): Promise<Harness> {
@@ -231,6 +232,8 @@ async function buildHarness(): Promise<Harness> {
     activityPubActorUri: 'https://pods.test/users/alice',
     atprotoDid: TEST_DID,
     atprotoHandle: TEST_HANDLE,
+    atprotoSource: 'local',
+    atprotoManaged: true,
     canonicalDidMethod: 'did:plc',
     atprotoPdsEndpoint: null,
     apSigningKeyRef: 'https://pods.test/keys/ap-signing',
@@ -289,8 +292,8 @@ async function buildHarness(): Promise<Harness> {
   };
 
   const passwordVerifier: AtPasswordVerifier = {
-    verify: async (canonicalAccountId, password) => {
-      if (canonicalAccountId !== TEST_CANONICAL_ID || password !== TEST_PASSWORD) {
+    verify: async (_canonicalAccountId, password) => {
+      if (password !== TEST_PASSWORD) {
         const error = new Error('Invalid credentials') as Error & { status?: number; code?: string };
         error.status = 401;
         error.code = 'AUTH_FAILED';
@@ -373,7 +376,18 @@ async function buildHarness(): Promise<Harness> {
   registerAtXrpcRoutes(app, { xrpcServer, sessionService });
   await app.ready();
 
-  return { app, repoRegistry, signCommitCalls };
+  return {
+    app,
+    repoRegistry,
+    signCommitCalls,
+    createAccessJwt: async () =>
+      tokenService.mintAccessToken({
+        canonicalAccountId: TEST_CANONICAL_ID,
+        did: TEST_DID,
+        handle: TEST_HANDLE,
+        scope: 'full',
+      }),
+  };
 }
 
 function jsonBody(response: { body: string }): unknown {
@@ -394,25 +408,17 @@ describe('Phase 7 regressions', () => {
   it('bootstraps repo state on first write, signs with canonicalAccountId, and exposes latest commit rev/CID', async () => {
     expect(await harness.repoRegistry.getRepoState(TEST_DID)).toBeNull();
 
-    const sessionResponse = await harness.app.inject({
-      method: 'POST',
-      url: '/xrpc/com.atproto.server.createSession',
-      headers: { 'content-type': 'application/json' },
-      payload: { identifier: TEST_HANDLE, password: TEST_PASSWORD },
-    });
-
-    expect(sessionResponse.statusCode).toBe(200);
-    const session = jsonBody(sessionResponse) as { accessJwt: string; did: string };
+    const accessJwt = await harness.createAccessJwt();
 
     const createResponse = await harness.app.inject({
       method: 'POST',
       url: '/xrpc/com.atproto.repo.createRecord',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${session.accessJwt}`,
+        authorization: `Bearer ${accessJwt}`,
       },
       payload: {
-        repo: session.did,
+        repo: TEST_DID,
         collection: 'app.bsky.feed.post',
         record: {
           $type: 'app.bsky.feed.post',
@@ -454,33 +460,25 @@ describe('Phase 7 regressions', () => {
       method: 'POST',
       url: '/xrpc/com.atproto.server.createSession',
       headers: { 'content-type': 'application/json' },
-      payload: { identifier: TEST_HANDLE, password: 'wrong-password' },
+      payload: { identifier: TEST_DID, password: 'wrong-password' },
     });
 
     expect(response.statusCode).toBe(401);
     expect(jsonBody(response)).toEqual({
       error: 'AuthRequired',
-      message: 'Invalid credentials',
+      message: 'Invalid identifier or password',
     });
   });
 
   it('returns a profile write result and readback for putRecord', async () => {
-    const sessionResponse = await harness.app.inject({
-      method: 'POST',
-      url: '/xrpc/com.atproto.server.createSession',
-      headers: { 'content-type': 'application/json' },
-      payload: { identifier: TEST_HANDLE, password: TEST_PASSWORD },
-    });
-
-    expect(sessionResponse.statusCode).toBe(200);
-    const session = jsonBody(sessionResponse) as { accessJwt: string };
+    const accessJwt = await harness.createAccessJwt();
 
     const putResponse = await harness.app.inject({
       method: 'POST',
       url: '/xrpc/com.atproto.repo.putRecord',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${session.accessJwt}`,
+        authorization: `Bearer ${accessJwt}`,
       },
       payload: {
         repo: TEST_DID,

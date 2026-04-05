@@ -9,6 +9,9 @@ export interface HttpAtIdentityResolverOptions {
   timeoutMs?: number;
   maxAttempts?: number;
   maxJsonBytes?: number;
+  didDocumentCacheTtlMs?: number;
+  didDocumentCacheMaxEntries?: number;
+  failedResolutionCacheTtlMs?: number;
 }
 
 export interface ResolvedAtIdentityDocument {
@@ -22,6 +25,23 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
   private readonly httpClient: AtIngressHttpClient;
   private readonly resolveTxtImpl: typeof defaultResolveTxt;
   private readonly maxJsonBytes: number;
+  private readonly didDocumentCacheTtlMs: number;
+  private readonly didDocumentCacheMaxEntries: number;
+  private readonly didDocumentCache = new Map<string, {
+    resolved: ResolvedAtIdentityDocument;
+    expiresAt: number;
+  }>();
+  private readonly failedResolutionCacheTtlMs: number;
+  private readonly failedResolutionCache = new Map<string, {
+    reason: string;
+    expiresAt: number;
+  }>();
+  private readonly inFlightResolutions = new Map<string, Promise<ResolvedAtIdentityDocument>>();
+
+  private _fetchAttempts = 0;
+  private _positiveCacheHits = 0;
+  private _negativeCacheHits = 0;
+  private _inFlightDedup = 0;
 
   public constructor(options: HttpAtIdentityResolverOptions = {}) {
     this.httpClient = new AtIngressHttpClient({
@@ -31,6 +51,23 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
     });
     this.resolveTxtImpl = options.resolveTxtImpl ?? defaultResolveTxt;
     this.maxJsonBytes = clampInteger(options.maxJsonBytes ?? 256_000, 8_192, 2_000_000);
+    this.didDocumentCacheTtlMs = clampInteger(options.didDocumentCacheTtlMs ?? 30_000, 0, 15 * 60_000);
+    this.didDocumentCacheMaxEntries = clampInteger(options.didDocumentCacheMaxEntries ?? 2_000, 1, 50_000);
+    this.failedResolutionCacheTtlMs = clampInteger(options.failedResolutionCacheTtlMs ?? 15_000, 0, 5 * 60_000);
+  }
+
+  public getMetrics(): {
+    fetchAttempts: number;
+    positiveCacheHits: number;
+    negativeCacheHits: number;
+    inFlightDedup: number;
+  } {
+    return {
+      fetchAttempts: this._fetchAttempts,
+      positiveCacheHits: this._positiveCacheHits,
+      negativeCacheHits: this._negativeCacheHits,
+      inFlightDedup: this._inFlightDedup,
+    };
   }
 
   public async resolveIdentity(did: string): Promise<{
@@ -59,11 +96,58 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
       throw new Error(`Unsupported or invalid DID: ${did}`);
     }
 
-    const didDocumentUrl = buildDidResolutionUrl(did);
-    const didDocument = await this.httpClient.requestJson(didDocumentUrl, {
-      accept: "application/json, application/did+ld+json, application/did+json",
-      maxBytes: this.maxJsonBytes,
-    });
+    const now = Date.now();
+    const cached = this.didDocumentCache.get(did);
+    if (cached && cached.expiresAt > now) {
+      this._positiveCacheHits += 1;
+      return cached.resolved;
+    }
+    if (cached) {
+      this.didDocumentCache.delete(did);
+    }
+
+    if (this.failedResolutionCacheTtlMs > 0) {
+      const failedCached = this.failedResolutionCache.get(did);
+      if (failedCached && failedCached.expiresAt > now) {
+        this._negativeCacheHits += 1;
+        throw new Error(failedCached.reason);
+      }
+      if (failedCached) {
+        this.failedResolutionCache.delete(did);
+      }
+    }
+
+      const inflight = this.inFlightResolutions.get(did);
+      if (inflight) {
+        this._inFlightDedup += 1;
+        return inflight;
+      }
+
+      const promise = this.resolveDocumentInner(did).finally(() => {
+        this.inFlightResolutions.delete(did);
+      });
+      this.inFlightResolutions.set(did, promise);
+      return promise;
+    }
+
+    private async resolveDocumentInner(did: string): Promise<ResolvedAtIdentityDocument> {
+      this._fetchAttempts += 1;
+      const didDocumentUrl = buildDidResolutionUrl(did);
+    let didDocument: Record<string, unknown>;
+    try {
+      didDocument = await this.httpClient.requestJson(didDocumentUrl, {
+        accept: "application/json, application/did+ld+json, application/did+json",
+        maxBytes: this.maxJsonBytes,
+      });
+    } catch (error) {
+      if (this.failedResolutionCacheTtlMs > 0) {
+        this.failedResolutionCache.set(did, {
+          reason: error instanceof Error ? error.message : String(error),
+          expiresAt: Date.now() + this.failedResolutionCacheTtlMs,
+        });
+      }
+      throw error;
+    }
 
     if (didDocument["id"] !== did) {
       throw new Error(`Resolved DID document did not match ${did}`);
@@ -72,12 +156,15 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
     const handle = await this.resolvePrimaryHandle(didDocument, did);
     const pdsEndpoint = extractPdsEndpoint(didDocument);
 
-    return {
+    const resolved = {
       did,
       didDocument,
       handle,
       pdsEndpoint,
     };
+
+    this.cacheDidDocument(did, resolved);
+    return resolved;
   }
 
   private async resolvePrimaryHandle(
@@ -138,6 +225,25 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
       return null;
     }
   }
+
+  private cacheDidDocument(did: string, resolved: ResolvedAtIdentityDocument): void {
+    if (this.didDocumentCacheTtlMs <= 0) {
+      return;
+    }
+
+    while (this.didDocumentCache.size >= this.didDocumentCacheMaxEntries) {
+      const oldestKey = this.didDocumentCache.keys().next().value;
+      if (!oldestKey) {
+        break;
+      }
+      this.didDocumentCache.delete(oldestKey);
+    }
+
+    this.didDocumentCache.set(did, {
+      resolved,
+      expiresAt: Date.now() + this.didDocumentCacheTtlMs,
+    });
+  }
 }
 
 function buildDidResolutionUrl(did: string): string {
@@ -149,9 +255,19 @@ function buildDidResolutionUrl(did: string): string {
     throw new Error(`Unsupported DID method for ${did}`);
   }
 
-  const authority = parseDidWebAuthority(did);
-  const protocol = authority.hostname === "localhost" ? "http:" : "https:";
-  return new URL("/.well-known/did.json", `${protocol}//${authority.authority}`).toString();
+  const target = parseDidWebTarget(did);
+  const protocol = target.hostname === "localhost" ? "http:" : "https:";
+  const url = new URL(`${protocol}//${target.authority}`);
+
+  if (target.pathSegments.length === 0) {
+    url.pathname = "/.well-known/did.json";
+  } else {
+    url.pathname = `/${target.pathSegments.map((segment) => encodeURIComponent(segment)).join("/")}/did.json`;
+  }
+
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function buildHandleWellKnownUrl(handle: string): string {
@@ -161,12 +277,24 @@ function buildHandleWellKnownUrl(handle: string): string {
   return new URL("/.well-known/atproto-did", `${protocol}//${handle}`).toString();
 }
 
-function parseDidWebAuthority(did: string): { hostname: string; authority: string } {
-  const encodedAuthority = did.slice("did:web:".length);
+function parseDidWebTarget(did: string): {
+  hostname: string;
+  authority: string;
+  pathSegments: string[];
+} {
+  const encodedIdentifier = did.slice("did:web:".length);
+  const encodedParts = encodedIdentifier.split(":");
+  const encodedAuthority = encodedParts[0] ?? "";
+  const encodedPathSegments = encodedParts.slice(1);
   const authority = decodeURIComponent(encodedAuthority);
+  const pathSegments = encodedPathSegments.map((segment) => decodeURIComponent(segment));
 
   if (!authority || authority.includes("/") || authority.includes("?") || authority.includes("#")) {
     throw new Error(`Unsupported did:web identifier: ${did}`);
+  }
+
+  if (pathSegments.some((segment) => !segment || segment.includes("/") || segment.includes("?") || segment.includes("#"))) {
+    throw new Error(`Unsupported did:web path segments: ${did}`);
   }
 
   const probe = authority.includes(":")
@@ -192,6 +320,7 @@ function parseDidWebAuthority(did: string): { hostname: string; authority: strin
   return {
     hostname: probe.hostname,
     authority: probe.port ? `${probe.hostname}:${probe.port}` : probe.hostname,
+    pathSegments,
   };
 }
 

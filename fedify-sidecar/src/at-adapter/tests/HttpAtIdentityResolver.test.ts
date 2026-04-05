@@ -89,6 +89,91 @@ describe("HttpAtIdentityResolver", () => {
     expect(result.success).toBe(true);
     expect(result.handle).toBe("alice.localhost");
   });
+
+  it("resolves path-form did:web identifiers via /<path>/did.json", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://example.com/user/alice/did.json") {
+        return jsonResponse({
+          id: "did:web:example.com:user:alice",
+          alsoKnownAs: ["at://alice.example.com"],
+          service: [
+            {
+              id: "#atproto_pds",
+              type: "AtprotoPersonalDataServer",
+              serviceEndpoint: "https://pds.example.com",
+            },
+          ],
+        });
+      }
+      if (url === "https://alice.example.com/.well-known/atproto-did") {
+        return textResponse("did:web:example.com:user:alice");
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    });
+    const resolveTxtImpl = vi.fn().mockRejectedValue(new Error("no TXT"));
+
+    const resolver = new HttpAtIdentityResolver({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      resolveTxtImpl,
+    });
+
+    const result = await resolver.resolveIdentity("did:web:example.com:user:alice");
+
+    expect(result.success).toBe(true);
+    expect(result.handle).toBe("alice.example.com");
+  });
+
+  it("reuses cached DID documents within the configured TTL", async () => {
+    const fetchImpl = vi.fn(async () => {
+      return jsonResponse({
+        id: "did:plc:alice",
+        alsoKnownAs: ["at://alice.example.com"],
+        service: [
+          {
+            id: "#atproto_pds",
+            type: "AtprotoPersonalDataServer",
+            serviceEndpoint: "https://pds.example.com",
+          },
+        ],
+      });
+    });
+    const resolveTxtImpl = vi.fn().mockResolvedValue([[("did=did:plc:alice")]]);
+
+    const resolver = new HttpAtIdentityResolver({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      resolveTxtImpl,
+      didDocumentCacheTtlMs: 60_000,
+    });
+
+    const first = await resolver.resolveDocument("did:plc:alice");
+    const second = await resolver.resolveDocument("did:plc:alice");
+
+    expect(first.did).toBe("did:plc:alice");
+    expect(second.did).toBe("did:plc:alice");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses failed DID resolutions within the configured TTL", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+
+    const resolver = new HttpAtIdentityResolver({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      maxAttempts: 1,
+      failedResolutionCacheTtlMs: 60_000,
+    });
+
+    await expect(resolver.resolveDocument("did:web:prod-chi0.stream.place")).rejects.toThrow(
+      "Network error while requesting https://prod-chi0.stream.place/.well-known/did.json",
+    );
+    await expect(resolver.resolveDocument("did:web:prod-chi0.stream.place")).rejects.toThrow(
+      "Network error while requesting https://prod-chi0.stream.place/.well-known/did.json",
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
 });
 
 function jsonResponse(body: Record<string, unknown>): Response {

@@ -133,8 +133,7 @@ export class OAuthExternalDiscoveryBroker {
     if (normalizedDid.startsWith('did:plc:')) {
       didDocUrl = new URL(`https://plc.directory/${normalizedDid}`);
     } else if (normalizedDid.startsWith('did:web:')) {
-      const host = normalizedDid.slice('did:web:'.length).replace(/:/g, '/');
-      didDocUrl = new URL(`https://${host}/.well-known/did.json`);
+      didDocUrl = buildDidWebDocumentUrl(normalizedDid, this.allowLocalhostHttp);
     } else {
       throw new OAuthError('invalid_request', 400, 'Unsupported DID method');
     }
@@ -185,4 +184,45 @@ export class OAuthExternalDiscoveryBroker {
     }
     return endpoint;
   }
+}
+
+function buildDidWebDocumentUrl(did: string, allowLocalhostHttp: boolean): URL {
+  const encodedIdentifier = did.slice('did:web:'.length);
+  const encodedParts = encodedIdentifier.split(':');
+  const encodedAuthority = encodedParts[0] ?? '';
+  const encodedPathSegments = encodedParts.slice(1);
+
+  const authority = decodeURIComponent(encodedAuthority);
+  if (!authority || authority.includes('/') || authority.includes('?') || authority.includes('#')) {
+    throw new OAuthError('invalid_request', 400, 'Unsupported did:web identifier');
+  }
+
+  const pathSegments = encodedPathSegments.map((segment) => decodeURIComponent(segment));
+  if (pathSegments.some((segment) => !segment || segment.includes('/') || segment.includes('?') || segment.includes('#'))) {
+    throw new OAuthError('invalid_request', 400, 'Unsupported did:web path segments');
+  }
+
+  const probe = authority.includes(':')
+    ? new URL(`http://${authority}`)
+    : new URL(`https://${authority}`);
+
+  if (probe.username || probe.password) {
+    throw new OAuthError('invalid_request', 400, 'did:web authority must not contain credentials');
+  }
+  if (probe.pathname !== '/' || probe.search || probe.hash) {
+    throw new OAuthError('invalid_request', 400, 'did:web authority must not contain a path or query');
+  }
+  if (probe.hostname !== 'localhost' && probe.port) {
+    throw new OAuthError('invalid_request', 400, 'did:web ports are only supported for localhost');
+  }
+
+  const protocol = probe.hostname === 'localhost' && allowLocalhostHttp ? 'http:' : 'https:';
+  const authorityHost = probe.port ? `${probe.hostname}:${probe.port}` : probe.hostname;
+  const url = new URL(`${protocol}//${authorityHost}`);
+  url.pathname = pathSegments.length === 0
+    ? '/.well-known/did.json'
+    : `/${pathSegments.map((segment) => encodeURIComponent(segment)).join('/')}/did.json`;
+  url.search = '';
+  url.hash = '';
+  return url;
 }

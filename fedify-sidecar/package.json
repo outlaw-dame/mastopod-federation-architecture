@@ -5,6 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
+    "prestart": "node scripts/prestart-topic-governance.mjs",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
@@ -24,14 +25,18 @@
     "proof:session-family:durable": "tsx src/at-adapter/tests/SessionFamilyDurabilityProof.ts",
     "smoke:identity-repo:upsert": "tsx src/at-adapter/tests/IdentityBindingRepositoryUpsertSmoke.ts",
     "smoke:identity-sync:direct": "tsx src/at-adapter/tests/IdentitySyncDirectSmoke.ts",
+    "topics:bootstrap": "tsx scripts/bootstrap-redpanda-topics.ts",
+    "topics:verify": "REDPANDA_TOPIC_GOVERNANCE_MODE=verify tsx scripts/bootstrap-redpanda-topics.ts",
     "inspect:identity-redis": "tsx src/at-adapter/tests/IdentityRedisInspector.ts",
     "smoke:phase7:primary": "tsx src/at-adapter/tests/Phase7PrimarySmoke.ts",
+    "smoke:ap:outbound-topic": "tsx src/protocol-bridge/tests/ApOutboundTopicSmokeProof.ts",
     "provision:test:fixture": "tsx scripts/provision-test-fixture.ts",
     "smoke:phase7:full": "npm run provision:test:fixture && npm run smoke:phase7:primary"
   },
   "dependencies": {
     "@atproto/oauth-client-node": "^0.3.17",
-    "@fedify/fedify": "^1.4.0",
+    "@fedify/fedify": "^2.1.3",
+    "@fedify/hono": "^2.1.3",
     "@hono/node-server": "^1.8.0",
     "@ipld/car": "^5.4.2",
     "@ipld/dag-cbor": "^9.2.5",
