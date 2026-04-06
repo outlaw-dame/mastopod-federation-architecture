@@ -1,0 +1,37 @@
+{
+  "name": "activitypods-media-pipeline-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Focused media pipeline sidecar for the Mastopod federation architecture",
+  "type": "module",
+  "main": "dist/server/queueIngress.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server/queueIngress.js",
+    "dev": "tsx watch src/server/queueIngress.ts",
+    "worker:ingest": "tsx src/workers/ingestWorker.ts",
+    "worker:fetch": "tsx src/workers/fetchWorker.ts",
+    "worker:process:image": "tsx src/workers/processImageWorker.ts",
+    "worker:finalize": "tsx src/workers/finalizeWorker.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.882.0",
+    "fastify": "^5.8.4",
+    "file-type": "^19.6.0",
+    "kafkajs": "^2.2.4",
+    "pino": "^8.19.0",
+    "redis": "^4.7.0",
+    "sharp": "^0.34.4",
+    "undici": "^6.21.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.17",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
