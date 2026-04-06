@@ -30,7 +30,8 @@ runSecureWorker({
       gatewayUrl: message.gatewayUrl || undefined,
       variants: {
         original: message.canonicalUrl,
-        preview: message.previewUrl || undefined
+        preview: message.previewUrl || undefined,
+        thumbnail: message.thumbnailUrl || undefined
       },
       alt: message.alt || undefined,
       contentWarning: message.contentWarning || undefined,

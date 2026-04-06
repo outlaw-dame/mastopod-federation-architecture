@@ -1,8 +1,8 @@
 import { safetyAdapters } from '../adapters';
 import { runSafetyAdapters } from '../adapters/safetySignals';
 import { MediaStreams } from '../contracts/MediaStreams';
-import { processImage, sha256 } from '../processing/image';
-import { generateBlurPreview } from '../processing/blurPreview';
+import { processVideo } from '../processing/video';
+import { sha256 } from '../processing/image';
 import { enqueue } from '../queue/producer';
 import { runSecureWorker } from '../queue/secureWorker';
 import { buildCanonicalMediaUrl, buildGatewayUrl } from '../storage/cdnUrlBuilder';
@@ -15,42 +15,31 @@ import { uploadToFilebase } from '../storage/filebaseClient';
  * Policy decisions are handled by MRF.
  */
 runSecureWorker({
-  stream: MediaStreams.PROCESS_IMAGE,
+  stream: MediaStreams.PROCESS_VIDEO,
   group: 'media',
-  consumer: 'process-image-worker-1',
+  consumer: 'process-video-worker-1',
   handler: async (message) => {
     const input = Buffer.from(message.bytesBase64, 'base64');
-    const processed = await processImage(input);
-    const blurPreview = await generateBlurPreview(processed.buffer);
+    const processed = await processVideo(input, message.mimeType);
 
     const fileHash = sha256(processed.buffer);
-    const originalKey = `${fileHash}.webp`;
-    const previewKey = `${fileHash}-preview.webp`;
-    const thumbnailKey = `${fileHash}-thumb.webp`;
+    const extension = processed.mimeType === 'video/webm'
+      ? 'webm'
+      : processed.mimeType === 'video/quicktime'
+        ? 'mov'
+        : 'mp4';
+    const originalKey = `${fileHash}.${extension}`;
 
     const original = await uploadToFilebase({
       key: originalKey,
       body: processed.buffer,
-      contentType: 'image/webp'
+      contentType: processed.mimeType
     });
-    const preview = await uploadToFilebase({
-      key: previewKey,
-      body: blurPreview,
-      contentType: 'image/webp'
-    });
-    const thumbnail = processed.thumbnail
-      ? await uploadToFilebase({
-          key: thumbnailKey,
-          body: processed.thumbnail,
-          contentType: 'image/webp'
-        })
-      : null;
 
     const existingSignals = message.signals ? JSON.parse(message.signals) : [];
     const contentSignals = await runSafetyAdapters(safetyAdapters, {
       url: buildCanonicalMediaUrl(original.key),
-      buffer: processed.buffer,
-      mimeType: 'image/webp'
+      mimeType: processed.mimeType
     });
 
     await enqueue(MediaStreams.FINALIZE, {
@@ -63,12 +52,12 @@ runSecureWorker({
       cid: original.cid || '',
       canonicalUrl: buildCanonicalMediaUrl(original.key),
       gatewayUrl: buildGatewayUrl(original.cid) || '',
-      previewUrl: buildCanonicalMediaUrl(preview.key),
-      thumbnailUrl: thumbnail ? buildCanonicalMediaUrl(thumbnail.key) : '',
-      mimeType: 'image/webp',
+      previewUrl: '',
+      thumbnailUrl: '',
+      mimeType: processed.mimeType,
       size: String(processed.buffer.byteLength),
-      width: String(processed.width || ''),
-      height: String(processed.height || ''),
+      width: '',
+      height: '',
       signals: JSON.stringify([...existingSignals, ...contentSignals])
     });
   }

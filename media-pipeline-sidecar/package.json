@@ -12,6 +12,7 @@
     "worker:ingest": "tsx src/workers/ingestWorker.ts",
     "worker:fetch": "tsx src/workers/fetchWorker.ts",
     "worker:process:image": "tsx src/workers/processImageWorker.ts",
+    "worker:process:video": "tsx src/workers/processVideoWorker.ts",
     "worker:finalize": "tsx src/workers/finalizeWorker.ts",
     "typecheck": "tsc --noEmit"
   },
