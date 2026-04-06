@@ -4,10 +4,10 @@
   "private": true,
   "description": "Focused media pipeline sidecar for the Mastopod federation architecture",
   "type": "module",
-  "main": "dist/server/queueIngress.js",
+  "main": "src/server/queueIngress.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server/queueIngress.js",
+    "start": "tsx src/server/queueIngress.ts",
     "dev": "tsx watch src/server/queueIngress.ts",
     "worker:ingest": "tsx src/workers/ingestWorker.ts",
     "worker:fetch": "tsx src/workers/fetchWorker.ts",
