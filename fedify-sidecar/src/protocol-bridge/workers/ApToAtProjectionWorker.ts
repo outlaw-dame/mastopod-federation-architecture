@@ -1,4 +1,5 @@
 import type { CanonicalIntent } from "../canonical/CanonicalIntent.js";
+import type { CanonicalIntentPublisher } from "../canonical/CanonicalIntentPublisher.js";
 import type {
   AtProjectionCommand,
   AtprotoWritePort,
@@ -30,6 +31,7 @@ export class ApToAtProjectionWorker {
     private readonly writePort: AtprotoWritePort,
     private readonly projectionContext: ProjectionContext,
     private readonly retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY,
+    private readonly canonicalPublisher?: CanonicalIntentPublisher,
   ) {}
 
   public async process(event: unknown, translationContext: TranslationContext): Promise<CanonicalIntent | null> {
@@ -40,6 +42,12 @@ export class ApToAtProjectionWorker {
 
     if (intent.provenance.projectionMode === "mirrored" && intent.provenance.originProtocol === "atproto") {
       return intent;
+    }
+
+    // Publish to canonical.v1 before projection — captures intent even if
+    // projection fails. Fault-isolated: errors are logged but not rethrown.
+    if (this.canonicalPublisher) {
+      await this.canonicalPublisher.publish(intent).catch(() => undefined);
     }
 
     const record = await this.ledger.get(intent.canonicalIntentId);

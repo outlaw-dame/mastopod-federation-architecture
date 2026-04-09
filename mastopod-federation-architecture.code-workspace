@@ -14,7 +14,38 @@
 			"npm --prefix fedify-sidecar": true,
 			"lsof": true,
 			"true": true,
-			"brew": true
+			"brew": true,
+			"npm --prefix /Users/damonoutlaw/activitypods-work/mastopod-federation-architecture/fedify-sidecar": true,
+			"npm run start": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/frontend && npm run$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^pwd && ls && npm run$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && npm run$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"pkill": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/frontend && npm run 2>&1 \\| head -30$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/usr/local/bin/npm": true,
+			"npx react-scripts": true,
+			"npm install": true,
+			"docker-compose": true,
+			"colima": true,
+			"limactl": true,
+			"git rev-parse": true,
+			"git remote": true,
+			"git add": true,
+			"git reset": true,
+			"git commit": true,
+			"git push": true
 		}
 	}
 }

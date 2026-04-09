@@ -7,6 +7,7 @@ import type { ApToAtProjectionWorker } from "../workers/ApToAtProjectionWorker.j
 import type { AtToApProjectionWorker } from "../workers/AtToApProjectionWorker.js";
 import type { ActivityPubBridgeIngressPort } from "./ActivityPubBridgeIngressClient.js";
 import { OutboxIntentDeduper, extractOutboxIntentId } from "../../utils/OutboxIntentDeduper.js";
+import type { CanonicalNotificationConsumer } from "../notifications/CanonicalNotificationConsumer.js";
 
 export interface ProtocolBridgeRuntimeConfig {
   brokers: string[];
@@ -44,6 +45,12 @@ export interface ProtocolBridgeRuntimeOptions {
   apToAtWorker?: ApToAtProjectionWorker;
   atToApWorker?: AtToApProjectionWorker;
   apIngressForwarder?: ActivityPubBridgeIngressPort;
+  /**
+   * Optional canonical.v1 notification consumer.
+   * When provided, `start()` also starts this consumer and `stop()` also
+   * stops it.  The consumer lifecycle is fully managed by the runtime.
+   */
+  canonicalNotificationConsumer?: CanonicalNotificationConsumer;
   logger?: ProtocolBridgeLogger;
   consumerFactory?: (groupId: string) => ProtocolBridgeConsumerLike;
 }
@@ -141,6 +148,12 @@ export class ProtocolBridgeRuntime {
       );
     }
 
+    // Start the canonical notification consumer independently of the bridge
+    // projection workers — it has its own Kafka consumer group.
+    if (this.options.canonicalNotificationConsumer) {
+      await this.options.canonicalNotificationConsumer.start();
+    }
+
     this.started = true;
     this.logger.info("Protocol bridge runtime started", {
       apToAt: this.options.config.enableApToAt,
@@ -149,6 +162,7 @@ export class ProtocolBridgeRuntime {
       atCommitTopic: this.options.config.atCommitTopic,
       atVerifiedIngressTopic: this.options.config.atVerifiedIngressTopic ?? null,
       apIngressTopic: this.options.config.apIngressTopic,
+      canonicalNotifications: this.options.canonicalNotificationConsumer != null,
     });
   }
 
@@ -164,6 +178,14 @@ export class ProtocolBridgeRuntime {
       }
       try {
         await consumer.disconnect();
+      } catch {
+        // Best-effort shutdown.
+      }
+    }
+
+    if (this.options.canonicalNotificationConsumer) {
+      try {
+        await this.options.canonicalNotificationConsumer.stop();
       } catch {
         // Best-effort shutdown.
       }

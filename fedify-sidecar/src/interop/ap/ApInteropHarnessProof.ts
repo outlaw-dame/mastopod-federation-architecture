@@ -13,7 +13,7 @@ import {
 } from "./lib.js";
 
 const TARGET = process.env["AP_INTEROP_TARGET"] || "gotosocial";
-const TARGET_HOST = process.env["AP_INTEROP_TARGET_HOST"] || (TARGET === "mastodon" ? "mastodon" : "gotosocial");
+const TARGET_HOST = process.env["AP_INTEROP_TARGET_HOST"] || resolveTargetHost(TARGET);
 const TARGET_USERNAME = process.env["AP_INTEROP_TARGET_USERNAME"] || "interop";
 const TARGET_ACCT = process.env["AP_INTEROP_TARGET_ACCT"] || `${TARGET_USERNAME}@${TARGET_HOST}`;
 const SIDECAR_WEBHOOK_URL =
@@ -30,6 +30,18 @@ const ACTIVITYPODS_TOKEN = process.env["AP_INTEROP_ACTIVITYPODS_TOKEN"] || "inte
 const FOLLOW_ACTIVITY_ID =
   process.env["AP_INTEROP_FOLLOW_ACTIVITY_ID"]
   || `${SIDECAR_ACTOR_URI.replace(/\/+$/, "")}/activities/follow-${randomUUID()}`;
+
+function resolveTargetHost(target: string): string {
+  switch (target) {
+    case "mastodon":
+      return "mastodon";
+    case "akkoma":
+      return "akkoma";
+    case "gotosocial":
+    default:
+      return "gotosocial";
+  }
+}
 
 interface BackoffOptions {
   baseDelayMs: number;

@@ -93,6 +93,15 @@ export const V6_TOPICS: Record<string, TopicSchema> = {
     retentionMs: 30 * 24 * 60 * 60 * 1000, // 30 days
     description: 'Tombstone events (delete notifications)',
   },
+
+  // Protocol-neutral canonical intent log (from both AT and AP bridge)
+  'canonical.v1': {
+    name: 'canonical.v1',
+    partitions: 6,
+    replicationFactor: 3,
+    retentionMs: 30 * 24 * 60 * 60 * 1000, // 30 days
+    description: 'Durable protocol-neutral canonical intent log (AT + AP bridge, pre-projection)',
+  },
 };
 
 /**
@@ -176,6 +185,68 @@ export interface TombstoneEvent {
   // Delete notification
   objectId: string;
   deletedAt: string;
+  timestamp: number;
+}
+
+/**
+ * Canonical intent event — protocol-neutral record of every social action
+ * translated by the bridge before projection to either protocol.
+ */
+export interface CanonicalV1ActorRef {
+  canonicalAccountId?: string | null;
+  did?: string | null;
+  activityPubActorUri?: string | null;
+  handle?: string | null;
+}
+
+export interface CanonicalV1ObjectRef {
+  canonicalObjectId: string;
+  atUri?: string | null;
+  activityPubObjectId?: string | null;
+  canonicalUrl?: string | null;
+}
+
+export interface CanonicalV1Event {
+  /** Unique deterministic ID for this canonical intent. */
+  canonicalIntentId: string;
+  /** Discriminant for the type of social action. */
+  kind:
+    | "PostCreate"
+    | "PostEdit"
+    | "PostDelete"
+    | "ReactionAdd"
+    | "ReactionRemove"
+    | "ShareAdd"
+    | "ShareRemove"
+    | "FollowAdd"
+    | "FollowRemove"
+    | "ProfileUpdate"
+    | "AccountState";
+  /** Protocol the event originated from. */
+  sourceProtocol: "activitypub" | "atproto";
+  /** Original event ID in the source protocol. */
+  sourceEventId: string;
+  /** Actor who performed the action. */
+  actor: CanonicalV1ActorRef;
+  /**
+   * Primary object of the action (posts, reactions, shares, deletes).
+   * Absent for FollowAdd/FollowRemove/ProfileUpdate/AccountState.
+   */
+  object?: CanonicalV1ObjectRef;
+  /**
+   * Target actor (for FollowAdd/FollowRemove — the person being followed).
+   */
+  subject?: CanonicalV1ActorRef;
+  /**
+   * AP actor URIs of users mentioned in the content (PostCreate/PostEdit only).
+   * Used by the notification consumer to fan-out mention notifications.
+   */
+  mentions?: string[];
+  /** ISO timestamp when the original social action occurred. */
+  createdAt: string;
+  /** ISO timestamp when the sidecar observed the event. */
+  observedAt: string;
+  /** Unix milliseconds when this canonical record was written to the topic. */
   timestamp: number;
 }
 

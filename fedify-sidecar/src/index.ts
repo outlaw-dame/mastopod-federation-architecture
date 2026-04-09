@@ -150,6 +150,8 @@ import { RedisBridgeProfileMediaStore } from "./protocol-bridge/profile/BridgePr
 import { RedisBridgePostMediaStore } from "./protocol-bridge/post/BridgePostMedia.js";
 import { ApToAtProjectionWorker } from "./protocol-bridge/workers/ApToAtProjectionWorker.js";
 import { AtToApProjectionWorker } from "./protocol-bridge/workers/AtToApProjectionWorker.js";
+import { CanonicalIntentPublisher, CANONICAL_V1_TOPIC } from "./protocol-bridge/canonical/CanonicalIntentPublisher.js";
+import { CanonicalNotificationConsumer } from "./protocol-bridge/notifications/CanonicalNotificationConsumer.js";
 // Fedify runtime integration (feature-flagged: ENABLE_FEDIFY_RUNTIME_INTEGRATION=true)
 import { FedifyKvAdapter } from "./federation/FedifyKvAdapter.js";
 import { createFedifyAdapter, type FedifyFederationAdapter } from "./federation/FedifyFederationAdapter.js";
@@ -160,6 +162,47 @@ import {
   OutboundWebhookValidationError,
   resolveOutboundWebhookBackpressureConfigFromEnv,
 } from "./delivery/outbound-webhook.js";
+import { registerMrfAdminIntegration } from "./admin/mrf/integration.js";
+import { registerModerationBridgeIntegration } from "./admin/moderation/integration.js";
+import {
+  ApRelaySubscriptionService,
+  parseRelayActorUrls,
+} from "./federation/relay/ApRelaySubscriptionService.js";
+import {
+  AtJetstreamService,
+  parseJetstreamUrl,
+} from "./at-adapter/jetstream/AtJetstreamService.js";
+
+function normalizeMrfAdminStoreMode(raw: string | undefined): "memory" | "redis" {
+  return raw === "redis" ? "redis" : "memory";
+}
+
+type StartupMode = "blocking" | "background";
+type StartupPhase = "starting" | "ready" | "failed";
+
+interface StartupTask {
+  name: string;
+  start(): Promise<void>;
+}
+
+interface StartupState {
+  mode: StartupMode;
+  phase: StartupPhase;
+  startedAtMs: number;
+  readyAtMs: number | null;
+  currentStep: string | null;
+  completedSteps: string[];
+  failedStep: string | null;
+  error: string | null;
+}
+
+function resolveStartupMode(raw: string | undefined, nodeEnv: string): StartupMode {
+  if (raw === "blocking" || raw === "background") {
+    return raw;
+  }
+
+  return nodeEnv === "production" ? "blocking" : "background";
+}
 
 // ============================================================================
 // Configuration
@@ -168,6 +211,10 @@ import {
 const config = {
   version: process.env["VERSION"] || "5.0.0",
   nodeEnv: process.env["NODE_ENV"] || "development",
+  startupMode: resolveStartupMode(
+    process.env["SIDECAR_STARTUP_MODE"],
+    process.env["NODE_ENV"] || "development",
+  ),
   port: parseInt(process.env["PORT"] || "8080", 10),
   host: process.env["HOST"] || "0.0.0.0",
   domain: process.env["DOMAIN"] || "localhost",
@@ -182,7 +229,132 @@ const config = {
   enableFedifyRuntimeIntegration:
     process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
   enableProtocolBridgeApToAt: process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true",
-  enableProtocolBridgeAtToAp: process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true",
+  // AT→AP is auto-enabled when Jetstream is on, so Bluesky content reaches the AP timeline.
+  // Can be explicitly set to "false" to disable even when ENABLE_AT_JETSTREAM=true.
+  enableProtocolBridgeAtToAp:
+    process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true" ||
+    (process.env["ENABLE_AT_JETSTREAM"] === "true" &&
+      process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] !== "false"),
+  enableMrfAdminApi: process.env["ENABLE_MRF_ADMIN_API"] === "true",
+  mrfAdminToken: process.env["MRF_ADMIN_TOKEN"] || "",
+  mrfAdminStore: normalizeMrfAdminStoreMode(process.env["MRF_ADMIN_STORE"]),
+  mrfAdminRedisPrefix: process.env["MRF_ADMIN_REDIS_PREFIX"] || "mrf:admin",
+  enableModerationBridgeApi:
+    process.env["ENABLE_MODERATION_BRIDGE_API"] === "true" ||
+    process.env["ENABLE_MRF_ADMIN_API"] === "true",
+  moderationBridgeRedisPrefix:
+    process.env["MODERATION_BRIDGE_REDIS_PREFIX"] || "moderation:bridge",
+  moderationLabelerDid:
+    process.env["MODERATION_LABELER_DID"] || `did:web:${process.env["DOMAIN"] || "localhost"}`,
+  moderationLabelerSigningKeyHex: process.env["MODERATION_LABELER_SIGNING_KEY_HEX"] || "",
+  moderationAtAdminXrpcBaseUrl: process.env["MODERATION_AT_ADMIN_XRPC_BASE_URL"] || "",
+  moderationAtAdminBearerToken: process.env["MODERATION_AT_ADMIN_BEARER_TOKEN"] || "",
+  moderationAtAdminTimeoutMs: Number.parseInt(
+    process.env["MODERATION_AT_ADMIN_TIMEOUT_MS"] || "5000",
+    10,
+  ),
+
+  // AP relay subscription
+  // AP_RELAY_ACTOR_URLS: comma-separated list of relay actor URLs to follow.
+  // Each URL must use https and follow the ActivityRelay / LitePub relay
+  // protocol (actor document served at the URL, inbox URL embedded within).
+  //
+  // Common relay actor URL formats:
+  //   https://relay.example.com/actor       (ActivityRelay standard)
+  //   https://mastodon.social/relay          (Mastodon built-in relay)
+  //
+  // Pre-configured relay targets (set AP_RELAY_ACTOR_URLS to override):
+  //   https://mastodon.social/relay
+  //   https://mastodon.online/relay
+  //   https://flipboard.social/relay
+  //   https://cosocial.ca/relay
+  //   https://web.brid.gy/relay
+  //   https://sigmoid.social/relay
+  //   https://twit.social/relay
+  //   https://blacktwitter.io/relay
+  //   https://social.coop/relay
+  //   https://mstdn.games/relay
+  //   https://werd.social/relay
+  //   https://Beige.party/relay
+  //   https://glammr.us/relay
+  //   https://dmv.community/relay
+  //   https://mastodon.mit.edu/relay
+  //   https://c.im/relay
+  //   https://channel.org/relay
+  //   https://dair-community.social/relay
+  //   https://macaw.social/relay
+  //   https://ursal.zone/relay
+  //   https://geekdom.social/relay
+  //   https://blorbo.social/relay
+  //   https://sunny.garden/relay
+  apRelayActorUrls: parseRelayActorUrls(
+    process.env["AP_RELAY_ACTOR_URLS"] ??
+    [
+      "https://relay.fedi.buzz/instance/mastodon.social",
+      "https://relay.fedi.buzz/instance/mastodon.online",
+      "https://relay.fedi.buzz/instance/flipboard.social",
+      "https://relay.fedi.buzz/instance/cosocial.ca",
+      "https://relay.fedi.buzz/instance/web.brid.gy",
+      "https://relay.fedi.buzz/instance/sigmoid.social",
+      "https://relay.fedi.buzz/instance/twit.social",
+      "https://relay.fedi.buzz/instance/blacktwitter.io",
+      "https://relay.fedi.buzz/instance/social.coop",
+      "https://relay.fedi.buzz/instance/mstdn.games",
+      "https://relay.fedi.buzz/instance/werd.social",
+      "https://relay.fedi.buzz/instance/Beige.party",
+      "https://relay.fedi.buzz/instance/glammr.us",
+      "https://relay.fedi.buzz/instance/dmv.community",
+      "https://relay.fedi.buzz/instance/mastodon.mit.edu",
+      "https://relay.fedi.buzz/instance/c.im",
+      "https://relay.fedi.buzz/instance/channel.org",
+      "https://relay.fedi.buzz/instance/dair-community.social",
+      "https://relay.fedi.buzz/instance/macaw.social",
+      "https://relay.fedi.buzz/instance/ursal.zone",
+      "https://relay.fedi.buzz/instance/geekdom.social",
+      "https://relay.fedi.buzz/instance/blorbo.social",
+      "https://relay.fedi.buzz/instance/sunny.garden",
+    ].join(",")
+  ),
+  // AP_RELAY_LOCAL_ACTOR_URI: the local AP actor that sends Follow activities
+  // to relay servers.  Must be an actor whose private key is held by
+  // ActivityPods.  Defaults to https://${DOMAIN}/users/relay.
+  apRelayLocalActorUri: process.env["AP_RELAY_LOCAL_ACTOR_URI"] || "",
+  // How often (ms) to re-check relay subscriptions. Default: 24 h.
+  apRelayResubscribeIntervalMs: Number.parseInt(
+    process.env["AP_RELAY_RESUBSCRIBE_INTERVAL_MS"] || `${24 * 60 * 60 * 1_000}`,
+    10,
+  ),
+
+  // Canonical event log (canonical.v1) — durable protocol-neutral record of
+  // every translated CanonicalIntent from both AT and AP bridge workers.
+  // ENABLE_CANONICAL_EVENT_LOG=true activates publishing from projection workers.
+  // ENABLE_CANONICAL_NOTIFICATIONS=true activates the in-app notification consumer.
+  // CANONICAL_TOPIC overrides the default topic name (canonical.v1).
+  enableCanonicalEventLog:
+    process.env["ENABLE_CANONICAL_EVENT_LOG"] !== "false" &&
+    (process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true" ||
+      process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true" ||
+      process.env["ENABLE_AT_JETSTREAM"] === "true"),
+  enableCanonicalNotifications:
+    process.env["ENABLE_CANONICAL_NOTIFICATIONS"] !== "false" &&
+    (process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true" ||
+      process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true" ||
+      process.env["ENABLE_AT_JETSTREAM"] === "true"),
+  canonicalTopic: process.env["CANONICAL_TOPIC"] || CANONICAL_V1_TOPIC,
+
+  // ATProto Jetstream (lightweight JSON firehose from Bluesky infrastructure).
+  // ENABLE_AT_JETSTREAM=true activates ingestion.
+  // JETSTREAM_URL overrides the default endpoint (wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post).
+  // JETSTREAM_MAX_EVENTS: if set, service exits cleanly after N published events (useful for smoke tests).
+  enableAtJetstream: process.env["ENABLE_AT_JETSTREAM"] === "true",
+  atJetstreamUrl: parseJetstreamUrl(process.env["JETSTREAM_URL"]),
+  atJetstreamPublishTopic:
+    process.env["AT_JETSTREAM_PUBLISH_TOPIC"] ||
+    process.env["PROTOCOL_BRIDGE_AT_VERIFIED_INGRESS_TOPIC"] ||
+    "at.ingress.v1",
+  atJetstreamMaxEvents: process.env["JETSTREAM_MAX_EVENTS"]
+    ? Number.parseInt(process.env["JETSTREAM_MAX_EVENTS"], 10)
+    : undefined,
 
   // Phase 7: AT session token secret (min 32 chars).
   // Required when ENABLE_XRPC_SERVER is true.
@@ -336,8 +508,74 @@ let atFirehoseRuntime: AtFirehoseRuntime | null = null;
 let atExternalFirehoseRuntime: AtIngressRuntime | null = null;
 let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
 let searchIndexerRedis: Redis | null = null;
+let mrfAdminRedisClient: Redis | null = null;
+let moderationBridgeRedisClient: Redis | null = null;
 let fedifyAdapter: FedifyFederationAdapter | null = null;
+let apRelaySubscriptionService: ApRelaySubscriptionService | null = null;
+let atJetstreamService: AtJetstreamService | null = null;
 let isShuttingDown = false;
+const startupState: StartupState = {
+  mode: config.startupMode,
+  phase: "starting",
+  startedAtMs: Date.now(),
+  readyAtMs: null,
+  currentStep: null,
+  completedSteps: [],
+  failedStep: null,
+  error: null,
+};
+
+function completeStartupTask(taskName: string): void {
+  if (!startupState.completedSteps.includes(taskName)) {
+    startupState.completedSteps.push(taskName);
+  }
+  startupState.currentStep = null;
+}
+
+function snapshotStartupState() {
+  const now = Date.now();
+
+  return {
+    mode: startupState.mode,
+    phase: startupState.phase,
+    currentStep: startupState.currentStep,
+    completedSteps: [...startupState.completedSteps],
+    failedStep: startupState.failedStep,
+    error: startupState.error,
+    durationMs: (startupState.readyAtMs ?? now) - startupState.startedAtMs,
+    startedAt: new Date(startupState.startedAtMs).toISOString(),
+    readyAt: startupState.readyAtMs ? new Date(startupState.readyAtMs).toISOString() : null,
+  };
+}
+
+async function runStartupTasks(tasks: StartupTask[]): Promise<void> {
+  for (const task of tasks) {
+    startupState.currentStep = task.name;
+    logger.info("Startup task started", {
+      task: task.name,
+      mode: startupState.mode,
+    });
+
+    try {
+      await task.start();
+      completeStartupTask(task.name);
+      logger.info("Startup task completed", { task: task.name });
+    } catch (error: any) {
+      startupState.phase = "failed";
+      startupState.failedStep = task.name;
+      startupState.error = error?.message || String(error);
+      throw error;
+    }
+  }
+}
+
+function markStartupReady(): void {
+  startupState.phase = "ready";
+  startupState.readyAtMs = Date.now();
+  startupState.currentStep = null;
+  startupState.failedStep = null;
+  startupState.error = null;
+}
 
 // ============================================================================
 // Main Application
@@ -347,6 +585,7 @@ async function main() {
   logger.info("Starting Fedify Sidecar for ActivityPods", {
     version: config.version,
     nodeEnv: config.nodeEnv,
+    startupMode: config.startupMode,
   });
 
   const activityPubOutboundDeliveryPolicy = {
@@ -355,14 +594,21 @@ async function main() {
     disabledNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewDisabledDomains,
   } as const;
 
-  const redpandaRequired =
+  const redpandaProducerRequired =
     config.enableOutboxIntentWorker
     || config.enableOutboundWorker
+    || config.enableInboundWorker;
+  const kafkaBackplaneRequired =
+    redpandaProducerRequired
     || config.enableOpenSearchIndexer
-    || config.enableInboundWorker
     || config.enableXrpcServer
     || config.enableProtocolBridgeApToAt
-    || config.enableProtocolBridgeAtToAp;
+    || config.enableProtocolBridgeAtToAp
+    || config.enableAtJetstream
+    || config.enableAtExternalFirehose
+    || config.enableCanonicalEventLog
+    || config.enableCanonicalNotifications;
+  const startupTasks: StartupTask[] = [];
 
   const enforceTopicGovernance = process.env["REDPANDA_ENFORCE_TOPIC_GOVERNANCE"] !== "false";
 
@@ -416,12 +662,17 @@ async function main() {
   });
 
   try {
-    if (redpandaRequired && enforceTopicGovernance) {
+    if (kafkaBackplaneRequired && enforceTopicGovernance) {
       const topicGovernanceOptions = resolveTopicGovernanceOptionsFromEnv();
-      await verifyRedpandaTopics(topicGovernanceOptions);
-      logger.info("Redpanda topic governance verification passed", {
-        profile: topicGovernanceOptions.profile,
-        brokers: topicGovernanceOptions.brokers,
+      startupTasks.push({
+        name: "verify Redpanda topic governance",
+        start: async () => {
+          await verifyRedpandaTopics(topicGovernanceOptions);
+          logger.info("Redpanda topic governance verification passed", {
+            profile: topicGovernanceOptions.profile,
+            brokers: topicGovernanceOptions.brokers,
+          });
+        },
       });
     }
 
@@ -437,12 +688,17 @@ async function main() {
 
     // Initialize RedPanda producer only when worker/indexer features need it.
     let redpanda: any = null;
-    if (redpandaRequired) {
+    if (redpandaProducerRequired) {
       redpanda = createRedPandaProducer();
-      await redpanda.connect();
-      logger.info("RedPanda producer connected");
+      startupTasks.push({
+        name: "connect RedPanda producer",
+        start: async () => {
+          await redpanda.connect();
+          logger.info("RedPanda producer connected");
+        },
+      });
     } else {
-      logger.info("RedPanda producer skipped (workers/indexer disabled)");
+      logger.info("RedPanda producer skipped (worker delivery pipeline disabled)");
     }
 
     // Initialize Fedify 2.x runtime adapter (feature-flagged)
@@ -481,6 +737,46 @@ async function main() {
       logger.info("Fedify runtime adapter initialized", { domain: config.domain });
     }
 
+    // Initialize AP relay subscription service (requires Fedify + outbox intent worker)
+    if (
+      config.enableFedifyRuntimeIntegration &&
+      config.enableOutboxIntentWorker &&
+      config.apRelayActorUrls.length > 0
+    ) {
+      const relayLocalActorUri =
+        config.apRelayLocalActorUri || `https://${config.domain}/users/relay`;
+      const relayRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      relayRedis.on("error", (err: Error) =>
+        logger.error("Relay subscription Redis error", { error: err.message }),
+      );
+      apRelaySubscriptionService = new ApRelaySubscriptionService(
+        relayRedis,
+        queue!,
+        {
+          relayActorUrls: config.apRelayActorUrls,
+          localActorUri: relayLocalActorUri,
+          domain: config.domain,
+          resubscribeIntervalMs: config.apRelayResubscribeIntervalMs,
+          userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+        },
+        logger,
+      );
+      startupTasks.push({
+        name: "start AP relay subscription service",
+        start: async () => {
+          await apRelaySubscriptionService!.start();
+          logger.info("AP relay subscription service started", {
+            relays: config.apRelayActorUrls,
+            localActorUri: relayLocalActorUri,
+          });
+        },
+      });
+    } else if (config.apRelayActorUrls.length > 0 && !config.enableFedifyRuntimeIntegration) {
+      logger.warn(
+        "AP_RELAY_ACTOR_URLS configured but ENABLE_FEDIFY_RUNTIME_INTEGRATION is false — relay subscription disabled",
+      );
+    }
+
     // Initialize OpenSearch indexer (dedicated search indexer service)
     if (config.enableOpenSearchIndexer) {
       searchIndexerRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
@@ -490,11 +786,16 @@ async function main() {
       opensearchIndexer = createSearchIndexerService({
         redis: searchIndexerRedis as any,
       });
-      await opensearchIndexer.initialize();
-      opensearchIndexer.start().catch(err => {
-        logger.error("OpenSearch indexer error", { error: err.message });
+      startupTasks.push({
+        name: "start OpenSearch indexer",
+        start: async () => {
+          await opensearchIndexer!.initialize();
+          opensearchIndexer!.start().catch(err => {
+            logger.error("OpenSearch indexer error", { error: err.message });
+          });
+          logger.info("OpenSearch indexer started");
+        },
       });
-      logger.info("OpenSearch indexer started");
     }
 
     // Initialize outbound worker
@@ -503,20 +804,30 @@ async function main() {
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
       });
-      outboundWorker.start().catch(err => {
-        logger.error("Outbound worker error", { error: err.message });
+      startupTasks.push({
+        name: "start outbound worker",
+        start: async () => {
+          outboundWorker!.start().catch(err => {
+            logger.error("Outbound worker error", { error: err.message });
+          });
+          logger.info("Outbound worker started");
+        },
       });
-      logger.info("Outbound worker started");
     }
 
     if (config.enableOutboxIntentWorker) {
       outboxIntentWorker = createOutboxIntentWorker(queue, redpanda, {
         activityPubOutboundDeliveryPolicy,
       });
-      outboxIntentWorker.start().catch((err) => {
-        logger.error("Outbox intent worker error", { error: err.message });
+      startupTasks.push({
+        name: "start outbox intent worker",
+        start: async () => {
+          outboxIntentWorker!.start().catch((err) => {
+            logger.error("Outbox intent worker error", { error: err.message });
+          });
+          logger.info("Outbox intent worker started");
+        },
       });
-      logger.info("Outbox intent worker started");
     }
 
     // Initialize inbound worker
@@ -525,10 +836,15 @@ async function main() {
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
       });
-      inboundWorker.start().catch(err => {
-        logger.error("Inbound worker error", { error: err.message });
+      startupTasks.push({
+        name: "start inbound worker",
+        start: async () => {
+          inboundWorker!.start().catch(err => {
+            logger.error("Inbound worker error", { error: err.message });
+          });
+          logger.info("Inbound worker started");
+        },
       });
-      logger.info("Inbound worker started");
     }
 
     // Create HTTP server
@@ -554,13 +870,28 @@ async function main() {
         status: "ok",
         version: config.version,
         uptime: process.uptime(),
+        startup: snapshotStartupState(),
       };
     });
 
     // Readiness check endpoint
-    app.get("/ready", async () => {
+    app.get("/ready", async (_request, reply) => {
       if (!queue) {
-        return { status: "not_ready", reason: "Queue not initialized" };
+        reply.code(503);
+        return {
+          status: "not_ready",
+          reason: "Queue not initialized",
+          startup: snapshotStartupState(),
+        };
+      }
+
+      const startup = snapshotStartupState();
+      if (startup.phase !== "ready") {
+        reply.code(503);
+        return {
+          status: startup.phase === "failed" ? "startup_failed" : "starting",
+          startup,
+        };
       }
       
       const [outboundPending, inboundPending, outboxIntentPending] = await Promise.all([
@@ -571,6 +902,7 @@ async function main() {
       
       return {
         status: "ready",
+        startup,
         queues: {
           outbound: { pending: outboundPending },
           inbound: { pending: inboundPending },
@@ -638,6 +970,19 @@ async function main() {
         ...renderOAuthSecurityMetricsLines(),
       ].filter((line) => line.length > 0).join("\n") + "\n";
     });
+
+    if (config.enableMrfAdminApi) {
+      const registration = await registerMrfAdminIntegration({
+        app,
+        logger,
+        enabled: config.enableMrfAdminApi,
+        adminToken: config.mrfAdminToken,
+        storeMode: config.mrfAdminStore,
+        redisUrl: process.env["REDIS_URL"] ?? "redis://localhost:6379",
+        redisPrefix: config.mrfAdminRedisPrefix,
+      });
+      mrfAdminRedisClient = registration.redisClient;
+    }
 
     // Shared inbox endpoint
     const enqueueRawInboundRequest = async (
@@ -1023,7 +1368,6 @@ async function main() {
           ),
           source: "fedify-sidecar.at-native",
         });
-        await atEventPublisher.connect();
         const eventPublisherAdapter: EventPublisher = atEventPublisher;
 
         atFirehoseRuntime = new AtFirehoseRuntime({
@@ -1045,100 +1389,6 @@ async function main() {
             error: (message, meta) => logger.error(meta || {}, message),
           },
         });
-        await atFirehoseRuntime.start();
-
-        logger.info("AT firehose runtime enabled", {
-          consumerGroupId: config.atFirehoseConsumerGroupId,
-          commitTopic: "at.commit.v1",
-          identityTopic: "at.identity.v1",
-          accountTopic: "at.account.v1",
-          cursorMaxEvents: config.atFirehoseCursorMaxEvents,
-        });
-
-        if (config.enableAtExternalFirehose) {
-          try {
-            const externalFirehoseSources = parseAtExternalFirehoseSources(
-              process.env["AT_EXTERNAL_FIREHOSE_SOURCES"],
-            );
-            const externalDidFailureCacheTtlMs = 60_000;
-            const externalIdentityResolver = new HttpAtIdentityResolver({
-              fetchImpl: fetch,
-              timeoutMs: config.externalPdsTimeoutMs,
-              maxAttempts: config.externalPdsMaxAttempts,
-              failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
-            });
-            const externalCommitVerifier = new ProductionAtCommitVerifier({
-              identityResolver: externalIdentityResolver,
-              repoRegistry,
-            });
-            const externalIngressBootstrap = buildAtExternalFirehoseBootstrap({
-              runtimeConfig: {
-                brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
-                  .split(",")
-                  .map((broker) => broker.trim())
-                  .filter(Boolean),
-                clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
-                consumerGroupId: config.atExternalFirehoseConsumerGroupId,
-                rawTopic: config.atExternalFirehoseRawTopic,
-                sources: externalFirehoseSources,
-              },
-              redis: atRedis as any,
-              eventPublisher: eventPublisherAdapter,
-              repoRegistry,
-              commitVerifier: externalCommitVerifier,
-              logger: {
-                info: (message, meta) => logger.info(meta || {}, message),
-                warn: (message, meta) => logger.warn(meta || {}, message),
-                error: (message, meta) => logger.error(meta || {}, message),
-              },
-              identityResolverOptions: {
-                timeoutMs: config.externalPdsTimeoutMs,
-                maxAttempts: config.externalPdsMaxAttempts,
-                failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
-              },
-              syncRebuilderOptions: {
-                fetchImpl: fetch,
-                timeoutMs: config.externalPdsTimeoutMs,
-                maxAttempts: config.externalPdsMaxAttempts,
-              },
-            });
-
-            if (externalIngressBootstrap.kind === "ready") {
-              await externalIngressBootstrap.runtime.start();
-              atExternalFirehoseRuntime = externalIngressBootstrap.runtime;
-
-              logger.info(
-                {
-                  enableAtExternalFirehose: true,
-                  sourceCount: externalIngressBootstrap.sources.length,
-                  rawTopic: config.atExternalFirehoseRawTopic,
-                  consumerGroupId: config.atExternalFirehoseConsumerGroupId,
-                },
-                "External AT firehose intake started",
-              );
-            } else {
-              logger.warn(
-                {
-                  enableAtExternalFirehose: true,
-                  sourceCount: externalIngressBootstrap.sources.length,
-                  rawTopic: config.atExternalFirehoseRawTopic,
-                  consumerGroupId: config.atExternalFirehoseConsumerGroupId,
-                  bootstrapStatus: externalIngressBootstrap.kind,
-                  bootstrapReason: externalIngressBootstrap.reason,
-                },
-                `External AT firehose intake requested but not started: ${externalIngressBootstrap.message}`,
-              );
-            }
-          } catch (error: any) {
-            logger.error(
-              {
-                enableAtExternalFirehose: true,
-                error: error?.message || String(error),
-              },
-              "External AT firehose intake requested but configuration validation failed",
-            );
-          }
-        }
 
         // ---- Projection worker ----
         const blobStore             = new DefaultAtBlobStore();
@@ -1316,6 +1566,31 @@ async function main() {
               })
             : undefined;
 
+          const canonicalPublisher = config.enableCanonicalEventLog && atEventPublisher
+            ? new CanonicalIntentPublisher(atEventPublisher, config.canonicalTopic)
+            : undefined;
+
+          const canonicalNotificationConsumer = config.enableCanonicalNotifications && atEventPublisher
+            ? new CanonicalNotificationConsumer(
+                {
+                  brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+                    .split(",")
+                    .map((broker) => broker.trim())
+                    .filter(Boolean),
+                  clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+                  consumerGroupId: `${config.protocolBridgeConsumerGroupId}-canonical-notifications`,
+                  canonicalTopic: config.canonicalTopic,
+                  activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+                  activityPodsBearerToken: process.env["ACTIVITYPODS_TOKEN"] || "",
+                },
+                {
+                  info: (message, meta) => logger.info(meta || {}, message),
+                  warn: (message, meta) => logger.warn(meta || {}, message),
+                  error: (message, meta) => logger.error(meta || {}, message),
+                },
+              )
+            : undefined;
+
           protocolBridgeRuntime = new ProtocolBridgeRuntime({
             config: {
               brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
@@ -1340,6 +1615,8 @@ async function main() {
                   projectionLedger,
                   bridgeAtWritePort,
                   projectionContext,
+                  undefined,
+                  canonicalPublisher,
                 )
               : undefined,
             atToApWorker: config.enableProtocolBridgeAtToAp
@@ -1352,24 +1629,17 @@ async function main() {
                   projectionLedger,
                   bridgeApPublishPort!,
                   projectionContext,
+                  undefined,
+                  canonicalPublisher,
                 )
               : undefined,
             apIngressForwarder: bridgeApIngressForwarder,
+            canonicalNotificationConsumer,
             logger: {
               info: (message, meta) => logger.info(meta || {}, message),
               warn: (message, meta) => logger.warn(meta || {}, message),
               error: (message, meta) => logger.error(meta || {}, message),
             },
-          });
-          await protocolBridgeRuntime.start();
-
-          logger.info("Protocol bridge runtime enabled", {
-            enableApToAt: config.enableProtocolBridgeApToAt,
-            enableAtToAp: config.enableProtocolBridgeAtToAp,
-            apSourceTopic: config.protocolBridgeApSourceTopic,
-            atCommitTopic: config.protocolBridgeAtCommitTopic,
-            atVerifiedIngressTopic: config.protocolBridgeAtVerifiedIngressTopic,
-            apIngressTopic: config.protocolBridgeApIngressTopic,
           });
         }
 
@@ -1455,6 +1725,71 @@ async function main() {
           });
         }
 
+        // ---- Internal AT session mint (trusted backend-only path) ----
+        // Used by ActivityPods dashboard/services to obtain a short-lived
+        // AT access token for managed accounts without requiring an app password.
+        app.post('/api/internal/atproto/session', async (request, reply) => {
+          const authHeader = (request.headers.authorization as string | undefined) ?? '';
+          const [scheme, token] = authHeader.split(' ');
+          if (scheme !== 'Bearer' || token !== (process.env['ACTIVITYPODS_TOKEN'] || '')) {
+            reply.status(401).send({ error: 'Unauthorized' });
+            return;
+          }
+
+          if (!sessionService) {
+            reply.status(503).send({ error: 'Session service unavailable' });
+            return;
+          }
+
+          let rawBody: Record<string, unknown> | undefined;
+          if (typeof request.body === 'string') {
+            try {
+              const parsed = JSON.parse(request.body);
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                rawBody = parsed as Record<string, unknown>;
+              }
+            } catch {
+              rawBody = undefined;
+            }
+          } else if (request.body && typeof request.body === 'object' && !Array.isArray(request.body)) {
+            rawBody = request.body as Record<string, unknown>;
+          }
+
+          const canonicalAccountId = typeof rawBody?.['canonicalAccountId'] === 'string'
+            ? rawBody['canonicalAccountId'].trim()
+            : '';
+
+          if (!canonicalAccountId) {
+            reply.status(400).send({ error: 'canonicalAccountId is required' });
+            return;
+          }
+
+          const binding = await identityRepo.getByCanonicalAccountId(canonicalAccountId);
+          if (!binding || !binding.atprotoDid || !binding.atprotoHandle) {
+            reply.status(404).send({ error: 'ATProto identity binding not found' });
+            return;
+          }
+
+          const isExternal = binding.atprotoManaged === false || binding.atprotoSource === 'external';
+          if (isExternal) {
+            reply.status(403).send({ error: 'External accounts require delegated credentials' });
+            return;
+          }
+
+          const accessJwt = await sessionService.mintAccessToken({
+            canonicalAccountId,
+            did: binding.atprotoDid,
+            handle: binding.atprotoHandle,
+            scope: 'full',
+          });
+
+          reply.status(200).send({
+            accessJwt,
+            did: binding.atprotoDid,
+            handle: binding.atprotoHandle,
+          });
+        });
+
         // ---- Assemble XRPC server ----
         const xrpcServer = new DefaultAtXrpcServer({
           recordReader,
@@ -1484,6 +1819,27 @@ async function main() {
         });
         xrpcServerForWebSocket = xrpcServer;
 
+        if (config.enableModerationBridgeApi) {
+          const moderationRegistration = await registerModerationBridgeIntegration({
+            app,
+            logger,
+            enabled: config.enableModerationBridgeApi,
+            adminToken: config.mrfAdminToken,
+            storeMode: config.mrfAdminStore,
+            redisUrl: process.env["REDIS_URL"] ?? "redis://localhost:6379",
+            redisPrefix: config.moderationBridgeRedisPrefix,
+            identityBindingRepository: identityRepo,
+            labelerDid: config.moderationLabelerDid,
+            labelerSigningKeyHex: config.moderationLabelerSigningKeyHex || undefined,
+            atAdminXrpcBaseUrl: config.moderationAtAdminXrpcBaseUrl || undefined,
+            atAdminBearerToken: config.moderationAtAdminBearerToken || undefined,
+            atAdminTimeoutMs: Number.isFinite(config.moderationAtAdminTimeoutMs)
+              ? Math.max(1_000, config.moderationAtAdminTimeoutMs)
+              : 5_000,
+          });
+          moderationBridgeRedisClient = moderationRegistration.redisClient;
+        }
+
         if (!config.atLocalFixture) {
           identityWarmupService = new IdentityWarmupService({
             backendBaseUrl: process.env["ACTIVITYPODS_URL"]!,
@@ -1495,14 +1851,158 @@ async function main() {
             intervalMs: config.identityWarmIntervalMs,
             batchLimit: config.identityWarmBatchLimit,
           });
-          identityWarmupService.start();
-
-          logger.info("AT identity warmup enabled", {
-            backendBaseUrl: process.env["ACTIVITYPODS_URL"],
-            intervalMs: config.identityWarmIntervalMs,
-            batchLimit: config.identityWarmBatchLimit,
-          });
         }
+
+        startupTasks.push({
+          name: "start AT runtime backplane",
+          start: async () => {
+            await atEventPublisher!.connect();
+            await atFirehoseRuntime!.start();
+
+            logger.info("AT firehose runtime enabled", {
+              consumerGroupId: config.atFirehoseConsumerGroupId,
+              commitTopic: "at.commit.v1",
+              identityTopic: "at.identity.v1",
+              accountTopic: "at.account.v1",
+              cursorMaxEvents: config.atFirehoseCursorMaxEvents,
+            });
+
+            if (config.enableAtExternalFirehose) {
+              try {
+                const externalFirehoseSources = parseAtExternalFirehoseSources(
+                  process.env["AT_EXTERNAL_FIREHOSE_SOURCES"],
+                );
+                const externalDidFailureCacheTtlMs = 60_000;
+                const externalIdentityResolver = new HttpAtIdentityResolver({
+                  fetchImpl: fetch,
+                  timeoutMs: config.externalPdsTimeoutMs,
+                  maxAttempts: config.externalPdsMaxAttempts,
+                  failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
+                });
+                const externalCommitVerifier = new ProductionAtCommitVerifier({
+                  identityResolver: externalIdentityResolver,
+                  repoRegistry,
+                });
+                const externalIngressBootstrap = buildAtExternalFirehoseBootstrap({
+                  runtimeConfig: {
+                    brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+                      .split(",")
+                      .map((broker) => broker.trim())
+                      .filter(Boolean),
+                    clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+                    consumerGroupId: config.atExternalFirehoseConsumerGroupId,
+                    rawTopic: config.atExternalFirehoseRawTopic,
+                    sources: externalFirehoseSources,
+                  },
+                  redis: atRedis as any,
+                  eventPublisher: eventPublisherAdapter,
+                  repoRegistry,
+                  commitVerifier: externalCommitVerifier,
+                  logger: {
+                    info: (message, meta) => logger.info(meta || {}, message),
+                    warn: (message, meta) => logger.warn(meta || {}, message),
+                    error: (message, meta) => logger.error(meta || {}, message),
+                  },
+                  identityResolverOptions: {
+                    timeoutMs: config.externalPdsTimeoutMs,
+                    maxAttempts: config.externalPdsMaxAttempts,
+                    failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
+                  },
+                  syncRebuilderOptions: {
+                    fetchImpl: fetch,
+                    timeoutMs: config.externalPdsTimeoutMs,
+                    maxAttempts: config.externalPdsMaxAttempts,
+                  },
+                });
+
+                if (externalIngressBootstrap.kind === "ready") {
+                  await externalIngressBootstrap.runtime.start();
+                  atExternalFirehoseRuntime = externalIngressBootstrap.runtime;
+
+                  logger.info(
+                    {
+                      enableAtExternalFirehose: true,
+                      sourceCount: externalIngressBootstrap.sources.length,
+                      rawTopic: config.atExternalFirehoseRawTopic,
+                      consumerGroupId: config.atExternalFirehoseConsumerGroupId,
+                    },
+                    "External AT firehose intake started",
+                  );
+                } else {
+                  logger.warn(
+                    {
+                      enableAtExternalFirehose: true,
+                      sourceCount: externalIngressBootstrap.sources.length,
+                      rawTopic: config.atExternalFirehoseRawTopic,
+                      consumerGroupId: config.atExternalFirehoseConsumerGroupId,
+                      bootstrapStatus: externalIngressBootstrap.kind,
+                      bootstrapReason: externalIngressBootstrap.reason,
+                    },
+                    `External AT firehose intake requested but not started: ${externalIngressBootstrap.message}`,
+                  );
+                }
+              } catch (error: any) {
+                logger.error(
+                  {
+                    enableAtExternalFirehose: true,
+                    error: error?.message || String(error),
+                  },
+                  "External AT firehose intake requested but configuration validation failed",
+                );
+              }
+            }
+
+            if (protocolBridgeRuntime) {
+              await protocolBridgeRuntime.start();
+
+              logger.info("Protocol bridge runtime enabled", {
+                enableApToAt: config.enableProtocolBridgeApToAt,
+                enableAtToAp: config.enableProtocolBridgeAtToAp,
+                apSourceTopic: config.protocolBridgeApSourceTopic,
+                atCommitTopic: config.protocolBridgeAtCommitTopic,
+                atVerifiedIngressTopic: config.protocolBridgeAtVerifiedIngressTopic,
+                apIngressTopic: config.protocolBridgeApIngressTopic,
+              });
+            }
+
+            if (identityWarmupService) {
+              identityWarmupService.start();
+
+              logger.info("AT identity warmup enabled", {
+                backendBaseUrl: process.env["ACTIVITYPODS_URL"],
+                intervalMs: config.identityWarmIntervalMs,
+                batchLimit: config.identityWarmBatchLimit,
+              });
+            }
+
+            if (config.enableAtJetstream) {
+              atJetstreamService = new AtJetstreamService(
+                atEventPublisher!,
+                {
+                  url: config.atJetstreamUrl,
+                  publishTopic: config.atJetstreamPublishTopic,
+                  maxEvents: config.atJetstreamMaxEvents,
+                },
+                {
+                  info: (message, meta) => logger.info(meta ?? {}, message),
+                  warn: (message, meta) => logger.warn(meta ?? {}, message),
+                  error: (message, meta) => logger.error(meta ?? {}, message),
+                },
+              );
+              atJetstreamService.onMaxEvents(() => {
+                logger.info("Jetstream maxEvents reached — initiating graceful shutdown");
+                process.emit("SIGTERM");
+              });
+              atJetstreamService.start();
+
+              logger.info("AT Jetstream intake started", {
+                url: config.atJetstreamUrl,
+                publishTopic: config.atJetstreamPublishTopic,
+                maxEvents: config.atJetstreamMaxEvents ?? null,
+              });
+            }
+          },
+        });
 
         if (config.atLocalFixture) {
           logger.warn(
@@ -1531,16 +2031,50 @@ async function main() {
     }
 
     // Start HTTP server only after all HTTP and WebSocket routes are registered.
+    if (config.startupMode === "blocking") {
+      await runStartupTasks(startupTasks);
+    }
+
     await app.listen({ port: config.port, host: config.host });
 
     logger.info(`Fedify Sidecar listening on ${config.host}:${config.port}`);
     logger.info(`Metrics available at http://${config.host}:${config.port}/metrics`);
     logger.info("Configuration summary", {
       domain: config.domain,
+      startupMode: config.startupMode,
       enableOutboundWorker: config.enableOutboundWorker,
       enableInboundWorker: config.enableInboundWorker,
       enableOpenSearchIndexer: config.enableOpenSearchIndexer,
     });
+
+    if (config.startupMode === "background") {
+      logger.info("HTTP server is listening while background startup continues", {
+        pendingStartupTasks: startupTasks.map((task) => task.name),
+      });
+
+      void (async () => {
+        try {
+          await runStartupTasks(startupTasks);
+          markStartupReady();
+          logger.info("Background startup completed", {
+            startup: snapshotStartupState(),
+          });
+        } catch (error: any) {
+          logger.error(
+            {
+              error: error?.message || String(error),
+              startup: snapshotStartupState(),
+            },
+            "Background startup failed",
+          );
+        }
+      })();
+    } else {
+      markStartupReady();
+      logger.info("Startup completed", {
+        startup: snapshotStartupState(),
+      });
+    }
 
   } catch (error: any) {
     logger.error({ error: error.message, stack: error.stack }, "Failed to start Fedify Sidecar");
@@ -1581,6 +2115,17 @@ async function shutdown(signal: string): Promise<void> {
   }, 30000);
 
   try {
+    // Stop relay subscription service
+    if (apRelaySubscriptionService) {
+      apRelaySubscriptionService.shutdown();
+      logger.info("AP relay subscription service stopped");
+    }
+
+    if (atJetstreamService) {
+      atJetstreamService.shutdown();
+      logger.info("AT Jetstream service stopped");
+    }
+
     // Stop workers first
     if (outboxIntentWorker) {
       await outboxIntentWorker.stop();
@@ -1642,6 +2187,18 @@ async function shutdown(signal: string): Promise<void> {
       await searchIndexerRedis.quit().catch(() => searchIndexerRedis!.disconnect());
       searchIndexerRedis = null;
       logger.info("Search indexer Redis client disconnected");
+    }
+
+    if (mrfAdminRedisClient) {
+      await mrfAdminRedisClient.quit().catch(() => mrfAdminRedisClient!.disconnect());
+      mrfAdminRedisClient = null;
+      logger.info("MRF admin Redis client disconnected");
+    }
+
+    if (moderationBridgeRedisClient) {
+      await moderationBridgeRedisClient.quit().catch(() => moderationBridgeRedisClient!.disconnect());
+      moderationBridgeRedisClient = null;
+      logger.info("Moderation bridge Redis client disconnected");
     }
 
     // Quit shared AT Redis client

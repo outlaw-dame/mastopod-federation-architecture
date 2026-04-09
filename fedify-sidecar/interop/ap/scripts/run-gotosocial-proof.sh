@@ -17,9 +17,15 @@ if [ "${SKIP_BUILD}" != "1" ]; then
 fi
 
 docker compose -f "${COMPOSE_FILE}" --profile mastodon stop mastodon-web-app mastodon-sidekiq >/dev/null 2>&1 || true
+docker compose -f "${COMPOSE_FILE}" --profile akkoma stop akkoma-app >/dev/null 2>&1 || true
 
 docker compose -f "${COMPOSE_FILE}" up -d \
-  redis redpanda mock-activitypods fedify-sidecar gotosocial-app ap-proxy
+  redis redpanda mock-activitypods gotosocial-app
+
+docker compose -f "${COMPOSE_FILE}" run --rm fedify-sidecar npm run topics:bootstrap >/dev/null
+
+docker compose -f "${COMPOSE_FILE}" up -d \
+  fedify-sidecar ap-proxy
 
 AP_INTEROP_GOTOSOCIAL_USERNAME="${USERNAME}" \
   "${SCRIPT_DIR}/bootstrap-gotosocial-account.sh"

@@ -17,3 +17,8 @@ https://mastodon {
   tls /certs/mastodon.crt /certs/mastodon.key
   reverse_proxy mastodon-web-app:3000
 }
+
+https://akkoma {
+  tls /certs/akkoma.crt /certs/akkoma.key
+  reverse_proxy akkoma-app:4000
+}

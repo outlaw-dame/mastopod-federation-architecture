@@ -51,6 +51,7 @@ services:
           - sidecar
           - gotosocial
           - mastodon
+          - akkoma
 
   mock-activitypods:
     build:
@@ -134,6 +135,52 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    networks:
+      - ap-interop
+
+  akkoma-db:
+    image: postgres:14-alpine
+    profiles: ["akkoma"]
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ap_interop_akkoma_db:/var/lib/postgresql/data
+    networks:
+      - ap-interop
+
+  akkoma-app:
+    image: ap-akkoma:latest
+    profiles: ["akkoma"]
+    build:
+      context: ./akkoma
+      dockerfile: Dockerfile
+      args:
+        AKKOMA_SOURCE_REPO: ${AKKOMA_SOURCE_REPO:-https://akkoma.dev/AkkomaGang/akkoma.git}
+        AKKOMA_SOURCE_REF: ${AKKOMA_SOURCE_REF:-v3.18.1}
+        AKKOMA_SOURCE_COMMIT: ${AKKOMA_SOURCE_COMMIT:-792385f4ac1e258c21a3a900342c4ded14db1727}
+    env_file:
+      - ./akkoma/akkoma.env
+    environment:
+      SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
+    depends_on:
+      akkoma-db:
+        condition: service_healthy
+    volumes:
+      - ./runtime/akkoma/etc:/etc/akkoma
+      - ./runtime/akkoma/lib:/var/lib/akkoma
+      - ./runtime:/interop/runtime:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/api/v1/instance >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
     networks:
       - ap-interop
 
@@ -292,6 +339,7 @@ services:
 volumes:
   ap_interop_redis:
   ap_interop_redpanda:
+  ap_interop_akkoma_db:
   ap_interop_mastodon_db:
   ap_interop_mastodon_redis:
   ap_interop_mastodon_public:
