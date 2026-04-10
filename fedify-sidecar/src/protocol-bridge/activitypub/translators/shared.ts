@@ -548,7 +548,8 @@ function toAttachment(rawAttachment: unknown, fallbackId: string): CanonicalAtta
   }
 
   const attachment = rawAttachment as Record<string, unknown>;
-  const url = extractFirstUrl(attachment["url"]);
+  const { primaryUrl, cid: urlCid } = extractHttpUrlAndCid(attachment["url"]);
+  const url = primaryUrl;
   const id = asString(attachment["id"]) ?? url ?? fallbackId;
   const mediaType = asString(attachment["mediaType"]) ?? inferMediaType(asString(attachment["type"]));
 
@@ -560,6 +561,7 @@ function toAttachment(rawAttachment: unknown, fallbackId: string): CanonicalAtta
     attachmentId: id,
     mediaType,
     url,
+    cid: asString(attachment["cid"]) ?? urlCid ?? null,
     alt: asString(attachment["name"]) ?? asString(attachment["summary"]) ?? null,
     byteSize: asAttachmentByteSize(attachment),
     width: asOptionalNumber(attachment["width"]),
@@ -638,6 +640,42 @@ export function extractFirstUrl(value: unknown): string | null {
     return typeof href === "string" ? href : null;
   }
   return null;
+}
+
+/**
+ * Collect all URL strings from an ActivityPub `url` value (string, array, or Link object).
+ * Prefers the first non-ipfs:// HTTP(S) URL as the primary canonical URL.
+ * If an ipfs:// URL is present, extracts the CID for content-addressed storage.
+ */
+export function extractHttpUrlAndCid(value: unknown): { primaryUrl: string | null; cid: string | null } {
+  const all = collectAllUrls(value);
+
+  const httpUrl = all.find((u) => /^https?:\/\//i.test(u)) ?? null;
+  const ipfsUrl = all.find((u) => /^ipfs:\/\//i.test(u)) ?? null;
+
+  let cid: string | null = null;
+  if (ipfsUrl) {
+    const stripped = ipfsUrl.replace(/^ipfs:\/\//i, "").trim();
+    if (stripped.length > 0) {
+      cid = stripped;
+    }
+  }
+
+  return { primaryUrl: httpUrl ?? (all[0] ?? null), cid };
+}
+
+function collectAllUrls(value: unknown): string[] {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return [value];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => collectAllUrls(entry));
+  }
+  if (value && typeof value === "object") {
+    const href = (value as Record<string, unknown>)["href"];
+    return typeof href === "string" && href.trim().length > 0 ? [href] : [];
+  }
+  return [];
 }
 
 export function extractId(value: unknown): string | null {

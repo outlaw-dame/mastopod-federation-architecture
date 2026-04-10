@@ -149,19 +149,30 @@ export function canonicalFacetsToApTags(facets: readonly CanonicalFacet[]): Arra
 export function canonicalAttachmentsToApAttachments(
   attachments: readonly CanonicalAttachment[],
 ): Array<Record<string, unknown>> {
-  return attachments.map((attachment) => ({
-    type: activityPubMediaTypeForAttachment(attachment.mediaType),
-    mediaType: attachment.mediaType,
-    url: attachment.url ?? toIpfsUrl(attachment.cid) ?? attachment.attachmentId,
-    name: attachment.alt ?? undefined,
-    size: attachment.byteSize ?? undefined,
-    duration: attachment.duration ?? undefined,
-    digestMultibase: attachment.digestMultibase ?? undefined,
-    width: attachment.width ?? undefined,
-    height: attachment.height ?? undefined,
-    focalPoint: attachment.focalPoint ?? undefined,
-    blurhash: attachment.blurhash ?? undefined,
-  }));
+  return attachments.map((attachment) => {
+    const primaryUrl = attachment.url ?? attachment.attachmentId;
+    const ipfsUrl = toIpfsUrl(attachment.cid);
+
+    // FEP-1311: when both an HTTP URL and an IPFS CID are available, emit both
+    // as a url array so consumers can verify content integrity and fetch via IPFS.
+    const urlValue: unknown = primaryUrl && ipfsUrl
+      ? [primaryUrl, ipfsUrl]
+      : primaryUrl ?? ipfsUrl ?? attachment.attachmentId;
+
+    return {
+      type: activityPubMediaTypeForAttachment(attachment.mediaType),
+      mediaType: attachment.mediaType,
+      url: urlValue,
+      name: attachment.alt ?? undefined,
+      size: attachment.byteSize ?? undefined,
+      duration: attachment.duration ?? undefined,
+      digestMultibase: attachment.digestMultibase ?? undefined,
+      width: attachment.width ?? undefined,
+      height: attachment.height ?? undefined,
+      focalPoint: attachment.focalPoint ?? undefined,
+      blurhash: attachment.blurhash ?? undefined,
+    };
+  });
 }
 
 function activityPubMediaTypeForAttachment(mediaType: string): "Image" | "Video" | "Audio" | "Document" {

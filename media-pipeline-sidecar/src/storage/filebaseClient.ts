@@ -1,4 +1,4 @@
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { config } from '../config/config';
@@ -33,9 +33,24 @@ export async function uploadToFilebase(params: {
     maxDelayMs: 4000
   });
 
+  // Retrieve IPFS CID from Filebase object metadata (best-effort; may be absent for non-IPFS buckets)
+  let cid: string | undefined;
+  try {
+    const head = await client.send(new HeadObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: params.key
+    }));
+    const rawCid = head.Metadata?.cid;
+    if (rawCid && rawCid.trim().length > 0) {
+      cid = rawCid.trim();
+    }
+  } catch {
+    // CID retrieval is best-effort; the rest of the pipeline continues without it
+  }
+
   return {
     key: params.key,
-    cid: undefined,
+    cid,
     url: buildCanonicalMediaUrl(params.key)
   };
 }

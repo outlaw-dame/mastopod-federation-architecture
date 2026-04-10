@@ -22,6 +22,7 @@ export function projectToActivityPubMedia(asset: CanonicalAsset): ActivityPubMed
     width: asset.width,
     height: asset.height,
     focalPoint: asset.focalPoint,
-    blurhash: asset.blurhash
+    blurhash: asset.blurhash,
+    gatewayUrl: asset.gatewayUrl
   };
 }

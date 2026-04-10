@@ -12,6 +12,8 @@ export interface ActivityPubMediaBinding {
   height?: number;
   focalPoint?: [number, number];
   blurhash?: string;
+  /** IPFS gateway URL for FEP-1311 content-addressed access (present when CID is known). */
+  gatewayUrl?: string;
 }
 
 export interface ATProtoMediaBinding {

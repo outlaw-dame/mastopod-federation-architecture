@@ -98,11 +98,16 @@ describe("protocol bridge video parity", () => {
     }
 
     const object = projected.commands[0]?.activity["object"] as Record<string, unknown>;
+    // FEP-1311: when both HTTP URL and CID are present, both are emitted
+    // so recipients can verify integrity and access via IPFS.
     expect(object["attachment"]).toEqual([
       expect.objectContaining({
         type: "Video",
         mediaType: "video/mp4",
-        url: "https://cdn.example.com/did:plc:alice/bafkrei-video-1",
+        url: [
+          "https://cdn.example.com/did:plc:alice/bafkrei-video-1",
+          "ipfs://bafkrei-video-1",
+        ],
         name: "A sample bridge video",
         size: 1024,
         duration: "PT12S",
