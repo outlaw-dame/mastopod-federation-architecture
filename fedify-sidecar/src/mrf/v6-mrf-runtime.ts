@@ -96,7 +96,7 @@ export class BlockedDomainPolicy implements MrfPolicy {
   name = 'blocked-domain';
   enabled = true;
   priority = 100;
-  direction = 'both';
+  direction: MrfDirection | 'both' = 'both';
 
   private blockedDomains: Set<string>;
 
@@ -443,8 +443,8 @@ export class V6MrfRuntime {
    */
   async health(): Promise<{ status: string; connected: boolean }> {
     try {
-      await this.producer.admin().connect();
-      await this.producer.admin().disconnect();
+      await this.kafka.admin().connect();
+      await this.kafka.admin().disconnect();
       return { status: 'healthy', connected: true };
     } catch (err) {
       return { status: 'unhealthy', connected: false };

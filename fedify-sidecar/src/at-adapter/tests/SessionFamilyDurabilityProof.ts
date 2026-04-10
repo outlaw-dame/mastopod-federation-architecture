@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { DefaultAtSessionTokenService } from '../auth/DefaultAtSessionTokenService.js';
 import { RedisSessionFamilyStateStore } from '../auth/SessionFamilyStateStore.js';
 

@@ -195,7 +195,7 @@ export function secp256k1PemToMultibase(publicKeyPem: string): string {
   x.copy(xPad, 32 - x.length);
   y.copy(yPad, 32 - y.length);
 
-  const prefix = yPad[31] % 2 === 0 ? 0x02 : 0x03;
+  const prefix = yPad[31]! % 2 === 0 ? 0x02 : 0x03;
   const compressed = Buffer.concat([Buffer.from([prefix]), xPad]);
 
   // Multicodec prefix for secp256k1-pub: varint 0xe701
@@ -216,7 +216,7 @@ function _base58btcEncode(input: Buffer): string {
   for (const byte of input) {
     let carry = byte;
     for (let i = 0; i < digits.length; i++) {
-      carry += digits[i] << 8;
+      carry += digits[i]! << 8;
       digits[i] = carry % 58;
       carry = Math.floor(carry / 58);
     }
@@ -235,6 +235,6 @@ function _base58btcEncode(input: Buffer): string {
 
   const chars: string[] = [];
   for (let i = 0; i < leadingZeros; i++) chars.push('1');
-  for (let i = digits.length - 1; i >= 0; i--) chars.push(ALPHABET[digits[i]]);
+  for (let i = digits.length - 1; i >= 0; i--) chars.push(ALPHABET[digits[i]!]!);
   return chars.join('');
 }

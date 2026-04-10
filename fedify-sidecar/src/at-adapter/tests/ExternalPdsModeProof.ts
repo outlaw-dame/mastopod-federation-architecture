@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { RedisIdentityBindingRepository } from '../../core-domain/identity/RedisIdentityBindingRepository.js';
 
 const SIDEcar_BASE = process.env.UNIFIED_SIDECAR_BASE ?? 'http://localhost:8086';

@@ -83,7 +83,7 @@ export class ActivityPodsClient {
         throw new Error(`Failed to fetch actor: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as Record<string, unknown>;
       const actorData = this.mapToActorData(data);
 
       // Cache the result
@@ -149,12 +149,12 @@ export class ActivityPodsClient {
         throw new Error(`Failed to fetch key pair: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as Record<string, unknown>;
 
       // Import the keys
       const publicKey = await crypto.subtle.importKey(
         "spki",
-        this.pemToArrayBuffer(data.publicKeyPem),
+        this.pemToArrayBuffer(data.publicKeyPem as string),
         { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
         true,
         ["verify"]
@@ -162,7 +162,7 @@ export class ActivityPodsClient {
 
       const privateKey = await crypto.subtle.importKey(
         "pkcs8",
-        this.pemToArrayBuffer(data.privateKeyPem),
+        this.pemToArrayBuffer(data.privateKeyPem as string),
         { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
         true,
         ["sign"]
@@ -243,8 +243,8 @@ export class ActivityPodsClient {
         throw new Error(`Failed to request signature: ${response.status}`);
       }
 
-      const data = await response.json();
-      return data.signature;
+      const data = await response.json() as Record<string, unknown>;
+      return data.signature as string;
     } catch (error) {
       logger.error("Failed to request signature from ActivityPods", { actorId, error });
       throw error;

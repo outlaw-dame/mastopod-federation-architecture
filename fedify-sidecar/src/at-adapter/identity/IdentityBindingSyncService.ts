@@ -258,7 +258,7 @@ function toIdentityBinding(payload: BackendIdentityProjection): IdentityBinding 
     atRotationKeyRef: payload.atRotationKeyRef ?? null,
     plc: {
       opCid: null,
-      rotationKeyRef: payload.atRotationKeyRef,
+      rotationKeyRef: payload.atRotationKeyRef ?? null,
       plcUpdateState: null,
       lastSubmittedAt: null,
       lastConfirmedAt: null,

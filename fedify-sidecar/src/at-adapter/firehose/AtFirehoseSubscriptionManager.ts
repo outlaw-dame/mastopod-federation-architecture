@@ -25,7 +25,7 @@
  *   - Cursor values are validated to be non-negative integers.
  */
 
-import { AtFirehoseCursorStore } from './AtFirehoseCursorStore';
+import { AtFirehoseCursorStore } from './AtFirehoseCursorStore.js';
 
 export interface FirehoseSubscriber {
   id: string;

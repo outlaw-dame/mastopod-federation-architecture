@@ -9,7 +9,7 @@
  * Ref: https://atproto.com/specs/repository#commit-objects
  */
 
-import { AtprotoRepoRegistry } from '../../../atproto/repo/AtprotoRepoRegistry';
+import { AtprotoRepoRegistry } from '../../../atproto/repo/AtprotoRepoRegistry.js';
 
 // ---------------------------------------------------------------------------
 // Interface

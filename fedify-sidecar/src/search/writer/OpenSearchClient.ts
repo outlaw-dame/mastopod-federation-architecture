@@ -4,8 +4,8 @@
  * OpenSearch Client implementation for the unified public-content-v1 index.
  */
 
-import { PublicContentDocument } from '../models/PublicContentDocument';
-import { OpenSearchClient as IOpenSearchClient } from './PublicContentIndexWriter';
+import { PublicContentDocument } from '../models/PublicContentDocument.js';
+import { OpenSearchClient as IOpenSearchClient } from './PublicContentIndexWriter.js';
 
 export class DefaultOpenSearchClient implements IOpenSearchClient {
   private readonly indexName = 'public-content-v1';

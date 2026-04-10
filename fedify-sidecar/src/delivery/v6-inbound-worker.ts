@@ -102,7 +102,7 @@ export class V6InboundWorker {
       try {
         activity = JSON.parse(inboundRequest.body.toString());
       } catch (err) {
-        logger.warn('Failed to parse activity JSON', { error: err.message });
+        logger.warn('Failed to parse activity JSON', { error: (err as Error).message });
         return {
           statusCode: 400,
           body: { error: 'invalid_json' },
@@ -245,12 +245,12 @@ export class V6InboundWorker {
    * Parse Cavage signature header
    */
   private parseSignatureHeader(header: string): Record<string, any> {
-    const params: Record<string, string> = {};
+    const params: Record<string, any> = {};
     const regex = /(\w+)="([^"]*)"/g;
     let match;
 
     while ((match = regex.exec(header)) !== null) {
-      params[match[1]] = match[2];
+      params[match[1]!] = match[2]!;
     }
 
     if (params.signature) {
@@ -306,7 +306,8 @@ export class V6InboundWorker {
           Accept: 'application/activity+json',
           'User-Agent': this.config.userAgent,
         },
-        timeout: this.config.requestTimeoutMs,
+        headersTimeout: this.config.requestTimeoutMs,
+        bodyTimeout: this.config.requestTimeoutMs,
       });
 
       if (response.statusCode !== 200) {
@@ -335,7 +336,7 @@ export class V6InboundWorker {
   private async forwardToActivityPods(
     activity: any,
     actorUri: string,
-    request: InboundRequest
+    incomingRequest: InboundRequest
   ): Promise<{ success: boolean; permanent?: boolean; error?: string }> {
     try {
       const response = await request(
@@ -350,10 +351,11 @@ export class V6InboundWorker {
             targetInbox: `${this.config.activityPodsUrl}/inbox`,
             activity,
             verifiedActorUri: actorUri,
-            receivedAt: request.receivedAt,
-            remoteIp: request.remoteIp,
+            receivedAt: incomingRequest.receivedAt,
+            remoteIp: incomingRequest.remoteIp,
           }),
-          timeout: this.config.requestTimeoutMs,
+          headersTimeout: this.config.requestTimeoutMs,
+          bodyTimeout: this.config.requestTimeoutMs,
         }
       );
 

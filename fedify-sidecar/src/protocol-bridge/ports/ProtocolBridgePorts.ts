@@ -39,7 +39,7 @@ export interface ProjectionCommandMetadata {
 
 export interface AtAttachmentMediaHint extends Pick<
   CanonicalAttachment,
-  "attachmentId" | "mediaType" | "url" | "cid" | "byteSize" | "alt" | "width" | "height"
+  "attachmentId" | "mediaType" | "url" | "cid" | "byteSize" | "duration" | "digestMultibase" | "alt" | "width" | "height" | "focalPoint" | "blurhash"
 > {}
 
 export interface AtProjectionCommand {

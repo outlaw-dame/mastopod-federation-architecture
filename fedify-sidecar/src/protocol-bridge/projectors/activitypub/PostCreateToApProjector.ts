@@ -150,20 +150,39 @@ export function canonicalAttachmentsToApAttachments(
   attachments: readonly CanonicalAttachment[],
 ): Array<Record<string, unknown>> {
   return attachments.map((attachment) => ({
-    type: attachment.mediaType.startsWith("image/")
-      ? "Image"
-      : attachment.mediaType.startsWith("video/")
-        ? "Video"
-        : attachment.mediaType.startsWith("audio/")
-          ? "Audio"
-          : "Document",
+    type: activityPubMediaTypeForAttachment(attachment.mediaType),
     mediaType: attachment.mediaType,
-    url: attachment.url ?? attachment.cid ?? attachment.attachmentId,
+    url: attachment.url ?? toIpfsUrl(attachment.cid) ?? attachment.attachmentId,
     name: attachment.alt ?? undefined,
+    size: attachment.byteSize ?? undefined,
+    duration: attachment.duration ?? undefined,
+    digestMultibase: attachment.digestMultibase ?? undefined,
     width: attachment.width ?? undefined,
     height: attachment.height ?? undefined,
+    focalPoint: attachment.focalPoint ?? undefined,
     blurhash: attachment.blurhash ?? undefined,
   }));
+}
+
+function activityPubMediaTypeForAttachment(mediaType: string): "Image" | "Video" | "Audio" | "Document" {
+  if (mediaType.startsWith("image/")) {
+    return "Image";
+  }
+  if (mediaType.startsWith("video/")) {
+    return "Video";
+  }
+  if (mediaType.startsWith("audio/")) {
+    return "Audio";
+  }
+  return "Document";
+}
+
+function toIpfsUrl(cid: string | null | undefined): string | null {
+  if (!cid || cid.trim().length === 0) {
+    return null;
+  }
+
+  return `ipfs://${cid}`;
 }
 
 export function canonicalMentionRecipients(facets: readonly CanonicalFacet[]): string[] {

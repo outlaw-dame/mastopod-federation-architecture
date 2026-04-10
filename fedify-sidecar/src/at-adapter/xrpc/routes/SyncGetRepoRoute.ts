@@ -14,10 +14,10 @@
  * Ref: https://atproto.com/lexicon/com-atproto-sync#comatprotosyncgetrepo
  */
 
-import { AtCarExporter } from '../../repo/AtCarExporter';
-import { HandleResolutionReader, isValidDid } from '../../identity/HandleResolutionReader';
-import { AtprotoRepoRegistry } from '../../../atproto/repo/AtprotoRepoRegistry';
-import { XrpcErrors } from '../middleware/XrpcErrorMapper';
+import { AtCarExporter } from '../../repo/AtCarExporter.js';
+import { HandleResolutionReader, isValidDid } from '../../identity/HandleResolutionReader.js';
+import { AtprotoRepoRegistry } from '../../../atproto/repo/AtprotoRepoRegistry.js';
+import { XrpcErrors } from '../middleware/XrpcErrorMapper.js';
 import type { IdentityBindingRepository } from '../../../core-domain/identity/IdentityBindingRepository.js';
 import type { ExternalReadGateway } from '../../external/ExternalReadGateway.js';
 import { isExternalAtprotoBinding } from '../../external/ExternalAccountMode.js';

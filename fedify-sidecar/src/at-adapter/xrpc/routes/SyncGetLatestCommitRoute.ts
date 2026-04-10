@@ -7,10 +7,10 @@
  * Ref: https://atproto.com/lexicon/com-atproto-sync#comatprotosyncgetlatestcommit
  */
 
-import { AtprotoRepoRegistry } from '../../../atproto/repo/AtprotoRepoRegistry';
-import { HandleResolutionReader, isValidDid } from '../../identity/HandleResolutionReader';
-import { XrpcErrors } from '../middleware/XrpcErrorMapper';
-import { RepoRevLookup, withRepoRevHeader } from '../middleware/AtRepoRevHeader';
+import { AtprotoRepoRegistry } from '../../../atproto/repo/AtprotoRepoRegistry.js';
+import { HandleResolutionReader, isValidDid } from '../../identity/HandleResolutionReader.js';
+import { XrpcErrors } from '../middleware/XrpcErrorMapper.js';
+import { RepoRevLookup, withRepoRevHeader } from '../middleware/AtRepoRevHeader.js';
 import type { IdentityBindingRepository } from '../../../core-domain/identity/IdentityBindingRepository.js';
 import type { ExternalReadGateway } from '../../external/ExternalReadGateway.js';
 import { isExternalAtprotoBinding } from '../../external/ExternalAccountMode.js';

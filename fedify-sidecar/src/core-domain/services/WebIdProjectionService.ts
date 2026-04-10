@@ -261,10 +261,12 @@ export class WebIdProjectionService {
     webIdLinks: { sameAs: string[]; accounts: string[] },
     actorLinks: string[]
   ): boolean {
+    const actorLink = actorLinks[0] ?? '';
+
     // Check if actor appears in WebID
     const actorInWebId =
-      webIdLinks.sameAs.some((link) => link.includes(actorLinks[0])) ||
-      webIdLinks.accounts.some((link) => link.includes(actorLinks[0]));
+      webIdLinks.sameAs.some((link) => link.includes(actorLink)) ||
+      webIdLinks.accounts.some((link) => link.includes(actorLink));
 
     // Check if WebID appears in actor alsoKnownAs
     const webIdInActor = actorLinks.some((link) => link.includes('profile/card#me'));
@@ -347,6 +349,6 @@ export class WebIdProjectionService {
       '"': '&quot;',
       "'": '&#039;',
     };
-    return text.replace(/[&<>"']/g, (char) => map[char]);
+    return text.replace(/[&<>"']/g, (char) => map[char] ?? char);
   }
 }

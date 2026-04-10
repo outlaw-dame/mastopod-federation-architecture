@@ -237,7 +237,7 @@ export class SigningClient {
   async signOne(req: Omit<SignRequest, "requestId">): Promise<SignResult> {
     const requestId = `sig-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const results = await this.signBatch([{ ...req, requestId }]);
-    return results[0];
+    return results[0]!;
   }
 
   /**
@@ -540,7 +540,7 @@ export class SigningClient {
     // All retries exhausted
     logger.error("Signing API: unavailable after retries", {
       attempts: this.config.maxRetries,
-      error: lastErr?.message,
+      error: (lastErr as Error | null)?.message,
     });
     return [
       ...earlyErrors,
@@ -549,7 +549,7 @@ export class SigningClient {
         ok: false as const,
         error: {
           code: "INTERNAL_ERROR" as SigningErrorCode,
-          message: lastErr?.message ?? "Signing API unavailable",
+          message: (lastErr as Error | null)?.message ?? "Signing API unavailable",
           retryable: true,
         },
       })),

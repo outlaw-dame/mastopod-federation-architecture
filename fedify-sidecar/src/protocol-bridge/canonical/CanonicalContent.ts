@@ -30,10 +30,13 @@ export interface CanonicalAttachment {
   url?: string | null;
   cid?: string | null;
   byteSize?: number | null;
+  duration?: string | number | null;
+  digestMultibase?: string | null;
   role?: CanonicalAttachmentRole | null;
   alt?: string | null;
   width?: number | null;
   height?: number | null;
+  focalPoint?: [number, number] | null;
   blurhash?: string | null;
 }
 

@@ -147,7 +147,7 @@ class InMemoryIdentityBindingRepository implements IdentityBindingRepository {
     for (const id of ids) { const b = this.store.get(id); if (b) m.set(id, b); }
     return m;
   }
-  async transaction<T>(cb: (r: IdentityBindingRepository) => Promise<T>) { return cb(this); }
+  async transaction<T>(cb: (r: IdentityBindingRepository) => Promise<T>): Promise<T> { return cb(this); }
   async health() { return true; }
 
   private _write(b: IdentityBinding) {
@@ -227,8 +227,13 @@ async function buildDeps() {
     did: TEST_DID,
     rev: '0',
     rootCid: null,
-    collections: [{ nsid: 'app.bsky.feed.post' }],
+      commits: [],
+    collections: [{ nsid: 'app.bsky.feed.post', recordCount: 0, lastUpdated: now }],
+      totalRecords: 0,
+      sizeBytes: 0,
     status: 'active',
+      lastCommitAt: now,
+      snapshotAt: now,
     createdAt: now,
     updatedAt: now,
   };

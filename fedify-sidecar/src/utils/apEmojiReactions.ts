@@ -61,7 +61,7 @@ function normalizeUnicodeEmoji(value: unknown): string | null {
     return null;
   }
 
-  return EMOJI_GRAPHEME_RE.test(graphemes[0]) ? graphemes[0] : null;
+  return EMOJI_GRAPHEME_RE.test(graphemes[0]!) ? graphemes[0]! : null;
 }
 
 function hasType(activity: AnyRecord, ...allowedTypes: string[]): boolean {
@@ -98,6 +98,27 @@ export function extractApEmojiReactionContent(activity: unknown): string | undef
   }
 
   const apActivity = activity as AnyRecord;
+  const isEmojiReact = hasType(
+    apActivity,
+    'EmojiReact',
+    'litepub:EmojiReact',
+    'http://litepub.social/ns#EmojiReact'
+  );
+
+  if (isEmojiReact && typeof apActivity.content === 'string') {
+    const direct = apActivity.content.trim().match(SHORTCODE_RE);
+    if (direct) {
+      return `:${direct[1]}:`;
+    }
+
+    const unicodeEmoji = normalizeUnicodeEmoji(apActivity.content);
+    if (unicodeEmoji) {
+      return unicodeEmoji;
+    }
+
+    return undefined;
+  }
+
   const shortcode = normalizeShortcode(apActivity.content);
   if (shortcode) {
     return shortcode;

@@ -5,7 +5,7 @@
  * Maps canonicalId <-> AP URI <-> AT DID/URI.
  */
 
-import { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository';
+import { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
 
 export interface ResolvedIdentity {
   canonicalId?: string;

@@ -561,9 +561,13 @@ function toAttachment(rawAttachment: unknown, fallbackId: string): CanonicalAtta
     mediaType,
     url,
     alt: asString(attachment["name"]) ?? asString(attachment["summary"]) ?? null,
+    byteSize: asAttachmentByteSize(attachment),
     width: asOptionalNumber(attachment["width"]),
     height: asOptionalNumber(attachment["height"]),
-    blurhash: asString(attachment["blurhash"]) ?? null,
+    duration: asOptionalScalar(attachment["duration"]),
+    digestMultibase: asString(attachment["digestMultibase"]) ?? sha256HexToDigestMultibase(asString(attachment["sha256"])),
+    focalPoint: asFocalPoint(attachment["focalPoint"]),
+    blurhash: asString(attachment["blurhash"]) ?? asString(attachment["blurHash"]) ?? null,
   };
 }
 
@@ -653,6 +657,43 @@ export function asString(value: unknown): string | null {
 
 function asOptionalNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asAttachmentByteSize(value: Record<string, unknown>): number | null {
+  return asOptionalNumber(value["size"]) ?? asOptionalNumber(value["byteSize"]);
+}
+
+function asOptionalScalar(value: unknown): string | number | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+
+  return asOptionalNumber(value);
+}
+
+function asFocalPoint(value: unknown): [number, number] | null {
+  if (Array.isArray(value) && value.length >= 2) {
+    const x = asOptionalNumber(value[0]);
+    const y = asOptionalNumber(value[1]);
+    return x != null && y != null ? [x, y] : null;
+  }
+
+  const object = asObject(value);
+  if (!object) {
+    return null;
+  }
+
+  const x = asOptionalNumber(object["x"]);
+  const y = asOptionalNumber(object["y"]);
+  return x != null && y != null ? [x, y] : null;
+}
+
+function sha256HexToDigestMultibase(value: string | null): string | null {
+  if (!value || !/^[a-fA-F0-9]{64}$/.test(value)) {
+    return null;
+  }
+
+  return `u${Buffer.from(value, "hex").toString("base64url")}`;
 }
 
 export function asObject(value: unknown): Record<string, unknown> | null {

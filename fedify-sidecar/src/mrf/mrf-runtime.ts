@@ -264,7 +264,7 @@ export class MrfRuntime {
   /**
    * Enable/disable a policy
    */
-  setPolicy Enabled(policyName: string, enabled: boolean): void {
+  setPolicyEnabled(policyName: string, enabled: boolean): void {
     const policy = this.policies.find((p) => p.name === policyName);
     if (policy) {
       policy.enabled = enabled;
@@ -283,8 +283,8 @@ export class MrfRuntime {
    */
   async health(): Promise<{ status: string; connected: boolean }> {
     try {
-      await this.producer.admin().connect();
-      await this.producer.admin().disconnect();
+      await this.kafka.admin().connect();
+      await this.kafka.admin().disconnect();
       return { status: 'healthy', connected: true };
     } catch (err) {
       return { status: 'unhealthy', connected: false };

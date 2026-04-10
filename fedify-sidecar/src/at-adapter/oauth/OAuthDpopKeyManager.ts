@@ -57,7 +57,7 @@ export async function generateDpopKeypair(): Promise<DpopKeypair> {
 
   return {
     privateKeyJwk: JSON.stringify(privateJwk),
-    publicKeyJwk: publicJwk,
+    publicKeyJwk: publicJwk as unknown as Record<string, unknown>,
     thumbprint,
   };
 }
@@ -91,7 +91,7 @@ export interface BuildDpopProofOptions {
  */
 export async function buildDpopProof(opts: BuildDpopProofOptions): Promise<string> {
   const privateJwk  = JSON.parse(opts.privateKeyJwk) as Record<string, unknown>;
-  const privateKey  = await importJWK(privateJwk, 'ES256');
+  const privateKey  = await importJWK(privateJwk as unknown as Parameters<typeof importJWK>[0], 'ES256');
 
   // Strip private key material for the header jwk (MUST be public key only)
   const { d: _d, ...publicJwk } = privateJwk;
@@ -115,6 +115,6 @@ export async function buildDpopProof(opts: BuildDpopProofOptions): Promise<strin
   }
 
   return new SignJWT(payload)
-    .setProtectedHeader({ alg: 'ES256', typ: 'dpop+jwt', jwk: publicJwk })
+    .setProtectedHeader({ alg: 'ES256', typ: 'dpop+jwt', jwk: publicJwk as unknown as Parameters<typeof importJWK>[0] })
     .sign(privateKey);
 }

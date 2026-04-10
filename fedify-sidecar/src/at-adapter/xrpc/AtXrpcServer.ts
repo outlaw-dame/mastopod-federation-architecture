@@ -28,36 +28,36 @@
  * Ref: https://atproto.com/specs/xrpc
  */
 
-import { AtRecordReader } from '../repo/AtRecordReader';
-import { AtCarExporter } from '../repo/AtCarExporter';
+import { AtRecordReader } from '../repo/AtRecordReader.js';
+import { AtCarExporter } from '../repo/AtCarExporter.js';
 import type { AtBlobStore } from '../blob/AtBlobStore.js';
-import { HandleResolutionReader } from '../identity/HandleResolutionReader';
-import { AtFirehoseSubscriptionManager } from '../firehose/AtFirehoseSubscriptionManager';
-import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry';
-import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository';
-import { SyncGetRepoRoute } from './routes/SyncGetRepoRoute';
-import { SyncGetLatestCommitRoute } from './routes/SyncGetLatestCommitRoute';
+import { HandleResolutionReader } from '../identity/HandleResolutionReader.js';
+import { AtFirehoseSubscriptionManager } from '../firehose/AtFirehoseSubscriptionManager.js';
+import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
+import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
+import { SyncGetRepoRoute } from './routes/SyncGetRepoRoute.js';
+import { SyncGetLatestCommitRoute } from './routes/SyncGetLatestCommitRoute.js';
 import { SyncGetBlobRoute } from './routes/SyncGetBlobRoute.js';
-import { RepoGetRecordRoute } from './routes/RepoGetRecordRoute';
-import { RepoListRecordsRoute } from './routes/RepoListRecordsRoute';
-import { IdentityResolveHandleRoute } from './routes/IdentityResolveHandleRoute';
-import { SubscribeReposRoute } from './routes/SubscribeReposRoute';
-import { DefaultRepoRevLookup } from './middleware/AtRepoRevHeader';
-import { mapToXrpcError, XrpcErrors } from './middleware/XrpcErrorMapper';
+import { RepoGetRecordRoute } from './routes/RepoGetRecordRoute.js';
+import { RepoListRecordsRoute } from './routes/RepoListRecordsRoute.js';
+import { IdentityResolveHandleRoute } from './routes/IdentityResolveHandleRoute.js';
+import { SubscribeReposRoute } from './routes/SubscribeReposRoute.js';
+import { DefaultRepoRevLookup } from './middleware/AtRepoRevHeader.js';
+import { mapToXrpcError, XrpcErrors } from './middleware/XrpcErrorMapper.js';
 // Phase 7: authenticated write + session routes
 import {
   ServerDescribeServerRoute,
   type ServerDescribeServerConfig,
-} from './routes/ServerDescribeServerRoute';
-import { ServerCreateSessionRoute } from './routes/ServerCreateSessionRoute';
-import { ServerRefreshSessionRoute } from './routes/ServerRefreshSessionRoute';
-import { RepoCreateRecordRoute } from './routes/RepoCreateRecordRoute';
-import { RepoPutRecordRoute } from './routes/RepoPutRecordRoute';
-import { RepoDeleteRecordRoute } from './routes/RepoDeleteRecordRoute';
-import { RepoDescribeRepoRoute } from './routes/RepoDescribeRepoRoute';
-import type { AtSessionService, AtAccountResolver, AtPasswordVerifier } from '../auth/AtSessionTypes';
-import type { AtWriteGateway } from '../writes/AtWriteTypes';
-import type { AtSessionContext } from '../auth/AtSessionTypes';
+} from './routes/ServerDescribeServerRoute.js';
+import { ServerCreateSessionRoute } from './routes/ServerCreateSessionRoute.js';
+import { ServerRefreshSessionRoute } from './routes/ServerRefreshSessionRoute.js';
+import { RepoCreateRecordRoute } from './routes/RepoCreateRecordRoute.js';
+import { RepoPutRecordRoute } from './routes/RepoPutRecordRoute.js';
+import { RepoDeleteRecordRoute } from './routes/RepoDeleteRecordRoute.js';
+import { RepoDescribeRepoRoute } from './routes/RepoDescribeRepoRoute.js';
+import type { AtSessionService, AtAccountResolver, AtPasswordVerifier } from '../auth/AtSessionTypes.js';
+import type { AtWriteGateway } from '../writes/AtWriteTypes.js';
+import type { AtSessionContext } from '../auth/AtSessionTypes.js';
 import type { ExternalWriteGateway } from '../external/ExternalWriteGateway.js';
 import type { ExternalReadGateway } from '../external/ExternalReadGateway.js';
 

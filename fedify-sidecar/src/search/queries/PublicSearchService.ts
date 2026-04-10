@@ -5,8 +5,8 @@
  * Exposes three query modes: lexical, semantic, and hybrid.
  */
 
-import { HybridQueryBuilder } from './HybridQueryBuilder';
-import { EmbeddingService } from '../embeddings/EmbeddingIngestWorker';
+import { HybridQueryBuilder } from './HybridQueryBuilder.js';
+import { EmbeddingService } from '../embeddings/EmbeddingIngestWorker.js';
 
 export interface PublicSearchInput {
   query: string;

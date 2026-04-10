@@ -24,17 +24,17 @@
  * Ref: https://atproto.com/specs/event-stream
  */
 
-import { AtCommitV1 } from '../events/AtRepoEvents';
-import { AtIdentityV1, AtAccountV1 } from '../../core-domain/events/CoreIdentityEvents';
+import { AtCommitV1 } from '../events/AtRepoEvents.js';
+import { AtIdentityV1, AtAccountV1 } from '../../core-domain/events/CoreIdentityEvents.js';
 import {
   AtFirehoseEventEncoder,
   CommitFirehoseEvent,
   IdentityFirehoseEvent,
   AccountFirehoseEvent
-} from './AtFirehoseEventEncoder';
-import { AtFirehoseCursorStore } from './AtFirehoseCursorStore';
-import { AtFirehoseSubscriptionManager } from './AtFirehoseSubscriptionManager';
-import { AtRepoDiffBuilder } from '../repo/AtRepoDiffBuilder';
+} from './AtFirehoseEventEncoder.js';
+import { AtFirehoseCursorStore } from './AtFirehoseCursorStore.js';
+import { AtFirehoseSubscriptionManager } from './AtFirehoseSubscriptionManager.js';
+import { AtRepoDiffBuilder } from '../repo/AtRepoDiffBuilder.js';
 
 // ---------------------------------------------------------------------------
 // Retry helper

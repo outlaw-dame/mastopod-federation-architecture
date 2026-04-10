@@ -4,14 +4,14 @@
  * Provides structured logging with configurable levels and formats.
  */
 
-import pino from "pino";
+import { pino, type LoggerOptions } from "pino";
 
 // Get log level from environment
 const level = process.env.LOG_LEVEL ?? "info";
 const format = process.env.LOG_FORMAT ?? "json";
 
 // Create pino logger
-const pinoOptions: pino.LoggerOptions = {
+const pinoOptions: LoggerOptions = {
   level,
   base: {
     service: "fedify-sidecar",
@@ -21,18 +21,21 @@ const pinoOptions: pino.LoggerOptions = {
 };
 
 // Use pretty printing in development
-const transport = format === "pretty"
-  ? pino.transport({
-      target: "pino-pretty",
-      options: {
-        colorize: true,
-        translateTime: "SYS:standard",
-        ignore: "pid,hostname",
-      },
-    })
-  : undefined;
-
-export const logger = pino(pinoOptions, transport);
+export const logger = pino(
+  format === "pretty"
+    ? {
+        ...pinoOptions,
+        transport: {
+          target: "pino-pretty",
+          options: {
+            colorize: true,
+            translateTime: "SYS:standard",
+            ignore: "pid,hostname",
+          },
+        },
+      }
+    : pinoOptions,
+);
 
 // Export log levels for convenience
 export const LogLevel = {

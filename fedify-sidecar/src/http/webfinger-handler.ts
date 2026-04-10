@@ -67,7 +67,7 @@ export async function handleWebFinger(
   reply: FastifyReply,
   config: ActorDocumentConfig
 ): Promise<void> {
-  const resource = request.query.resource as string;
+  const resource = (request.query as { resource?: string })?.resource ?? '';
 
   if (!resource) {
     return reply.status(400).send({
@@ -88,7 +88,8 @@ export async function handleWebFinger(
         error_description: 'Invalid acct: format',
       });
     }
-    [username, domain] = parts;
+    username = parts[0]!;
+    domain = parts[1]!;
   } else if (resource.startsWith('https://') || resource.startsWith('http://')) {
     try {
       const url = new URL(resource);
@@ -97,7 +98,7 @@ export async function handleWebFinger(
       if (pathParts.length < 2 || pathParts[0] !== 'users') {
         throw new Error('Invalid path');
       }
-      username = pathParts[1];
+      username = pathParts[1]!;
     } catch (err) {
       return reply.status(400).send({
         error: 'invalid_resource',
@@ -311,15 +312,15 @@ export async function registerWebFingerHandlers(
   });
 
   fastify.get('/users/:username', async (request, reply) => {
-    await handleActorDocument(request, reply, config);
+    await handleActorDocument(request as FastifyRequest<{ Params: { username: string } }>, reply, config);
   });
 
   fastify.get('/users/:username/followers', async (request, reply) => {
-    await handleFollowersCollection(request, reply, config);
+    await handleFollowersCollection(request as FastifyRequest<{ Params: { username: string } }>, reply, config);
   });
 
   fastify.get('/users/:username/following', async (request, reply) => {
-    await handleFollowingCollection(request, reply, config);
+    await handleFollowingCollection(request as FastifyRequest<{ Params: { username: string } }>, reply, config);
   });
 
   logger.info('WebFinger and actor handlers registered');

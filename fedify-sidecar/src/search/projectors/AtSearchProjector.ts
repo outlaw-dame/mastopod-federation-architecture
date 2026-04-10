@@ -6,11 +6,11 @@
  * Outputs: search.public.upsert.v1, search.public.delete.v1
  */
 
-import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents';
-import { IdentityAliasResolver } from '../identity/IdentityAliasResolver';
-import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy';
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
-import { AtCommitV1 } from '../../at-adapter/events/AtRepoEvents';
+import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents.js';
+import { IdentityAliasResolver } from '../identity/IdentityAliasResolver.js';
+import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy.js';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
+import { AtCommitV1 } from '../../at-adapter/events/AtRepoEvents.js';
 import { extractAtprotoTagsFromFacets, extractAtprotoTagsFromRecordTags } from '../../utils/hashtags.js';
 import { extractEmojisFromText } from '../../utils/emojis.js';
 
@@ -43,6 +43,7 @@ export class AtSearchProjector {
         const del: SearchPublicDeleteV1 = {
           stableDocId,
           reason: 'at_delete',
+          deleteMode: 'soft',
           deletedAt: event.emittedAt || new Date().toISOString()
         };
 
@@ -85,6 +86,7 @@ export class AtSearchProjector {
 
       const upsert: SearchPublicUpsertV1 = {
         stableDocId,
+        upsertKind: 'full',
         canonicalContentId: sourceKind === 'local' ? ((op as any).canonicalRefId || op.rkey) : undefined,
         protocolSource: 'at',
         sourceKind,

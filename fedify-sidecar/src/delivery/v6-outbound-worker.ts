@@ -162,7 +162,7 @@ export class V6OutboundWorker {
     }
 
     // Resolve offset after processing batch
-    resolveOffset(batch.messages[batch.messages.length - 1].offset);
+    resolveOffset(batch.messages.at(-1)!.offset);
   }
 
   /**
@@ -188,7 +188,7 @@ export class V6OutboundWorker {
       }
 
       // Check domain blocking
-      const domain = new URL(event.recipients[0]).hostname;
+      const domain = new URL(event.recipients[0]!).hostname;
       const isBlocked = await this.deliveryState.isDomainBlocked(domain);
       if (isBlocked) {
         logger.info('Domain is blocked', { domain, jobId: event.jobId });
@@ -319,7 +319,8 @@ export class V6OutboundWorker {
           body: JSON.stringify({
             requests: [signingRequest],
           }),
-          timeout: this.config.requestTimeoutMs,
+          headersTimeout: this.config.requestTimeoutMs,
+          bodyTimeout: this.config.requestTimeoutMs,
         }
       );
 
@@ -371,7 +372,8 @@ export class V6OutboundWorker {
           ...signedHeaders,
         },
         body: JSON.stringify(activity),
-        timeout: this.config.requestTimeoutMs,
+        headersTimeout: this.config.requestTimeoutMs,
+        bodyTimeout: this.config.requestTimeoutMs,
       });
 
       if (response.statusCode >= 200 && response.statusCode < 300) {

@@ -61,6 +61,7 @@ export interface OutboundJob {
   attempt: number;
   maxAttempts: number;
   notBeforeMs: number;
+  lastError?: string;
   meta?: {
     isPublicIndexable?: boolean;
     isDeleteOrTombstone?: boolean;
@@ -203,16 +204,18 @@ export class RedisStreamsQueue {
           { COUNT: 10 }
         );
 
-        for (const [messageId, fields] of pending.messages) {
-          const envelope = this.deserializeInboundEnvelope(messageId, fields);
-          yield { messageId, envelope };
+        for (const msg of pending.messages) {
+          if (!msg) continue;
+          const id = String(msg.id);
+          const envelope = this.deserializeInboundEnvelope(id, msg.message as Record<string, string>);
+          yield { messageId: id, envelope };
         }
 
         // Read new messages
         const messages = await this.redis.xReadGroup(
-          { key: this.inboundStreamKey, id: lastId },
           this.consumerGroup,
           this.consumerId,
+          { key: this.inboundStreamKey, id: lastId },
           { COUNT: 10, BLOCK: this.blockTimeoutMs }
         );
 
@@ -220,11 +223,11 @@ export class RedisStreamsQueue {
           continue;
         }
 
-        for (const [, streamMessages] of messages) {
-          for (const [messageId, fields] of streamMessages) {
-            lastId = messageId;
-            const envelope = this.deserializeInboundEnvelope(messageId, fields);
-            yield { messageId, envelope };
+        for (const stream of messages) {
+          for (const msg of stream.messages) {
+            lastId = String(msg.id);
+            const envelope = this.deserializeInboundEnvelope(lastId, msg.message as Record<string, string>);
+            yield { messageId: lastId, envelope };
           }
         }
       } catch (err: any) {
@@ -236,13 +239,13 @@ export class RedisStreamsQueue {
 
   private deserializeInboundEnvelope(messageId: string, fields: Record<string, string>): InboundEnvelope {
     return {
-      envelopeId: fields.envelopeId,
-      method: fields.method,
-      path: fields.path,
-      headers: JSON.parse(fields.headers),
-      body: fields.body,
-      remoteIp: fields.remoteIp,
-      receivedAt: parseInt(fields.receivedAt, 10),
+      envelopeId: fields['envelopeId']!,
+      method: fields['method']!,
+      path: fields['path']!,
+      headers: JSON.parse(fields['headers']!),
+      body: fields['body']!,
+      remoteIp: fields['remoteIp']!,
+      receivedAt: parseInt(fields['receivedAt']!, 10),
     };
   }
 
@@ -291,16 +294,18 @@ export class RedisStreamsQueue {
           { COUNT: 10 }
         );
 
-        for (const [messageId, fields] of pending.messages) {
-          const job = this.deserializeOutboundJob(messageId, fields);
-          yield { messageId, job };
+        for (const msg of pending.messages) {
+          if (!msg) continue;
+          const id = String(msg.id);
+          const job = this.deserializeOutboundJob(id, msg.message as Record<string, string>);
+          yield { messageId: id, job };
         }
 
         // Read new messages
         const messages = await this.redis.xReadGroup(
-          { key: this.outboundStreamKey, id: lastId },
           this.consumerGroup,
           this.consumerId,
+          { key: this.outboundStreamKey, id: lastId },
           { COUNT: 10, BLOCK: this.blockTimeoutMs }
         );
 
@@ -308,11 +313,11 @@ export class RedisStreamsQueue {
           continue;
         }
 
-        for (const [, streamMessages] of messages) {
-          for (const [messageId, fields] of streamMessages) {
-            lastId = messageId;
-            const job = this.deserializeOutboundJob(messageId, fields);
-            yield { messageId, job };
+        for (const stream of messages) {
+          for (const msg of stream.messages) {
+            lastId = String(msg.id);
+            const job = this.deserializeOutboundJob(lastId, msg.message as Record<string, string>);
+            yield { messageId: lastId, job };
           }
         }
       } catch (err: any) {
@@ -324,16 +329,16 @@ export class RedisStreamsQueue {
 
   private deserializeOutboundJob(messageId: string, fields: Record<string, string>): OutboundJob {
     return {
-      jobId: fields.jobId,
-      activityId: fields.activityId,
-      actorUri: fields.actorUri,
-      activity: fields.activity,
-      targetInbox: fields.targetInbox,
-      targetDomain: fields.targetDomain,
-      attempt: parseInt(fields.attempt, 10),
-      maxAttempts: parseInt(fields.maxAttempts, 10),
-      notBeforeMs: parseInt(fields.notBeforeMs, 10),
-      meta: fields.meta ? JSON.parse(fields.meta) : undefined,
+      jobId: fields['jobId']!,
+      activityId: fields['activityId']!,
+      actorUri: fields['actorUri']!,
+      activity: fields['activity']!,
+      targetInbox: fields['targetInbox']!,
+      targetDomain: fields['targetDomain']!,
+      attempt: parseInt(fields['attempt']!, 10),
+      maxAttempts: parseInt(fields['maxAttempts']!, 10),
+      notBeforeMs: parseInt(fields['notBeforeMs']!, 10),
+      meta: fields['meta'] ? JSON.parse(fields['meta']) : undefined,
     };
   }
 
@@ -487,6 +492,45 @@ export class RedisStreamsQueue {
       outboundQueueLength: outboundLen,
       dlqLength: dlqLen,
     };
+  }
+
+  // ==========================================================================
+  // Stream Metrics
+  // ==========================================================================
+
+  async getStreamLength(type: "inbound" | "outbound"): Promise<number> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+    const key = type === "inbound" ? this.inboundStreamKey : this.outboundStreamKey;
+    return this.redis.xLen(key);
+  }
+
+  async getPendingCount(type: "inbound" | "outbound"): Promise<number> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+    const key = type === "inbound" ? this.inboundStreamKey : this.outboundStreamKey;
+    const info = await this.redis.xPending(key, this.consumerGroup);
+    return info.pending;
+  }
+
+  // ==========================================================================
+  // Actor Document Cache
+  // ==========================================================================
+
+  async getCachedActorDoc(actorUri: string): Promise<Record<string, unknown> | null> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+    const cacheKey = `ap:actor-cache:${actorUri}`;
+    const raw = await this.redis.get(cacheKey);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  async cacheActorDoc(actorUri: string, doc: Record<string, unknown>, ttlSeconds = 300): Promise<void> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+    const cacheKey = `ap:actor-cache:${actorUri}`;
+    await this.redis.setEx(cacheKey, ttlSeconds, JSON.stringify(doc));
   }
 }
 

@@ -61,15 +61,15 @@ export interface AtFirehoseEventEncoder {
 
 export class DefaultAtFirehoseEventEncoder implements AtFirehoseEventEncoder {
   encodeCommit(evt: CommitFirehoseEvent): Uint8Array {
-    return this._encode('#commit', evt);
+    return this._encode('#commit', evt as unknown as Record<string, unknown>);
   }
 
   encodeIdentity(evt: IdentityFirehoseEvent): Uint8Array {
-    return this._encode('#identity', evt);
+    return this._encode('#identity', evt as unknown as Record<string, unknown>);
   }
 
   encodeAccount(evt: AccountFirehoseEvent): Uint8Array {
-    return this._encode('#account', evt);
+    return this._encode('#account', evt as unknown as Record<string, unknown>);
   }
 
   /**

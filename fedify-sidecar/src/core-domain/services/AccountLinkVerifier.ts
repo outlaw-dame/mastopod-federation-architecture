@@ -1,1 +1,308 @@
-/**\n * V6.5 Account Link Verifier - Bidirectional Account Link Verification\n *\n * Verifies that account links are bidirectional and authentic:\n * - ActivityPub actor includes ATProto DID in alsoKnownAs\n * - ATProto DID document includes ActivityPub actor in alsoKnownAs\n * - WebID includes both in RDF triples\n *\n * This ensures no account takeover or spoofing is possible.\n */\n\nimport { IdentityBinding, AccountLinkVerificationStatus } from '../identity/IdentityBinding.js';\n\n/**\n * Link verification result\n */\nexport interface LinkVerificationResult {\n  /**\n   * Overall verification status\n   */\n  status: AccountLinkVerificationStatus;\n\n  /**\n   * Actor document verification\n   */\n  actorDocumentVerified: boolean;\n\n  /**\n   * DID document verification\n   */\n  didDocumentVerified: boolean;\n\n  /**\n   * WebID document verification\n   */\n  webIdDocumentVerified: boolean;\n\n  /**\n   * Verification errors\n   */\n  errors: string[];\n\n  /**\n   * Verification timestamp\n   */\n  verifiedAt: string;\n}\n\n/**\n * Account Link Verifier\n *\n * Verifies bidirectional account links.\n */\nexport class AccountLinkVerifier {\n  /**\n   * HTTP request timeout (milliseconds)\n   */\n  private readonly HTTP_TIMEOUT_MS = 15000;\n\n  /**\n   * Verify account link\n   *\n   * @param binding - The identity binding\n   * @returns Verification result\n   */\n  async verifyAccountLink(binding: IdentityBinding): Promise<LinkVerificationResult> {\n    const errors: string[] = [];\n    let actorDocumentVerified = false;\n    let didDocumentVerified = false;\n    let webIdDocumentVerified = false;\n    const now = new Date().toISOString();\n\n    // Verify ActivityPub actor document\n    try {\n      actorDocumentVerified = await this.verifyActorDocument(binding);\n      if (!actorDocumentVerified) {\n        errors.push('ActivityPub actor document does not include ATProto DID');\n      }\n    } catch (error) {\n      errors.push(\n        `Failed to verify actor document: ${error instanceof Error ? error.message : String(error)}`\n      );\n    }\n\n    // Verify ATProto DID document\n    if (binding.atprotoDid) {\n      try {\n        didDocumentVerified = await this.verifyDidDocument(binding);\n        if (!didDocumentVerified) {\n          errors.push('ATProto DID document does not include ActivityPub actor');\n        }\n      } catch (error) {\n        errors.push(\n          `Failed to verify DID document: ${error instanceof Error ? error.message : String(error)}`\n        );\n      }\n    }\n\n    // Verify WebID document\n    try {\n      webIdDocumentVerified = await this.verifyWebIdDocument(binding);\n      if (!webIdDocumentVerified) {\n        errors.push('WebID document does not include both identities');\n      }\n    } catch (error) {\n      errors.push(\n        `Failed to verify WebID document: ${error instanceof Error ? error.message : String(error)}`\n      );\n    }\n\n    // Determine overall status\n    let status: AccountLinkVerificationStatus;\n    if (errors.length === 0) {\n      status = 'verified';\n    } else if (actorDocumentVerified && webIdDocumentVerified) {\n      status = 'partial'; // At least AP and WebID are verified\n    } else {\n      status = 'unverified';\n    }\n\n    return {\n      status,\n      actorDocumentVerified,\n      didDocumentVerified,\n      webIdDocumentVerified,\n      errors,\n      verifiedAt: now,\n    };\n  }\n\n  /**\n   * Verify ActivityPub actor document\n   *\n   * @param binding - The identity binding\n   * @returns true if verified\n   * @throws Error on fetch failure\n   */\n  private async verifyActorDocument(binding: IdentityBinding): Promise<boolean> {\n    try {\n      const response = await fetch(binding.activityPubActorUri, {\n        method: 'GET',\n        headers: {\n          'Accept': 'application/activity+json',\n        },\n        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),\n      });\n\n      if (!response.ok) {\n        throw new Error(`HTTP ${response.status}`);\n      }\n\n      const actor = (await response.json()) as any;\n\n      // Check alsoKnownAs\n      const alsoKnownAs = actor.alsoKnownAs || [];\n      const aliases = Array.isArray(alsoKnownAs) ? alsoKnownAs : [alsoKnownAs];\n\n      // Check for ATProto DID\n      if (binding.atprotoDid) {\n        return aliases.some(\n          (alias: string) =>\n            alias === binding.atprotoDid ||\n            alias === `at://${binding.atprotoDid}` ||\n            alias.includes(binding.atprotoDid)\n        );\n      }\n\n      return false;\n    } catch (error) {\n      throw new Error(\n        `Failed to fetch actor document: ${error instanceof Error ? error.message : String(error)}`\n      );\n    }\n  }\n\n  /**\n   * Verify ATProto DID document\n   *\n   * @param binding - The identity binding\n   * @returns true if verified\n   * @throws Error on fetch failure\n   */\n  private async verifyDidDocument(binding: IdentityBinding): Promise<boolean> {\n    if (!binding.atprotoDid) {\n      return false;\n    }\n\n    try {\n      // Resolve DID to document\n      const response = await fetch(`https://plc.directory/${binding.atprotoDid}`, {\n        method: 'GET',\n        headers: {\n          'Accept': 'application/json',\n        },\n        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),\n      });\n\n      if (!response.ok) {\n        throw new Error(`HTTP ${response.status}`);\n      }\n\n      const entry = (await response.json()) as any;\n      const didDoc = entry.operation || {};\n\n      // Check alsoKnownAs\n      const alsoKnownAs = didDoc.alsoKnownAs || [];\n\n      // Check for ActivityPub actor\n      return alsoKnownAs.some(\n        (alias: string) =>\n          alias === binding.activityPubActorUri || alias.includes(binding.activityPubActorUri)\n      );\n    } catch (error) {\n      throw new Error(\n        `Failed to fetch DID document: ${error instanceof Error ? error.message : String(error)}`\n      );\n    }\n  }\n\n  /**\n   * Verify WebID document\n   *\n   * @param binding - The identity binding\n   * @returns true if verified\n   * @throws Error on fetch failure\n   */\n  private async verifyWebIdDocument(binding: IdentityBinding): Promise<boolean> {\n    try {\n      const response = await fetch(binding.webId, {\n        method: 'GET',\n        headers: {\n          'Accept': 'application/ld+json, application/json',\n        },\n        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),\n      });\n\n      if (!response.ok) {\n        throw new Error(`HTTP ${response.status}`);\n      }\n\n      const webId = (await response.json()) as any;\n\n      // Check schema:sameAs\n      const sameAs = webId.sameAs || [];\n      const sameAsArray = Array.isArray(sameAs) ? sameAs : [sameAs];\n\n      const hasSameAsAp = sameAsArray.some((alias: string) =>\n        alias.includes(binding.activityPubActorUri)\n      );\n      const hasSameAsDid = binding.atprotoDid\n        ? sameAsArray.some(\n            (alias: string) =>\n              alias === binding.atprotoDid || alias === `at://${binding.atprotoDid}`\n          )\n        : true;\n\n      return hasSameAsAp && hasSameAsDid;\n    } catch (error) {\n      throw new Error(\n        `Failed to fetch WebID document: ${error instanceof Error ? error.message : String(error)}`\n      );\n    }\n  }\n\n  /**\n   * Check if link is stale (needs reverification)\n   *\n   * @param binding - The identity binding\n   * @param maxAgeDays - Maximum age in days (default 30)\n   * @returns true if stale\n   */\n  isLinkStale(binding: IdentityBinding, maxAgeDays: number = 30): boolean {\n    if (!binding.accountLinks.verificationRecords || binding.accountLinks.verificationRecords.length === 0) {\n      return true;\n    }\n\n    const latest = binding.accountLinks.verificationRecords[0];\n    const verifiedTime = new Date(latest.verifiedAt).getTime();\n    const now = Date.now();\n    const ageMs = now - verifiedTime;\n    const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;\n\n    return ageMs > maxAgeMs;\n  }\n\n  /**\n   * Format verification result for logging\n   *\n   * @param result - Verification result\n   * @returns Human-readable description\n   */\n  formatResult(result: LinkVerificationResult): string {\n    const parts = [\n      `Status: ${result.status}`,\n      `Actor: ${result.actorDocumentVerified ? '✓' : '✗'}`,\n      `DID: ${result.didDocumentVerified ? '✓' : '✗'}`,\n      `WebID: ${result.webIdDocumentVerified ? '✓' : '✗'}`,\n    ];\n\n    if (result.errors.length > 0) {\n      parts.push(`Errors: ${result.errors.join('; ')}`);\n    }\n\n    return parts.join(' | ');\n  }\n}\n
+/**
+ * V6.5 Account Link Verifier - Bidirectional Account Link Verification
+ *
+ * Verifies that account links are bidirectional and authentic:
+ * - ActivityPub actor includes ATProto DID in alsoKnownAs
+ * - ATProto DID document includes ActivityPub actor in alsoKnownAs
+ * - WebID includes both in RDF triples
+ *
+ * This ensures no account takeover or spoofing is possible.
+ */
+
+import { IdentityBinding, AccountLinkVerificationStatus } from '../identity/IdentityBinding.js';
+
+/**
+ * Link verification result
+ */
+export interface LinkVerificationResult {
+  /**
+   * Overall verification status
+   */
+  status: AccountLinkVerificationStatus;
+
+  /**
+   * Actor document verification
+   */
+  actorDocumentVerified: boolean;
+
+  /**
+   * DID document verification
+   */
+  didDocumentVerified: boolean;
+
+  /**
+   * WebID document verification
+   */
+  webIdDocumentVerified: boolean;
+
+  /**
+   * Verification errors
+   */
+  errors: string[];
+
+  /**
+   * Verification timestamp
+   */
+  verifiedAt: string;
+}
+
+/**
+ * Account Link Verifier
+ *
+ * Verifies bidirectional account links.
+ */
+export class AccountLinkVerifier {
+  /**
+   * HTTP request timeout (milliseconds)
+   */
+  private readonly HTTP_TIMEOUT_MS = 15000;
+
+  /**
+   * Verify account link
+   *
+   * @param binding - The identity binding
+   * @returns Verification result
+   */
+  async verifyAccountLink(binding: IdentityBinding): Promise<LinkVerificationResult> {
+    const errors: string[] = [];
+    let actorDocumentVerified = false;
+    let didDocumentVerified = false;
+    let webIdDocumentVerified = false;
+    const now = new Date().toISOString();
+
+    // Verify ActivityPub actor document
+    try {
+      actorDocumentVerified = await this.verifyActorDocument(binding);
+      if (!actorDocumentVerified) {
+        errors.push('ActivityPub actor document does not include ATProto DID');
+      }
+    } catch (error) {
+      errors.push(
+        `Failed to verify actor document: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    // Verify ATProto DID document
+    if (binding.atprotoDid) {
+      try {
+        didDocumentVerified = await this.verifyDidDocument(binding);
+        if (!didDocumentVerified) {
+          errors.push('ATProto DID document does not include ActivityPub actor');
+        }
+      } catch (error) {
+        errors.push(
+          `Failed to verify DID document: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    // Verify WebID document
+    try {
+      webIdDocumentVerified = await this.verifyWebIdDocument(binding);
+      if (!webIdDocumentVerified) {
+        errors.push('WebID document does not include both identities');
+      }
+    } catch (error) {
+      errors.push(
+        `Failed to verify WebID document: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    // Determine overall status
+    let status: AccountLinkVerificationStatus;
+    if (errors.length === 0) {
+      status = 'fresh_verified';
+    } else if (actorDocumentVerified && webIdDocumentVerified) {
+      status = 'stale_verified'; // At least AP and WebID are verified
+    } else {
+      status = 'unverified';
+    }
+
+    return {
+      status,
+      actorDocumentVerified,
+      didDocumentVerified,
+      webIdDocumentVerified,
+      errors,
+      verifiedAt: now,
+    };
+  }
+
+  /**
+   * Verify ActivityPub actor document
+   *
+   * @param binding - The identity binding
+   * @returns true if verified
+   * @throws Error on fetch failure
+   */
+  private async verifyActorDocument(binding: IdentityBinding): Promise<boolean> {
+    try {
+      const response = await fetch(binding.activityPubActorUri, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/activity+json',
+        },
+        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const actor = (await response.json()) as any;
+
+      // Check alsoKnownAs
+      const alsoKnownAs = actor.alsoKnownAs || [];
+      const aliases = Array.isArray(alsoKnownAs) ? alsoKnownAs : [alsoKnownAs];
+
+      // Check for ATProto DID
+      const atprotoDid = binding.atprotoDid;
+      if (atprotoDid) {
+        return aliases.some(
+          (alias: string) =>
+            alias === atprotoDid ||
+            alias === `at://${atprotoDid}` ||
+            alias.includes(atprotoDid)
+        );
+      }
+
+      return false;
+    } catch (error) {
+      throw new Error(
+        `Failed to fetch actor document: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Verify ATProto DID document
+   *
+   * @param binding - The identity binding
+   * @returns true if verified
+   * @throws Error on fetch failure
+   */
+  private async verifyDidDocument(binding: IdentityBinding): Promise<boolean> {
+    if (!binding.atprotoDid) {
+      return false;
+    }
+
+    try {
+      // Resolve DID to document
+      const response = await fetch(`https://plc.directory/${binding.atprotoDid}`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const entry = (await response.json()) as any;
+      const didDoc = entry.operation || {};
+
+      // Check alsoKnownAs
+      const alsoKnownAs = didDoc.alsoKnownAs || [];
+
+      // Check for ActivityPub actor
+      return alsoKnownAs.some(
+        (alias: string) =>
+          alias === binding.activityPubActorUri || alias.includes(binding.activityPubActorUri)
+      );
+    } catch (error) {
+      throw new Error(
+        `Failed to fetch DID document: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Verify WebID document
+   *
+   * @param binding - The identity binding
+   * @returns true if verified
+   * @throws Error on fetch failure
+   */
+  private async verifyWebIdDocument(binding: IdentityBinding): Promise<boolean> {
+    try {
+      const response = await fetch(binding.webId, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/ld+json, application/json',
+        },
+        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const webId = (await response.json()) as any;
+
+      // Check schema:sameAs
+      const sameAs = webId.sameAs || [];
+      const sameAsArray = Array.isArray(sameAs) ? sameAs : [sameAs];
+
+      const hasSameAsAp = sameAsArray.some((alias: string) =>
+        alias.includes(binding.activityPubActorUri)
+      );
+      const hasSameAsDid = binding.atprotoDid
+        ? sameAsArray.some(
+            (alias: string) =>
+              alias === binding.atprotoDid || alias === `at://${binding.atprotoDid}`
+          )
+        : true;
+
+      return hasSameAsAp && hasSameAsDid;
+    } catch (error) {
+      throw new Error(
+        `Failed to fetch WebID document: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Check if link is stale (needs reverification)
+   *
+   * @param binding - The identity binding
+   * @param maxAgeDays - Maximum age in days (default 30)
+   * @returns true if stale
+   */
+  isLinkStale(binding: IdentityBinding, maxAgeDays: number = 30): boolean {
+    if (!(binding.accountLinks as any).verificationRecords || (binding.accountLinks as any).verificationRecords.length === 0) {
+      return true;
+    }
+
+    const latest = (binding.accountLinks as any).verificationRecords[0];
+    const verifiedTime = new Date(latest.verifiedAt).getTime();
+    const now = Date.now();
+    const ageMs = now - verifiedTime;
+    const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+
+    return ageMs > maxAgeMs;
+  }
+
+  /**
+   * Format verification result for logging
+   *
+   * @param result - Verification result
+   * @returns Human-readable description
+   */
+  formatResult(result: LinkVerificationResult): string {
+    const parts = [
+      `Status: ${result.status}`,
+      `Actor: ${result.actorDocumentVerified ? '✓' : '✗'}`,
+      `DID: ${result.didDocumentVerified ? '✓' : '✗'}`,
+      `WebID: ${result.webIdDocumentVerified ? '✓' : '✗'}`,
+    ];
+
+    if (result.errors.length > 0) {
+      parts.push(`Errors: ${result.errors.join('; ')}`);
+    }
+
+    return parts.join(' | ');
+  }
+}
+

@@ -15,7 +15,7 @@
  */
 
 import Fastify from "fastify";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import {
   RedisStreamsQueue,
   createDefaultConfig as createQueueConfig,
@@ -78,7 +78,7 @@ import { ExternalPdsClient } from "./at-adapter/external/ExternalPdsClient.js";
 import { RedisExternalAtSessionStore } from "./at-adapter/external/ExternalAtSessionStore.js";
 import { ExternalWriteGateway } from "./at-adapter/external/ExternalWriteGateway.js";
 import { ExternalReadGateway } from "./at-adapter/external/ExternalReadGateway.js";
-import { DefaultAtBlobStore } from "./at-adapter/blob/AtBlobStore.js";
+import { RedisAtBlobStore } from "./at-adapter/blob/AtBlobStore.js";
 import { DefaultBlobReferenceMapper } from "./at-adapter/blob/BlobReferenceMapper.js";
 import { DefaultAtBlobUploadService } from "./at-adapter/blob/AtBlobUploadService.js";
 // AT local fixture signing (dev/test only — activated by AT_LOCAL_FIXTURE=true)
@@ -298,7 +298,7 @@ let queue: RedisStreamsQueue | null = null;
 let outboundWorker: OutboundWorker | null = null;
 let inboundWorker: InboundWorker | null = null;
 let opensearchIndexer: ReturnType<typeof createOpenSearchIndexer> | null = null;
-let atRedisClient: Redis | null = null;
+let atRedisClient: InstanceType<typeof Redis> | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
 let identityWarmupService: IdentityWarmupService | null = null;
 let atEventPublisher: RedpandaEventPublisher | null = null;
@@ -881,7 +881,7 @@ async function main() {
         }
 
         // ---- Projection worker ----
-        const blobStore             = new DefaultAtBlobStore();
+          const blobStore             = new RedisAtBlobStore(atRedis);
         const blobReferenceMapper   = new DefaultBlobReferenceMapper();
         const blobUploadService     = new DefaultAtBlobUploadService(blobStore, blobReferenceMapper);
         const profileMediaStore     = new RedisBridgeProfileMediaStore(atRedis, {

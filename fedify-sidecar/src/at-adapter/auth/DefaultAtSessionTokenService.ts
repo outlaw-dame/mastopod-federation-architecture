@@ -322,7 +322,7 @@ export class DefaultAtSessionTokenService implements AtSessionTokenService {
       }
 
       if (!this._isMatchingActiveFamily(family, claims)) {
-        if (family.status === 'active') {
+        if ((family as SessionFamilyRecord).status === 'active') {
           await this.sessionStateStore.markFamilyCompromised(
             sessionFamilyId,
             this.refreshExpiry
@@ -364,11 +364,11 @@ export class DefaultAtSessionTokenService implements AtSessionTokenService {
 
       // Constant-time HMAC comparison — prevents timing attacks
       const expected = createHmac('sha256', this.secret).update(signingInput).digest();
-      const actual   = Buffer.from(sigB64, 'base64url');
+      const actual   = Buffer.from(sigB64!, 'base64url');
       if (!_timingSafeEqual(expected, actual)) return null;
 
       const claims = JSON.parse(
-        Buffer.from(payloadB64, 'base64url').toString('utf8')
+        Buffer.from(payloadB64!, 'base64url').toString('utf8')
       ) as JwtClaims;
 
       const nowSec = Math.floor(Date.now() / 1000);
@@ -428,7 +428,7 @@ function _timingSafeEqual(a: Buffer, b: Buffer): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) {
-    diff |= a[i] ^ b[i];
+    diff |= a[i]! ^ b[i]!;
   }
   return diff === 0;
 }

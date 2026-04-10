@@ -40,8 +40,8 @@ export class BackendIntrospectionTokenVerifier implements OAuthAccessTokenVerifi
   private readonly maxAttempts: number;
 
   constructor(private readonly deps: BackendIntrospectionTokenVerifierDeps) {
-    this.timeoutMs = Number.isFinite(deps.timeoutMs) ? Math.max(500, deps.timeoutMs) : 3000;
-    this.maxAttempts = Number.isFinite(deps.maxAttempts) ? Math.max(1, Math.min(5, deps.maxAttempts)) : 3;
+    this.timeoutMs = Number.isFinite(deps.timeoutMs) ? Math.max(500, deps.timeoutMs!) : 3000;
+    this.maxAttempts = Number.isFinite(deps.maxAttempts) ? Math.max(1, Math.min(5, deps.maxAttempts!)) : 3;
   }
 
   async verify(

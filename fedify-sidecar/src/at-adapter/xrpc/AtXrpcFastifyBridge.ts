@@ -104,7 +104,7 @@ export function registerAtXrpcRoutes(
 
       const result = await xrpcServer.handleRequest(
         'GET',
-        req.url.split('?')[0],
+        req.url.split('?')[0] ?? req.url,
         query,
         req.ip
       );
@@ -218,7 +218,7 @@ export function registerAtXrpcRoutes(
 
       const result = await xrpcServer.handleAuthenticatedRequest(
         'POST',
-        req.url.split('?')[0],
+        req.url.split('?')[0] ?? req.url,
         body,
         sessionCtx
       );

@@ -6,10 +6,10 @@
  * Outputs: search.public.upsert.v1, search.public.delete.v1
  */
 
-import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchAuthorUpsertV1, SearchAuthorDeleteV1 } from '../events/SearchEvents';
-import { IdentityAliasResolver } from '../identity/IdentityAliasResolver';
-import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy';
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
+import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchAuthorUpsertV1, SearchAuthorDeleteV1 } from '../events/SearchEvents.js';
+import { IdentityAliasResolver } from '../identity/IdentityAliasResolver.js';
+import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy.js';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 import { extractHashtagsFromActivityPubTags, extractHashtagsFromText } from '../../utils/hashtags.js';
 
 export class ApSearchProjector {

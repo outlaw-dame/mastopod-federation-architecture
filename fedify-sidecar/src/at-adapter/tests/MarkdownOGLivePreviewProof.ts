@@ -288,15 +288,10 @@ const noteIntentWithPreview: CanonicalPostCreateIntent = {
   sourceProtocol: "atproto",
   sourceEventId: "at://did:plc:test0001/app.bsky.feed.post/proof001",
   sourceAccountRef: {
-    type: "actor",
-    sourceProtocol: "atproto",
     canonicalAccountId: "https://pods.test/users/alice",
-    externalAccountId: "did:plc:test0001",
     did: "did:plc:test0001",
-    webfinger: null,
   },
   object: {
-    type: "object",
     canonicalObjectId: "at://did:plc:test0001/app.bsky.feed.post/proof001",
     atUri: "at://did:plc:test0001/app.bsky.feed.post/proof001",
     cid: null,
@@ -305,7 +300,12 @@ const noteIntentWithPreview: CanonicalPostCreateIntent = {
   createdAt: "2026-01-01T00:00:00Z",
   observedAt: "2026-01-01T00:00:00Z",
   visibility: "public",
-  provenance: null,
+  provenance: {
+    originProtocol: "atproto",
+    originEventId: "at://did:plc:test0001/app.bsky.feed.post/proof001",
+    originAccountId: "did:plc:test0001",
+    projectionMode: "native",
+  },
   warnings: [],
   inReplyTo: null,
   content: {
@@ -337,6 +337,7 @@ const mockProjCtx: ProjectionContext = {
   }),
   resolveObjectRef: async (ref) => ref,
   now: () => new Date("2026-01-01T00:00:00Z"),
+  buildIntentId: () => "urn:test:proof:001",
 };
 
 const projResult = await projector.project(noteIntentWithPreview, mockProjCtx);

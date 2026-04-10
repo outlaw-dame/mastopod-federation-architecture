@@ -1,4 +1,4 @@
-import { CanonicalPost } from '../AtProjectionPolicy';
+import { CanonicalPost } from '../AtProjectionPolicy.js';
 import { normalizeAtprotoTag } from '../../../utils/hashtags.js';
 
 interface AtRichtextFacetTag {

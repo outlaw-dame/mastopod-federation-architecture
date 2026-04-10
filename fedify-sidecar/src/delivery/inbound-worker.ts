@@ -269,7 +269,7 @@ export class InboundWorker {
     const regex = /(\w+)="([^"]+)"/g;
     let match;
     while ((match = regex.exec(header)) !== null) {
-      params[match[1]] = match[2];
+      params[match[1]!] = match[2]!;
     }
     return params;
   }
@@ -305,7 +305,7 @@ export class InboundWorker {
    */
   private async fetchActorDocument(keyId: string): Promise<any | null> {
     // Extract actor URI from keyId (e.g., "https://example.com/users/alice#main-key" -> "https://example.com/users/alice")
-    const actorUri = keyId.split("#")[0];
+    const actorUri = keyId.split("#")[0]!;
 
     // Check cache first
     const cached = await this.queue.getCachedActorDoc(actorUri);

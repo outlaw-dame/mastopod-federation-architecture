@@ -11,10 +11,10 @@
  * Ref: https://atproto.com/lexicon/com-atproto-repo#comatprotolistrecords
  */
 
-import { AtRecordReader } from '../../repo/AtRecordReader';
-import { HandleResolutionReader } from '../../identity/HandleResolutionReader';
-import { XrpcErrors } from '../middleware/XrpcErrorMapper';
-import { RepoRevLookup, withRepoRevHeader } from '../middleware/AtRepoRevHeader';
+import { AtRecordReader } from '../../repo/AtRecordReader.js';
+import { HandleResolutionReader } from '../../identity/HandleResolutionReader.js';
+import { XrpcErrors } from '../middleware/XrpcErrorMapper.js';
+import { RepoRevLookup, withRepoRevHeader } from '../middleware/AtRepoRevHeader.js';
 import type { IdentityBindingRepository } from '../../../core-domain/identity/IdentityBindingRepository.js';
 import type { ExternalReadGateway } from '../../external/ExternalReadGateway.js';
 import { isExternalAtprotoBinding } from '../../external/ExternalAccountMode.js';

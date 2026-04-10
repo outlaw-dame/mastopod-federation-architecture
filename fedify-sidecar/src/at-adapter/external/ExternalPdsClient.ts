@@ -170,7 +170,7 @@ export class ExternalPdsClient {
     dpopPrivateKeyJwk: string,
     clientId: string
   ): Promise<ExternalPdsSessionResponse> {
-    const htu = tokenEndpoint.split('?')[0];
+    const htu = tokenEndpoint.split('?')[0]!;
     const dpopProof = await buildDpopProof({
       privateKeyJwk: dpopPrivateKeyJwk,
       htu,
@@ -376,7 +376,7 @@ export class ExternalPdsClient {
       // DPoP proof generation — must happen per-attempt so the `iat` is fresh.
       let requestInit: RequestJsonOptions = init;
       if (init.dpopPrivateKeyJwk && init.dpopAccessToken) {
-        const htu = url.split('?')[0];
+        const htu = url.split('?')[0]!;
         const htm = (init.method ?? 'GET').toUpperCase();
         const dpopProof = await buildDpopProof({
           privateKeyJwk: init.dpopPrivateKeyJwk,

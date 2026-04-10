@@ -253,9 +253,13 @@ export function toAttachmentMediaHints(
     url: attachment.url ?? null,
     cid: attachment.cid ?? null,
     byteSize: attachment.byteSize ?? null,
+    duration: attachment.duration ?? null,
+    digestMultibase: attachment.digestMultibase ?? null,
     alt: attachment.alt ?? null,
     width: attachment.width ?? null,
     height: attachment.height ?? null,
+    focalPoint: attachment.focalPoint ?? null,
+    blurhash: attachment.blurhash ?? null,
   }));
 }
 

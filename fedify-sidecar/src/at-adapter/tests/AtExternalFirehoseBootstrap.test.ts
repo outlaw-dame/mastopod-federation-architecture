@@ -22,7 +22,7 @@ describe("AtExternalFirehoseBootstrap", () => {
       sourceType: "pds",
       url: "wss://bsky.social/xrpc/com.atproto.sync.subscribeRepos",
     });
-    expect(sources[0].id).not.toBe(sources[1].id);
+    expect(sources[0]!.id).not.toBe(sources[1]!.id);
   });
 
   it("refuses unsafe external firehose source URLs", () => {
@@ -53,7 +53,7 @@ describe("AtExternalFirehoseBootstrap", () => {
     });
 
     expect(bootstrap.kind).toBe("disabled");
-    expect(bootstrap.reason).toBe("missing_commit_verifier");
+    expect((bootstrap as { kind: string; reason?: string }).reason).toBe("missing_commit_verifier");
     expect(bootstrap.sources).toHaveLength(1);
   });
 

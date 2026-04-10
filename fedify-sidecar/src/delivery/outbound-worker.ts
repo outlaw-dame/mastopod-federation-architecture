@@ -238,9 +238,6 @@ export class OutboundWorker {
       actorUri: job.actorUri,
       method: "POST",
       targetUrl: job.targetInbox,
-      headers: {
-        "content-type": "application/activity+json",
-      },
       body: job.activity,  // Immutable - signed as-is
     });
 
