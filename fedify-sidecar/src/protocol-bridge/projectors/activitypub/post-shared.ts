@@ -9,10 +9,26 @@ import type { ActivityPubProjectionCommand } from "../../ports/ProtocolBridgePor
 
 export const PUBLIC_AUDIENCE = "https://www.w3.org/ns/activitystreams#Public";
 
+const FEP1311_ATTACHMENT_CONTEXT = {
+  digestMultibase: "https://w3id.org/security#digestMultibase",
+  focalPoint: {
+    "@id": "https://joinmastodon.org/ns#focalPoint",
+    "@container": "@list",
+  },
+  blurhash: "http://joinmastodon.org/ns#blurhash",
+};
+
 type CanonicalPostIntent =
   | CanonicalPostCreateIntent
   | CanonicalPostEditIntent
   | CanonicalPostDeleteIntent;
+
+export function buildApActivityContext(): Array<string | Record<string, unknown>> {
+  return [
+    "https://www.w3.org/ns/activitystreams",
+    FEP1311_ATTACHMENT_CONTEXT,
+  ];
+}
 
 export function buildPostMetadata(intent: CanonicalPostIntent) {
   const noteLinkPreviewUrl =

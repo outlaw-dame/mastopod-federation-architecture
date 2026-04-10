@@ -88,7 +88,22 @@ describe("pod-owned attachment bridge round-trip", () => {
       return;
     }
 
-    expect((projectedToAp.commands[0]?.activity.object as Record<string, unknown>).attachment).toEqual([
+    const apActivity = projectedToAp.commands[0]?.activity as Record<string, unknown>;
+    expect(apActivity["@context"]).toEqual(
+      expect.arrayContaining([
+        "https://www.w3.org/ns/activitystreams",
+        expect.objectContaining({
+          digestMultibase: "https://w3id.org/security#digestMultibase",
+          focalPoint: expect.objectContaining({
+            "@id": "https://joinmastodon.org/ns#focalPoint",
+            "@container": "@list",
+          }),
+          blurhash: "http://joinmastodon.org/ns#blurhash",
+        }),
+      ]),
+    );
+
+    expect((apActivity.object as Record<string, unknown>).attachment).toEqual([
       expect.objectContaining({
         type: "Image",
         mediaType: "image/png",

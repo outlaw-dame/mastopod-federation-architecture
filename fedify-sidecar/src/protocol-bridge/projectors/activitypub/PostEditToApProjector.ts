@@ -23,6 +23,7 @@ import {
 import {
   buildApLinkPreviewCard,
   apTargetTopic,
+  buildApActivityContext,
   buildApLinkPreviewIcon,
   buildPostMetadata,
   resolveApObjectId,
@@ -104,7 +105,7 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     }
 
     const activity: Record<string, unknown> = {
-      "@context": "https://www.w3.org/ns/activitystreams",
+      "@context": buildApActivityContext(),
       id: `${objectId}#update-${intent.canonicalIntentId.slice(0, 12)}`,
       type: "Update",
       actor: actorId,

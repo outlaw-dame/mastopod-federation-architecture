@@ -16,6 +16,7 @@ import {
 import {
   buildApLinkPreviewCard,
   apTargetTopic,
+  buildApActivityContext,
   buildApLinkPreviewIcon,
   buildPostMetadata,
   PUBLIC_AUDIENCE,
@@ -98,7 +99,7 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
     }
 
     const activity: Record<string, unknown> = {
-      "@context": "https://www.w3.org/ns/activitystreams",
+      "@context": buildApActivityContext(),
       id: `${objectId}#create`,
       type: "Create",
       actor: actorId,
