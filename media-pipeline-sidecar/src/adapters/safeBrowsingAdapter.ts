@@ -1,6 +1,7 @@
 import { config } from '../config/config';
-import { SafetySignalAdapter } from './safetySignals';
+import type { SafetySignal, SafetySignalAdapter } from './safetySignals';
 import { fetch } from 'undici';
+import { retryAsync } from '../utils/retry';
 
 /**
  * MEDIA PIPELINE RULE:
@@ -11,12 +12,31 @@ import { fetch } from 'undici';
 export class SafeBrowsingAdapter implements SafetySignalAdapter {
   name = 'safe-browsing';
 
-  async execute({ url }: { url?: string }) {
+  async execute(input: { url?: string; buffer?: Buffer; mimeType?: string }): Promise<SafetySignal | null> {
+    const { url } = input;
     if (!url || !config.safeBrowsingApiKey) return null;
 
     const params = new URLSearchParams();
     params.append('urls', url);
-    const res = await fetch(`https://safebrowsing.googleapis.com/v5alpha1/urls:search?${params.toString()}&key=${config.safeBrowsingApiKey}`);
+    const endpoint = `https://safebrowsing.googleapis.com/v5alpha1/urls:search?${params.toString()}`;
+    const res = await retryAsync(async () => {
+      const response = await fetch(endpoint, {
+        headers: {
+          'x-goog-api-key': config.safeBrowsingApiKey
+        },
+        signal: AbortSignal.timeout(config.requestTimeoutMs)
+      });
+
+      if (response.status >= 500 || response.status === 429) {
+        throw new Error(`Transient Safe Browsing API error: ${response.status}`);
+      }
+
+      return response;
+    }, {
+      retries: 2,
+      baseDelayMs: 300,
+      maxDelayMs: 2000
+    });
 
     if (!res.ok) {
       throw new Error(`Safe Browsing error: ${await res.text()}`);

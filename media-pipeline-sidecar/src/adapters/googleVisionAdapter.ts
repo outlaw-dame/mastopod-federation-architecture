@@ -1,6 +1,7 @@
 import { config } from '../config/config';
-import { SafetySignalAdapter } from './safetySignals';
+import type { SafetySignal, SafetySignalAdapter } from './safetySignals';
 import { fetch } from 'undici';
+import { retryAsync } from '../utils/retry';
 
 /**
  * MEDIA PIPELINE RULE:
@@ -11,21 +12,38 @@ import { fetch } from 'undici';
 export class GoogleVisionAdapter implements SafetySignalAdapter {
   name = 'google-vision';
 
-  async execute({ buffer }: { buffer?: Buffer }) {
+  async execute(input: { url?: string; buffer?: Buffer; mimeType?: string }): Promise<SafetySignal | null> {
+    const { buffer } = input;
     if (!buffer || !config.googleVisionApiKey) return null;
 
     const base64Image = buffer.toString('base64');
-    const res = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${config.googleVisionApiKey}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        requests: [
-          {
-            image: { content: base64Image },
-            features: [{ type: 'SAFE_SEARCH_DETECTION' }]
-          }
-        ]
-      })
+    const res = await retryAsync(async () => {
+      const response = await fetch('https://vision.googleapis.com/v1/images:annotate', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-goog-api-key': config.googleVisionApiKey
+        },
+        body: JSON.stringify({
+          requests: [
+            {
+              image: { content: base64Image },
+              features: [{ type: 'SAFE_SEARCH_DETECTION' }]
+            }
+          ]
+        }),
+        signal: AbortSignal.timeout(config.requestTimeoutMs)
+      });
+
+      if (response.status >= 500 || response.status === 429) {
+        throw new Error(`Transient Vision API error: ${response.status}`);
+      }
+
+      return response;
+    }, {
+      retries: 2,
+      baseDelayMs: 300,
+      maxDelayMs: 2000
     });
 
     if (!res.ok) {

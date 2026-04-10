@@ -6,7 +6,7 @@ import { generateBlurPreview } from '../processing/blurPreview';
 import { enqueue } from '../queue/producer';
 import { runSecureWorker } from '../queue/secureWorker';
 import { buildCanonicalMediaUrl, buildGatewayUrl } from '../storage/cdnUrlBuilder';
-import { uploadToFilebase } from '../storage/filebaseClient';
+import { deleteFromFilebase, downloadFromFilebase, uploadToFilebase } from '../storage/filebaseClient';
 
 /**
  * MEDIA PIPELINE RULE:
@@ -19,7 +19,15 @@ runSecureWorker({
   group: 'media',
   consumer: 'process-image-worker-1',
   handler: async (message) => {
-    const input = Buffer.from(message.bytesBase64, 'base64');
+    const transientKey = message.sourceObjectKey || '';
+    const input = transientKey
+      ? await downloadFromFilebase(transientKey)
+      : Buffer.from(message.bytesBase64 || '', 'base64');
+
+    if (!input.byteLength) {
+      throw new Error('Missing image payload for processing');
+    }
+
     const processed = await processImage(input);
     const blurPreview = await generateBlurPreview(processed.buffer);
 
@@ -71,5 +79,9 @@ runSecureWorker({
       height: String(processed.height || ''),
       signals: JSON.stringify([...existingSignals, ...contentSignals])
     });
+
+    if (transientKey) {
+      await deleteFromFilebase(transientKey);
+    }
   }
 });

@@ -28,14 +28,18 @@ export async function runSafetyAdapters(
     mimeType?: string;
   }
 ): Promise<SafetySignal[]> {
+  const settled = await Promise.allSettled(adapters.map((adapter) => adapter.execute(input)));
   const results: SafetySignal[] = [];
-  for (const adapter of adapters) {
-    try {
-      const result = await adapter.execute(input);
-      if (result) results.push(result);
-    } catch (err) {
-      console.error(`[safety-adapter-error] ${adapter.name}`, err);
+  for (let i = 0; i < settled.length; i += 1) {
+    const outcome = settled[i];
+    if (outcome.status === 'fulfilled') {
+      if (outcome.value) {
+        results.push(outcome.value);
+      }
+      continue;
     }
+    const adapter = adapters[i];
+    console.error(`[safety-adapter-error] ${adapter?.name || 'unknown-adapter'}`, outcome.reason);
   }
   return results;
 }

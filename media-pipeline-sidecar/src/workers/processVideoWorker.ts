@@ -6,7 +6,7 @@ import { sha256 } from '../processing/image';
 import { enqueue } from '../queue/producer';
 import { runSecureWorker } from '../queue/secureWorker';
 import { buildCanonicalMediaUrl, buildGatewayUrl } from '../storage/cdnUrlBuilder';
-import { uploadToFilebase } from '../storage/filebaseClient';
+import { deleteFromFilebase, downloadFromFilebase, uploadToFilebase } from '../storage/filebaseClient';
 
 /**
  * MEDIA PIPELINE RULE:
@@ -19,7 +19,15 @@ runSecureWorker({
   group: 'media',
   consumer: 'process-video-worker-1',
   handler: async (message) => {
-    const input = Buffer.from(message.bytesBase64, 'base64');
+    const transientKey = message.sourceObjectKey || '';
+    const input = transientKey
+      ? await downloadFromFilebase(transientKey)
+      : Buffer.from(message.bytesBase64 || '', 'base64');
+
+    if (!input.byteLength) {
+      throw new Error('Missing video payload for processing');
+    }
+
     const processed = await processVideo(input, message.mimeType);
 
     const fileHash = sha256(processed.buffer);
@@ -60,5 +68,9 @@ runSecureWorker({
       height: '',
       signals: JSON.stringify([...existingSignals, ...contentSignals])
     });
+
+    if (transientKey) {
+      await deleteFromFilebase(transientKey);
+    }
   }
 });

@@ -1,6 +1,7 @@
 import { config } from '../config/config';
-import { SafetySignalAdapter } from './safetySignals';
+import type { SafetySignal, SafetySignalAdapter } from './safetySignals';
 import { fetch } from 'undici';
+import { retryAsync } from '../utils/retry';
 
 /**
  * MEDIA PIPELINE RULE:
@@ -11,19 +12,33 @@ import { fetch } from 'undici';
 export class GoogleVideoAdapter implements SafetySignalAdapter {
   name = 'google-video';
 
-  async execute({ url, mimeType }: { url?: string; mimeType?: string }) {
+  async execute(input: { url?: string; buffer?: Buffer; mimeType?: string }): Promise<SafetySignal | null> {
+    const { url, mimeType } = input;
     if (!url || !mimeType?.startsWith('video/') || !config.googleVideoAccessToken) return null;
 
-    const res = await fetch('https://videointelligence.googleapis.com/v1/videos:annotate', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.googleVideoAccessToken}`,
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify({
-        inputUri: url,
-        features: ['EXPLICIT_CONTENT_DETECTION']
-      })
+    const res = await retryAsync(async () => {
+      const response = await fetch('https://videointelligence.googleapis.com/v1/videos:annotate', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.googleVideoAccessToken}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          inputUri: url,
+          features: ['EXPLICIT_CONTENT_DETECTION']
+        }),
+        signal: AbortSignal.timeout(config.requestTimeoutMs)
+      });
+
+      if (response.status >= 500 || response.status === 429) {
+        throw new Error(`Transient Video Intelligence API error: ${response.status}`);
+      }
+
+      return response;
+    }, {
+      retries: 2,
+      baseDelayMs: 300,
+      maxDelayMs: 2000
     });
 
     if (!res.ok) {

@@ -6,10 +6,14 @@ export function buildCanonicalMediaUrl(key: string): string {
     return `https://${config.cloudflareMediaDomain}/${normalizedKey}`;
   }
 
+  if (config.s3.publicBaseUrl) {
+    return `${config.s3.publicBaseUrl.replace(/\/$/, '')}/${normalizedKey}`;
+  }
+
   return `${config.s3.endpoint.replace(/\/$/, '')}/${config.s3.bucket}/${normalizedKey}`;
 }
 
 export function buildGatewayUrl(cid?: string): string | undefined {
   if (!cid) return undefined;
-  return `${config.filebaseGatewayBase.replace(/\/$/, '')}/${cid}`;
+  return `${config.ipfsGatewayBase.replace(/\/$/, '')}/${cid}`;
 }
