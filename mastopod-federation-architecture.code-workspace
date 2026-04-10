@@ -18,7 +18,11 @@
 			"npm --prefix fedify-sidecar": true,
 			"lsof": true,
 			"true": true,
-			"brew": true
+			"brew": true,
+			"npm run -s build": true,
+			"npm install": true,
+			"npm run -s typecheck": true,
+			"npm run -s smoke:runtime": true
 		}
 	}
 }
