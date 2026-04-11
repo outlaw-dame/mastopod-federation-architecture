@@ -103,7 +103,7 @@ describe("pod-owned attachment bridge round-trip", () => {
       ]),
     );
 
-    expect(((apActivity["object"] as Record<string, unknown>)["attachment"]) ).toEqual([
+    expect((apActivity["object"] as Record<string, unknown>)["attachment"]).toEqual([
       expect.objectContaining({
         type: "Image",
         mediaType: "image/png",
