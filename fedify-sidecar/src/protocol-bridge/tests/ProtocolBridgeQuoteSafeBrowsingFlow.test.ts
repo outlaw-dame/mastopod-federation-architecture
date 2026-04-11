@@ -39,15 +39,15 @@ function createIdentityRepo() {
 describe("quote + Safe Browsing integration flow", () => {
   beforeEach(() => {
     requestMock.mockReset();
-    process.env.GOOGLE_SAFE_BROWSING_API_KEY = "test-api-key";
-    delete process.env.SAFE_BROWSING_API_KEY;
-    delete process.env.SAFE_BROWSING_FAIL_CLOSED;
+    process.env["GOOGLE_SAFE_BROWSING_API_KEY"] = "test-api-key";
+    delete process.env["SAFE_BROWSING_API_KEY"];
+    delete process.env["SAFE_BROWSING_FAIL_CLOSED"];
   });
 
   afterEach(() => {
-    delete process.env.GOOGLE_SAFE_BROWSING_API_KEY;
-    delete process.env.SAFE_BROWSING_API_KEY;
-    delete process.env.SAFE_BROWSING_FAIL_CLOSED;
+    delete process.env["GOOGLE_SAFE_BROWSING_API_KEY"];
+    delete process.env["SAFE_BROWSING_API_KEY"];
+    delete process.env["SAFE_BROWSING_FAIL_CLOSED"];
   });
 
   it("projects quote posts while suppressing link preview when Safe Browsing flags the URL", async () => {

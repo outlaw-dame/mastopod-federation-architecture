@@ -49,11 +49,13 @@ import {
   type Context,
   type Federation,
   type InboxContext,
-  SendActivityError,
+  type KvStore,
+  Activity,
+  CryptographicKey,
+  Person,
+  type Actor,
+  parseSemVer,
 } from "@fedify/fedify";
-import type { KvStore } from "@fedify/fedify";
-import { Activity, CryptographicKey, Person } from "@fedify/vocab";
-import type { Actor } from "@fedify/vocab";
 import { isIP } from "node:net";
 import { request } from "undici";
 import type {
@@ -548,19 +550,15 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         response.body,
         this.outboundRuntimeConfig.maxErrorResponseBodyBytes,
       );
-      const sendError = new SendActivityError(
-        targetUrl,
-        response.statusCode,
-        `Failed to send activity ${input.activityId} to ${targetUrl.href} (${response.statusCode}):\n${responseBody}`,
-        responseBody,
-      );
+      const sendErrorMessage =
+        `Failed to send activity ${input.activityId} to ${targetUrl.href} (${response.statusCode}):\n${responseBody}`;
       const permanent = this.outboundRuntimeConfig.permanentFailureStatusCodes.includes(response.statusCode);
 
       return {
         jobId: input.jobId,
         success: false,
         statusCode: response.statusCode,
-        error: sendError.message,
+        error: sendErrorMessage,
         responseBody,
         permanent,
         retryAfterMs: permanent ? undefined : parseRetryAfterMs(response.headers["retry-after"]),
@@ -734,14 +732,6 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
       .on(Activity, async (ctx, activity) => {
         await this.enqueueVerifiedActivity(ctx, activity);
       })
-      .onUnverifiedActivity((ctx, activity, reason) => {
-        this.logger.warn("[fedify] rejected unverified inbound activity", {
-          activityId: activity.id?.href,
-          activityType: activity.constructor.name,
-          path: ctx.url.pathname,
-          reasonType: reason.type,
-        });
-      })
       .onError((_ctx, error) => {
         this.logger.error("[fedify] inbox listener error", {
           error: error instanceof Error ? error.message : String(error),
@@ -811,7 +801,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     federation.setNodeInfoDispatcher("/nodeinfo/2.1", async (_ctx) => ({
       software: {
         name: "mastopod-federation-sidecar",
-        version: "6.5.0", // plain string in 2.x (was SemVer object in 1.x)
+        version: parseSemVer("6.5.0"),
         homepage: new URL("https://github.com/activitypods/mastopod"),
       },
       protocols: ["activitypub"],

@@ -157,6 +157,13 @@ function isPrivatePreviewAllowed(): boolean {
   return process.env["ALLOW_PRIVATE_PREVIEW_FETCHES"] === "1";
 }
 
+function isPreviewTargetAllowed(url: URL): boolean {
+  if (isPrivatePreviewAllowed()) {
+    return true;
+  }
+  return !isDisallowedPreviewHost(url.hostname);
+}
+
 function isDisallowedPreviewHost(hostname: string): boolean {
   const normalized = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
   if (!normalized) {

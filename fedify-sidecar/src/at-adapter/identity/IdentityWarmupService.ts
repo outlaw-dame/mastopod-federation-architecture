@@ -110,7 +110,7 @@ export class IdentityWarmupService {
   }
 
   private async runScheduledPoll(): Promise<void> {
-    this.inFlight = this.pollOnce().then(() => undefined);
+    this.inFlight = this.pollOnce();
 
     try {
       await this.inFlight;
