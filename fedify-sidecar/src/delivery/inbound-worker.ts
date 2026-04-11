@@ -20,6 +20,7 @@ import {
 } from "../queue/sidecar-redis-queue.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
 import { logger } from "../utils/logger.js";
+import { CapabilityGateResult } from "../capabilities/gates.js";
 
 // ============================================================================
 // Types
@@ -31,6 +32,7 @@ export interface InboundWorkerConfig {
   activityPodsToken: string;
   requestTimeoutMs: number;
   userAgent: string;
+  capabilityGate?: (capabilityId: string) => CapabilityGateResult;
 }
 
 export interface VerificationResult {
@@ -99,6 +101,22 @@ export class InboundWorker {
     logger.info("Inbound worker stopped", { remainingJobs: this.activeJobs });
   }
 
+  getConcurrency(): number {
+    return this.config.concurrency;
+  }
+
+  setConcurrency(nextConcurrency: number): void {
+    const normalized = Math.max(1, Math.floor(nextConcurrency));
+    if (normalized === this.config.concurrency) return;
+
+    const previous = this.config.concurrency;
+    this.config.concurrency = normalized;
+    logger.info("Inbound worker concurrency updated", {
+      previous,
+      next: normalized,
+    });
+  }
+
   /**
    * Process a single inbound envelope
    */
@@ -106,6 +124,22 @@ export class InboundWorker {
     this.activeJobs++;
     
     try {
+      // Capability gate check (defense-in-depth: HTTP route also checks, but worker
+      // runs independently and capability state may change after enqueue time)
+      if (this.config.capabilityGate) {
+        const gate = this.config.capabilityGate("ap.federation.ingress");
+        if (!gate.allowed) {
+          await this.queue.ack("inbound", messageId);
+          await this.queue.moveToDlq("inbound", envelope, gate.message || `Capability denied: ${gate.reasonCode || "feature_disabled"}`);
+          logger.warn("Inbound processing skipped by capability gate", {
+            envelopeId: envelope.envelopeId,
+            capabilityId: "ap.federation.ingress",
+            reasonCode: gate.reasonCode,
+          });
+          return;
+        }
+      }
+
       // Step 1: Parse the activity
       let activity: any;
       try {

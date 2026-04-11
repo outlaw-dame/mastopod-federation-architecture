@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "1.0.0",
+  "provider": {
+    "id": "pods.example",
+    "displayName": "Example Pods",
+    "region": "us-east-1"
+  },
+  "profiles": {
+    "active": ["ap-core"],
+    "supported": ["ap-core", "ap-scale", "dual-protocol-standard"]
+  },
+  "protocols": {
+    "activitypub": {
+      "enabled": true,
+      "version": "1.0",
+      "status": "enabled"
+    },
+    "atproto": {
+      "enabled": false,
+      "status": "disabled",
+      "disabledReason": "provider_policy"
+    }
+  },
+  "capabilities": [
+    {
+      "id": "ap.federation.ingress",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": [],
+      "limits": {
+        "maxPayloadBytes": 1048576,
+        "requestsPerMinute": 1200
+      }
+    },
+    {
+      "id": "ap.federation.egress",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": ["ap.signing.batch", "ap.queue.delivery"],
+      "limits": {
+        "maxConcurrentPerDomain": 4,
+        "maxAttempts": 8
+      }
+    },
+    {
+      "id": "ap.signing.batch",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": [],
+      "limits": {
+        "batchSize": 100,
+        "timeoutMs": 5000
+      }
+    },
+    {
+      "id": "ap.queue.delivery",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": [],
+      "limits": {
+        "dlqEnabled": true,
+        "idempotencyTtlHours": 168
+      }
+    },
+    {
+      "id": "at.xrpc.server",
+      "version": "1.0.0",
+      "status": "disabled",
+      "dependencies": ["protocol.atproto"],
+      "limits": {},
+      "disabledReason": "profile_not_active"
+    }
+  ],
+  "entitlements": {
+    "plan": "basic",
+    "effectiveAt": "2026-04-10T00:00:00Z",
+    "overrides": []
+  },
+  "degradation": {
+    "modes": [
+      {
+        "when": "ap.search.opensearch.disabled",
+        "behavior": "feeds_limited",
+        "contractRef": "feed-limited-v1"
+      }
+    ]
+  },
+  "events": {
+    "catalogVersion": "1.0.0",
+    "topics": []
+  },
+  "security": {
+    "internalApisAuth": "bearer",
+    "signingKeysLocation": "activitypods-only",
+    "failClosed": true
+  }
+}

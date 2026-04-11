@@ -27,7 +27,12 @@
     "inspect:identity-redis": "tsx src/at-adapter/tests/IdentityRedisInspector.ts",
     "smoke:phase7:primary": "tsx src/at-adapter/tests/Phase7PrimarySmoke.ts",
     "provision:test:fixture": "tsx scripts/provision-test-fixture.ts",
-    "smoke:phase7:full": "npm run provision:test:fixture && npm run smoke:phase7:primary"
+    "smoke:phase7:full": "npm run provision:test:fixture && npm run smoke:phase7:primary",
+    "loadtest:k6:inbox": "k6 run loadtest/sidecar-loadtest.js -e SCENARIO=inbox",
+    "loadtest:k6:webhook": "k6 run loadtest/sidecar-loadtest.js -e SCENARIO=webhook",
+    "loadtest:k6:mixed": "k6 run loadtest/sidecar-loadtest.js -e SCENARIO=mixed",
+    "loadtest:k6:benchmark": "./scripts/run-benchmarks.sh",
+    "scale:estimate": "tsx scripts/scale-estimate.ts"
   },
   "dependencies": {
     "@atproto/oauth-client-node": "^0.3.17",
@@ -60,6 +65,8 @@
     "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
+    "ajv": "^8.18.0",
+    "ajv-formats": "^3.0.1",
     "eslint": "^8.56.0",
     "ts-jest": "^29.4.6",
     "tsx": "^4.7.0",

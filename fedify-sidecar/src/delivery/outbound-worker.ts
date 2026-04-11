@@ -21,6 +21,7 @@ import {
 import { SigningClient, SignResult, SignErrorResult } from "../signing/signing-client.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
 import { logger } from "../utils/logger.js";
+import type { CapabilityGateResult } from "../capabilities/gates.js";
 
 // ============================================================================
 // Types
@@ -31,6 +32,7 @@ export interface OutboundWorkerConfig {
   maxConcurrentPerDomain: number;
   requestTimeoutMs: number;
   userAgent: string;
+  capabilityGate?: (capabilityId: string) => CapabilityGateResult;
 }
 
 export interface DeliveryResult {
@@ -102,6 +104,38 @@ export class OutboundWorker {
     logger.info("Outbound worker stopped", { remainingJobs: this.activeJobs });
   }
 
+  getConcurrency(): number {
+    return this.config.concurrency;
+  }
+
+  setConcurrency(nextConcurrency: number): void {
+    const normalized = Math.max(1, Math.floor(nextConcurrency));
+    if (normalized === this.config.concurrency) return;
+
+    const previous = this.config.concurrency;
+    this.config.concurrency = normalized;
+    logger.info("Outbound worker concurrency updated", {
+      previous,
+      next: normalized,
+    });
+  }
+
+  getMaxConcurrentPerDomain(): number {
+    return this.config.maxConcurrentPerDomain;
+  }
+
+  setMaxConcurrentPerDomain(nextLimit: number): void {
+    const normalized = Math.max(1, Math.floor(nextLimit));
+    if (normalized === this.config.maxConcurrentPerDomain) return;
+
+    const previous = this.config.maxConcurrentPerDomain;
+    this.config.maxConcurrentPerDomain = normalized;
+    logger.info("Outbound per-domain concurrency updated", {
+      previous,
+      next: normalized,
+    });
+  }
+
   /**
    * Process a single delivery job
    */
@@ -109,6 +143,24 @@ export class OutboundWorker {
     this.activeJobs++;
     
     try {
+      if (this.config.capabilityGate) {
+        const gate = this.config.capabilityGate("ap.federation.egress");
+        if (!gate.allowed) {
+          await this.queue.ack("outbound", messageId);
+          await this.queue.moveToDlq(
+            "outbound",
+            job,
+            gate.message || `Capability denied: ${gate.reasonCode || "feature_disabled"}`,
+          );
+          logger.warn("Outbound delivery skipped by capability gate", {
+            jobId: job.jobId,
+            capabilityId: gate.capabilityId,
+            reasonCode: gate.reasonCode,
+          });
+          return;
+        }
+      }
+
       // Step 1: Check notBeforeMs (delayed job)
       if (job.notBeforeMs > 0 && Date.now() < job.notBeforeMs) {
         // Not ready yet - requeue without incrementing attempt

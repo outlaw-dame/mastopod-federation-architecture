@@ -22,7 +22,24 @@
 			"npm run -s build": true,
 			"npm install": true,
 			"npm run -s typecheck": true,
-			"npm run -s smoke:runtime": true
+			"npm run -s smoke:runtime": true,
+			"npm run build": true,
+			"npm run -s test": true,
+			"npx vitest": true,
+			"/^node -e \"import\\('ajv'\\)\\.then\\(\\(\\)=>console\\.log\\('AJV_OK'\\)\\)\\.catch\\(\\(\\)=>\\{console\\.log\\('AJV_MISSING'\\); process\\.exit\\(1\\);\\}\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node -e \"const f = require\\('ajv-formats'\\); console\\.log\\(typeof f\\.default \\?\\? typeof f\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node -e \"import\\('ajv-formats'\\)\\.then\\(m => console\\.log\\(Object\\.keys\\(m\\)\\)\\)\\.catch\\(e => console\\.error\\(e\\.message\\)\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npx tsc": true,
+			"command": true
 		}
 	}
 }

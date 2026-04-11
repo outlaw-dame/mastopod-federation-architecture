@@ -135,10 +135,58 @@ import { RedisBridgeProfileMediaStore } from "./protocol-bridge/profile/BridgePr
 import { RedisBridgePostMediaStore } from "./protocol-bridge/post/BridgePostMedia.js";
 import { ApToAtProjectionWorker } from "./protocol-bridge/workers/ApToAtProjectionWorker.js";
 import { AtToApProjectionWorker } from "./protocol-bridge/workers/AtToApProjectionWorker.js";
+import {
+  buildProviderCapabilities,
+  inferProviderProfile,
+  renderCapabilitiesResponse,
+} from "./capabilities/provider-capabilities.js";
+import { validateProviderCapabilitiesConfig } from "./capabilities/startup-validator.js";
+import type { ProviderProfile } from "./capabilities/types.js";
+import { evaluateCapabilityGate } from "./capabilities/gates.js";
 
 // ============================================================================
 // Configuration
 // ============================================================================
+
+type SidecarDeploymentSize = "small" | "medium" | "large";
+
+const deploymentSize = (process.env.SIDECAR_DEPLOYMENT_SIZE || "medium") as SidecarDeploymentSize;
+
+const sizeDefaults: Record<SidecarDeploymentSize, {
+  inboundConcurrency: number;
+  outboundConcurrency: number;
+  maxConcurrentPerDomain: number;
+  wsMaxConnections: number;
+  wsIdleTimeoutMs: number;
+  wsHeartbeatIntervalMs: number;
+}> = {
+  small: {
+    inboundConcurrency: 16,
+    outboundConcurrency: 32,
+    maxConcurrentPerDomain: 5,
+    wsMaxConnections: 1000,
+    wsIdleTimeoutMs: 120000,
+    wsHeartbeatIntervalMs: 30000,
+  },
+  medium: {
+    inboundConcurrency: 32,
+    outboundConcurrency: 64,
+    maxConcurrentPerDomain: 10,
+    wsMaxConnections: 5000,
+    wsIdleTimeoutMs: 120000,
+    wsHeartbeatIntervalMs: 30000,
+  },
+  large: {
+    inboundConcurrency: 64,
+    outboundConcurrency: 128,
+    maxConcurrentPerDomain: 20,
+    wsMaxConnections: 20000,
+    wsIdleTimeoutMs: 90000,
+    wsHeartbeatIntervalMs: 20000,
+  },
+};
+
+const selectedSizeDefaults = sizeDefaults[deploymentSize] ?? sizeDefaults.medium;
 
 const config = {
   version: process.env.VERSION || "5.0.0",
@@ -155,6 +203,14 @@ const config = {
   enableXrpcServer: process.env.ENABLE_XRPC_SERVER !== "false",
   enableProtocolBridgeApToAt: process.env.ENABLE_PROTOCOL_BRIDGE_AP_TO_AT === "true",
   enableProtocolBridgeAtToAp: process.env.ENABLE_PROTOCOL_BRIDGE_AT_TO_AP === "true",
+  enableProviderCapabilitiesEndpoint: process.env.ENABLE_PROVIDER_CAPABILITIES_ENDPOINT !== "false",
+  enableProviderCapabilitiesValidation: process.env.ENABLE_PROVIDER_CAPABILITIES_VALIDATION === "true",
+  providerId: process.env.PROVIDER_ID || process.env.DOMAIN || "localhost",
+  providerDisplayName: process.env.PROVIDER_DISPLAY_NAME || "ActivityPods Provider",
+  providerRegion: process.env.PROVIDER_REGION || "global",
+  providerPlan: process.env.PROVIDER_PLAN || "pro",
+  providerProfile: process.env.PROVIDER_PROFILE || "",
+  providerAtprotoEnabledRaw: process.env.PROVIDER_ATPROTO_ENABLED,
 
   // Phase 7: AT session token secret (min 32 chars).
   // Required when ENABLE_XRPC_SERVER is true.
@@ -239,6 +295,65 @@ const config = {
   atExternalFirehoseRawTopic:
     process.env.AT_EXTERNAL_FIREHOSE_RAW_TOPIC || "at.firehose.raw.v1",
   enableAtExternalFirehose: process.env.ENABLE_AT_EXTERNAL_FIREHOSE === "true",
+  deploymentSize,
+  inboundConcurrency: Number.parseInt(
+    process.env.INBOUND_CONCURRENCY || `${selectedSizeDefaults.inboundConcurrency}`,
+    10,
+  ),
+  outboundConcurrency: Number.parseInt(
+    process.env.OUTBOUND_CONCURRENCY || `${selectedSizeDefaults.outboundConcurrency}`,
+    10,
+  ),
+  maxConcurrentPerDomain: Number.parseInt(
+    process.env.MAX_CONCURRENT_PER_DOMAIN || `${selectedSizeDefaults.maxConcurrentPerDomain}`,
+    10,
+  ),
+  wsSubscribeReposMaxConnections: Number.parseInt(
+    process.env.AT_SUBSCRIBE_REPOS_MAX_CONNECTIONS || `${selectedSizeDefaults.wsMaxConnections}`,
+    10,
+  ),
+  wsSubscribeReposIdleTimeoutMs: Number.parseInt(
+    process.env.AT_SUBSCRIBE_REPOS_IDLE_TIMEOUT_MS || `${selectedSizeDefaults.wsIdleTimeoutMs}`,
+    10,
+  ),
+  wsSubscribeReposHeartbeatIntervalMs: Number.parseInt(
+    process.env.AT_SUBSCRIBE_REPOS_HEARTBEAT_INTERVAL_MS || `${selectedSizeDefaults.wsHeartbeatIntervalMs}`,
+    10,
+  ),
+  enableAdaptiveScaling: process.env.ENABLE_ADAPTIVE_SCALING === "true",
+  adaptiveScalingIntervalMs: Number.parseInt(
+    process.env.ADAPTIVE_SCALING_INTERVAL_MS || "10000",
+    10,
+  ),
+  adaptiveScaleStep: Number.parseInt(process.env.ADAPTIVE_SCALE_STEP || "4", 10),
+  adaptiveInboundLagHigh: Number.parseInt(process.env.ADAPTIVE_INBOUND_LAG_HIGH || "400", 10),
+  adaptiveInboundLagLow: Number.parseInt(process.env.ADAPTIVE_INBOUND_LAG_LOW || "40", 10),
+  adaptiveOutboundLagHigh: Number.parseInt(process.env.ADAPTIVE_OUTBOUND_LAG_HIGH || "1000", 10),
+  adaptiveOutboundLagLow: Number.parseInt(process.env.ADAPTIVE_OUTBOUND_LAG_LOW || "100", 10),
+  adaptiveInboundConcurrencyMin: Number.parseInt(
+    process.env.ADAPTIVE_INBOUND_CONCURRENCY_MIN || `${Math.max(1, Math.floor(selectedSizeDefaults.inboundConcurrency / 2))}`,
+    10,
+  ),
+  adaptiveInboundConcurrencyMax: Number.parseInt(
+    process.env.ADAPTIVE_INBOUND_CONCURRENCY_MAX || `${selectedSizeDefaults.inboundConcurrency * 2}`,
+    10,
+  ),
+  adaptiveOutboundConcurrencyMin: Number.parseInt(
+    process.env.ADAPTIVE_OUTBOUND_CONCURRENCY_MIN || `${Math.max(1, Math.floor(selectedSizeDefaults.outboundConcurrency / 2))}`,
+    10,
+  ),
+  adaptiveOutboundConcurrencyMax: Number.parseInt(
+    process.env.ADAPTIVE_OUTBOUND_CONCURRENCY_MAX || `${selectedSizeDefaults.outboundConcurrency * 2}`,
+    10,
+  ),
+  adaptiveMaxConcurrentPerDomainMin: Number.parseInt(
+    process.env.ADAPTIVE_MAX_CONCURRENT_PER_DOMAIN_MIN || `${Math.max(1, Math.floor(selectedSizeDefaults.maxConcurrentPerDomain / 2))}`,
+    10,
+  ),
+  adaptiveMaxConcurrentPerDomainMax: Number.parseInt(
+    process.env.ADAPTIVE_MAX_CONCURRENT_PER_DOMAIN_MAX || `${selectedSizeDefaults.maxConcurrentPerDomain * 2}`,
+    10,
+  ),
   protocolBridgeLedgerTtlSec: Number.parseInt(
     process.env.PROTOCOL_BRIDGE_LEDGER_TTL_SEC || `${60 * 60 * 24 * 14}`,
     10,
@@ -305,6 +420,35 @@ let atEventPublisher: RedpandaEventPublisher | null = null;
 let atFirehoseRuntime: AtFirehoseRuntime | null = null;
 let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
 let isShuttingDown = false;
+let adaptiveScalingTimer: ReturnType<typeof setInterval> | null = null;
+
+type ScaleDirection = "up" | "down" | "hold";
+
+const adaptiveScalingState: {
+  lastTickEpochMs: number;
+  ticksTotal: number;
+  errorsTotal: number;
+  changesTotal: number;
+  inboundLag: number;
+  outboundLag: number;
+  inboundDirection: ScaleDirection;
+  outboundDirection: ScaleDirection;
+  inboundConcurrencyCurrent: number;
+  outboundConcurrencyCurrent: number;
+  outboundPerDomainCurrent: number;
+} = {
+  lastTickEpochMs: 0,
+  ticksTotal: 0,
+  errorsTotal: 0,
+  changesTotal: 0,
+  inboundLag: 0,
+  outboundLag: 0,
+  inboundDirection: "hold",
+  outboundDirection: "hold",
+  inboundConcurrencyCurrent: 0,
+  outboundConcurrencyCurrent: 0,
+  outboundPerDomainCurrent: 0,
+};
 
 // ============================================================================
 // Main Application
@@ -321,6 +465,10 @@ async function main() {
     richNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewRichDomains,
     disabledNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewDisabledDomains,
   } as const;
+
+  const clampInt = (value: number, min: number, max: number): number => {
+    return Math.max(min, Math.min(max, Math.floor(value)));
+  };
 
   if (config.enableXrpcServer && !config.atLocalFixture) {
     if (!process.env.ACTIVITYPODS_URL) {
@@ -357,6 +505,59 @@ async function main() {
       accountList + '\n' +
       `${'='.repeat(72)}\n\n`,
     );
+  }
+
+  const resolvedProviderProfile: ProviderProfile = (
+    config.providerProfile === "ap-core" ||
+    config.providerProfile === "ap-scale" ||
+    config.providerProfile === "dual-protocol-standard"
+  )
+    ? config.providerProfile
+    : inferProviderProfile(config.enableXrpcServer);
+
+  const resolvedAtprotoEnabled = config.providerAtprotoEnabledRaw === undefined
+    ? config.enableXrpcServer
+    : config.providerAtprotoEnabledRaw === "true";
+
+  const providerCapabilitiesDocument = buildProviderCapabilities({
+    providerId: config.providerId,
+    providerDisplayName: config.providerDisplayName,
+    providerRegion: config.providerRegion,
+    profile: resolvedProviderProfile,
+    plan: config.providerPlan,
+    enableInboundWorker: config.enableInboundWorker,
+    enableOutboundWorker: config.enableOutboundWorker,
+    enableOpenSearchIndexer: config.enableOpenSearchIndexer,
+    enableXrpcServer: config.enableXrpcServer,
+    enableMrf: process.env.ENABLE_MRF !== "false",
+    atprotoEnabled: resolvedAtprotoEnabled,
+    firehoseRetentionDays: Number.parseInt(process.env.PROVIDER_FIREHOSE_RETENTION_DAYS || "30", 10),
+    includeAtDisabledEntries: true,
+  });
+
+  if (config.enableProviderCapabilitiesValidation) {
+    const validation = validateProviderCapabilitiesConfig(providerCapabilitiesDocument, {
+      profile: resolvedProviderProfile,
+      hasRedisUrl: Boolean(process.env.REDIS_URL),
+      hasRedpandaBrokers: Boolean(process.env.REDPANDA_BROKERS),
+      hasSigningEndpoint: Boolean(process.env.ACTIVITYPODS_SIGNING_API_URL),
+      hasSigningToken: Boolean(process.env.ACTIVITYPODS_TOKEN),
+      hasOpenSearchUrl: Boolean(process.env.OPENSEARCH_URL),
+      enableMrf: process.env.ENABLE_MRF !== "false",
+    });
+
+    for (const issue of validation.issues) {
+      const level = issue.severity === "fatal" ? "error" : "warn";
+      logger[level]({
+        ruleId: issue.ruleId,
+        code: issue.code,
+        details: issue.details,
+      }, issue.message);
+    }
+
+    if (!validation.ok) {
+      throw new Error("Provider capabilities validation failed; refusing startup");
+    }
   }
 
   // Register shutdown handlers
@@ -409,7 +610,11 @@ async function main() {
 
     // Initialize outbound worker
     if (config.enableOutboundWorker) {
-      outboundWorker = createOutboundWorker(queue, signingClient, redpanda);
+      outboundWorker = createOutboundWorker(queue, signingClient, redpanda, {
+        concurrency: config.outboundConcurrency,
+        maxConcurrentPerDomain: config.maxConcurrentPerDomain,
+        capabilityGate: (capabilityId) => evaluateCapabilityGate(providerCapabilitiesDocument, capabilityId),
+      });
       outboundWorker.start().catch(err => {
         logger.error("Outbound worker error", { error: err.message });
       });
@@ -418,11 +623,137 @@ async function main() {
 
     // Initialize inbound worker
     if (config.enableInboundWorker) {
-      inboundWorker = createInboundWorker(queue, redpanda);
+      inboundWorker = createInboundWorker(queue, redpanda, {
+        concurrency: config.inboundConcurrency,
+        capabilityGate: (capabilityId) => evaluateCapabilityGate(providerCapabilitiesDocument, capabilityId),
+      });
       inboundWorker.start().catch(err => {
         logger.error("Inbound worker error", { error: err.message });
       });
       logger.info("Inbound worker started");
+    }
+
+    if (config.enableAdaptiveScaling) {
+      adaptiveScalingTimer = setInterval(() => {
+        if (isShuttingDown || !queue) {
+          return;
+        }
+
+        adaptiveScalingState.lastTickEpochMs = Date.now();
+
+        Promise.all([
+          queue.getPendingCount("inbound"),
+          queue.getPendingCount("outbound"),
+        ])
+          .then(([inboundLag, outboundLag]) => {
+            adaptiveScalingState.ticksTotal += 1;
+            adaptiveScalingState.inboundLag = inboundLag;
+            adaptiveScalingState.outboundLag = outboundLag;
+
+            if (inboundWorker) {
+              const inboundCurrent = inboundWorker.getConcurrency();
+              let inboundTarget = inboundCurrent;
+              let inboundDirection: ScaleDirection = "hold";
+
+              if (inboundLag >= config.adaptiveInboundLagHigh) {
+                inboundTarget = clampInt(
+                  inboundCurrent + config.adaptiveScaleStep,
+                  config.adaptiveInboundConcurrencyMin,
+                  config.adaptiveInboundConcurrencyMax,
+                );
+                inboundDirection = inboundTarget > inboundCurrent ? "up" : "hold";
+              } else if (inboundLag <= config.adaptiveInboundLagLow) {
+                inboundTarget = clampInt(
+                  inboundCurrent - config.adaptiveScaleStep,
+                  config.adaptiveInboundConcurrencyMin,
+                  config.adaptiveInboundConcurrencyMax,
+                );
+                inboundDirection = inboundTarget < inboundCurrent ? "down" : "hold";
+              }
+
+              if (inboundTarget !== inboundCurrent) {
+                adaptiveScalingState.changesTotal += 1;
+              }
+
+              inboundWorker.setConcurrency(inboundTarget);
+              adaptiveScalingState.inboundConcurrencyCurrent = inboundWorker.getConcurrency();
+              adaptiveScalingState.inboundDirection = inboundDirection;
+            }
+
+            if (outboundWorker) {
+              const outboundCurrent = outboundWorker.getConcurrency();
+              const perDomainCurrent = outboundWorker.getMaxConcurrentPerDomain();
+              let outboundTarget = outboundCurrent;
+              let perDomainTarget = perDomainCurrent;
+              let outboundDirection: ScaleDirection = "hold";
+
+              if (outboundLag >= config.adaptiveOutboundLagHigh) {
+                outboundTarget = clampInt(
+                  outboundCurrent + config.adaptiveScaleStep,
+                  config.adaptiveOutboundConcurrencyMin,
+                  config.adaptiveOutboundConcurrencyMax,
+                );
+                perDomainTarget = clampInt(
+                  perDomainCurrent + 1,
+                  config.adaptiveMaxConcurrentPerDomainMin,
+                  config.adaptiveMaxConcurrentPerDomainMax,
+                );
+                outboundDirection =
+                  outboundTarget > outboundCurrent || perDomainTarget > perDomainCurrent
+                    ? "up"
+                    : "hold";
+              } else if (outboundLag <= config.adaptiveOutboundLagLow) {
+                outboundTarget = clampInt(
+                  outboundCurrent - config.adaptiveScaleStep,
+                  config.adaptiveOutboundConcurrencyMin,
+                  config.adaptiveOutboundConcurrencyMax,
+                );
+                perDomainTarget = clampInt(
+                  perDomainCurrent - 1,
+                  config.adaptiveMaxConcurrentPerDomainMin,
+                  config.adaptiveMaxConcurrentPerDomainMax,
+                );
+                outboundDirection =
+                  outboundTarget < outboundCurrent || perDomainTarget < perDomainCurrent
+                    ? "down"
+                    : "hold";
+              }
+
+              if (outboundTarget !== outboundCurrent || perDomainTarget !== perDomainCurrent) {
+                adaptiveScalingState.changesTotal += 1;
+              }
+
+              outboundWorker.setConcurrency(outboundTarget);
+              outboundWorker.setMaxConcurrentPerDomain(perDomainTarget);
+              adaptiveScalingState.outboundConcurrencyCurrent = outboundWorker.getConcurrency();
+              adaptiveScalingState.outboundPerDomainCurrent =
+                outboundWorker.getMaxConcurrentPerDomain();
+              adaptiveScalingState.outboundDirection = outboundDirection;
+            }
+          })
+          .catch((err: any) => {
+            adaptiveScalingState.errorsTotal += 1;
+            logger.warn("Adaptive scaling tick failed", {
+              error: err?.message || String(err),
+            });
+          });
+      }, config.adaptiveScalingIntervalMs);
+
+      adaptiveScalingTimer.unref();
+      logger.info("Adaptive scaling enabled", {
+        intervalMs: config.adaptiveScalingIntervalMs,
+        step: config.adaptiveScaleStep,
+        inboundLagLow: config.adaptiveInboundLagLow,
+        inboundLagHigh: config.adaptiveInboundLagHigh,
+        outboundLagLow: config.adaptiveOutboundLagLow,
+        outboundLagHigh: config.adaptiveOutboundLagHigh,
+        inboundConcurrencyMin: config.adaptiveInboundConcurrencyMin,
+        inboundConcurrencyMax: config.adaptiveInboundConcurrencyMax,
+        outboundConcurrencyMin: config.adaptiveOutboundConcurrencyMin,
+        outboundConcurrencyMax: config.adaptiveOutboundConcurrencyMax,
+        maxConcurrentPerDomainMin: config.adaptiveMaxConcurrentPerDomainMin,
+        maxConcurrentPerDomainMax: config.adaptiveMaxConcurrentPerDomainMax,
+      });
     }
 
     // Create HTTP server
@@ -484,6 +815,15 @@ async function main() {
       const inboundPending = await queue.getPendingCount("inbound");
       const outboundLength = await queue.getStreamLength("outbound");
       const inboundLength = await queue.getStreamLength("inbound");
+      const inboundConcurrencyCurrent = inboundWorker ? inboundWorker.getConcurrency() : 0;
+      const outboundConcurrencyCurrent = outboundWorker ? outboundWorker.getConcurrency() : 0;
+      const outboundPerDomainCurrent = outboundWorker
+        ? outboundWorker.getMaxConcurrentPerDomain()
+        : 0;
+      const inboundDirectionUp = adaptiveScalingState.inboundDirection === "up" ? 1 : 0;
+      const inboundDirectionDown = adaptiveScalingState.inboundDirection === "down" ? 1 : 0;
+      const outboundDirectionUp = adaptiveScalingState.outboundDirection === "up" ? 1 : 0;
+      const outboundDirectionDown = adaptiveScalingState.outboundDirection === "down" ? 1 : 0;
       
       return [
         `# HELP fedify_outbound_pending Number of pending outbound jobs`,
@@ -501,12 +841,88 @@ async function main() {
         `# HELP fedify_uptime_seconds Uptime in seconds`,
         `# TYPE fedify_uptime_seconds gauge`,
         `fedify_uptime_seconds ${Math.floor(process.uptime())}`,
+        `# HELP fedify_adaptive_scaling_enabled Adaptive scaling enabled flag`,
+        `# TYPE fedify_adaptive_scaling_enabled gauge`,
+        `fedify_adaptive_scaling_enabled ${config.enableAdaptiveScaling ? 1 : 0}`,
+        `# HELP fedify_adaptive_scaling_ticks_total Total adaptive scaling ticks completed`,
+        `# TYPE fedify_adaptive_scaling_ticks_total counter`,
+        `fedify_adaptive_scaling_ticks_total ${adaptiveScalingState.ticksTotal}`,
+        `# HELP fedify_adaptive_scaling_errors_total Total adaptive scaling tick errors`,
+        `# TYPE fedify_adaptive_scaling_errors_total counter`,
+        `fedify_adaptive_scaling_errors_total ${adaptiveScalingState.errorsTotal}`,
+        `# HELP fedify_adaptive_scaling_changes_total Total adaptive scaling changes applied`,
+        `# TYPE fedify_adaptive_scaling_changes_total counter`,
+        `fedify_adaptive_scaling_changes_total ${adaptiveScalingState.changesTotal}`,
+        `# HELP fedify_adaptive_scaling_last_tick_epoch_seconds Last adaptive scaling tick time (epoch seconds)`,
+        `# TYPE fedify_adaptive_scaling_last_tick_epoch_seconds gauge`,
+        `fedify_adaptive_scaling_last_tick_epoch_seconds ${
+          adaptiveScalingState.lastTickEpochMs > 0
+            ? Math.floor(adaptiveScalingState.lastTickEpochMs / 1000)
+            : 0
+        }`,
+        `# HELP fedify_adaptive_inbound_lag Last inbound lag observed by autoscaler`,
+        `# TYPE fedify_adaptive_inbound_lag gauge`,
+        `fedify_adaptive_inbound_lag ${adaptiveScalingState.inboundLag}`,
+        `# HELP fedify_adaptive_outbound_lag Last outbound lag observed by autoscaler`,
+        `# TYPE fedify_adaptive_outbound_lag gauge`,
+        `fedify_adaptive_outbound_lag ${adaptiveScalingState.outboundLag}`,
+        `# HELP fedify_inbound_concurrency_current Current inbound worker concurrency`,
+        `# TYPE fedify_inbound_concurrency_current gauge`,
+        `fedify_inbound_concurrency_current ${inboundConcurrencyCurrent}`,
+        `# HELP fedify_outbound_concurrency_current Current outbound worker concurrency`,
+        `# TYPE fedify_outbound_concurrency_current gauge`,
+        `fedify_outbound_concurrency_current ${outboundConcurrencyCurrent}`,
+        `# HELP fedify_outbound_per_domain_concurrency_current Current outbound max concurrency per domain`,
+        `# TYPE fedify_outbound_per_domain_concurrency_current gauge`,
+        `fedify_outbound_per_domain_concurrency_current ${outboundPerDomainCurrent}`,
+        `# HELP fedify_adaptive_inbound_direction_up Last inbound scaling direction was up`,
+        `# TYPE fedify_adaptive_inbound_direction_up gauge`,
+        `fedify_adaptive_inbound_direction_up ${inboundDirectionUp}`,
+        `# HELP fedify_adaptive_inbound_direction_down Last inbound scaling direction was down`,
+        `# TYPE fedify_adaptive_inbound_direction_down gauge`,
+        `fedify_adaptive_inbound_direction_down ${inboundDirectionDown}`,
+        `# HELP fedify_adaptive_outbound_direction_up Last outbound scaling direction was up`,
+        `# TYPE fedify_adaptive_outbound_direction_up gauge`,
+        `fedify_adaptive_outbound_direction_up ${outboundDirectionUp}`,
+        `# HELP fedify_adaptive_outbound_direction_down Last outbound scaling direction was down`,
+        `# TYPE fedify_adaptive_outbound_direction_down gauge`,
+        `fedify_adaptive_outbound_direction_down ${outboundDirectionDown}`,
         ...renderOAuthSecurityMetricsLines(),
       ].join("\n") + "\n";
     });
 
+    if (config.enableProviderCapabilitiesEndpoint) {
+      app.get("/.well-known/provider-capabilities", async (request, reply) => {
+        const rendered = renderCapabilitiesResponse(providerCapabilitiesDocument);
+        const etag = `\"${rendered.etag}\"`;
+        const ifNoneMatch = request.headers["if-none-match"];
+
+        if (ifNoneMatch === etag) {
+          reply.status(304).header("ETag", etag).send();
+          return;
+        }
+
+        reply
+          .header("Content-Type", "application/vnd.activitypods.provider-capabilities+json;version=1")
+          .header("Cache-Control", "public, max-age=60")
+          .header("ETag", etag)
+          .send(rendered.body);
+      });
+    }
+
     // Shared inbox endpoint
     app.post("/inbox", async (request, reply) => {
+      const gate = evaluateCapabilityGate(providerCapabilitiesDocument, "ap.federation.ingress");
+      if (!gate.allowed) {
+        reply.status(403).send({
+          error: gate.reasonCode ?? "feature_disabled",
+          message: gate.message ?? "AP ingress capability is disabled",
+          capabilityId: gate.capabilityId,
+          retryable: gate.retryable ?? false,
+        });
+        return;
+      }
+
       if (!queue) {
         reply.status(503).send({ error: "Service unavailable" });
         return;
@@ -527,6 +943,17 @@ async function main() {
 
     // Per-user inbox endpoint
     app.post("/users/:username/inbox", async (request, reply) => {
+      const gate = evaluateCapabilityGate(providerCapabilitiesDocument, "ap.federation.ingress");
+      if (!gate.allowed) {
+        reply.status(403).send({
+          error: gate.reasonCode ?? "feature_disabled",
+          message: gate.message ?? "AP ingress capability is disabled",
+          capabilityId: gate.capabilityId,
+          retryable: gate.retryable ?? false,
+        });
+        return;
+      }
+
       if (!queue) {
         reply.status(503).send({ error: "Service unavailable" });
         return;
@@ -549,6 +976,17 @@ async function main() {
 
     // Alternative inbox path format
     app.post("/:username/inbox", async (request, reply) => {
+      const gate = evaluateCapabilityGate(providerCapabilitiesDocument, "ap.federation.ingress");
+      if (!gate.allowed) {
+        reply.status(403).send({
+          error: gate.reasonCode ?? "feature_disabled",
+          message: gate.message ?? "AP ingress capability is disabled",
+          capabilityId: gate.capabilityId,
+          retryable: gate.retryable ?? false,
+        });
+        return;
+      }
+
       if (!queue) {
         reply.status(503).send({ error: "Service unavailable" });
         return;
@@ -571,13 +1009,33 @@ async function main() {
 
     // Outbound webhook — receives delivery work from ActivityPods
     app.post("/webhook/outbox", async (request, reply) => {
+      const gate = evaluateCapabilityGate(providerCapabilitiesDocument, "ap.federation.egress");
+      if (!gate.allowed) {
+        reply.status(403).send({
+          error: gate.reasonCode ?? "feature_disabled",
+          message: gate.message ?? "AP egress capability is disabled",
+          capabilityId: gate.capabilityId,
+          retryable: gate.retryable ?? false,
+        });
+        return;
+      }
+
       const authHeader = (request.headers["authorization"] as string) || "";
       const [scheme, token] = authHeader.split(" ");
       if (scheme !== "Bearer" || token !== config.sidecarToken) {
         reply.status(401).send({ error: "Unauthorized" });
         return;
       }
-      const body = request.body as any;
+
+      // Parse JSON body (stored as string for signature verification)
+      let body: any;
+      try {
+        body = typeof request.body === "string" ? JSON.parse(request.body) : request.body;
+      } catch (err) {
+        reply.status(400).send({ error: "Bad Request - Invalid JSON" });
+        return;
+      }
+
       if (!body?.actorUri || !body?.activity || !Array.isArray(body?.remoteTargets)) {
         reply.status(400).send({ error: "Bad Request" });
         return;
@@ -1221,6 +1679,7 @@ async function main() {
           xrpcServer,
           sessionService,
           oauthTokenVerifier,
+          capabilityGate: (capabilityId) => evaluateCapabilityGate(providerCapabilitiesDocument, capabilityId),
         });
         xrpcServerForWebSocket = xrpcServer;
 
@@ -1267,7 +1726,12 @@ async function main() {
     }
 
     if (xrpcServerForWebSocket) {
-      attachSubscribeReposWebSocket(app, xrpcServerForWebSocket);
+      attachSubscribeReposWebSocket(app, xrpcServerForWebSocket, {
+        capabilityGate: (capabilityId) => evaluateCapabilityGate(providerCapabilitiesDocument, capabilityId),
+        maxConnections: config.wsSubscribeReposMaxConnections,
+        idleTimeoutMs: config.wsSubscribeReposIdleTimeoutMs,
+        heartbeatIntervalMs: config.wsSubscribeReposHeartbeatIntervalMs,
+      });
     }
 
     // Start HTTP server only after all HTTP and WebSocket routes are registered.
@@ -1277,9 +1741,18 @@ async function main() {
     logger.info(`Metrics available at http://${config.host}:${config.port}/metrics`);
     logger.info("Configuration summary", {
       domain: config.domain,
+      deploymentSize: config.deploymentSize,
       enableOutboundWorker: config.enableOutboundWorker,
       enableInboundWorker: config.enableInboundWorker,
       enableOpenSearchIndexer: config.enableOpenSearchIndexer,
+      inboundConcurrency: config.inboundConcurrency,
+      outboundConcurrency: config.outboundConcurrency,
+      maxConcurrentPerDomain: config.maxConcurrentPerDomain,
+      wsSubscribeReposMaxConnections: config.wsSubscribeReposMaxConnections,
+      wsSubscribeReposIdleTimeoutMs: config.wsSubscribeReposIdleTimeoutMs,
+      wsSubscribeReposHeartbeatIntervalMs: config.wsSubscribeReposHeartbeatIntervalMs,
+      enableAdaptiveScaling: config.enableAdaptiveScaling,
+      adaptiveScalingIntervalMs: config.adaptiveScalingIntervalMs,
     });
 
   } catch (error: any) {
@@ -1321,6 +1794,11 @@ async function shutdown(signal: string): Promise<void> {
   }, 30000);
 
   try {
+    if (adaptiveScalingTimer) {
+      clearInterval(adaptiveScalingTimer);
+      adaptiveScalingTimer = null;
+    }
+
     // Stop workers first
     if (outboundWorker) {
       await outboundWorker.stop();
