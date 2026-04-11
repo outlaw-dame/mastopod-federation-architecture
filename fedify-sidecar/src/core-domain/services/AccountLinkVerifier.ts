@@ -1,308 +1,290 @@
-/**
- * V6.5 Account Link Verifier - Bidirectional Account Link Verification
- *
- * Verifies that account links are bidirectional and authentic:
- * - ActivityPub actor includes ATProto DID in alsoKnownAs
- * - ATProto DID document includes ActivityPub actor in alsoKnownAs
- * - WebID includes both in RDF triples
- *
- * This ensures no account takeover or spoofing is possible.
- */
+import type {
+  AccountLinkVerificationStatus,
+  IdentityBinding,
+} from "../identity/IdentityBinding.js";
 
-import { IdentityBinding, AccountLinkVerificationStatus } from '../identity/IdentityBinding.js';
-
-/**
- * Link verification result
- */
 export interface LinkVerificationResult {
-  /**
-   * Overall verification status
-   */
   status: AccountLinkVerificationStatus;
-
-  /**
-   * Actor document verification
-   */
   actorDocumentVerified: boolean;
-
-  /**
-   * DID document verification
-   */
   didDocumentVerified: boolean;
-
-  /**
-   * WebID document verification
-   */
   webIdDocumentVerified: boolean;
-
-  /**
-   * Verification errors
-   */
   errors: string[];
-
-  /**
-   * Verification timestamp
-   */
   verifiedAt: string;
 }
 
-/**
- * Account Link Verifier
- *
- * Verifies bidirectional account links.
- */
-export class AccountLinkVerifier {
-  /**
-   * HTTP request timeout (milliseconds)
-   */
-  private readonly HTTP_TIMEOUT_MS = 15000;
+interface LinkCheckResult {
+  matched: boolean;
+  contradictory: boolean;
+  error?: string;
+}
 
-  /**
-   * Verify account link
-   *
-   * @param binding - The identity binding
-   * @returns Verification result
-   */
+export class AccountLinkVerifier {
+  private readonly HTTP_TIMEOUT_MS = 15_000;
+
   async verifyAccountLink(binding: IdentityBinding): Promise<LinkVerificationResult> {
-    const errors: string[] = [];
-    let actorDocumentVerified = false;
-    let didDocumentVerified = false;
-    let webIdDocumentVerified = false;
     const now = new Date().toISOString();
 
-    // Verify ActivityPub actor document
-    try {
-      actorDocumentVerified = await this.verifyActorDocument(binding);
-      if (!actorDocumentVerified) {
-        errors.push('ActivityPub actor document does not include ATProto DID');
-      }
-    } catch (error) {
-      errors.push(
-        `Failed to verify actor document: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
+    const actorCheck = await this.verifyActorDocument(binding);
+    const didCheck = await this.verifyDidDocument(binding);
+    const webIdCheck = await this.verifyWebIdDocument(binding);
 
-    // Verify ATProto DID document
-    if (binding.atprotoDid) {
-      try {
-        didDocumentVerified = await this.verifyDidDocument(binding);
-        if (!didDocumentVerified) {
-          errors.push('ATProto DID document does not include ActivityPub actor');
-        }
-      } catch (error) {
-        errors.push(
-          `Failed to verify DID document: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
+    const errors = [actorCheck.error, didCheck.error, webIdCheck.error].filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
 
-    // Verify WebID document
-    try {
-      webIdDocumentVerified = await this.verifyWebIdDocument(binding);
-      if (!webIdDocumentVerified) {
-        errors.push('WebID document does not include both identities');
-      }
-    } catch (error) {
-      errors.push(
-        `Failed to verify WebID document: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-
-    // Determine overall status
-    let status: AccountLinkVerificationStatus;
-    if (errors.length === 0) {
-      status = 'fresh_verified';
-    } else if (actorDocumentVerified && webIdDocumentVerified) {
-      status = 'stale_verified'; // At least AP and WebID are verified
-    } else {
-      status = 'unverified';
-    }
+    const status = this.resolveStatus(actorCheck, didCheck, webIdCheck, errors);
 
     return {
       status,
-      actorDocumentVerified,
-      didDocumentVerified,
-      webIdDocumentVerified,
+      actorDocumentVerified: actorCheck.matched,
+      didDocumentVerified: didCheck.matched,
+      webIdDocumentVerified: webIdCheck.matched,
       errors,
       verifiedAt: now,
     };
   }
 
-  /**
-   * Verify ActivityPub actor document
-   *
-   * @param binding - The identity binding
-   * @returns true if verified
-   * @throws Error on fetch failure
-   */
-  private async verifyActorDocument(binding: IdentityBinding): Promise<boolean> {
-    try {
-      const response = await fetch(binding.activityPubActorUri, {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/activity+json',
-        },
-        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const actor = (await response.json()) as any;
-
-      // Check alsoKnownAs
-      const alsoKnownAs = actor.alsoKnownAs || [];
-      const aliases = Array.isArray(alsoKnownAs) ? alsoKnownAs : [alsoKnownAs];
-
-      // Check for ATProto DID
-      const atprotoDid = binding.atprotoDid;
-      if (atprotoDid) {
-        return aliases.some(
-          (alias: string) =>
-            alias === atprotoDid ||
-            alias === `at://${atprotoDid}` ||
-            alias.includes(atprotoDid)
-        );
-      }
-
-      return false;
-    } catch (error) {
-      throw new Error(
-        `Failed to fetch actor document: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * Verify ATProto DID document
-   *
-   * @param binding - The identity binding
-   * @returns true if verified
-   * @throws Error on fetch failure
-   */
-  private async verifyDidDocument(binding: IdentityBinding): Promise<boolean> {
-    if (!binding.atprotoDid) {
-      return false;
-    }
-
-    try {
-      // Resolve DID to document
-      const response = await fetch(`https://plc.directory/${binding.atprotoDid}`, {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/json',
-        },
-        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const entry = (await response.json()) as any;
-      const didDoc = entry.operation || {};
-
-      // Check alsoKnownAs
-      const alsoKnownAs = didDoc.alsoKnownAs || [];
-
-      // Check for ActivityPub actor
-      return alsoKnownAs.some(
-        (alias: string) =>
-          alias === binding.activityPubActorUri || alias.includes(binding.activityPubActorUri)
-      );
-    } catch (error) {
-      throw new Error(
-        `Failed to fetch DID document: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * Verify WebID document
-   *
-   * @param binding - The identity binding
-   * @returns true if verified
-   * @throws Error on fetch failure
-   */
-  private async verifyWebIdDocument(binding: IdentityBinding): Promise<boolean> {
-    try {
-      const response = await fetch(binding.webId, {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/ld+json, application/json',
-        },
-        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const webId = (await response.json()) as any;
-
-      // Check schema:sameAs
-      const sameAs = webId.sameAs || [];
-      const sameAsArray = Array.isArray(sameAs) ? sameAs : [sameAs];
-
-      const hasSameAsAp = sameAsArray.some((alias: string) =>
-        alias.includes(binding.activityPubActorUri)
-      );
-      const hasSameAsDid = binding.atprotoDid
-        ? sameAsArray.some(
-            (alias: string) =>
-              alias === binding.atprotoDid || alias === `at://${binding.atprotoDid}`
-          )
-        : true;
-
-      return hasSameAsAp && hasSameAsDid;
-    } catch (error) {
-      throw new Error(
-        `Failed to fetch WebID document: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * Check if link is stale (needs reverification)
-   *
-   * @param binding - The identity binding
-   * @param maxAgeDays - Maximum age in days (default 30)
-   * @returns true if stale
-   */
-  isLinkStale(binding: IdentityBinding, maxAgeDays: number = 30): boolean {
-    if (!(binding.accountLinks as any).verificationRecords || (binding.accountLinks as any).verificationRecords.length === 0) {
+  isLinkStale(binding: IdentityBinding, maxAgeDays = 30): boolean {
+    const records = binding.accountLinks.verificationRecords ?? [];
+    if (records.length === 0) {
       return true;
     }
 
-    const latest = (binding.accountLinks as any).verificationRecords[0];
-    const verifiedTime = new Date(latest.verifiedAt).getTime();
-    const now = Date.now();
-    const ageMs = now - verifiedTime;
-    const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+    const latest = records[0];
+    if (!latest) {
+      return true;
+    }
 
-    return ageMs > maxAgeMs;
+    if (latest.status === "error" || latest.status === "conflict" || latest.status === "unverified") {
+      return true;
+    }
+
+    const expiresAt = Date.parse(latest.expiresAt);
+    if (!Number.isNaN(expiresAt)) {
+      return Date.now() > expiresAt;
+    }
+
+    const checkedAt = Date.parse(latest.checkedAt);
+    if (Number.isNaN(checkedAt)) {
+      return true;
+    }
+
+    const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+    return Date.now() - checkedAt > maxAgeMs;
   }
 
-  /**
-   * Format verification result for logging
-   *
-   * @param result - Verification result
-   * @returns Human-readable description
-   */
   formatResult(result: LinkVerificationResult): string {
     const parts = [
       `Status: ${result.status}`,
-      `Actor: ${result.actorDocumentVerified ? '✓' : '✗'}`,
-      `DID: ${result.didDocumentVerified ? '✓' : '✗'}`,
-      `WebID: ${result.webIdDocumentVerified ? '✓' : '✗'}`,
+      `Actor: ${result.actorDocumentVerified ? "yes" : "no"}`,
+      `DID: ${result.didDocumentVerified ? "yes" : "no"}`,
+      `WebID: ${result.webIdDocumentVerified ? "yes" : "no"}`,
     ];
 
     if (result.errors.length > 0) {
-      parts.push(`Errors: ${result.errors.join('; ')}`);
+      parts.push(`Errors: ${result.errors.join("; ")}`);
     }
 
-    return parts.join(' | ');
+    return parts.join(" | ");
+  }
+
+  private resolveStatus(
+    actorCheck: LinkCheckResult,
+    didCheck: LinkCheckResult,
+    webIdCheck: LinkCheckResult,
+    errors: string[],
+  ): AccountLinkVerificationStatus {
+    if (actorCheck.contradictory || didCheck.contradictory || webIdCheck.contradictory) {
+      return "conflict";
+    }
+
+    if (errors.length > 0) {
+      return "error";
+    }
+
+    if (actorCheck.matched && didCheck.matched && webIdCheck.matched) {
+      return "fresh_verified";
+    }
+
+    return "unverified";
+  }
+
+  private async verifyActorDocument(binding: IdentityBinding): Promise<LinkCheckResult> {
+    const actor = await this.fetchJsonDocument(
+      binding.activityPubActorUri,
+      "application/activity+json, application/ld+json",
+    );
+
+    if (!actor.ok) {
+      return { matched: false, contradictory: false, error: actor.error };
+    }
+
+    const aliases = this.toStringArray(actor.body["alsoKnownAs"]);
+    const matched = aliases.some((alias) => this.matchesDidAlias(alias, binding.atprotoDid));
+    const contradictory =
+      this.hasExplicitDidReference(aliases) &&
+      !matched;
+
+    return {
+      matched,
+      contradictory,
+      error: contradictory
+        ? "ActivityPub actor links to a different ATProto identity"
+        : undefined,
+    };
+  }
+
+  private async verifyDidDocument(binding: IdentityBinding): Promise<LinkCheckResult> {
+    if (!binding.atprotoDid) {
+      return { matched: false, contradictory: false };
+    }
+
+    const didDocument = await this.fetchJsonDocument(
+      this.resolveDidDocumentUrl(binding.atprotoDid),
+      "application/json",
+    );
+
+    if (!didDocument.ok) {
+      return { matched: false, contradictory: false, error: didDocument.error };
+    }
+
+    const documentBody = this.extractDidDocumentBody(didDocument.body);
+    const aliases = this.toStringArray(documentBody["alsoKnownAs"]);
+    const matched = aliases.some((alias) => alias === binding.activityPubActorUri);
+    const contradictory =
+      aliases.some((alias) => this.looksLikeHttpUrl(alias) && alias !== binding.activityPubActorUri) &&
+      !matched;
+
+    return {
+      matched,
+      contradictory,
+      error: contradictory
+        ? "ATProto DID document links to a different ActivityPub actor"
+        : undefined,
+    };
+  }
+
+  private async verifyWebIdDocument(binding: IdentityBinding): Promise<LinkCheckResult> {
+    const webIdDocument = await this.fetchJsonDocument(
+      binding.webId,
+      "application/ld+json, application/json",
+    );
+
+    if (!webIdDocument.ok) {
+      return { matched: false, contradictory: false, error: webIdDocument.error };
+    }
+
+    const sameAs = this.toStringArray(
+      webIdDocument.body["sameAs"] ?? webIdDocument.body["schema:sameAs"],
+    );
+    const hasActivityPubLink = sameAs.some((alias) => alias === binding.activityPubActorUri);
+    const hasDidLink = binding.atprotoDid
+      ? sameAs.some((alias) => this.matchesDidAlias(alias, binding.atprotoDid))
+      : false;
+    const contradictory =
+      this.hasExplicitDidReference(sameAs) &&
+      !hasDidLink;
+
+    return {
+      matched: hasActivityPubLink && hasDidLink,
+      contradictory,
+      error: contradictory
+        ? "WebID document links to a different ATProto identity"
+        : undefined,
+    };
+  }
+
+  private async fetchJsonDocument(
+    url: string,
+    accept: string,
+  ): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; error: string }> {
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        headers: { Accept: accept },
+        signal: AbortSignal.timeout(this.HTTP_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        return { ok: false, error: `Failed to fetch ${url}: HTTP ${response.status}` };
+      }
+
+      const body = (await response.json()) as Record<string, unknown>;
+      return { ok: true, body };
+    } catch (error) {
+      return {
+        ok: false,
+        error: `Failed to fetch ${url}: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  private extractDidDocumentBody(body: Record<string, unknown>): Record<string, unknown> {
+    const operation = body["operation"];
+    return operation && typeof operation === "object"
+      ? (operation as Record<string, unknown>)
+      : body;
+  }
+
+  private resolveDidDocumentUrl(did: string): string {
+    if (did.startsWith("did:plc:")) {
+      return `https://plc.directory/${did}`;
+    }
+
+    if (did.startsWith("did:web:")) {
+      const segments = did.slice("did:web:".length).split(":").map((segment) => decodeURIComponent(segment));
+      const [host, ...pathSegments] = segments;
+
+      if (!host) {
+        throw new Error(`Unsupported did:web identifier: ${did}`);
+      }
+
+      if (pathSegments.length === 0) {
+        return `https://${host}/.well-known/did.json`;
+      }
+
+      return `https://${host}/${pathSegments.join("/")}/did.json`;
+    }
+
+    throw new Error(`Unsupported DID method for account-link verification: ${did}`);
+  }
+
+  private toStringArray(value: unknown): string[] {
+    if (typeof value === "string") {
+      return [value];
+    }
+
+    if (Array.isArray(value)) {
+      return value.filter((item): item is string => typeof item === "string");
+    }
+
+    return [];
+  }
+
+  private matchesDidAlias(alias: string, did: string | null): boolean {
+    if (!did) {
+      return false;
+    }
+
+    return (
+      alias === did ||
+      alias === `at://${did}` ||
+      alias === `https://bsky.app/profile/${did}` ||
+      alias.includes(did)
+    );
+  }
+
+  private hasExplicitDidReference(aliases: string[]): boolean {
+    return aliases.some(
+      (alias) =>
+        alias.startsWith("did:plc:") ||
+        alias.startsWith("did:web:") ||
+        alias.startsWith("at://did:") ||
+        alias.startsWith("https://bsky.app/profile/did:"),
+    );
+  }
+
+  private looksLikeHttpUrl(value: string): boolean {
+    return value.startsWith("http://") || value.startsWith("https://");
   }
 }
-

@@ -96,6 +96,7 @@ export class AtSearchProjector {
         : undefined;
 
       const upsert: SearchPublicUpsertV1 = {
+        upsertKind: 'full',
         stableDocId,
         upsertKind: 'full',
         canonicalContentId: sourceKind === 'local' ? ((op as any).canonicalRefId || op.rkey) : undefined,

@@ -8,11 +8,10 @@
  *
  * Uses `undici` (already a sidecar dependency).
  * Returns null on any error (network failure, timeout, non-HTML response, etc.).
- * Rejects obvious loopback/private literal targets by default to reduce SSRF risk.
  */
 
-import { isIP } from "node:net";
 import { request } from "undici";
+import { isIP } from "node:net";
 
 export interface OGMetadata {
   /** Canonical page URL (og:url, or the original URL if absent). */
@@ -95,9 +94,7 @@ export async function fetchOpenGraph(url: string): Promise<OGMetadata | null> {
       totalBytes += buf.length;
       if (totalBytes >= MAX_READ_BYTES) break;
     }
-    // Discard remaining bytes without letting destroy() propagate an error.
-    try { body.destroy(); } catch { /* swallow */ }
-    body.on?.("error", () => { /* suppress post-destroy stream error */ });
+    body.destroy();
 
     const html = Buffer.concat(chunks).toString("utf8");
     return parseOpenGraph(parsedUrl.toString(), html);
@@ -156,86 +153,50 @@ function parseSafeBrowsingPayload(payload: string): { threatCount: number } | nu
   }
 }
 
-function isPreviewTargetAllowed(parsedUrl: URL): boolean {
-  if (isPrivatePreviewFetchesAllowed()) {
-    return true;
-  }
-
-  const hostname = normalizeHostForIpChecks(parsedUrl.hostname);
-  if (!hostname) {
-    return false;
-  }
-  if (hostname === "localhost" || hostname.endsWith(".localhost")) {
-    return false;
-  }
-
-  const ipVersion = isIP(hostname);
-  if (ipVersion === 4) {
-    return !isPrivateIpv4(hostname);
-  }
-  if (ipVersion === 6) {
-    return !isPrivateIpv6(hostname);
-  }
-
-  return true;
+function isPrivatePreviewAllowed(): boolean {
+  return process.env["ALLOW_PRIVATE_PREVIEW_FETCHES"] === "1";
 }
 
-function isPrivatePreviewFetchesAllowed(): boolean {
-  return /^(1|true|yes)$/i.test(process.env[ALLOW_PRIVATE_PREVIEW_FETCHES_ENV] ?? "");
-}
-
-function normalizeHostForIpChecks(hostname: string): string {
-  return hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
-}
-
-function isPrivateIpv4(hostname: string): boolean {
-  const octets = hostname.split(".").map((value) => Number.parseInt(value, 10));
-  if (octets.length !== 4 || octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
+function isDisallowedPreviewHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  if (!normalized) {
     return true;
   }
 
-  const [first, second] = octets as [number, number, number, number];
-  if (first === 0 || first === 10 || first === 127) {
+  if (normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1") {
     return true;
   }
-  if (first === 100 && second >= 64 && second <= 127) {
-    return true;
+
+  const ipType = isIP(normalized);
+  if (ipType === 4) {
+    return isPrivateIpv4(normalized);
   }
-  if (first === 169 && second === 254) {
-    return true;
-  }
-  if (first === 172 && second >= 16 && second <= 31) {
-    return true;
-  }
-  if (first === 192 && second === 168) {
-    return true;
-  }
-  if (first === 198 && (second === 18 || second === 19)) {
-    return true;
-  }
-  if (first >= 224) {
-    return true;
+  if (ipType === 6) {
+    return isPrivateIpv6(normalized);
   }
 
   return false;
 }
 
-function isPrivateIpv6(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  if (normalized === "::" || normalized === "::1" || normalized === "0:0:0:0:0:0:0:1") {
+function isPrivateIpv4(ip: string): boolean {
+  if (ip.startsWith("10.") || ip.startsWith("127.") || ip.startsWith("192.168.") || ip.startsWith("169.254.")) {
     return true;
   }
-  if (normalized.startsWith("fe80:")) {
-    return true;
+  if (!ip.startsWith("172.")) {
+    return false;
   }
-  if (normalized.startsWith("fc") || normalized.startsWith("fd")) {
-    return true;
-  }
-  if (normalized.startsWith("::ffff:")) {
-    return isPrivateIpv4(normalized.slice("::ffff:".length));
-  }
+  const second = Number.parseInt(ip.split(".")[1] ?? "-1", 10);
+  return second >= 16 && second <= 31;
+}
 
-  return false;
+function isPrivateIpv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  return (
+    lower === "::1" ||
+    lower.startsWith("fc") ||
+    lower.startsWith("fd") ||
+    lower.startsWith("fe80:")
+  );
 }
 
 // ---------------------------------------------------------------------------

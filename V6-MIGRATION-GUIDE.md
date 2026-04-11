@@ -4,6 +4,26 @@
 
 This guide documents the migration from V5 to V6 architecture for the Mastopod Federation Sidecar. The V6 specification is the authoritative architecture and supersedes all earlier versions.
 
+## Fedify Runtime Integration Note (2026-04-04)
+
+The current migration path uses a feature-flagged integration seam for Fedify runtime adoption, rather than a big-bang replacement.
+
+What changed:
+- Runtime seam and flag were introduced for controlled rollout:
+	- `ENABLE_FEDIFY_RUNTIME_INTEGRATION` (default OFF)
+	- `FederationRuntimeAdapter` with noop default behavior
+
+What did not change:
+- ActivityPods remains signing authority and key custody boundary.
+- Redis Streams remains transient delivery/work queue substrate.
+- RedPanda remains immutable event-log backbone.
+- OpenSearch remains firehose consumer plus bulk indexer.
+
+Rollout posture:
+- Enable the runtime flag in non-production first.
+- Validate parity and invariants with existing Phase runbook checks.
+- Promote to production only after CI/staging parity evidence is green.
+
 ## Key Architectural Changes
 
 ### 1. Queue Layer: Redis is State-Only, Not Work Queue

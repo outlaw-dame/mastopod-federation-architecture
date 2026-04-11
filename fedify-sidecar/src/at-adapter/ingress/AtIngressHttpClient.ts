@@ -214,6 +214,20 @@ function normalizeHttpError(error: unknown, url: string): AtIngressHttpError {
   }
 
   if (error instanceof Error) {
+    const causeCode = (error.cause as { code?: string } | null)?.code ?? "";
+    if (
+      causeCode.startsWith("ERR_TLS") ||
+      causeCode.startsWith("ERR_SSL") ||
+      causeCode === "CERT_HAS_EXPIRED" ||
+      causeCode === "DEPTH_ZERO_SELF_SIGNED_CERT" ||
+      causeCode === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
+      causeCode === "SELF_SIGNED_CERT_IN_CHAIN"
+    ) {
+      return new AtIngressHttpError(
+        `TLS error while requesting ${redactUrl(url)}`,
+        { retryable: false, code: "TLS_ERROR", cause: error },
+      );
+    }
     const retryable = error.name === "TypeError";
     return new AtIngressHttpError(
       `${retryable ? "Network error" : "Request failed"} while requesting ${redactUrl(url)}`,

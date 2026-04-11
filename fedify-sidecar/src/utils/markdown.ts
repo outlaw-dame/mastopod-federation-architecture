@@ -57,35 +57,14 @@ export function linkifyHashtagsInHtml(html: string, baseUrl: string): string {
   const origin = safeOrigin(baseUrl);
   if (!origin) return html;
 
-  // Unicode-aware hashtag regex: 
-  // Matches # followed by alphanumeric Unicode characters/underscores, 
-  // but ensures the body is not purely numeric to match Mastodon behavior.
-  const HASHTAG_REGEX = /(^|[^\p{L}\p{N}_&;\/])#(?!\d+\b)([\p{L}\p{N}_]+)/gu;
-
-  const segments = html.split(/(<[^>]+>)/g);
-  let insideExcluded = 0;
-
-  return segments.map(segment => {
-    if (!segment) return "";
-    if (segment.startsWith("<")) {
-      const tagName = segment.match(/^<\/?([a-z0-9]+)/i)?.[1]?.toLowerCase();
-      if (tagName && ["pre", "code", "a"].includes(tagName)) {
-        if (segment.startsWith("</")) {
-          insideExcluded = Math.max(0, insideExcluded - 1);
-        } else if (!segment.endsWith("/>")) {
-          insideExcluded++;
-        }
-      }
-      return segment;
-    }
-
-    if (insideExcluded > 0) return segment;
-
-    return segment.replace(HASHTAG_REGEX, (match, prefix, tag: string) => {
+  // Split into tag segments (<...>) and text segments; process text only.
+  return html.replace(/(<[^>]+>|[^<]+)/g, (segment) => {
+    if (segment.startsWith("<")) return segment;
+    return segment.replace(/#([A-Za-z0-9][A-Za-z0-9_]*)/g, (_m, tag: string) => {
       const normalized = tag.toLowerCase();
-      return `${prefix}<a href="${escapeAttr(origin)}/tags/${encodeURIComponent(normalized)}" class="mention hashtag" rel="tag">#${escapeHtml(tag)}</a>`;
+      return `<a href="${escapeAttr(origin)}/tags/${normalized}" class="mention hashtag" rel="tag">#${escapeHtml(tag)}</a>`;
     });
-  }).join("");
+  });
 }
 
 // ---------------------------------------------------------------------------

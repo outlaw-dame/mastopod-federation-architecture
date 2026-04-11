@@ -21,6 +21,7 @@
  */
 
 import { decodeFirst as decodeCborFirst } from 'cborg';
+import { CID } from 'multiformats/cid';
 import { AtFirehoseEventType } from './AtIngressEvents.js';
 
 // ---------------------------------------------------------------------------
@@ -189,9 +190,18 @@ export class DefaultAtFirehoseDecoder implements AtFirehoseDecoder {
   }
 }
 
+const CBOR_TAGS: Array<((value: unknown) => unknown) | undefined> = [];
+CBOR_TAGS[42] = decodeCidTag;
+
 const CBOR_DECODE_OPTIONS = {
   strict: true,
   allowUndefined: false,
+  allowIndefinite: false,
+  allowNaN: false,
+  allowInfinity: false,
+  allowBigInt: true,
+  rejectDuplicateMapKeys: true,
+  tags: CBOR_TAGS,
 };
 
 function decodeFirstValue(data: Uint8Array): [unknown, Uint8Array] {
@@ -200,6 +210,20 @@ function decodeFirstValue(data: Uint8Array): [unknown, Uint8Array] {
     return [value, Uint8Array.from(remainder)];
   } catch (error) {
     throw new FirehoseDecodeError('Invalid DRISL-CBOR frame', error);
+  }
+}
+
+function decodeCidTag(value: unknown): CID {
+  if (!(value instanceof Uint8Array)) {
+    throw new FirehoseDecodeError('Invalid CID tag payload; expected byte array');
+  }
+  if (value.length < 2 || value[0] !== 0x00) {
+    throw new FirehoseDecodeError('Invalid CID tag payload; expected 0x00-prefixed CID bytes');
+  }
+  try {
+    return CID.decode(value.subarray(1));
+  } catch (error) {
+    throw new FirehoseDecodeError('Invalid CID tag payload; failed to decode CID', error);
   }
 }
 

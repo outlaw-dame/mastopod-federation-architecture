@@ -166,7 +166,7 @@ function createProducer(config: RedpandaEventPublisherConfig): Producer {
   });
 
   return kafka.producer({
-    allowAutoTopicCreation: true,
+    allowAutoTopicCreation: false,
     transactionTimeout: 30_000,
   });
 }

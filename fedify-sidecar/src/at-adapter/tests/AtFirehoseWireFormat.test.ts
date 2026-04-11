@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { decodeFirst, encode } from "cborg";
+import * as dagCbor from "@ipld/dag-cbor";
+import { sha256 } from "multiformats/hashes/sha2";
+import { CID } from "multiformats/cid";
 import { DefaultAtFirehoseEventEncoder } from "../firehose/AtFirehoseEventEncoder.js";
 import { DefaultAtFirehoseDecoder, FirehoseDecodeError } from "../ingress/AtFirehoseDecoder.js";
 
@@ -72,6 +75,34 @@ describe("AT firehose wire format", () => {
     });
   });
 
+  it("decodes CID-tagged payload fields from strict firehose frames", async () => {
+    const decoder = new DefaultAtFirehoseDecoder();
+    const commitCid = await dagCborCid({ type: "commit" });
+    const prevDataCid = await dagCborCid({ type: "prevData" });
+    const frame = concatBytes(
+      encode({ op: 1, t: "#commit" }),
+      dagCbor.encode({
+        seq: 102,
+        repo: "did:plc:alice",
+        rev: "3krev",
+        commit: commitCid,
+        prevData: prevDataCid,
+        ops: [],
+      }),
+    );
+
+    const decoded = decoder.decodeFull(frame) as {
+      header: Record<string, unknown>;
+      body: Record<string, unknown>;
+    };
+
+    expect(decoded.header).toEqual({ op: 1, t: "#commit" });
+    expect(decoded.body["commit"]).toBeInstanceOf(CID);
+    expect((decoded.body["commit"] as CID).toString()).toBe(commitCid.toString());
+    expect(decoded.body["prevData"]).toBeInstanceOf(CID);
+    expect((decoded.body["prevData"] as CID).toString()).toBe(prevDataCid.toString());
+  });
+
   it("rejects legacy array framing and trailing bytes as invalid firehose frames", () => {
     const decoder = new DefaultAtFirehoseDecoder();
     const legacyArrayFrame = encode([
@@ -102,4 +133,8 @@ function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
   combined.set(left, 0);
   combined.set(right, left.length);
   return combined;
+}
+
+async function dagCborCid(value: unknown): Promise<CID> {
+  return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(value)));
 }

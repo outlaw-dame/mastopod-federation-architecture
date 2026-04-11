@@ -6,7 +6,7 @@ export interface IdentitySyncLogger {
 }
 
 export function isIdentitySyncTraceEnabled(): boolean {
-  return process.env.IDENTITY_SYNC_TRACE === 'true';
+  return process.env["IDENTITY_SYNC_TRACE"] === 'true';
 }
 
 export function traceIdentitySync(

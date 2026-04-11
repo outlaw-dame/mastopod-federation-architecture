@@ -15,7 +15,7 @@
  */
 
 import Fastify from 'fastify';
-import { registerAtXrpcRoutes, attachSubscribeReposWebSocket } from '../xrpc/AtXrpcFastifyBridge.js';
+import { registerAtXrpcRoutes } from '../xrpc/AtXrpcFastifyBridge.js';
 import { DefaultAtXrpcServer } from '../xrpc/AtXrpcServer.js';
 
 // Auth
@@ -50,6 +50,7 @@ import { DefaultAtProjectionPolicy } from '../projection/AtProjectionPolicy.js';
 import { DefaultAtProjectionWorker } from '../projection/AtProjectionWorker.js';
 import { DefaultProfileRecordSerializer } from '../projection/serializers/ProfileRecordSerializer.js';
 import { DefaultPostRecordSerializer } from '../projection/serializers/PostRecordSerializer.js';
+import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer.js';
 import { DefaultFacetBuilder } from '../projection/serializers/FacetBuilder.js';
 import { DefaultEmbedBuilder } from '../projection/serializers/EmbedBuilder.js';
 import { DefaultImageEmbedBuilder } from '../projection/serializers/ImageEmbedBuilder.js';
@@ -57,10 +58,9 @@ import { DefaultVideoEmbedBuilder } from '../projection/serializers/VideoEmbedBu
 import { DefaultFollowRecordSerializer } from '../projection/serializers/FollowRecordSerializer.js';
 import { DefaultLikeRecordSerializer } from '../projection/serializers/LikeRecordSerializer.js';
 import { DefaultRepostRecordSerializer } from '../projection/serializers/RepostRecordSerializer.js';
-import { DefaultStandardDocumentRecordSerializer } from '../projection/serializers/StandardDocumentRecordSerializer.js';
+import { DefaultAtBlobUploadService } from '../blob/AtBlobUploadService.js';
 import { DefaultAtBlobStore } from '../blob/AtBlobStore.js';
 import { DefaultBlobReferenceMapper } from '../blob/BlobReferenceMapper.js';
-import { DefaultAtBlobUploadService } from '../blob/AtBlobUploadService.js';
 
 // Writes
 import { DefaultAtWriteNormalizer } from '../writes/DefaultAtWriteNormalizer.js';
@@ -73,21 +73,13 @@ import type { SigningService } from '../../core-domain/contracts/SigningContract
 import type { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 import type { RepositoryState } from '../../atproto/repo/AtprotoRepoState.js';
 
-// ============================================================================
-// Test constants
-// ============================================================================
-
-const TEST_DID              = 'did:plc:phase7writeprooftest00001';
-const TEST_HANDLE           = 'alice.test.pods';
-const TEST_CANONICAL_ID     = 'https://pods.test/users/alice';
-const TEST_CONTEXT_ID       = 'pods.test';
-const TEST_PASSWORD         = 'harness-test-password-123';
-const AT_SESSION_SECRET     = 'phase7-write-proof-secret-at-least-32chars!';
-const HARNESS_PORT          = 19870;
-
-// ============================================================================
-// Minimal in-memory IdentityBindingRepository
-// ============================================================================
+const TEST_DID = 'did:plc:phase7writeprooftest00001';
+const TEST_HANDLE = 'alice.test.pods';
+const TEST_CANONICAL_ID = 'https://pods.test/users/alice';
+const TEST_CONTEXT_ID = 'pods.test';
+const TEST_PASSWORD = 'harness-test-password-123';
+const AT_SESSION_SECRET = 'phase7-write-proof-secret-at-least-32chars!';
+const HARNESS_PORT = 19870;
 
 class InMemoryIdentityBindingRepository implements IdentityBindingRepository {
   private store = new Map<string, IdentityBinding>();
@@ -159,10 +151,6 @@ class InMemoryIdentityBindingRepository implements IdentityBindingRepository {
   }
 }
 
-// ============================================================================
-// Minimal mock Redis (for DefaultAtCommitPersistenceService state writes)
-// ============================================================================
-
 function makeMockRedis() {
   const data = new Map<string, string>();
   const sets = new Map<string, Set<string>>();
@@ -187,30 +175,25 @@ function makeMockRedis() {
   };
 }
 
-// ============================================================================
-// Build the full DI chain
-// ============================================================================
-
 async function buildDeps() {
-  const identityRepo  = new InMemoryIdentityBindingRepository();
-  const aliasStore    = new InMemoryAtAliasStore();
-  const repoRegistry  = new InMemoryAtprotoRepoRegistry();
-  const mockRedis     = makeMockRedis();
+  const identityRepo = new InMemoryIdentityBindingRepository();
+  const aliasStore = new InMemoryAtAliasStore();
+  const repoRegistry = new InMemoryAtprotoRepoRegistry();
+  const mockRedis = makeMockRedis();
 
-  // Seed test identity binding
   const now = new Date().toISOString();
   await identityRepo.create({
     canonicalAccountId: TEST_CANONICAL_ID,
-    contextId:          TEST_CONTEXT_ID,
-    webId:              TEST_CANONICAL_ID,
-    activityPubActorUri: `https://pods.test/users/alice`,
-    atprotoDid:          TEST_DID,
-    atprotoHandle:       TEST_HANDLE,
-    canonicalDidMethod:  'did:plc',
-    atprotoPdsEndpoint:  null,
-    apSigningKeyRef:     'https://pods.test/keys/ap-signing',
-    atSigningKeyRef:     'https://pods.test/keys/at-signing',
-    atRotationKeyRef:    'https://pods.test/keys/at-rotation',
+    contextId: TEST_CONTEXT_ID,
+    webId: TEST_CANONICAL_ID,
+    activityPubActorUri: 'https://pods.test/users/alice',
+    atprotoDid: TEST_DID,
+    atprotoHandle: TEST_HANDLE,
+    canonicalDidMethod: 'did:plc',
+    atprotoPdsEndpoint: null,
+    apSigningKeyRef: 'https://pods.test/keys/ap-signing',
+    atSigningKeyRef: 'https://pods.test/keys/at-signing',
+    atRotationKeyRef: 'https://pods.test/keys/at-rotation',
     plc: {
       opCid: null, rotationKeyRef: 'https://pods.test/keys/at-rotation',
       plcUpdateState: null, lastSubmittedAt: null, lastConfirmedAt: null, lastError: null,
@@ -222,39 +205,37 @@ async function buildDeps() {
     updatedAt: now,
   });
 
-  // Seed repo state
   const repoState: RepositoryState = {
     did: TEST_DID,
     rev: '0',
     rootCid: null,
-      commits: [],
+    commits: [],
     collections: [{ nsid: 'app.bsky.feed.post', recordCount: 0, lastUpdated: now }],
-      totalRecords: 0,
-      sizeBytes: 0,
+    totalRecords: 0,
+    sizeBytes: 0,
     status: 'active',
-      lastCommitAt: now,
-      snapshotAt: now,
+    lastCommitAt: now,
+    snapshotAt: now,
     createdAt: now,
     updatedAt: now,
   };
   await repoRegistry.register(repoState);
 
-  // Mock signing service (returns a valid-looking base64url signature)
   const mockSig = Buffer.from('mock-secp256k1-signature-for-phase7-proof').toString('base64url');
   const signingService: SigningService = {
     signAtprotoCommit: async (req) => ({
-      did:                req.did,
-      keyId:              `${req.did}#atproto`,
+      did: req.did,
+      keyId: `${req.did}#atproto`,
       signatureBase64Url: mockSig,
-      algorithm:          'k256',
-      signedAt:           new Date().toISOString(),
+      algorithm: 'k256',
+      signedAt: new Date().toISOString(),
     }),
     signPlcOperation: async (req) => ({
-      did:                req.did,
-      keyId:              `${req.did}#atproto-rotation-key`,
+      did: req.did,
+      keyId: `${req.did}#atproto-rotation-key`,
       signatureBase64Url: mockSig,
-      algorithm:          'k256',
-      signedAt:           new Date().toISOString(),
+      algorithm: 'k256',
+      signedAt: new Date().toISOString(),
     }),
     getAtprotoPublicKey: async () => { throw new Error('not used in proof'); },
     generateApSigningKey: async () => { throw new Error('not used in proof'); },
@@ -262,13 +243,11 @@ async function buildDeps() {
     getApPublicKey: async () => { throw new Error('not used in proof'); },
   };
 
-  // No-op event publisher
   const eventPublisher: EventPublisher = {
     publish: async () => {},
     publishBatch: async () => {},
   };
 
-  // Mock password verifier (accepts any password for the test account)
   const passwordVerifier: AtPasswordVerifier = {
     verify: async (canonicalAccountId, _password) => {
       if (canonicalAccountId !== TEST_CANONICAL_ID) throw new Error('Unknown account');
@@ -276,20 +255,19 @@ async function buildDeps() {
     },
   };
 
-  // Shared services
-  const tokenService      = new DefaultAtSessionTokenService({ secret: AT_SESSION_SECRET });
-  const accountResolver   = new DefaultAtAccountResolver(identityRepo);
-  const sessionService    = new DefaultAtSessionService(accountResolver, passwordVerifier, tokenService);
+  const tokenService = new DefaultAtSessionTokenService({ secret: AT_SESSION_SECRET });
+  const accountResolver = new DefaultAtAccountResolver(identityRepo);
+  const sessionService = new DefaultAtSessionService(accountResolver, passwordVerifier, tokenService);
 
-  // Projection worker
-  const commitBuilder      = new DefaultAtCommitBuilder(signingService);
+  const commitBuilder = new DefaultAtCommitBuilder(signingService);
   const persistenceService = new DefaultAtCommitPersistenceService(aliasStore, eventPublisher, mockRedis);
-  const rkeyService        = new DefaultAtRkeyService();
-  const blobStore          = new DefaultAtBlobStore();
-  const blobMapper         = new DefaultBlobReferenceMapper();
-  const blobUploadService  = new DefaultAtBlobUploadService(blobStore, blobMapper);
+  const rkeyService = new DefaultAtRkeyService();
+  const blobUploadService = new DefaultAtBlobUploadService(
+    new DefaultAtBlobStore(),
+    new DefaultBlobReferenceMapper(),
+  );
   const attachmentMediaResolver = {
-    resolveMedia: async (_did: string, _mediaId: string) => null,
+    resolveMedia: async () => null,
   };
 
   const projectionWorker = new DefaultAtProjectionWorker(
@@ -305,36 +283,34 @@ async function buildDeps() {
     persistenceService,
     eventPublisher,
     {
-      mediaResolver:       { resolveAvatarBlob: async () => null, resolveBannerBlob: async () => null },
-      facetBuilder:        new DefaultFacetBuilder(),
-      embedBuilder:        new DefaultEmbedBuilder(
+      mediaResolver: { resolveAvatarBlob: async () => null, resolveBannerBlob: async () => null },
+      facetBuilder: new DefaultFacetBuilder(),
+      embedBuilder: new DefaultEmbedBuilder(
         new DefaultImageEmbedBuilder(blobUploadService, attachmentMediaResolver),
         new DefaultVideoEmbedBuilder(blobUploadService, attachmentMediaResolver),
       ),
-      recordRefResolver:   new DefaultAtRecordRefResolver(aliasStore),
-      subjectResolver:     new DefaultAtSubjectResolver(identityRepo),
+      recordRefResolver: new DefaultAtRecordRefResolver(aliasStore),
+      subjectResolver: new DefaultAtSubjectResolver(identityRepo),
       targetAliasResolver: new DefaultAtTargetAliasResolver(aliasStore),
-      followSerializer:    new DefaultFollowRecordSerializer(),
-      likeSerializer:      new DefaultLikeRecordSerializer(),
-      repostSerializer:    new DefaultRepostRecordSerializer(),
+      followSerializer: new DefaultFollowRecordSerializer(),
+      likeSerializer: new DefaultLikeRecordSerializer(),
+      repostSerializer: new DefaultRepostRecordSerializer(),
     },
   );
 
-  // Write gateway
-  const resultStore   = new InMemoryAtWriteResultStore();
-  const writeService  = new DefaultCanonicalClientWriteService({ projectionWorker, aliasStore, resultStore, identityRepo });
-  const writeGateway  = new DefaultAtWriteGateway({
-    normalizer:  new DefaultAtWriteNormalizer(),
-    policyGate:  new DefaultAtWritePolicyGate(identityRepo, aliasStore),
+  const resultStore = new InMemoryAtWriteResultStore();
+  const writeService = new DefaultCanonicalClientWriteService({ projectionWorker, aliasStore, resultStore, identityRepo });
+  const writeGateway = new DefaultAtWriteGateway({
+    normalizer: new DefaultAtWriteNormalizer(),
+    policyGate: new DefaultAtWritePolicyGate(identityRepo, aliasStore),
     writeService,
     resultStore,
   });
 
-  // Record reader + CAR exporter
   const handleResolutionReader = new DefaultHandleResolutionReader(identityRepo);
-  const recordReader           = new DefaultAtRecordReader(handleResolutionReader, aliasStore, repoRegistry);
-  const carExporter            = new DefaultAtCarExporter(repoRegistry);
-  const firehoseSubscriptions  = new DefaultAtFirehoseSubscriptionManager(new InMemoryAtFirehoseCursorStore());
+  const recordReader = new DefaultAtRecordReader(handleResolutionReader, aliasStore, repoRegistry);
+  const carExporter = new DefaultAtCarExporter(repoRegistry);
+  const firehoseSubscriptions = new DefaultAtFirehoseSubscriptionManager(new InMemoryAtFirehoseCursorStore());
 
   const xrpcServer = new DefaultAtXrpcServer({
     recordReader,
@@ -351,10 +327,6 @@ async function buildDeps() {
 
   return { xrpcServer, sessionService };
 }
-
-// ============================================================================
-// Run the proof
-// ============================================================================
 
 async function run() {
   console.log('\n=====================================================');
@@ -376,10 +348,7 @@ async function run() {
   const base = `http://127.0.0.1:${HARNESS_PORT}`;
 
   try {
-    // ------------------------------------------------------------------
-    // Step 1: createSession
-    // ------------------------------------------------------------------
-    console.log(`[1] POST /xrpc/com.atproto.server.createSession`);
+    console.log('[1] POST /xrpc/com.atproto.server.createSession');
     console.log(`    identifier: ${TEST_HANDLE}  password: ${TEST_PASSWORD}`);
 
     const sessionRes = await fetch(`${base}/xrpc/com.atproto.server.createSession`, {
@@ -400,24 +369,21 @@ async function run() {
 
     const { accessJwt } = session;
 
-    // ------------------------------------------------------------------
-    // Step 2: createRecord — app.bsky.feed.post
-    // ------------------------------------------------------------------
-    console.log(`\n[2] POST /xrpc/com.atproto.repo.createRecord`);
+    console.log('\n[2] POST /xrpc/com.atproto.repo.createRecord');
     console.log(`    repo: ${TEST_DID}  collection: app.bsky.feed.post`);
 
     const createRes = await fetch(`${base}/xrpc/com.atproto.repo.createRecord`, {
       method: 'POST',
       headers: {
-        'Content-Type':  'application/json',
+        'Content-Type': 'application/json',
         'Authorization': `Bearer ${accessJwt}`,
       },
       body: JSON.stringify({
-        repo:       TEST_DID,
+        repo: TEST_DID,
         collection: 'app.bsky.feed.post',
         record: {
-          $type:     'app.bsky.feed.post',
-          text:      'Phase 7 write proof — first canonical post via AT!',
+          $type: 'app.bsky.feed.post',
+          text: 'Phase 7 write proof — first canonical post via AT!',
           createdAt: new Date().toISOString(),
         },
       }),
@@ -432,21 +398,17 @@ async function run() {
     console.log(`    ✓ uri: ${created.uri}`);
     console.log(`    ✓ cid: ${created.cid}`);
 
-    // ------------------------------------------------------------------
-    // Assertions
-    // ------------------------------------------------------------------
-    const uriOk  = typeof created.uri === 'string' && created.uri.startsWith(`at://${TEST_DID}/app.bsky.feed.post/`);
-    const cidOk  = typeof created.cid === 'string' && created.cid.length > 0;
+    const uriOk = typeof created.uri === 'string' && created.uri.startsWith(`at://${TEST_DID}/app.bsky.feed.post/`);
+    const cidOk = typeof created.cid === 'string' && created.cid.length > 0;
 
-    if (!uriOk)  throw new Error(`URI assertion failed: ${created.uri}`);
-    if (!cidOk)  throw new Error(`CID assertion failed: ${created.cid}`);
+    if (!uriOk) throw new Error(`URI assertion failed: ${created.uri}`);
+    if (!cidOk) throw new Error(`CID assertion failed: ${created.cid}`);
 
     console.log('\n=====================================================');
     console.log('  PROOF PASSED');
     console.log(`  URI: ${created.uri}`);
     console.log(`  CID: ${created.cid}`);
     console.log('=====================================================\n');
-
   } finally {
     await app.close();
   }

@@ -285,7 +285,9 @@ describe('Phase 5.5 Acceptance Tests', () => {
 
       expect(eventPublisher.publish).not.toHaveBeenCalledWith('at.ingress.v1', expect.anything());
       expect(auditPublisher.published).toHaveLength(1);
-      expect(auditPublisher.published[0]!.reason).toBe('did_resolution_failed');
+      const published = auditPublisher.published[0];
+      expect(published).toBeDefined();
+      expect(published?.reason).toBe('did_resolution_failed');
     });
   });
 
@@ -365,7 +367,9 @@ describe('Phase 5.5 Acceptance Tests', () => {
       await verifier.handleRawEvent(envelope);
 
       expect(auditPublisher.published).toHaveLength(1);
-      expect(auditPublisher.published[0]!.reason).toBe('sync_rebuild_failed');
+      const published = auditPublisher.published[0];
+      expect(published).toBeDefined();
+      expect(published?.reason).toBe('sync_rebuild_failed');
     });
   });
 
@@ -441,7 +445,9 @@ describe('Phase 5.5 Acceptance Tests', () => {
       expect(result).toBe(true);
       expect(eventPublisher.publish).not.toHaveBeenCalledWith('at.ingress.v1', expect.anything());
       expect(auditPublisher.published).toHaveLength(1);
-      expect(auditPublisher.published[0]!.reason).toBe('decode_failed');
+      const published = auditPublisher.published[0];
+      expect(published).toBeDefined();
+      expect(published?.reason).toBe('decode_failed');
     });
 
     it('should not emit trusted event for duplicate seq', async () => {
@@ -449,17 +455,43 @@ describe('Phase 5.5 Acceptance Tests', () => {
 
       // First processing
       await verifier.handleRawEvent(envelope);
-      const firstPublishCount = (eventPublisher.publish as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      const firstPublishCount = vi.mocked(eventPublisher.publish).mock.calls.length;
 
       // Second processing (replay)
       await verifier.handleRawEvent(envelope);
-      const secondPublishCount = (eventPublisher.publish as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      const secondPublishCount = vi.mocked(eventPublisher.publish).mock.calls.length;
 
       // No additional trusted events should have been published
       expect(secondPublishCount).toBe(firstPublishCount);
       // The second attempt should result in a dedupe failure
       const dedupeFailures = auditPublisher.published.filter(e => e.reason === 'dedupe_rejected');
       expect(dedupeFailures).toHaveLength(1);
+    });
+
+    it('should request retry and avoid dedupe mark when failure audit publish fails', async () => {
+      commitVerifier = buildMockCommitVerifier(false, 'signature_mismatch');
+      const throwingAuditPublisher = {
+        publishVerifyFailed: vi.fn().mockRejectedValue(new Error('failure topic unavailable')),
+      };
+      verifier = new DefaultAtIngressVerifier(
+        decoder,
+        classifier,
+        throwingAuditPublisher as any,
+        eventPublisher as any,
+        commitVerifier,
+        identityResolver,
+        syncRebuilder,
+      );
+
+      const envelope = buildRawEnvelope({ seq: 3456, eventType: '#commit' });
+
+      const first = await verifier.handleRawEvent(envelope);
+      const second = await verifier.handleRawEvent(envelope);
+
+      expect(first).toBe(false);
+      expect(second).toBe(false);
+      expect(throwingAuditPublisher.publishVerifyFailed).toHaveBeenCalledTimes(2);
+      expect(eventPublisher.publish).not.toHaveBeenCalledWith('at.ingress.v1', expect.anything());
     });
   });
 

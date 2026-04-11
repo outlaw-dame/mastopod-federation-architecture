@@ -302,11 +302,11 @@ export class DeliveryStateManager {
  */
 export function createDefaultConfig(): DeliveryStateConfig {
   return {
-    redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
-    maxConcurrentPerDomain: parseInt(process.env.MAX_CONCURRENT_PER_DOMAIN || '5', 10),
-    idempotencyTtlMs: parseInt(process.env.IDEMPOTENCY_TTL_MS || '86400000', 10), // 24h
-    rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '3600000', 10), // 1h
-    rateLimitMaxPerWindow: parseInt(process.env.RATE_LIMIT_MAX_PER_WINDOW || '1000', 10),
-    actorCacheTtlMs: parseInt(process.env.ACTOR_CACHE_TTL_MS || '3600000', 10), // 1h
+    redisUrl: process.env["REDIS_URL"] || 'redis://localhost:6379',
+    maxConcurrentPerDomain: parseInt(process.env["MAX_CONCURRENT_PER_DOMAIN"] || '5', 10),
+    idempotencyTtlMs: parseInt(process.env["IDEMPOTENCY_TTL_MS"] || '86400000', 10), // 24h
+    rateLimitWindowMs: parseInt(process.env["RATE_LIMIT_WINDOW_MS"] || '3600000', 10), // 1h
+    rateLimitMaxPerWindow: parseInt(process.env["RATE_LIMIT_MAX_PER_WINDOW"] || '1000', 10),
+    actorCacheTtlMs: parseInt(process.env["ACTOR_CACHE_TTL_MS"] || '3600000', 10), // 1h
   };
 }

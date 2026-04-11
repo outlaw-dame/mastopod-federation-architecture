@@ -44,7 +44,7 @@ export class IdentityWarmupService {
 
   private started = false;
   private timer: NodeJS.Timeout | null = null;
-  private inFlight: Promise<void> | null = null;
+  private inFlight: Promise<{ items: number; nextCursor: string | null }> | null = null;
 
   constructor(config: IdentityWarmupServiceConfig) {
     this.backendBaseUrl = config.backendBaseUrl.replace(/\/$/, '');

@@ -5,10 +5,13 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
+    "prestart": "node scripts/prestart-topic-governance.mjs",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
+    "dev:local": "sh ./scripts/dev-local.sh",
     "lint": "eslint src --ext .ts",
+    "check:fast": "sh ./scripts/run-fast-checks.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest",
     "test:coverage": "vitest --coverage",
@@ -24,8 +27,22 @@
     "proof:session-family:durable": "tsx src/at-adapter/tests/SessionFamilyDurabilityProof.ts",
     "smoke:identity-repo:upsert": "tsx src/at-adapter/tests/IdentityBindingRepositoryUpsertSmoke.ts",
     "smoke:identity-sync:direct": "tsx src/at-adapter/tests/IdentitySyncDirectSmoke.ts",
+    "topics:bootstrap": "tsx scripts/bootstrap-redpanda-topics.ts",
+    "topics:verify": "REDPANDA_TOPIC_GOVERNANCE_MODE=verify tsx scripts/bootstrap-redpanda-topics.ts",
     "inspect:identity-redis": "tsx src/at-adapter/tests/IdentityRedisInspector.ts",
     "smoke:phase7:primary": "tsx src/at-adapter/tests/Phase7PrimarySmoke.ts",
+    "smoke:ap:outbound-topic": "tsx src/protocol-bridge/tests/ApOutboundTopicSmokeProof.ts",
+    "proof:ap:interop": "tsx src/interop/ap/ApInteropHarnessProof.ts",
+    "interop:ap:gotosocial": "sh ./interop/ap/scripts/run-gotosocial-proof.sh",
+    "interop:ap:mastodon": "sh ./interop/ap/scripts/run-mastodon-proof.sh",
+    "interop:ap:akkoma": "sh ./interop/ap/scripts/run-akkoma-proof.sh",
+    "smoke:interop:ap": "sh ./interop/ap/scripts/run-ap-interop-smoke.sh",
+    "smoke:interop:ap:extended": "AP_INTEROP_TARGETS='gotosocial mastodon akkoma' sh ./interop/ap/scripts/run-ap-interop-smoke.sh",
+    "smoke:jetstream": "tsx scripts/smoke-jetstream.ts",
+    "smoke:mrf-admin": "tsx scripts/smoke-mrf-admin.ts",
+    "smoke:mrf-admin:ci": "sh ./scripts/run-mrf-admin-smoke.sh",
+    "interop:ap:authority": "tsx src/interop/ap/MockActivityPodsAuthority.ts",
+    "provision:relay-actor": "tsx scripts/provision-relay-actor.ts",
     "provision:test:fixture": "tsx scripts/provision-test-fixture.ts",
     "smoke:phase7:full": "npm run provision:test:fixture && npm run smoke:phase7:primary",
     "loadtest:k6:inbox": "k6 run loadtest/sidecar-loadtest.js -e SCENARIO=inbox",
@@ -36,15 +53,16 @@
   },
   "dependencies": {
     "@atproto/oauth-client-node": "^0.3.17",
-    "@fedify/fedify": "^1.4.0",
-    "@hono/node-server": "^1.8.0",
+    "@fedify/fedify": "^2.1.5",
+    "@fedify/hono": "^2.1.5",
+    "@hono/node-server": "^1.19.13",
     "@ipld/car": "^5.4.2",
     "@ipld/dag-cbor": "^9.2.5",
     "@opensearch-project/opensearch": "^2.6.0",
     "cborg": "^4.5.8",
     "fast-json-stable-stringify": "^2.1.0",
     "fastify": "^5.8.4",
-    "hono": "^4.0.0",
+    "hono": "^4.12.12",
     "ioredis": "^5.3.2",
     "jose": "^5.10.0",
     "kafkajs": "^2.2.4",
@@ -57,10 +75,10 @@
     "redis": "^5.11.0",
     "ulid": "^2.3.0",
     "undici": "^6.6.2",
+    "ws": "^8.20.0",
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@types/jest": "^30.0.0",
     "@types/node": "^20.11.0",
     "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
@@ -68,11 +86,9 @@
     "ajv": "^8.18.0",
     "ajv-formats": "^3.0.1",
     "eslint": "^8.56.0",
-    "ts-jest": "^29.4.6",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
-    "vitest": "^4.1.1",
-    "ws": "^8.20.0"
+    "vitest": "^4.1.3"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -80,6 +96,13 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/activitypods/mastopod"
+  },
+  "overrides": {
+    "brace-expansion": "^1.1.13",
+    "minimatch@10.2.4": {
+      "brace-expansion": "^5.0.5"
+    },
+    "picomatch": "^4.0.4"
   },
   "keywords": [
     "activitypub",

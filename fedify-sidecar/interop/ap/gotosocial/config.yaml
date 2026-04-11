@@ -1,0 +1,24 @@
+log-level: "info"
+host: "gotosocial"
+account-domain: ""
+protocol: "https"
+bind-address: "0.0.0.0"
+port: 8080
+http-client:
+  # Test-harness only: allow dialing the fixed docker bridge subnet so
+  # GoToSocial can dereference sidecar actor/public-key URLs over Caddy TLS.
+  allow-ips:
+    - "172.31.240.0/24"
+trusted-proxies:
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "10.0.0.0/8"
+db-type: "sqlite"
+db-address: "/gotosocial/storage/sqlite.db"
+storage-backend: "local"
+storage-local-base-path: "/gotosocial/storage"
+letsencrypt-enabled: false
+instance-title: "AP Interop Harness (GoToSocial)"
+instance-description: "Private dockerized ActivityPub interoperability receiver harness."
+accounts-registration-open: false
+landing-page-user: ""

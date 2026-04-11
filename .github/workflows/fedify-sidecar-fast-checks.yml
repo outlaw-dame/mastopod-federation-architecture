@@ -1,0 +1,43 @@
+name: Fedify Sidecar Fast Checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "fedify-sidecar/**"
+      - ".github/workflows/fedify-sidecar-fast-checks.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "fedify-sidecar/**"
+      - ".github/workflows/fedify-sidecar-fast-checks.yml"
+
+concurrency:
+  group: fedify-sidecar-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fast-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install Sidecar Dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Run Fast Sidecar Checks
+        run: npm --prefix fedify-sidecar run check:fast

@@ -2,11 +2,13 @@
  * Inbound Worker
  * 
  * Processes inbound envelopes from the Redis Streams queue.
- * Verifies HTTP signatures, validates activities, and forwards to ActivityPods.
+ * Verifies inbound deliveries when needed, validates activities, and forwards
+ * them to ActivityPods.
  * Also publishes public activities to Stream2 (RedPanda).
  * 
  * Key principles:
- * - HTTP signature verification before processing
+ * - Trust only explicitly marked, runtime-verified envelopes
+ * - HTTP signature verification before processing for raw fallback ingress
  * - Actor document fetching with caching
  * - Forward verified activities to ActivityPods
  * - Publish public activities to Stream2
@@ -14,11 +16,17 @@
 
 import { request } from "undici";
 import { createVerify, createHash } from "node:crypto";
-import { 
-  RedisStreamsQueue, 
+import {
+  RedisStreamsQueue,
   InboundEnvelope,
+  InboundEnvelopeVerification,
+  backoffMs,
 } from "../queue/sidecar-redis-queue.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
+import {
+  FederationRuntimeAdapter,
+  NoopFederationRuntimeAdapter,
+} from "../core-domain/contracts/SigningContracts.js";
 import { logger } from "../utils/logger.js";
 import { CapabilityGateResult } from "../capabilities/gates.js";
 
@@ -33,12 +41,96 @@ export interface InboundWorkerConfig {
   requestTimeoutMs: number;
   userAgent: string;
   capabilityGate?: (capabilityId: string) => CapabilityGateResult;
+  fedifyRuntimeIntegrationEnabled: boolean;
+  /** Injected adapter — defaults to NoopFederationRuntimeAdapter when flag is off. */
+  adapter?: FederationRuntimeAdapter;
 }
 
 export interface VerificationResult {
   valid: boolean;
   actorUri?: string;
   error?: string;
+}
+
+const MAX_INBOUND_ATTEMPTS = 8;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function looksLikeActorType(value: unknown): boolean {
+  const actorTypes = new Set([
+    "Application",
+    "Group",
+    "Organization",
+    "Person",
+    "Service",
+  ]);
+
+  if (typeof value === "string") {
+    return actorTypes.has(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((entry) => typeof entry === "string" && actorTypes.has(entry));
+  }
+
+  return false;
+}
+
+function looksLikeActorDocument(document: Record<string, unknown>): boolean {
+  return (
+    looksLikeActorType(document["type"]) ||
+    isNonEmptyString(document["inbox"]) ||
+    isNonEmptyString(document["preferredUsername"]) ||
+    isNonEmptyString(document["followers"]) ||
+    isNonEmptyString(document["following"])
+  );
+}
+
+export function extractPublicKeyPemFromVerificationDocument(document: unknown): string | null {
+  if (!isRecord(document)) {
+    return null;
+  }
+
+  if (isNonEmptyString(document["publicKeyPem"])) {
+    return document["publicKeyPem"];
+  }
+
+  const publicKey = document["publicKey"];
+  if (isRecord(publicKey) && isNonEmptyString(publicKey["publicKeyPem"])) {
+    return publicKey["publicKeyPem"];
+  }
+
+  return null;
+}
+
+export function resolveActorUriFromVerificationDocument(
+  keyId: string,
+  document: unknown,
+): string | null {
+  if (isRecord(document)) {
+    const publicKey = isRecord(document["publicKey"]) ? document["publicKey"] : null;
+    const ownerCandidate =
+      document["owner"] ??
+      document["controller"] ??
+      publicKey?.["owner"] ??
+      publicKey?.["controller"];
+
+    if (isNonEmptyString(ownerCandidate)) {
+      return ownerCandidate;
+    }
+
+    if (isNonEmptyString(document["id"]) && looksLikeActorDocument(document)) {
+      return document["id"];
+    }
+  }
+
+  return keyId.includes("#") ? (keyId.split("#")[0] ?? null) : null;
 }
 
 // ============================================================================
@@ -49,6 +141,7 @@ export class InboundWorker {
   private queue: RedisStreamsQueue;
   private redpanda: RedPandaProducer;
   private config: InboundWorkerConfig;
+  private adapter: FederationRuntimeAdapter;
   private isRunning = false;
   private activeJobs = 0;
 
@@ -60,6 +153,31 @@ export class InboundWorker {
     this.queue = queue;
     this.redpanda = redpanda;
     this.config = config;
+    this.adapter = config.fedifyRuntimeIntegrationEnabled
+      ? (config.adapter ?? NoopFederationRuntimeAdapter)
+      : NoopFederationRuntimeAdapter;
+  }
+
+  /**
+   * Invoke a FederationRuntimeAdapter hook inside a noop-safe circuit-breaker.
+   * Errors thrown by the adapter are logged and swallowed — they must never
+   * affect the calling business-logic path.
+   */
+  private async callAdapter(
+    hook: "onInboundVerified",
+    input: NonNullable<Parameters<NonNullable<FederationRuntimeAdapter["onInboundVerified"]>>[0]>
+  ): Promise<void> {
+    if (!this.adapter.enabled) return;
+    const fn = this.adapter[hook];
+    if (!fn) return;
+    try {
+      await fn.call(this.adapter, input);
+    } catch (err: any) {
+      logger.warn("FederationRuntimeAdapter hook threw (swallowed)", {
+        hook,
+        error: err.message,
+      });
+    }
   }
 
   /**
@@ -67,7 +185,10 @@ export class InboundWorker {
    */
   async start(): Promise<void> {
     this.isRunning = true;
-    logger.info("Inbound worker started", { concurrency: this.config.concurrency });
+    logger.info("Inbound worker started", {
+      concurrency: this.config.concurrency,
+      fedifyRuntimeIntegrationEnabled: this.config.fedifyRuntimeIntegrationEnabled,
+    });
 
     for await (const { messageId, envelope } of this.queue.consumeInbound()) {
       if (!this.isRunning) break;
@@ -120,10 +241,17 @@ export class InboundWorker {
   /**
    * Process a single inbound envelope
    */
-  private async processEnvelope(messageId: string, envelope: InboundEnvelope): Promise<void> {
+  protected async processEnvelope(messageId: string, envelope: InboundEnvelope): Promise<void> {
     this.activeJobs++;
-    
+
     try {
+      // Step 0: Honour delayed retry — re-enqueue and ack if not yet due.
+      if (envelope.notBeforeMs > 0 && Date.now() < envelope.notBeforeMs) {
+        await this.queue.enqueueInbound(envelope);
+        await this.queue.ack("inbound", messageId);
+        return;
+      }
+
       // Capability gate check (defense-in-depth: HTTP route also checks, but worker
       // runs independently and capability state may change after enqueue time)
       if (this.config.capabilityGate) {
@@ -151,20 +279,7 @@ export class InboundWorker {
         return;
       }
 
-      // Step 2: Verify HTTP signature
-      const verification = await this.verifySignature(envelope);
-      
-      if (!verification.valid) {
-        await this.queue.ack("inbound", messageId);
-        await this.queue.moveToDlq("inbound", envelope, `Signature verification failed: ${verification.error}`);
-        logger.warn("Signature verification failed", { 
-          envelopeId: envelope.envelopeId, 
-          error: verification.error 
-        });
-        return;
-      }
-
-      // Step 3: Basic activity validation
+      // Step 2: Basic activity validation
       if (!activity.type || !activity.actor) {
         await this.queue.ack("inbound", messageId);
         await this.queue.moveToDlq("inbound", envelope, "Missing required activity fields");
@@ -172,25 +287,51 @@ export class InboundWorker {
         return;
       }
 
+      // Step 3: Resolve the verified actor, trusting only envelopes that were
+      // verified by the enabled Fedify ingress path before they entered Redis.
+      const verifiedActorUri = await this.resolveVerifiedActorUri(messageId, envelope, activity);
+      if (!verifiedActorUri) {
+        return;
+      }
+
       // Step 4: Check if activity is public
       const isPublic = this.isPublicActivity(activity);
 
       // Step 5: Forward to ActivityPods
-      const forwardResult = await this.forwardToActivityPods(envelope, activity, verification.actorUri!);
+      const forwardResult = await this.forwardToActivityPods(envelope, activity, verifiedActorUri);
       
       if (!forwardResult.success) {
-        // Forwarding failed - requeue or DLQ based on error type
         await this.queue.ack("inbound", messageId);
-        if (forwardResult.permanent) {
-          await this.queue.moveToDlq("inbound", envelope, forwardResult.error || "Forward failed");
+
+        if (forwardResult.permanent || envelope.attempt >= MAX_INBOUND_ATTEMPTS) {
+          await this.queue.moveToDlq(
+            "inbound",
+            envelope,
+            forwardResult.permanent
+              ? (forwardResult.error || "Forward failed (permanent)")
+              : `Exhausted ${MAX_INBOUND_ATTEMPTS} attempts: ${forwardResult.error}`,
+          );
+          logger.warn("Inbound envelope moved to DLQ", {
+            envelopeId: envelope.envelopeId,
+            attempt: envelope.attempt,
+            permanent: forwardResult.permanent,
+            error: forwardResult.error,
+          });
         } else {
-          // Requeue for retry (simple retry - could be more sophisticated)
-          await this.queue.enqueueInbound(envelope);
+          const nextAttempt = envelope.attempt + 1;
+          const delay = backoffMs(nextAttempt);
+          await this.queue.enqueueInbound({
+            ...envelope,
+            attempt: nextAttempt,
+            notBeforeMs: Date.now() + delay,
+          });
+          logger.warn("Inbound envelope requeued with backoff", {
+            envelopeId: envelope.envelopeId,
+            attempt: nextAttempt,
+            retryAt: new Date(Date.now() + delay).toISOString(),
+            error: forwardResult.error,
+          });
         }
-        logger.warn("Failed to forward to ActivityPods", { 
-          envelopeId: envelope.envelopeId, 
-          error: forwardResult.error 
-        });
         return;
       }
 
@@ -199,7 +340,7 @@ export class InboundWorker {
         try {
           await this.redpanda.publishToStream2({
             activity,
-            actorUri: verification.actorUri!,
+            actorUri: verifiedActorUri,
             receivedAt: envelope.receivedAt,
             path: envelope.path,
           });
@@ -218,11 +359,20 @@ export class InboundWorker {
 
       // Step 7: Ack the message
       await this.queue.ack("inbound", messageId);
+
+      // Step 8: Notify integration adapter (fault-isolated — errors are swallowed)
+      await this.callAdapter("onInboundVerified", {
+        actorUri: verifiedActorUri,
+        activityId: activity.id,
+        activityType: activity.type,
+        isPublic,
+      });
+
       logger.info("Inbound activity processed", { 
         envelopeId: envelope.envelopeId,
         activityId: activity.id,
         type: activity.type,
-        actor: verification.actorUri,
+        actor: verifiedActorUri,
         isPublic,
       });
 
@@ -237,10 +387,123 @@ export class InboundWorker {
     }
   }
 
+  private async resolveVerifiedActorUri(
+    messageId: string,
+    envelope: InboundEnvelope,
+    activity: any
+  ): Promise<string | null> {
+    const trustedVerification = this.getTrustedVerification(envelope);
+    if (trustedVerification) {
+      return this.validateVerifiedActorMatch(
+        messageId,
+        envelope,
+        activity,
+        trustedVerification.actorUri,
+        trustedVerification.source,
+      );
+    }
+
+    const verification = await this.verifySignature(envelope);
+
+    if (!verification.valid || !verification.actorUri) {
+      await this.queue.ack("inbound", messageId);
+      await this.queue.moveToDlq(
+        "inbound",
+        envelope,
+        `Signature verification failed: ${verification.error}`,
+      );
+      logger.warn("Signature verification failed", {
+        envelopeId: envelope.envelopeId,
+        error: verification.error,
+      });
+      return null;
+    }
+
+    return this.validateVerifiedActorMatch(
+      messageId,
+      envelope,
+      activity,
+      verification.actorUri,
+      "http-signature",
+    );
+  }
+
+  private getTrustedVerification(
+    envelope: InboundEnvelope
+  ): InboundEnvelopeVerification | null {
+    if (
+      !this.config.fedifyRuntimeIntegrationEnabled ||
+      envelope.verification?.source !== "fedify-v2"
+    ) {
+      return null;
+    }
+
+    return envelope.verification;
+  }
+
+  private async validateVerifiedActorMatch(
+    messageId: string,
+    envelope: InboundEnvelope,
+    activity: any,
+    verifiedActorUri: string,
+    verificationSource: string
+  ): Promise<string | null> {
+    const activityActorUri = this.extractActivityActorUri(activity);
+
+    if (!activityActorUri) {
+      await this.queue.ack("inbound", messageId);
+      await this.queue.moveToDlq(
+        "inbound",
+        envelope,
+        "Activity actor is missing a resolvable URI",
+      );
+      logger.warn("Inbound activity actor URI missing", {
+        envelopeId: envelope.envelopeId,
+        verificationSource,
+      });
+      return null;
+    }
+
+    if (activityActorUri !== verifiedActorUri) {
+      await this.queue.ack("inbound", messageId);
+      await this.queue.moveToDlq(
+        "inbound",
+        envelope,
+        `Verified actor mismatch: envelope actor ${verifiedActorUri} != activity actor ${activityActorUri}`,
+      );
+      logger.warn("Inbound activity rejected due to actor mismatch", {
+        envelopeId: envelope.envelopeId,
+        verificationSource,
+        verifiedActorUri,
+        activityActorUri,
+      });
+      return null;
+    }
+
+    return verifiedActorUri;
+  }
+
+  private extractActivityActorUri(activity: any): string | null {
+    if (typeof activity?.actor === "string" && activity.actor.length > 0) {
+      return activity.actor;
+    }
+
+    if (
+      activity?.actor &&
+      typeof activity.actor === "object" &&
+      typeof activity.actor.id === "string" &&
+      activity.actor.id.length > 0
+    ) {
+      return activity.actor.id;
+    }
+
+    return null;
+  }
+
   /**
    * Verify HTTP signature on an inbound envelope
    */
-  private async verifySignature(envelope: InboundEnvelope): Promise<VerificationResult> {
+  protected async verifySignature(envelope: InboundEnvelope): Promise<VerificationResult> {
     try {
       const signatureHeader = envelope.headers["signature"];
       if (!signatureHeader) {
@@ -249,17 +512,24 @@ export class InboundWorker {
 
       // Parse signature header
       const sigParams = this.parseSignatureHeader(signatureHeader);
-      if (!sigParams.keyId || !sigParams.signature || !sigParams.headers) {
+      const keyId = sigParams["keyId"];
+      const signature = sigParams["signature"];
+      const signedHeaders = sigParams["headers"];
+      if (
+        typeof keyId !== "string" ||
+        typeof signature !== "string" ||
+        typeof signedHeaders !== "string"
+      ) {
         return { valid: false, error: "Invalid Signature header format" };
       }
 
-      // Fetch actor document to get public key
-      const actorDoc = await this.fetchActorDocument(sigParams.keyId);
-      if (!actorDoc) {
-        return { valid: false, error: "Could not fetch actor document" };
+      // Fetch an actor or key document to get the public key and actor owner.
+      const verificationDocument = await this.fetchActorDocument(keyId);
+      if (!verificationDocument) {
+        return { valid: false, error: "Could not fetch actor or key document" };
       }
 
-      const publicKeyPem = actorDoc.publicKey?.publicKeyPem;
+      const publicKeyPem = extractPublicKeyPemFromVerificationDocument(verificationDocument);
       if (!publicKeyPem) {
         return { valid: false, error: "Actor has no public key" };
       }
@@ -274,19 +544,21 @@ export class InboundWorker {
       }
 
       // Build signing string
-      const signingString = this.buildSigningString(envelope, sigParams.headers.split(" "));
+      const signingString = this.buildSigningString(envelope, signedHeaders.split(" "));
 
       // Verify signature
       const verifier = createVerify("RSA-SHA256");
       verifier.update(signingString);
-      const isValid = verifier.verify(publicKeyPem, sigParams.signature, "base64");
+      const isValid = verifier.verify(publicKeyPem, signature, "base64");
 
       if (!isValid) {
         return { valid: false, error: "Signature verification failed" };
       }
 
-      // Extract actor URI from keyId
-      const actorUri = sigParams.keyId.split("#")[0];
+      const actorUri = resolveActorUriFromVerificationDocument(keyId, verificationDocument);
+      if (!actorUri) {
+        return { valid: false, error: "Could not resolve actor owner for keyId" };
+      }
 
       return { valid: true, actorUri };
 
@@ -303,7 +575,11 @@ export class InboundWorker {
     const regex = /(\w+)="([^"]+)"/g;
     let match;
     while ((match = regex.exec(header)) !== null) {
-      params[match[1]!] = match[2]!;
+      const key = match[1];
+      const value = match[2];
+      if (key !== undefined && value !== undefined) {
+        params[key] = value;
+      }
     }
     return params;
   }
@@ -335,20 +611,22 @@ export class InboundWorker {
   }
 
   /**
-   * Fetch actor document with caching
+   * Fetch actor or key documents with caching.
    */
   private async fetchActorDocument(keyId: string): Promise<any | null> {
-    // Extract actor URI from keyId (e.g., "https://example.com/users/alice#main-key" -> "https://example.com/users/alice")
-    const actorUri = keyId.split("#")[0]!;
+    const fetchUrl = keyId.includes("#") ? (keyId.split("#")[0] ?? null) : keyId;
+    if (!fetchUrl) {
+      return null;
+    }
 
     // Check cache first
-    const cached = await this.queue.getCachedActorDoc(actorUri);
+    const cached = await this.queue.getCachedActorDoc(fetchUrl);
     if (cached) {
       return cached;
     }
 
     try {
-      const response = await request(actorUri, {
+      const response = await request(fetchUrl, {
         method: "GET",
         headers: {
           "accept": "application/activity+json, application/ld+json",
@@ -359,19 +637,19 @@ export class InboundWorker {
       });
 
       if (response.statusCode !== 200) {
-        logger.warn("Failed to fetch actor document", { actorUri, statusCode: response.statusCode });
+        logger.warn("Failed to fetch verification document", { fetchUrl, statusCode: response.statusCode });
         return null;
       }
 
       const doc = await response.body.json() as any;
 
       // Cache the document
-      await this.queue.cacheActorDoc(actorUri, doc);
+      await this.queue.cacheActorDoc(fetchUrl, doc);
 
       return doc;
 
     } catch (err: any) {
-      logger.error("Error fetching actor document", { actorUri, error: err.message });
+      logger.error("Error fetching verification document", { fetchUrl, error: err.message });
       return null;
     }
   }
@@ -398,7 +676,8 @@ export class InboundWorker {
   /**
    * Forward activity to ActivityPods
    */
-  private async forwardToActivityPods(
+  /** Forward a verified activity to ActivityPods internal inbox receiver. */
+  protected async forwardToActivityPods(
     envelope: InboundEnvelope, 
     activity: any,
     verifiedActorUri: string
@@ -472,11 +751,13 @@ export function createInboundWorker(
   overrides?: Partial<InboundWorkerConfig>
 ): InboundWorker {
   const config: InboundWorkerConfig = {
-    concurrency: parseInt(process.env.INBOUND_CONCURRENCY || "32", 10),
-    activityPodsUrl: process.env.ACTIVITYPODS_URL || "http://localhost:3000",
-    activityPodsToken: process.env.ACTIVITYPODS_TOKEN || "",
-    requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || "30000", 10),
-    userAgent: process.env.USER_AGENT || "Fedify-Sidecar/1.0 (ActivityPods)",
+    concurrency: parseInt(process.env["INBOUND_CONCURRENCY"] || "32", 10),
+    activityPodsUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+    activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] || "",
+    requestTimeoutMs: parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+    fedifyRuntimeIntegrationEnabled:
+      process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
     ...overrides,
   };
 

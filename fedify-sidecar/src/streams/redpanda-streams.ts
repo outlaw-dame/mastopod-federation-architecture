@@ -194,7 +194,7 @@ export class RedPandaStreams {
     
     await this.producer.send({
       topic: this.config.localPublicTopic,
-      compression: CompressionTypes.LZ4,
+      compression: CompressionTypes.ZSTD,
       messages: [
         {
           key,
@@ -225,7 +225,7 @@ export class RedPandaStreams {
     
     await this.producer.send({
       topic: this.config.remotePublicTopic,
-      compression: CompressionTypes.LZ4,
+      compression: CompressionTypes.ZSTD,
       messages: [
         {
           key,
@@ -260,7 +260,7 @@ export class RedPandaStreams {
     
     await this.producer.send({
       topic: this.config.firehoseTopic,
-      compression: CompressionTypes.LZ4,
+      compression: CompressionTypes.ZSTD,
       messages: [
         {
           key,
@@ -285,7 +285,7 @@ export class RedPandaStreams {
     
     await this.producer.send({
       topic: this.config.tombstoneTopic,
-      compression: CompressionTypes.LZ4,
+      compression: CompressionTypes.ZSTD,
       messages: [
         {
           key,
@@ -435,13 +435,13 @@ export class RedPandaStreams {
 
 export function createRedPandaStreams(config?: Partial<RedPandaConfig>): RedPandaStreams {
   const fullConfig: RedPandaConfig = {
-    brokers: (process.env.REDPANDA_BROKERS || "localhost:9092").split(","),
-    clientId: process.env.REDPANDA_CLIENT_ID || "fedify-sidecar",
-    localPublicTopic: process.env.REDPANDA_LOCAL_TOPIC || "apub.public.local.v1",
-    remotePublicTopic: process.env.REDPANDA_REMOTE_TOPIC || "apub.public.remote.v1",
-    firehoseTopic: process.env.REDPANDA_FIREHOSE_TOPIC || "apub.public.firehose.v1",
-    tombstoneTopic: process.env.REDPANDA_TOMBSTONE_TOPIC || "apub.tombstone.v1",
-    consumerGroupId: process.env.REDPANDA_CONSUMER_GROUP || "fedify-sidecar",
+    brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092").split(","),
+    clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+    localPublicTopic: process.env["REDPANDA_LOCAL_TOPIC"] || "apub.public.local.v1",
+    remotePublicTopic: process.env["REDPANDA_REMOTE_TOPIC"] || "apub.public.remote.v1",
+    firehoseTopic: process.env["REDPANDA_FIREHOSE_TOPIC"] || "apub.public.firehose.v1",
+    tombstoneTopic: process.env["REDPANDA_TOMBSTONE_TOPIC"] || "apub.tombstone.v1",
+    consumerGroupId: process.env["REDPANDA_CONSUMER_GROUP"] || "fedify-sidecar",
     ...config,
   };
 

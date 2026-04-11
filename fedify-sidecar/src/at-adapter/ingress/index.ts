@@ -72,6 +72,9 @@ export type {
 export {
   DefaultAtIngressVerifier,
 } from './AtIngressVerifier.js';
+export {
+  ProductionAtCommitVerifier,
+} from './ProductionAtCommitVerifier.js';
 
 export type {
   AtIngressVerifier,
@@ -97,6 +100,9 @@ export {
 export type {
   HttpAtSyncRebuilderOptions,
 } from './HttpAtSyncRebuilder.js';
+export type {
+  ProductionAtCommitVerifierOptions,
+} from './ProductionAtCommitVerifier.js';
 export {
   buildAtExternalFirehoseBootstrap,
   parseAtExternalFirehoseSources,

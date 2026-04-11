@@ -108,7 +108,7 @@ export class DefaultAtFirehoseSubscriptionManager implements AtFirehoseSubscript
 
     // Log any broadcast failures without crashing the publisher.
     for (const result of results) {
-      if (result.status === 'rejected' && process.env.NODE_ENV !== 'test') {
+      if (result.status === 'rejected' && process.env["NODE_ENV"] !== 'test') {
         console.error('[AtFirehoseSubscriptionManager] Broadcast send error:', result.reason);
       }
     }

@@ -170,7 +170,7 @@ export class ExternalPdsClient {
     dpopPrivateKeyJwk: string,
     clientId: string
   ): Promise<ExternalPdsSessionResponse> {
-    const htu = tokenEndpoint.split('?')[0]!;
+    const htu = tokenEndpoint.split('?')[0] ?? tokenEndpoint;
     const dpopProof = await buildDpopProof({
       privateKeyJwk: dpopPrivateKeyJwk,
       htu,
@@ -201,15 +201,15 @@ export class ExternalPdsClient {
 
     const body = response.body;
 
-    if (body.error) {
+    if (body["error"]) {
       throw new ExternalPdsClientError(
-        String(body.error_description ?? body.error),
-        { status: 400, error: String(body.error), retryable: false }
+        String(body["error_description"] ?? body["error"]),
+        { status: 400, error: String(body["error"]), retryable: false }
       );
     }
 
-    const accessJwt = String(body.access_token ?? '');
-    const did       = String(body.sub ?? '');
+    const accessJwt = String(body["access_token"] ?? '');
+    const did = String(body["sub"] ?? '');
     if (!accessJwt || !did) {
       throw new ExternalPdsClientError(
         'OAuth token refresh did not return access_token or sub',
@@ -219,9 +219,9 @@ export class ExternalPdsClient {
 
     return {
       did,
-      handle: typeof body.handle === 'string' ? body.handle : '',
+      handle: typeof body["handle"] === 'string' ? body["handle"] : '',
       accessJwt,
-      refreshJwt: typeof body.refresh_token === 'string' ? body.refresh_token : undefined,
+      refreshJwt: typeof body["refresh_token"] === 'string' ? body["refresh_token"] : undefined,
     };
   }
 
@@ -376,7 +376,7 @@ export class ExternalPdsClient {
       // DPoP proof generation — must happen per-attempt so the `iat` is fresh.
       let requestInit: RequestJsonOptions = init;
       if (init.dpopPrivateKeyJwk && init.dpopAccessToken) {
-        const htu = url.split('?')[0]!;
+        const htu = url.split('?')[0] ?? url;
         const htm = (init.method ?? 'GET').toUpperCase();
         const dpopProof = await buildDpopProof({
           privateKeyJwk: init.dpopPrivateKeyJwk,
@@ -586,8 +586,8 @@ async function parseErrorResponse(response: Response): Promise<{
     try {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       return {
-        error: typeof parsed.error === 'string' ? parsed.error : undefined,
-        message: typeof parsed.message === 'string' ? parsed.message : undefined,
+        error: typeof parsed["error"] === 'string' ? parsed["error"] : undefined,
+        message: typeof parsed["message"] === 'string' ? parsed["message"] : undefined,
         sanitizedBody: JSON.stringify(redactSensitive(parsed)).slice(0, 512),
       };
     } catch {

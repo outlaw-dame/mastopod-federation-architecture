@@ -256,12 +256,12 @@ function toIdentityBinding(payload: BackendIdentityProjection): IdentityBinding 
       `${payload.canonicalAccountId}#ap-signing`,
     atSigningKeyRef: payload.atSigningKeyRef ?? null,
     atRotationKeyRef: payload.atRotationKeyRef ?? null,
-    plc: {
-      opCid: null,
-      rotationKeyRef: payload.atRotationKeyRef ?? null,
-      plcUpdateState: null,
-      lastSubmittedAt: null,
-      lastConfirmedAt: null,
+	    plc: {
+	      opCid: null,
+	      rotationKeyRef: payload.atRotationKeyRef ?? null,
+	      plcUpdateState: null,
+	      lastSubmittedAt: null,
+	      lastConfirmedAt: null,
       lastError: null,
     },
     didWeb: null,

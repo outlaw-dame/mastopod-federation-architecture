@@ -197,8 +197,8 @@ export function registerAtXrpcRoutes(
 
       const authHeader = (req.headers.authorization as string | undefined) ?? '';
       const dpopHeader =
-        typeof req.headers.dpop === 'string'
-          ? req.headers.dpop
+        typeof req.headers["dpop"] === 'string'
+          ? req.headers["dpop"]
           : undefined;
 
       const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;

@@ -1,0 +1,39 @@
+name: redpanda-topic-governance
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  topic-governance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start Redpanda
+        run: docker compose -f docker-compose.yml up -d redpanda
+
+      - name: Bootstrap topics
+        run: REDPANDA_BROKERS=localhost:19092 REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development npm run topics:bootstrap
+
+      - name: Verify topic governance
+        run: REDPANDA_BROKERS=localhost:19092 REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development npm run topics:verify
+
+      - name: Stop Redpanda
+        if: always()
+        run: docker compose -f docker-compose.yml down

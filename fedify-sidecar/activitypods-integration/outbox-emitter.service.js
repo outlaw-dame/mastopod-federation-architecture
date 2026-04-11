@@ -17,6 +17,16 @@ const {
   resolveDeliveryTargets,
 } = require("./activitypub-recipient-resolution");
 
+const {
+  getSearchableBy,
+  isSearchableBy,
+  AS_PUBLIC,
+} = require('../utils/search-consent');
+
+const {
+  extractHashtagsFromText,
+} = require('../utils/hashtags');
+
 module.exports = {
   name: "outbox-emitter",
 
@@ -79,6 +89,8 @@ module.exports = {
             isPublicIndexable: this.isPublicIndexable(activity),
             isDeleteOrTombstone: this.isDeleteOrTombstone(activity),
             visibility: this.determineVisibility(activity),
+            searchConsent: this.buildSearchConsent(activity),
+            hashtags: this.extractMetadataHashtags(activity),
           },
         };
 
@@ -119,6 +131,8 @@ module.exports = {
             isPublicIndexable: this.isPublicIndexable(activity),
             isDeleteOrTombstone: this.isDeleteOrTombstone(activity),
             visibility: this.determineVisibility(activity),
+            searchConsent: this.buildSearchConsent(activity),
+            hashtags: this.extractMetadataHashtags(activity),
           },
         };
 
@@ -184,17 +198,25 @@ module.exports = {
         remoteTargets: event.deliveryTargets,  // sidecar validates body.remoteTargets
       };
 
-      for (let attempt = 1; attempt <= this.settings.webhookRetries; attempt++) {
-        try {
+      const headers = {
+        "Content-Type": "application/json",
+        "X-Event-Id": event.eventId,
+        "X-Event-Schema": event.schema,
+      };
+      // Only add Authorization header if a token is configured — omitting an
+      // empty Bearer token avoids confusing the sidecar's auth middleware.
+      if (this.settings.sidecarToken) {
+        headers["Authorization"] = `Bearer ${this.settings.sidecarToken}`;
+      }
+
+      const body = JSON.stringify(payload);
+
+      try {
+        await this.retryWithBackoff(async () => {
           const response = await fetch(url, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${this.settings.sidecarToken}`,
-              "X-Event-Id": event.eventId,
-              "X-Event-Schema": event.schema,
-            },
-            body: JSON.stringify(payload),
+            headers,
+            body,
             signal: AbortSignal.timeout(this.settings.webhookTimeoutMs),
           });
 
@@ -206,29 +228,51 @@ module.exports = {
             return;
           }
 
-          this.logger.warn("Sidecar webhook returned error", {
-            eventId: event.eventId,
-            status: response.status,
-            attempt,
-          });
-        } catch (err) {
-          this.logger.warn("Sidecar webhook delivery failed", {
-            eventId: event.eventId,
-            error: err.message,
-            attempt,
-          });
-        }
+          const error = new Error(`Sidecar webhook returned ${response.status}`);
+          // 429 and 5xx are transient; 4xx (except 429) are permanent.
+          error.retryable = response.status === 429 || response.status >= 500;
+          throw error;
+        }, {
+          maxRetries: Math.max(0, this.settings.webhookRetries - 1),
+          baseDelayMs: 250,
+          maxDelayMs: 10000,
+          retryIf: (err) => err.retryable !== false,
+        });
+      } catch (err) {
+        this.logger.error("Failed to deliver event to sidecar after retries", {
+          eventId: event.eventId,
+          activityId: event.activityId,
+          error: err.message,
+        });
+      }
+    },
 
-        // Backoff before retry
-        if (attempt < this.settings.webhookRetries) {
-          await this.sleep(1000 * attempt);
+    /**
+     * Exponential backoff with full jitter.
+     * Retries fn() up to opts.maxRetries times.  Between each attempt the
+     * delay is chosen uniformly at random in [0, min(maxDelayMs, baseDelayMs *
+     * 2^attempt)] — the "full jitter" strategy recommended by AWS to avoid
+     * thundering-herd problems.
+     *
+     * @param {() => Promise<void>} fn
+     * @param {{ maxRetries: number, baseDelayMs: number, maxDelayMs: number, retryIf?: (err: Error) => boolean }} opts
+     */
+    async retryWithBackoff(fn, opts) {
+      const { maxRetries, baseDelayMs, maxDelayMs, retryIf } = opts;
+      let lastError;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          return await fn();
+        } catch (err) {
+          lastError = err;
+          if (attempt === maxRetries) break;
+          if (retryIf && !retryIf(err)) break;
+          const cap = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attempt));
+          const delay = Math.random() * cap;
+          await new Promise(resolve => setTimeout(resolve, delay));
         }
       }
-
-      this.logger.error("Failed to deliver event to sidecar after retries", {
-        eventId: event.eventId,
-        activityId: event.activityId,
-      });
+      throw lastError;
     },
 
     /**
@@ -243,19 +287,43 @@ module.exports = {
 
     /**
      * Check if activity is publicly indexable.
+     * Uses FEP-268d searchableBy consent when present; falls back to
+     * audience-based check (as:Public in to/cc) when no explicit consent is set.
      */
     isPublicIndexable(activity) {
-      const publicAddress = "https://www.w3.org/ns/activitystreams#Public";
-      const recipients = [
-        ...(Array.isArray(activity.to) ? activity.to : [activity.to]),
-        ...(Array.isArray(activity.cc) ? activity.cc : [activity.cc]),
-      ].filter(Boolean);
+      const obj =
+        activity.object && typeof activity.object === 'object'
+          ? activity.object
+          : activity;
+      return isSearchableBy(obj, AS_PUBLIC);
+    },
 
-      return recipients.some(r => 
-        r === publicAddress || 
-        r === "as:Public" || 
-        r === "Public"
-      );
+    /**
+     * Build a search consent descriptor for the activity's inner object.
+     * Shape: { raw: string[], isPublic: boolean, explicitlySet: boolean }
+     */
+    buildSearchConsent(activity) {
+      const obj =
+        activity.object && typeof activity.object === 'object'
+          ? activity.object
+          : activity;
+      const raw = getSearchableBy(obj);
+      return {
+        raw,
+        isPublic: isSearchableBy(obj, AS_PUBLIC),
+        explicitlySet: raw.length > 0,
+      };
+    },
+
+    /**
+     * Extract hashtags for dual-protocol metadata (Facets).
+     */
+    extractMetadataHashtags(activity) {
+      const obj =
+        activity.object && typeof activity.object === 'object'
+          ? activity.object
+          : activity;
+      return extractHashtagsFromText(obj.content || "");
     },
 
     /**
@@ -287,8 +355,5 @@ module.exports = {
       return "direct";
     },
 
-	    sleep(ms) {
-	      return new Promise(resolve => setTimeout(resolve, ms));
-	    },
   },
 };

@@ -46,6 +46,20 @@ function normalizeShortcode(value: unknown): string | null {
   return null;
 }
 
+function normalizeDirectShortcode(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const direct = trimmed.match(SHORTCODE_RE);
+  return direct ? `:${direct[1]}:` : null;
+}
+
 function normalizeUnicodeEmoji(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
@@ -61,11 +75,16 @@ function normalizeUnicodeEmoji(value: unknown): string | null {
     return null;
   }
 
-  return EMOJI_GRAPHEME_RE.test(graphemes[0]!) ? graphemes[0]! : null;
+  const first = graphemes[0];
+  if (!first) {
+    return null;
+  }
+
+  return EMOJI_GRAPHEME_RE.test(first) ? first : null;
 }
 
 function hasType(activity: AnyRecord, ...allowedTypes: string[]): boolean {
-  const types = toArray(activity.type ?? activity['@type']);
+  const types = toArray(activity["type"] ?? activity['@type']);
   return types.some(type => typeof type === 'string' && allowedTypes.includes(type));
 }
 
@@ -88,8 +107,8 @@ export function isApEmojiReactionActivity(activity: unknown): boolean {
   }
 
   return hasType(apActivity, 'Like', 'as:Like', 'https://www.w3.org/ns/activitystreams#Like')
-    && typeof apActivity.content === 'string'
-    && apActivity.content.trim().length > 0;
+    && typeof apActivity["content"] === 'string'
+    && apActivity["content"].trim().length > 0;
 }
 
 export function extractApEmojiReactionContent(activity: unknown): string | undefined {
@@ -98,33 +117,19 @@ export function extractApEmojiReactionContent(activity: unknown): string | undef
   }
 
   const apActivity = activity as AnyRecord;
-  const isEmojiReact = hasType(
+  const shortcode = hasType(
     apActivity,
     'EmojiReact',
     'litepub:EmojiReact',
     'http://litepub.social/ns#EmojiReact'
-  );
-
-  if (isEmojiReact && typeof apActivity.content === 'string') {
-    const direct = apActivity.content.trim().match(SHORTCODE_RE);
-    if (direct) {
-      return `:${direct[1]}:`;
-    }
-
-    const unicodeEmoji = normalizeUnicodeEmoji(apActivity.content);
-    if (unicodeEmoji) {
-      return unicodeEmoji;
-    }
-
-    return undefined;
-  }
-
-  const shortcode = normalizeShortcode(apActivity.content);
+  )
+    ? normalizeDirectShortcode(apActivity["content"])
+    : normalizeShortcode(apActivity["content"]);
   if (shortcode) {
     return shortcode;
   }
 
-  const unicodeEmoji = normalizeUnicodeEmoji(apActivity.content);
+  const unicodeEmoji = normalizeUnicodeEmoji(apActivity["content"]);
   if (unicodeEmoji) {
     return unicodeEmoji;
   }

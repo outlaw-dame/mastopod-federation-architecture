@@ -34,10 +34,14 @@ export interface SessionFamilyStateStore {
 }
 
 interface RedisLike {
-  get(key: unknown): Promise<string | null>;
-  set(...args: unknown[]): Promise<unknown>;
-  del(...keys: unknown[]): Promise<unknown>;
-  eval?(...args: unknown[]): Promise<unknown>;
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, ...args: unknown[]): Promise<unknown>;
+  del(...keys: string[]): Promise<unknown>;
+  eval?(
+    script: string,
+    numKeys: number,
+    ...args: unknown[]
+  ): Promise<unknown>;
 }
 
 export class InMemorySessionFamilyStateStore implements SessionFamilyStateStore {
@@ -45,12 +49,13 @@ export class InMemorySessionFamilyStateStore implements SessionFamilyStateStore 
   private readonly refreshToFamily = new Map<string, string>();
 
   async createFamily(record: SessionFamilyRecord, _ttlSeconds: number): Promise<void> {
-    this.families.set(record.familyId, cloneRecord(record)!);
+    this.families.set(record.familyId, cloneRecord(record));
     this.refreshToFamily.set(record.currentRefreshTokenId, record.familyId);
   }
 
   async getFamily(familyId: string): Promise<SessionFamilyRecord | null> {
-    return cloneRecord(this.families.get(familyId) ?? null) as SessionFamilyRecord | null;
+    const family = this.families.get(familyId);
+    return family ? cloneRecord(family) : null;
   }
 
   async markFamilyCompromised(familyId: string, _ttlSeconds: number): Promise<void> {
@@ -262,6 +267,8 @@ export class RedisSessionFamilyStateStore implements SessionFamilyStateStore {
   }
 }
 
+function cloneRecord(record: SessionFamilyRecord): SessionFamilyRecord;
+function cloneRecord(record: null): null;
 function cloneRecord(record: SessionFamilyRecord | null): SessionFamilyRecord | null {
   if (!record) return null;
   return { ...record };

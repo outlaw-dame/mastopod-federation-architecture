@@ -1,10 +1,10 @@
-/// <reference types="vitest/globals" />
 /**
  * V6.5 Phase 5: Acceptance Tests
  *
  * Tests A-I covering follow, like, repost, image blobs, and reply roots.
  */
 
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DefaultAtProjectionWorker } from '../projection/AtProjectionWorker.js';
 import { DefaultAtProjectionPolicy } from '../projection/AtProjectionPolicy.js';
 import { InMemoryAtAliasStore } from '../repo/AtAliasStore.js';

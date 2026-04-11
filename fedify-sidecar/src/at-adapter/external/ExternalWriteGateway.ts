@@ -134,7 +134,7 @@ export class ExternalWriteGateway {
 function assertRepoOwnership(body: unknown, session: StoredExternalAtSession): void {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return;
 
-  const repo = (body as Record<string, unknown>).repo;
+  const repo = (body as Record<string, unknown>)["repo"];
   if (typeof repo !== 'string') return;
 
   const normalizedRepo = repo.trim().toLowerCase();

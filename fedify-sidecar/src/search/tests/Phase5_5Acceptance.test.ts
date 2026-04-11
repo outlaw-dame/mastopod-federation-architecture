@@ -1,10 +1,10 @@
-/// <reference types="vitest/globals" />
 /**
  * V6.5 Phase 5.5: Unified OpenSearch Read Stack
  *
  * Acceptance Tests
  */
 
+import { beforeEach, describe, expect, it } from 'vitest';
 import { DefaultSearchDedupService } from '../aliases/SearchDedupService.js';
 import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter.js';
 import { InMemoryOpenSearchClient } from '../writer/OpenSearchClient.js';

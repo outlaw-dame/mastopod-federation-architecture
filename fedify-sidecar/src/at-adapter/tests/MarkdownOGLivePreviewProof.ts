@@ -141,18 +141,17 @@ try {
 const mockCtx: TranslationContext = {
   now: () => new Date("2026-01-01T00:00:00Z"),
   resolveActorRef: async ({ did }) => ({
-    type: "actor",
-    sourceProtocol: "atproto",
-    canonicalAccountId: `https://pods.test/users/${did}`,
-    externalAccountId: did,
-    did,
-    webfinger: null,
+    canonicalAccountId: `https://pods.test/users/${did ?? "unknown"}`,
+    did: did ?? null,
+    webId: null,
+    activityPubActorUri: null,
+    handle: null,
   }),
   resolveObjectRef: async ({ canonicalObjectId, atUri, cid }) => ({
-    type: "object",
     canonicalObjectId,
     atUri: atUri ?? null,
     cid: cid ?? null,
+    activityPubObjectId: null,
     canonicalUrl: null,
   }),
 };
@@ -290,11 +289,15 @@ const noteIntentWithPreview: CanonicalPostCreateIntent = {
   sourceAccountRef: {
     canonicalAccountId: "https://pods.test/users/alice",
     did: "did:plc:test0001",
+    webId: null,
+    activityPubActorUri: null,
+    handle: null,
   },
   object: {
     canonicalObjectId: "at://did:plc:test0001/app.bsky.feed.post/proof001",
     atUri: "at://did:plc:test0001/app.bsky.feed.post/proof001",
     cid: null,
+    activityPubObjectId: null,
     canonicalUrl: null,
   },
   createdAt: "2026-01-01T00:00:00Z",
@@ -304,6 +307,7 @@ const noteIntentWithPreview: CanonicalPostCreateIntent = {
     originProtocol: "atproto",
     originEventId: "at://did:plc:test0001/app.bsky.feed.post/proof001",
     originAccountId: "did:plc:test0001",
+    mirroredFromCanonicalIntentId: null,
     projectionMode: "native",
   },
   warnings: [],
@@ -333,11 +337,12 @@ const mockProjCtx: ProjectionContext = {
     did: ref.did ?? "did:plc:test0001",
     handle: "alice.test",
     canonicalAccountId: ref.canonicalAccountId ?? null,
-    webfinger: null,
+    webId: ref.webId ?? null,
+    activityPubActorUri: ref.activityPubActorUri ?? null,
   }),
   resolveObjectRef: async (ref) => ref,
+  buildIntentId: () => "urn:test:projection",
   now: () => new Date("2026-01-01T00:00:00Z"),
-  buildIntentId: () => "urn:test:proof:001",
 };
 
 const projResult = await projector.project(noteIntentWithPreview, mockProjCtx);

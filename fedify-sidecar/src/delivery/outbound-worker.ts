@@ -20,6 +20,12 @@ import {
 } from "../queue/sidecar-redis-queue.js";
 import { SigningClient, SignResult, SignErrorResult } from "../signing/signing-client.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
+import {
+  FederationRuntimeAdapter,
+  NoopFederationRuntimeAdapter,
+  type OutboundDeliveryResult,
+} from "../core-domain/contracts/SigningContracts.js";
+import { metrics } from "../metrics/index.js";
 import { logger } from "../utils/logger.js";
 import type { CapabilityGateResult } from "../capabilities/gates.js";
 
@@ -33,15 +39,12 @@ export interface OutboundWorkerConfig {
   requestTimeoutMs: number;
   userAgent: string;
   capabilityGate?: (capabilityId: string) => CapabilityGateResult;
+  fedifyRuntimeIntegrationEnabled: boolean;
+  /** Injected adapter — defaults to NoopFederationRuntimeAdapter when flag is off. */
+  adapter?: FederationRuntimeAdapter;
 }
 
-export interface DeliveryResult {
-  jobId: string;
-  success: boolean;
-  statusCode?: number;
-  error?: string;
-  permanent?: boolean;  // If true, don't retry
-}
+export interface DeliveryResult extends OutboundDeliveryResult {}
 
 // ============================================================================
 // Outbound Worker
@@ -52,6 +55,7 @@ export class OutboundWorker {
   private signingClient: SigningClient;
   private redpanda: RedPandaProducer;
   private config: OutboundWorkerConfig;
+  private adapter: FederationRuntimeAdapter;
   private isRunning = false;
   private activeJobs = 0;
 
@@ -65,6 +69,35 @@ export class OutboundWorker {
     this.signingClient = signingClient;
     this.redpanda = redpanda;
     this.config = config;
+    this.adapter = config.fedifyRuntimeIntegrationEnabled
+      ? (config.adapter ?? NoopFederationRuntimeAdapter)
+      : NoopFederationRuntimeAdapter;
+  }
+
+  /**
+   * Invoke a FederationRuntimeAdapter hook inside a noop-safe circuit-breaker.
+   * Errors thrown by the adapter are logged and swallowed — they must never
+   * affect the calling business-logic path.
+   */
+  private async callAdapter(
+    hook: "onOutboundDelivered" | "onOutboundPermanentFailure",
+    input:
+      | NonNullable<Parameters<NonNullable<FederationRuntimeAdapter["onOutboundDelivered"]>>[0]>
+      | NonNullable<Parameters<NonNullable<FederationRuntimeAdapter["onOutboundPermanentFailure"]>>[0]>
+  ): Promise<void> {
+    if (!this.adapter.enabled) return;
+    const fn = this.adapter[hook] as
+      | FederationRuntimeAdapter["onOutboundDelivered"]
+      | FederationRuntimeAdapter["onOutboundPermanentFailure"];
+    if (!fn) return;
+    try {
+      await fn.call(this.adapter, input as never);
+    } catch (err: any) {
+      logger.warn("FederationRuntimeAdapter hook threw (swallowed)", {
+        hook,
+        error: err.message,
+      });
+    }
   }
 
   /**
@@ -72,7 +105,10 @@ export class OutboundWorker {
    */
   async start(): Promise<void> {
     this.isRunning = true;
-    logger.info("Outbound worker started", { concurrency: this.config.concurrency });
+    logger.info("Outbound worker started", {
+      concurrency: this.config.concurrency,
+      fedifyRuntimeIntegrationEnabled: this.config.fedifyRuntimeIntegrationEnabled,
+    });
 
     for await (const { messageId, job } of this.queue.consumeOutbound()) {
       if (!this.isRunning) break;
@@ -139,8 +175,9 @@ export class OutboundWorker {
   /**
    * Process a single delivery job
    */
-  private async processJob(messageId: string, job: OutboundJob): Promise<void> {
+  protected async processJob(messageId: string, job: OutboundJob): Promise<void> {
     this.activeJobs++;
+    const deliveryStartedAt = Date.now();
     
     try {
       if (this.config.capabilityGate) {
@@ -175,6 +212,7 @@ export class OutboundWorker {
       if (!isNew) {
         // Already delivered - ack and skip
         await this.queue.ack("outbound", messageId);
+        metrics.deliveryDuplicatesSkipped.inc({ domain: job.targetDomain });
         logger.debug("Duplicate delivery skipped", { jobId: job.jobId, activityId: job.activityId });
         return;
       }
@@ -215,8 +253,20 @@ export class OutboundWorker {
 
         // Step 7: Handle result
         if (result.success) {
-          // Success - ack and we're done
+          // Success - ack and notify integration adapter
           await this.queue.ack("outbound", messageId);
+          metrics.deliverySuccess.inc({ domain: job.targetDomain });
+          metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "success" });
+          metrics.deliveryLatency.observe(
+            { domain: job.targetDomain, type: "outbound", status: "success" },
+            (Date.now() - deliveryStartedAt) / 1000,
+          );
+          await this.callAdapter("onOutboundDelivered", {
+            actorUri: job.actorUri,
+            activityId: job.activityId,
+            targetDomain: job.targetDomain,
+            statusCode: result.statusCode,
+          });
           logger.info("Delivery successful", { 
             jobId: job.jobId, 
             activityId: job.activityId,
@@ -227,6 +277,22 @@ export class OutboundWorker {
           // Permanent failure - ack and DLQ
           await this.queue.ack("outbound", messageId);
           await this.queue.moveToDlq("outbound", job, result.error || "Permanent failure");
+          metrics.deliveryDlq.inc({ domain: job.targetDomain });
+          metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "permanent_failure" });
+          metrics.deliveryLatency.observe(
+            { domain: job.targetDomain, type: "outbound", status: "permanent_failure" },
+            (Date.now() - deliveryStartedAt) / 1000,
+          );
+          await this.callAdapter("onOutboundPermanentFailure", {
+            actorUri: job.actorUri,
+            activityId: job.activityId,
+            targetDomain: job.targetDomain,
+            targetInbox: job.targetInbox,
+            statusCode: result.statusCode,
+            error: result.error || "Permanent failure",
+            responseBody: result.responseBody,
+            attempt: job.attempt + 1,
+          });
           logger.warn("Permanent delivery failure", { 
             jobId: job.jobId, 
             error: result.error,
@@ -236,11 +302,17 @@ export class OutboundWorker {
           // Transient failure - retry or DLQ
           await this.queue.ack("outbound", messageId);
           await this.queue.clearIdempotency(job);  // Clear since we didn't successfully deliver
+          metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "transient_failure" });
+          metrics.deliveryLatency.observe(
+            { domain: job.targetDomain, type: "outbound", status: "transient_failure" },
+            (Date.now() - deliveryStartedAt) / 1000,
+          );
           
           const nextAttempt = job.attempt + 1;
           if (nextAttempt >= job.maxAttempts) {
             // Max attempts reached - DLQ
             await this.queue.moveToDlq("outbound", { ...job, lastError: result.error }, "Max attempts exceeded");
+            metrics.deliveryDlq.inc({ domain: job.targetDomain });
             logger.warn("Max delivery attempts exceeded", { 
               jobId: job.jobId, 
               attempts: nextAttempt,
@@ -248,7 +320,9 @@ export class OutboundWorker {
             });
           } else {
             // Requeue with backoff
-            const delay = backoffMs(nextAttempt);
+            const delay = result.retryAfterMs != null
+              ? Math.max(backoffMs(nextAttempt), result.retryAfterMs)
+              : backoffMs(nextAttempt);
             const retryJob: OutboundJob = {
               ...job,
               attempt: nextAttempt,
@@ -256,6 +330,7 @@ export class OutboundWorker {
               lastError: result.error,
             };
             await this.queue.enqueueOutbound(retryJob);
+            metrics.deliveryRetries.inc({ domain: job.targetDomain });
             logger.info("Delivery failed, scheduled retry", { 
               jobId: job.jobId, 
               attempt: nextAttempt,
@@ -282,7 +357,50 @@ export class OutboundWorker {
   /**
    * Deliver an activity to a remote inbox
    */
-  private async deliver(job: OutboundJob): Promise<DeliveryResult> {
+  protected async deliver(job: OutboundJob): Promise<DeliveryResult> {
+    if (this.adapter.enabled && this.adapter.deliverOutbound) {
+      return await this.adapter.deliverOutbound({
+        jobId: job.jobId,
+        actorUri: job.actorUri,
+        activityId: job.activityId,
+        activity: job.activity,
+        targetInbox: job.targetInbox,
+        targetDomain: job.targetDomain,
+        attempt: job.attempt,
+        maxAttempts: job.maxAttempts,
+        requestTimeoutMs: this.config.requestTimeoutMs,
+        userAgent: this.config.userAgent,
+        signHttpRequest: async ({ actorUri, method, targetUrl, body }) => {
+          const signResult = await this.signingClient.signOne({
+            actorUri,
+            method,
+            targetUrl,
+            body,
+          });
+          if (!signResult.ok) {
+            const errorResult = signResult as SignErrorResult;
+            return {
+              ok: false as const,
+              error: {
+                code: errorResult.error.code,
+                message: errorResult.error.message,
+                permanent: SigningClient.isPermanentError(errorResult),
+              },
+            };
+          }
+
+          return {
+            ok: true as const,
+            signedHeaders: {
+              date: signResult.signedHeaders.date,
+              digest: signResult.signedHeaders.digest,
+              signature: signResult.signedHeaders.signature,
+            },
+          };
+        },
+      });
+    }
+
     // Step 1: Request signature from ActivityPods
     const targetUrl = new URL(job.targetInbox);
     
@@ -390,10 +508,12 @@ export function createOutboundWorker(
   overrides?: Partial<OutboundWorkerConfig>
 ): OutboundWorker {
   const config: OutboundWorkerConfig = {
-    concurrency: parseInt(process.env.OUTBOUND_CONCURRENCY || "64", 10),
-    maxConcurrentPerDomain: parseInt(process.env.MAX_CONCURRENT_PER_DOMAIN || "10", 10),
-    requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || "30000", 10),
-    userAgent: process.env.USER_AGENT || "Fedify-Sidecar/1.0 (ActivityPods)",
+    concurrency: parseInt(process.env["OUTBOUND_CONCURRENCY"] || "64", 10),
+    maxConcurrentPerDomain: parseInt(process.env["MAX_CONCURRENT_PER_DOMAIN"] || "10", 10),
+    requestTimeoutMs: parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+    fedifyRuntimeIntegrationEnabled:
+      process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
     ...overrides,
   };
 

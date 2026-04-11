@@ -1,5 +1,7 @@
 # Mastopod + ActivityPods Federation Architecture Overview
 
+Historical overview. The current authoritative baseline is [ARCHITECTURE-BASELINE.md](./ARCHITECTURE-BASELINE.md).
+
 ## Executive Summary
 
 This architecture enables **Mastopod** (a Mastodon-compatible ActivityPub client) to work with **ActivityPods** (a Solid-based pod provider) while achieving high-performance federation with the broader Fediverse. The key innovation is a **Fedify Sidecar** that handles all remote HTTP federation, combined with an **event-driven streaming layer** that captures all public activities into queryable streams.
@@ -680,6 +682,8 @@ ActivityPods remains the authoritative system for:
 
 ### Fedify Sidecar
 
+Current runtime note: the sidecar process is hosted on Fastify for HTTP routing and XRPC/OAuth endpoints. This is a transport/runtime choice and does not change the queue/log model (Redis Streams for work queues, RedPanda for immutable event logs).
+
 |Responsibility        |Description                                             |
 |----------------------|--------------------------------------------------------|
 |**Inbound HTTP**      |Receive activities at `/inbox`, verify HTTP Signatures  |
@@ -689,6 +693,15 @@ ActivityPods remains the authoritative system for:
 |**WebFinger**         |Respond to `/.well-known/webfinger` for remote discovery|
 |**Shared Inbox**      |Optimize delivery to servers with many recipients       |
 |**Retry Logic**       |Exponential backoff, dead letter handling               |
+
+### Fedify Framework Gap (Explicit)
+
+- The sidecar currently implements federation workers and protocol bridges without runtime imports from `@fedify/fedify` in active `src/` code.
+- This is a framework-integration gap, not a protocol-authority gap:
+  - HTTP signatures remain authoritative in ActivityPods via the internal signing API.
+  - Redis Streams remains the transient work-queue layer.
+  - RedPanda remains the immutable event-log layer.
+- Integration target: introduce Fedify framework primitives where they add value (federation lifecycle/helpers) while preserving ActivityPods key custody and signing authority.
 
 ### Redis
 
@@ -706,14 +719,14 @@ ActivityPods remains the authoritative system for:
 |`ap.stream1.local-public.v1` |Local public activities (from ActivityPods)|
 |`ap.stream2.remote-public.v1`|Remote public activities (from Fedify)     |
 |`ap.firehose.v1`             |Stream1 + Stream2 merged                   |
-|`ap.tombstone.v1`            |Delete events (compacted topic)            |
+|`ap.tombstones.v1`           |Delete events (compacted topic)            |
 |`ap.dlq.v1`                  |Dead letter queue for failed processing    |
 
 ### OpenSearch
 
 |Capability           |Description                       |
 |---------------------|----------------------------------|
-|**Firehose Consumer**|Indexes from `ap.firehose.v1`     |
+|**Firehose Consumer**|Consumes `ap.firehose.v1` and bulk-indexes |
 |**Full-Text Search** |Content, hashtags, mentions       |
 |**Timeline Queries** |By actor, type, date range        |
 |**Discovery**        |Trending topics, suggested follows|

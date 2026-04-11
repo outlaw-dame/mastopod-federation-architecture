@@ -76,7 +76,7 @@ export class DefaultAtFirehoseEventEncoder implements AtFirehoseEventEncoder {
    * Encodes the event into the ATProto wire format: two concatenated
    * DRISL-CBOR objects (header map, then body map).
    */
-  private _encode(type: string, body: Record<string, unknown>): Uint8Array {
+  private _encode<T extends { $type?: string } & object>(type: string, body: T): Uint8Array {
     const header = { op: 1, t: type };
     const { $type: _ignoredType, ...payload } = body;
     return concatBytes(encodeCbor(header), encodeCbor(payload));

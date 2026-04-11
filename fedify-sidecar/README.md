@@ -129,6 +129,52 @@ npm start
 docker-compose up -d
 ```
 
+### Local Dev Profile (No Manual Flags)
+
+Use the local profile to run the sidecar against host-mapped dependencies with one command.
+
+```bash
+cp .env.local.example .env.local
+npm run dev:local
+```
+
+What this does:
+
+- loads environment from `.env.local` if present
+- ensures required RedPanda topics exist (`npm run topics:bootstrap`)
+- starts sidecar in dev mode (`npm run dev`)
+
+### RedPanda Topic Bootstrap (Required)
+
+Automatic topic creation is disabled for producers and consumers. Bootstrap topics explicitly before starting workers:
+
+```bash
+npm run topics:bootstrap
+```
+
+Validate topic governance (CI/startup parity check):
+
+```bash
+npm run topics:verify
+```
+
+Recommended profile and defaults:
+
+- `REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development|staging|production`
+- `REDPANDA_COMPRESSION=zstd`
+- `REDPANDA_TOPIC_BOOTSTRAP_RETRIES=5`
+- `REDPANDA_TOPIC_BOOTSTRAP_RETRY_BASE_MS=250`
+- `REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true`
+
+The bootstrap script applies exponential backoff with jitter and enforces topic-name sanitization to reduce unsafe or accidental topic creation.
+The verify command fails if topics are missing or if governance-critical settings drift (compression type, cleanup policy, retention, min ISR, partitions/replication floor).
+
+Production startup behavior:
+
+- `npm start` runs a prestart gate that executes `npm run topics:verify` when `NODE_ENV=production`.
+- If verification fails, startup is aborted (fail-fast).
+- You can explicitly bypass this with `REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false`.
+
 ## Configuration
 
 ### Environment Variables
@@ -142,6 +188,48 @@ docker-compose up -d
 | `ACTIVITYPODS_URL` | ActivityPods base URL | `http://localhost:3000` |
 | `ACTIVITYPODS_TOKEN` | Shared secret for Sidecar → ActivityPods APIs (signing + inbox receive) | (required) |
 | `SIDECAR_TOKEN` | Shared secret for ActivityPods → Sidecar outbox webhook | (required) |
+| `ENABLE_MRF_ADMIN_API` | Enable the MRF admin HTTP API | `false` |
+| `MRF_ADMIN_TOKEN` | Bearer token for MRF admin API | (required if enabled) |
+| `ENABLE_MODERATION_BRIDGE_API` | Enable the cross-protocol moderation bridge | same as `ENABLE_MRF_ADMIN_API` |
+| `MODERATION_BRIDGE_REDIS_PREFIX` | Redis key prefix for persisted decisions | `moderation:bridge` |
+| `MODERATION_LABELER_DID` | AT labeler DID used as the label source | `did:web:{DOMAIN}` |
+| `MODERATION_LABELER_SIGNING_KEY_HEX` | 32-byte secp256k1 private key hex for label signing | (optional; labels unsigned if absent) |
+| `MODERATION_AT_ADMIN_XRPC_BASE_URL` | PDS/AppView XRPC base URL for AT admin suspension calls | (optional) |
+| `MODERATION_AT_ADMIN_BEARER_TOKEN` | Admin bearer token with `com.atproto.admin.updateSubjectStatus` scope | (optional) |
+| `MODERATION_AT_ADMIN_TIMEOUT_MS` | Timeout (ms) for AT admin XRPC calls | `5000` |
+
+### Cross-Protocol Moderation Bridge
+
+The bridge provides a single HTTP API (`POST /internal/admin/moderation/decisions`) that
+propagates suspension and block decisions across both ActivityPods (via MRF policies) and
+BskyAtProto (via AT labels + admin subject status).
+
+#### AT Label Signing
+
+When `MODERATION_LABELER_SIGNING_KEY_HEX` is set, labels are signed using secp256k1 ECDSA
+(DAG-CBOR payload, IEEE P1363 signature encoding) as required by the AT Protocol labeler
+specification. Without the key, labels are emitted unsigned (acceptable for private/test
+deployments, but labelers intended for public relay subscription **must** sign).
+
+Generate a suitable key with:
+
+```sh
+node -e "const { generateKeyPairSync } = require('node:crypto'); \
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'secp256k1' }); \
+  console.log(privateKey.export({ format: 'jwk' }));"
+# Then extract the 'd' field, base64url-decode it, and hex-encode.
+```
+
+#### AT Admin Suspension
+
+When `MODERATION_AT_ADMIN_XRPC_BASE_URL` and `MODERATION_AT_ADMIN_BEARER_TOKEN` are both set,
+a `suspend` decision additionally calls `com.atproto.admin.updateSubjectStatus` on the
+configured PDS/AppView endpoint. This path is **optional** — omitting the env vars disables
+the call entirely without affecting label emission or MRF suspension.
+
+The bearer token requires admin-level authorization on the target PDS. For a self-hosted
+`did:web` PDS this is typically the `PDS_ADMIN_PASSWORD`-derived token; for AppView endpoints
+consult your operator documentation.
 
 ## Signing API Contract
 

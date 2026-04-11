@@ -6,6 +6,8 @@ import { DefaultRetryClassifier } from "../workers/Retry.js";
 import type { ApToAtProjectionWorker } from "../workers/ApToAtProjectionWorker.js";
 import type { AtToApProjectionWorker } from "../workers/AtToApProjectionWorker.js";
 import type { ActivityPubBridgeIngressPort } from "./ActivityPubBridgeIngressClient.js";
+import { OutboxIntentDeduper, extractOutboxIntentId } from "../../utils/OutboxIntentDeduper.js";
+import type { CanonicalNotificationConsumer } from "../notifications/CanonicalNotificationConsumer.js";
 
 export interface ProtocolBridgeRuntimeConfig {
   brokers: string[];
@@ -43,6 +45,12 @@ export interface ProtocolBridgeRuntimeOptions {
   apToAtWorker?: ApToAtProjectionWorker;
   atToApWorker?: AtToApProjectionWorker;
   apIngressForwarder?: ActivityPubBridgeIngressPort;
+  /**
+   * Optional canonical.v1 notification consumer.
+   * When provided, `start()` also starts this consumer and `stop()` also
+   * stops it.  The consumer lifecycle is fully managed by the runtime.
+   */
+  canonicalNotificationConsumer?: CanonicalNotificationConsumer;
   logger?: ProtocolBridgeLogger;
   consumerFactory?: (groupId: string) => ProtocolBridgeConsumerLike;
 }
@@ -50,6 +58,7 @@ export interface ProtocolBridgeRuntimeOptions {
 interface ApSourceWrapper {
   activity: Record<string, unknown>;
   bridge?: ActivityPubBridgeMetadata;
+  outboxIntentId?: string;
 }
 
 interface AtVerifiedIngressCommitEvent {
@@ -76,10 +85,18 @@ export class ProtocolBridgeRuntime {
   private readonly consumers: ProtocolBridgeConsumerLike[] = [];
   private started = false;
   private readonly consumerFactory: (groupId: string) => ProtocolBridgeConsumerLike;
+  private readonly outboxIntentDeduper: OutboxIntentDeduper;
 
   public constructor(private readonly options: ProtocolBridgeRuntimeOptions) {
     this.logger = options.logger ?? NOOP_LOGGER;
     this.consumerFactory = options.consumerFactory ?? buildKafkaConsumerFactory(options.config);
+    this.outboxIntentDeduper = new OutboxIntentDeduper({
+      prefix: "protocol-bridge:outbox-intent",
+      ttlSeconds: parseInt(
+        process.env["PROTOCOL_BRIDGE_OUTBOX_INTENT_DEDUP_TTL_SEC"] ?? `${60 * 60 * 24 * 7}`,
+        10,
+      ),
+    });
   }
 
   public async start(): Promise<void> {
@@ -131,6 +148,12 @@ export class ProtocolBridgeRuntime {
       );
     }
 
+    // Start the canonical notification consumer independently of the bridge
+    // projection workers — it has its own Kafka consumer group.
+    if (this.options.canonicalNotificationConsumer) {
+      await this.options.canonicalNotificationConsumer.start();
+    }
+
     this.started = true;
     this.logger.info("Protocol bridge runtime started", {
       apToAt: this.options.config.enableApToAt,
@@ -139,6 +162,7 @@ export class ProtocolBridgeRuntime {
       atCommitTopic: this.options.config.atCommitTopic,
       atVerifiedIngressTopic: this.options.config.atVerifiedIngressTopic ?? null,
       apIngressTopic: this.options.config.apIngressTopic,
+      canonicalNotifications: this.options.canonicalNotificationConsumer != null,
     });
   }
 
@@ -159,6 +183,14 @@ export class ProtocolBridgeRuntime {
       }
     }
 
+    if (this.options.canonicalNotificationConsumer) {
+      try {
+        await this.options.canonicalNotificationConsumer.stop();
+      } catch {
+        // Best-effort shutdown.
+      }
+    }
+
     this.started = false;
   }
 
@@ -170,6 +202,15 @@ export class ProtocolBridgeRuntime {
     const parsed = unwrapApSourceEvent(event);
     if (!parsed) {
       return;
+    }
+    if (parsed.outboxIntentId) {
+      const claimed = await this.outboxIntentDeduper.claim(parsed.outboxIntentId);
+      if (!claimed) {
+        this.logger.info("Protocol bridge skipped duplicate local outbox intent replay", {
+          outboxIntentId: parsed.outboxIntentId,
+        });
+        return;
+      }
     }
     if (
       parsed.bridge?.provenance.originProtocol === "atproto" &&
@@ -338,7 +379,7 @@ function buildKafkaConsumerFactory(
 
   return (groupId: string) => kafka.consumer({
     groupId,
-    allowAutoTopicCreation: true,
+    allowAutoTopicCreation: false,
   });
 }
 
@@ -353,12 +394,14 @@ function unwrapApSourceEvent(event: unknown): ApSourceWrapper | null {
     return {
       activity: activity as Record<string, unknown>,
       bridge: asActivityPubBridgeMetadata(candidate["bridge"]),
+      outboxIntentId: extractOutboxIntentId(candidate),
     };
   }
 
   if (typeof candidate["type"] === "string" && candidate["actor"]) {
     return {
       activity: candidate as Record<string, unknown>,
+      outboxIntentId: extractOutboxIntentId(candidate),
     };
   }
 

@@ -204,8 +204,13 @@ export class OpenSearchService {
       const duration = Date.now() - startTime;
       metrics.opensearchIndexLatency.observe(duration / 1000);
 
-      if (response.body.errors) {
-        const errorCount = response.body.items.filter(
+      const bulkBody = response.body as {
+        errors?: boolean;
+        items?: Array<{ index?: { error?: unknown } }>;
+      };
+
+      if (bulkBody.errors) {
+        const errorCount = (bulkBody.items ?? []).filter(
           (item: any) => item.index?.error
         ).length;
         
@@ -237,7 +242,11 @@ export class OpenSearchService {
    */
   private mapActivityToDocument(activity: StreamActivity): ActivityDocument {
     const raw = activity.raw as Record<string, unknown>;
-    const object = raw.object as Record<string, unknown> | undefined;
+    const rawObject = raw["object"];
+    const object =
+      rawObject && typeof rawObject === "object" && !Array.isArray(rawObject)
+        ? (rawObject as Record<string, unknown>)
+        : undefined;
 
     // Extract object details
     let objectId: string | undefined;
@@ -246,12 +255,12 @@ export class OpenSearchService {
     let inReplyTo: string | undefined;
 
     if (object) {
-      objectId = (object.id ?? object["@id"]) as string | undefined;
-      objectType = (object.type ?? object["@type"]) as string | undefined;
-      objectContent = object.content as string | undefined;
-      inReplyTo = object.inReplyTo as string | undefined;
-    } else if (typeof raw.object === "string") {
-      objectId = raw.object;
+      objectId = (object["id"] ?? object["@id"]) as string | undefined;
+      objectType = (object["type"] ?? object["@type"]) as string | undefined;
+      objectContent = object["content"] as string | undefined;
+      inReplyTo = object["inReplyTo"] as string | undefined;
+    } else if (typeof rawObject === "string") {
+      objectId = rawObject;
     }
 
     // Extract hashtags
@@ -296,9 +305,11 @@ export class OpenSearchService {
    * Extract hashtags from object
    */
   private extractHashtags(object?: Record<string, unknown>): string[] {
-    const fromTags = extractHashtagsFromActivityPubTags(object?.tag);
+    const fromTags = extractHashtagsFromActivityPubTags(object?.["tag"]);
     const fromContent =
-      typeof object?.content === "string" ? extractHashtagsFromText(object.content) : [];
+      typeof object?.["content"] === "string"
+        ? extractHashtagsFromText(object["content"])
+        : [];
 
     return Array.from(new Set([...fromTags, ...fromContent]));
   }
@@ -307,11 +318,12 @@ export class OpenSearchService {
    * Extract mentions from object
    */
   private extractMentions(object?: Record<string, unknown>): string[] {
-    if (!object?.tag) {
+    const tagValue = object?.["tag"];
+    if (!tagValue) {
       return [];
     }
 
-    const tags = Array.isArray(object.tag) ? object.tag : [object.tag];
+    const tags = Array.isArray(tagValue) ? tagValue : [tagValue];
     
     return tags
       .filter((tag: any) => tag.type === "Mention" && tag.href)
@@ -324,13 +336,14 @@ export class OpenSearchService {
   private extractAttachments(
     object?: Record<string, unknown>
   ): ActivityDocument["attachments"] {
-    if (!object?.attachment) {
+    const attachmentValue = object?.["attachment"];
+    if (!attachmentValue) {
       return [];
     }
 
-    const attachments = Array.isArray(object.attachment)
-      ? object.attachment
-      : [object.attachment];
+    const attachments = Array.isArray(attachmentValue)
+      ? attachmentValue
+      : [attachmentValue];
 
     return attachments
       .filter((att: any) => att.url)
@@ -413,9 +426,18 @@ export class OpenSearchService {
       },
     });
 
+    const searchBody = response.body as {
+      hits?: {
+        total?: { value?: number };
+        hits?: Array<{ _source?: ActivityDocument }>;
+      };
+    };
+
     return {
-      total: response.body.hits.total.value,
-      activities: response.body.hits.hits.map((hit: any) => hit._source),
+      total: searchBody.hits?.total?.value ?? 0,
+      activities: (searchBody.hits?.hits ?? [])
+        .map((hit) => hit._source)
+        .filter((hit): hit is ActivityDocument => hit !== undefined),
     };
   }
 
@@ -429,7 +451,8 @@ export class OpenSearchService {
         id,
       });
 
-      return response.body._source;
+      const body = response.body as { _source?: ActivityDocument };
+      return body._source ?? null;
     } catch (error: any) {
       if (error.meta?.statusCode === 404) {
         return null;

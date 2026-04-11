@@ -108,9 +108,10 @@ export class DefaultAtRecordReader implements AtRecordReader {
     const limit = input.limit ?? 50;
     const paginated = filtered.slice(0, limit);
 
+    const lastRecord = paginated[paginated.length - 1];
     const nextCursor =
-      paginated.length === limit && filtered.length > limit
-        ? paginated.at(-1)!.rkey
+      paginated.length === limit && filtered.length > limit && lastRecord
+        ? lastRecord.rkey
         : undefined;
 
     const records: AtStoredRecord[] = paginated.map(alias => ({

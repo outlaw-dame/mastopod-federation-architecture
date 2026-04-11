@@ -25,8 +25,8 @@ export class ServerCreateSessionRoute {
   async handle(
     body: Record<string, unknown> | undefined
   ): Promise<{ headers: Record<string, string>; body: unknown }> {
-    const identifier = body?.identifier;
-    const password = body?.password;
+    const identifier = body?.["identifier"];
+    const password = body?.["password"];
 
     if (!identifier || typeof identifier !== 'string') {
       throw XrpcErrors.invalidRequest('identifier is required');

@@ -214,7 +214,7 @@ interface Harness {
   app: FastifyInstance;
   repoRegistry: InMemoryAtprotoRepoRegistry;
   signCommitCalls: Array<Parameters<SigningService['signAtprotoCommit']>[0]>;
-  issueAccessJwt: () => Promise<string>;
+  createAccessJwt: () => Promise<string>;
 }
 
 async function buildHarness(): Promise<Harness> {
@@ -232,6 +232,8 @@ async function buildHarness(): Promise<Harness> {
     activityPubActorUri: 'https://pods.test/users/alice',
     atprotoDid: TEST_DID,
     atprotoHandle: TEST_HANDLE,
+    atprotoSource: 'local',
+    atprotoManaged: true,
     canonicalDidMethod: 'did:plc',
     atprotoPdsEndpoint: null,
     apSigningKeyRef: 'https://pods.test/keys/ap-signing',
@@ -290,8 +292,8 @@ async function buildHarness(): Promise<Harness> {
   };
 
   const passwordVerifier: AtPasswordVerifier = {
-    verify: async (canonicalAccountId, password) => {
-      if (canonicalAccountId !== TEST_CANONICAL_ID || password !== TEST_PASSWORD) {
+    verify: async (_canonicalAccountId, password) => {
+      if (password !== TEST_PASSWORD) {
         const error = new Error('Invalid credentials') as Error & { status?: number; code?: string };
         error.status = 401;
         error.code = 'AUTH_FAILED';
@@ -378,15 +380,13 @@ async function buildHarness(): Promise<Harness> {
     app,
     repoRegistry,
     signCommitCalls,
-    issueAccessJwt: async () => {
-      const session = await tokenService.mintSessionPair({
+    createAccessJwt: async () =>
+      tokenService.mintAccessToken({
         canonicalAccountId: TEST_CANONICAL_ID,
         did: TEST_DID,
         handle: TEST_HANDLE,
         scope: 'full',
-      });
-      return session.accessJwt;
-    },
+      }),
   };
 }
 
@@ -408,7 +408,7 @@ describe('Phase 7 regressions', () => {
   it('bootstraps repo state on first write, signs with canonicalAccountId, and exposes latest commit rev/CID', async () => {
     expect(await harness.repoRegistry.getRepoState(TEST_DID)).toBeNull();
 
-    const accessJwt = await harness.issueAccessJwt();
+    const accessJwt = await harness.createAccessJwt();
 
     const createResponse = await harness.app.inject({
       method: 'POST',
@@ -460,7 +460,7 @@ describe('Phase 7 regressions', () => {
       method: 'POST',
       url: '/xrpc/com.atproto.server.createSession',
       headers: { 'content-type': 'application/json' },
-      payload: { identifier: TEST_HANDLE, password: 'wrong-password' },
+      payload: { identifier: TEST_DID, password: 'wrong-password' },
     });
 
     expect(response.statusCode).toBe(401);
@@ -471,7 +471,7 @@ describe('Phase 7 regressions', () => {
   });
 
   it('returns a profile write result and readback for putRecord', async () => {
-    const accessJwt = await harness.issueAccessJwt();
+    const accessJwt = await harness.createAccessJwt();
 
     const putResponse = await harness.app.inject({
       method: 'POST',

@@ -249,12 +249,22 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
       // If exceeded, throw XrpcErrors.rateLimitExceeded()
       
       let result: { headers: Record<string, string>; body: any };
+      const did = query["did"] as string | undefined;
+      const since = query["since"] as string | undefined;
+      const cid = query["cid"] as string | undefined;
+      const repo = query["repo"] as string | undefined;
+      const collection = query["collection"] as string | undefined;
+      const rkey = query["rkey"] as string | undefined;
+      const cursor = query["cursor"] as string | undefined;
+      const reverse = query["reverse"] as string | undefined;
+      const handle = query["handle"] as string | undefined;
+      const limitValue = query["limit"] as string | undefined;
 
       if (method === 'GET' && path === '/xrpc/com.atproto.sync.getRepo') {
-        result = await this.getRepoRoute.handle(query.did, query.since);
+        result = await this.getRepoRoute.handle(did as string, since);
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.sync.getLatestCommit') {
-        result = await this.getLatestCommitRoute.handle(query.did);
+        result = await this.getLatestCommitRoute.handle(did as string);
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.sync.getBlob') {
         if (!this.getBlobRoute) {
@@ -264,28 +274,28 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
             body: { error: 'MethodNotImplemented', message: 'Blob reads are not configured' }
           };
         }
-        result = await this.getBlobRoute.handle(query.did, query.cid);
+        result = await this.getBlobRoute.handle(did as string, cid as string);
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.repo.getRecord') {
         result = await this.getRecordRoute.handle(
-          query.repo,
-          query.collection,
-          query.rkey,
-          query.cid
+          repo as string,
+          collection as string,
+          rkey as string,
+          cid
         );
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.repo.listRecords') {
-        const limit = query.limit ? parseInt(query.limit, 10) : undefined;
+        const limit = limitValue ? parseInt(limitValue, 10) : undefined;
         result = await this.listRecordsRoute.handle(
-          query.repo,
-          query.collection,
+          repo as string,
+          collection as string,
           limit,
-          query.cursor,
-          query.reverse === 'true'
+          cursor,
+          reverse === 'true'
         );
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.identity.resolveHandle') {
-        result = await this.resolveHandleRoute.handle(query.handle);
+        result = await this.resolveHandleRoute.handle(handle as string);
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.server.describeServer') {
         if (!this.describeServerRoute) {
@@ -294,7 +304,7 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
         result = await this.describeServerRoute.handle();
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.repo.describeRepo') {
-        result = await this.describeRepoRoute!.handle(query.repo);
+        result = await this.describeRepoRoute!.handle(repo as string);
 
       } else {
         return {

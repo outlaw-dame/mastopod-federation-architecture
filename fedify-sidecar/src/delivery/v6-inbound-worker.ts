@@ -102,7 +102,9 @@ export class V6InboundWorker {
       try {
         activity = JSON.parse(inboundRequest.body.toString());
       } catch (err) {
-        logger.warn('Failed to parse activity JSON', { error: (err as Error).message });
+        logger.warn('Failed to parse activity JSON', {
+          error: err instanceof Error ? err.message : String(err),
+        });
         return {
           statusCode: 400,
           body: { error: 'invalid_json' },
@@ -206,12 +208,19 @@ export class V6InboundWorker {
 
       // Parse signature header
       const signatureParams = this.parseSignatureHeader(signatureHeader);
-      if (!signatureParams.keyId || !signatureParams.signature) {
+      const keyId = signatureParams["keyId"];
+      const signature = signatureParams["signature"];
+      const headers = signatureParams["headers"];
+      if (
+        typeof keyId !== "string" ||
+        !Buffer.isBuffer(signature) ||
+        !Array.isArray(headers)
+      ) {
         return { valid: false, error: 'invalid_signature_header' };
       }
 
       // Extract actor URI from keyId (format: https://actor#key)
-      const actorUri = signatureParams.keyId.split('#')[0];
+      const actorUri = keyId.split('#')[0] ?? keyId;
 
       // Fetch actor document
       const actorDoc = await this.getActorDocument(actorUri);
@@ -222,13 +231,13 @@ export class V6InboundWorker {
       // Build signing string
       const signingString = this.buildSigningString(
         request,
-        signatureParams.headers
+        headers.filter((value): value is string => typeof value === "string")
       );
 
       // Verify signature
       const verifier = createVerify('RSA-SHA256');
       verifier.update(signingString);
-      const isValid = verifier.verify(actorDoc.publicKeyPem, signatureParams.signature, 'base64');
+      const isValid = verifier.verify(actorDoc.publicKeyPem, signature);
 
       if (!isValid) {
         return { valid: false, error: 'signature_verification_failed' };
@@ -244,21 +253,25 @@ export class V6InboundWorker {
   /**
    * Parse Cavage signature header
    */
-  private parseSignatureHeader(header: string): Record<string, any> {
-    const params: Record<string, any> = {};
+  private parseSignatureHeader(header: string): Record<string, unknown> {
+    const params: Record<string, unknown> = {};
     const regex = /(\w+)="([^"]*)"/g;
     let match;
 
     while ((match = regex.exec(header)) !== null) {
-      params[match[1]!] = match[2]!;
+      const key = match[1];
+      const value = match[2];
+      if (key !== undefined && value !== undefined) {
+        params[key] = value;
+      }
     }
 
-    if (params.signature) {
-      params.signature = Buffer.from(params.signature, 'base64');
+    if (typeof params["signature"] === "string") {
+      params["signature"] = Buffer.from(params["signature"], 'base64');
     }
 
-    if (params.headers) {
-      params.headers = params.headers.split(' ');
+    if (typeof params["headers"] === "string") {
+      params["headers"] = params["headers"].split(' ');
     }
 
     return params;
@@ -336,7 +349,7 @@ export class V6InboundWorker {
   private async forwardToActivityPods(
     activity: any,
     actorUri: string,
-    incomingRequest: InboundRequest
+    inboundRequest: InboundRequest
   ): Promise<{ success: boolean; permanent?: boolean; error?: string }> {
     try {
       const response = await request(
@@ -351,8 +364,8 @@ export class V6InboundWorker {
             targetInbox: `${this.config.activityPodsUrl}/inbox`,
             activity,
             verifiedActorUri: actorUri,
-            receivedAt: incomingRequest.receivedAt,
-            remoteIp: incomingRequest.remoteIp,
+            receivedAt: inboundRequest.receivedAt,
+            remoteIp: inboundRequest.remoteIp,
           }),
           headersTimeout: this.config.requestTimeoutMs,
           bodyTimeout: this.config.requestTimeoutMs,
@@ -454,12 +467,12 @@ export class V6InboundWorker {
  */
 export function createDefaultInboundWorkerConfig(): V6InboundWorkerConfig {
   return {
-    concurrency: parseInt(process.env.INBOUND_CONCURRENCY || '10', 10),
-    activityPodsUrl: process.env.ACTIVITYPODS_URL || 'http://localhost:3000',
-    activityPodsToken: process.env.ACTIVITYPODS_TOKEN || '',
-    requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '30000', 10),
-    userAgent: process.env.USER_AGENT || 'Fedify-Sidecar/v6',
-    redpandaBrokers: (process.env.REDPANDA_BROKERS || 'localhost:9092').split(','),
-    redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+    concurrency: parseInt(process.env["INBOUND_CONCURRENCY"] || '10', 10),
+    activityPodsUrl: process.env["ACTIVITYPODS_URL"] || 'http://localhost:3000',
+    activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] || '',
+    requestTimeoutMs: parseInt(process.env["REQUEST_TIMEOUT_MS"] || '30000', 10),
+    userAgent: process.env["USER_AGENT"] || 'Fedify-Sidecar/v6',
+    redpandaBrokers: (process.env["REDPANDA_BROKERS"] || 'localhost:9092').split(','),
+    redisUrl: process.env["REDIS_URL"] || 'redis://localhost:6379',
   };
 }
