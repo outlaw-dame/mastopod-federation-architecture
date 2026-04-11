@@ -105,9 +105,11 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
     const videoEmbed = buildVideoEmbedFromAttachments(mediaSelection.attachments);
     const imageEmbed = buildImageEmbedFromAttachments(mediaSelection.attachments);
     const externalEmbed = buildExternalLinkEmbed(intent.content.linkPreview);
+    const quoteRecord = await resolveQuotedRecordRef(intent, ctx, warnings);
+    let mediaEmbed: Record<string, unknown> | null = null;
     if (mediaSelection.kind === "video") {
       if (videoEmbed) {
-        postRecord["embed"] = videoEmbed;
+        mediaEmbed = videoEmbed;
       }
       if (mediaSelection.imageCount > 0) {
         warnings.push({
@@ -132,7 +134,7 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
       }
     } else if (mediaSelection.kind === "images") {
       if (imageEmbed) {
-        postRecord["embed"] = imageEmbed;
+        mediaEmbed = imageEmbed;
       }
       if (mediaSelection.droppedCount > 0) {
         warnings.push({
@@ -148,6 +150,43 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
           lossiness: "minor",
         });
       }
+    }
+
+    if (quoteRecord) {
+      postRecord["embed"] = mediaEmbed
+        ? {
+            $type: "app.bsky.embed.recordWithMedia",
+            record: quoteRecord,
+            media: mediaEmbed,
+          }
+        : {
+            $type: "app.bsky.embed.record",
+            record: quoteRecord,
+          };
+      if (externalEmbed) {
+        warnings.push({
+          code: "AT_LINK_PREVIEW_SKIPPED_WITH_QUOTE",
+          message: "AT posts support only one embed; quoted-record embeds were prioritized over link previews.",
+          lossiness: "minor",
+        });
+      }
+    } else if (mediaSelection.kind) {
+      if (mediaEmbed) {
+        postRecord["embed"] = mediaEmbed;
+      }
+      if (!mediaEmbed && externalEmbed) {
+        warnings.push({
+          code: mediaSelection.kind === "video"
+            ? "AT_LINK_PREVIEW_SKIPPED_WITH_VIDEO"
+            : "AT_LINK_PREVIEW_SKIPPED_WITH_IMAGES",
+          message: mediaSelection.kind === "video"
+            ? "AT posts support only one embed; video attachments were prioritized over link previews."
+            : "AT posts support only one embed; image attachments were prioritized over link previews.",
+          lossiness: "minor",
+        });
+      }
+    } else if (mediaEmbed) {
+      postRecord["embed"] = mediaEmbed;
     } else if (externalEmbed) {
       postRecord["embed"] = externalEmbed;
     }
@@ -178,6 +217,31 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
       warnings,
     };
   }
+}
+
+async function resolveQuotedRecordRef(
+  intent: CanonicalPostCreateIntent,
+  ctx: ProjectionContext,
+  warnings: CanonicalPostCreateIntent["warnings"],
+): Promise<{ uri: string; cid: string } | null> {
+  if (!intent.quoteOf) {
+    return null;
+  }
+
+  const quoteTarget = await ctx.resolveObjectRef(intent.quoteOf);
+  if (!quoteTarget.atUri || !quoteTarget.cid) {
+    warnings.push({
+      code: "AT_QUOTE_REFERENCE_SKIPPED",
+      message: "AT quoted-record projection requires both a quote target AT URI and CID; the quote embed was omitted.",
+      lossiness: "minor",
+    });
+    return null;
+  }
+
+  return {
+    uri: quoteTarget.atUri,
+    cid: quoteTarget.cid,
+  };
 }
 
 function buildReplyRef(

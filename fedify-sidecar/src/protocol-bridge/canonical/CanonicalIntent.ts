@@ -21,6 +21,7 @@ export interface CanonicalPostCreateIntent extends CanonicalIntentBase {
   object: CanonicalObjectRef;
   content: CanonicalContent;
   inReplyTo?: CanonicalObjectRef | null;
+  quoteOf?: CanonicalObjectRef | null;
 }
 
 export interface CanonicalPostEditIntent extends CanonicalIntentBase {
@@ -28,6 +29,7 @@ export interface CanonicalPostEditIntent extends CanonicalIntentBase {
   object: CanonicalObjectRef;
   content: CanonicalContent;
   inReplyTo?: CanonicalObjectRef | null;
+  quoteOf?: CanonicalObjectRef | null;
 }
 
 export interface CanonicalPostDeleteIntent extends CanonicalIntentBase {

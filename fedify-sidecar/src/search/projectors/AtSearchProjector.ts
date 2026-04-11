@@ -83,6 +83,17 @@ export class AtSearchProjector {
       const tagsFromRecord = extractAtprotoTagsFromRecordTags(record.tags);
       const tags = Array.from(new Set([...tagsFromFacets, ...tagsFromRecord]));
       const emojis = extractEmojisFromText(record.text || '');
+      const replyToStableId = typeof record.reply?.parent?.uri === 'string'
+        ? SearchDocIdStrategy.forRemoteAt(record.reply.parent.uri)
+        : undefined;
+      const quoteUri = extractQuotedAtUri(record.embed);
+      const quoteOfStableId = quoteUri ? SearchDocIdStrategy.forRemoteAt(quoteUri) : undefined;
+      const relations = replyToStableId || quoteOfStableId
+        ? {
+            ...(replyToStableId ? { replyToStableId } : {}),
+            ...(quoteOfStableId ? { quoteOfStableId } : {}),
+          }
+        : undefined;
 
       const upsert: SearchPublicUpsertV1 = {
         stableDocId,
@@ -108,10 +119,7 @@ export class AtSearchProjector {
           tags: tags.length > 0 ? tags : undefined,
           emojis: emojis.length > 0 ? emojis : undefined
         },
-        relations: record.reply ? {
-          replyToStableId: SearchDocIdStrategy.forRemoteAt(record.reply.parent.uri),
-          quoteOfStableId: record.embed?.$type === 'app.bsky.embed.record' ? SearchDocIdStrategy.forRemoteAt(record.embed.record.uri) : undefined
-        } : undefined,
+        relations,
         media: {
           hasMedia: mediaCount > 0,
           mediaCount
@@ -122,4 +130,20 @@ export class AtSearchProjector {
       await this.eventPublisher.publish('search.public.upsert.v1', upsert as any);
     }
   }
+}
+
+function extractQuotedAtUri(embed: any): string | undefined {
+  if (!embed || typeof embed !== 'object') {
+    return undefined;
+  }
+
+  if (embed.$type === 'app.bsky.embed.record' && typeof embed.record?.uri === 'string') {
+    return embed.record.uri;
+  }
+
+  if (embed.$type === 'app.bsky.embed.recordWithMedia' && typeof embed.record?.uri === 'string') {
+    return embed.record.uri;
+  }
+
+  return undefined;
 }

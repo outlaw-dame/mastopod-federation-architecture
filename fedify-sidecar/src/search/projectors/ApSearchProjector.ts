@@ -66,6 +66,19 @@ export class ApSearchProjector {
 
     // Extract reply
     const inReplyTo = typeof object.inReplyTo === 'string' ? object.inReplyTo : object.inReplyTo?.id;
+    const quoteUrl = this.extractQuoteUrl(object);
+    const relations = inReplyTo || quoteUrl ? {
+      ...(inReplyTo ? {
+        replyToStableId: isLocal
+          ? SearchDocIdStrategy.forLocal(inReplyTo)
+          : SearchDocIdStrategy.forRemoteAp(inReplyTo)
+      } : {}),
+      ...(quoteUrl ? {
+        quoteOfStableId: isLocal
+          ? SearchDocIdStrategy.forLocal(quoteUrl)
+          : SearchDocIdStrategy.forRemoteAp(quoteUrl)
+      } : {}),
+    } : undefined;
 
     const upsert: SearchPublicUpsertV1 = {
       upsertKind: 'full',
@@ -89,9 +102,7 @@ export class ApSearchProjector {
         langs: object.contentMap ? Object.keys(object.contentMap) : undefined,
         tags: this.extractTags(object.tag, object.content)
       },
-      relations: inReplyTo ? {
-        replyToStableId: SearchDocIdStrategy.forRemoteAp(inReplyTo) // Best effort without full resolution
-      } : undefined,
+      relations,
       media: {
         hasMedia: mediaCount > 0,
         mediaCount
@@ -175,5 +186,19 @@ export class ApSearchProjector {
     const hashtags = Array.from(new Set([...fromTags, ...fromContent]));
 
     return hashtags.length > 0 ? hashtags : undefined;
+  }
+
+  private extractQuoteUrl(object: any): string | undefined {
+    const raw = object?.quoteUrl ?? object?.quoteUri ?? object?.quoteURI;
+    if (typeof raw === 'string') {
+      return raw;
+    }
+    if (raw && typeof raw === 'object' && typeof raw.id === 'string') {
+      return raw.id;
+    }
+    if (raw && typeof raw === 'object' && typeof raw.href === 'string') {
+      return raw.href;
+    }
+    return undefined;
   }
 }

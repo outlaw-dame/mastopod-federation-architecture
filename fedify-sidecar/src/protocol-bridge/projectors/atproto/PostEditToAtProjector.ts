@@ -102,9 +102,11 @@ export class PostEditToAtProjector implements CanonicalProjector<AtProjectionCom
         const videoEmbed = buildVideoEmbedFromAttachments(teaserMediaSelection.attachments);
         const imageEmbed = buildImageEmbedFromAttachments(teaserMediaSelection.attachments);
         const externalEmbed = buildExternalLinkEmbed(intent.content.linkPreview);
+        const quoteRecord = await resolveQuotedRecordRef(intent, ctx, warnings);
+        let mediaEmbed: Record<string, unknown> | null = null;
         if (teaserMediaSelection.kind === "video") {
           if (videoEmbed) {
-            teaserRecord["embed"] = videoEmbed;
+            mediaEmbed = videoEmbed;
           }
           if (teaserMediaSelection.imageCount > 0) {
             warnings.push({
@@ -129,7 +131,7 @@ export class PostEditToAtProjector implements CanonicalProjector<AtProjectionCom
           }
         } else if (teaserMediaSelection.kind === "images") {
           if (imageEmbed) {
-            teaserRecord["embed"] = imageEmbed;
+            mediaEmbed = imageEmbed;
           }
           if (teaserMediaSelection.droppedCount > 0) {
             warnings.push({
@@ -145,6 +147,43 @@ export class PostEditToAtProjector implements CanonicalProjector<AtProjectionCom
               lossiness: "minor",
             });
           }
+        }
+
+        if (quoteRecord) {
+          teaserRecord["embed"] = mediaEmbed
+            ? {
+                $type: "app.bsky.embed.recordWithMedia",
+                record: quoteRecord,
+                media: mediaEmbed,
+              }
+            : {
+                $type: "app.bsky.embed.record",
+                record: quoteRecord,
+              };
+          if (externalEmbed) {
+            warnings.push({
+              code: "AT_LINK_PREVIEW_SKIPPED_WITH_QUOTE",
+              message: "AT posts support only one embed; quoted-record embeds were prioritized over link previews.",
+              lossiness: "minor",
+            });
+          }
+        } else if (teaserMediaSelection.kind) {
+          if (mediaEmbed) {
+            teaserRecord["embed"] = mediaEmbed;
+          }
+          if (!mediaEmbed && externalEmbed) {
+            warnings.push({
+              code: teaserMediaSelection.kind === "video"
+                ? "AT_LINK_PREVIEW_SKIPPED_WITH_VIDEO"
+                : "AT_LINK_PREVIEW_SKIPPED_WITH_IMAGES",
+              message: teaserMediaSelection.kind === "video"
+                ? "AT posts support only one embed; video attachments were prioritized over link previews."
+                : "AT posts support only one embed; image attachments were prioritized over link previews.",
+              lossiness: "minor",
+            });
+          }
+        } else if (mediaEmbed) {
+          teaserRecord["embed"] = mediaEmbed;
         } else if (externalEmbed) {
           teaserRecord["embed"] = externalEmbed;
         }
@@ -208,9 +247,11 @@ export class PostEditToAtProjector implements CanonicalProjector<AtProjectionCom
     const videoEmbed = buildVideoEmbedFromAttachments(mediaSelection.attachments);
     const imageEmbed = buildImageEmbedFromAttachments(mediaSelection.attachments);
     const externalEmbed = buildExternalLinkEmbed(intent.content.linkPreview);
+    const quoteRecord = await resolveQuotedRecordRef(intent, ctx, warnings);
+    let mediaEmbed: Record<string, unknown> | null = null;
     if (mediaSelection.kind === "video") {
       if (videoEmbed) {
-        record["embed"] = videoEmbed;
+        mediaEmbed = videoEmbed;
       }
       if (mediaSelection.imageCount > 0) {
         warnings.push({
@@ -235,7 +276,7 @@ export class PostEditToAtProjector implements CanonicalProjector<AtProjectionCom
       }
     } else if (mediaSelection.kind === "images") {
       if (imageEmbed) {
-        record["embed"] = imageEmbed;
+        mediaEmbed = imageEmbed;
       }
       if (mediaSelection.droppedCount > 0) {
         warnings.push({
@@ -251,6 +292,43 @@ export class PostEditToAtProjector implements CanonicalProjector<AtProjectionCom
           lossiness: "minor",
         });
       }
+    }
+
+    if (quoteRecord) {
+      record["embed"] = mediaEmbed
+        ? {
+            $type: "app.bsky.embed.recordWithMedia",
+            record: quoteRecord,
+            media: mediaEmbed,
+          }
+        : {
+            $type: "app.bsky.embed.record",
+            record: quoteRecord,
+          };
+      if (externalEmbed) {
+        warnings.push({
+          code: "AT_LINK_PREVIEW_SKIPPED_WITH_QUOTE",
+          message: "AT posts support only one embed; quoted-record embeds were prioritized over link previews.",
+          lossiness: "minor",
+        });
+      }
+    } else if (mediaSelection.kind) {
+      if (mediaEmbed) {
+        record["embed"] = mediaEmbed;
+      }
+      if (!mediaEmbed && externalEmbed) {
+        warnings.push({
+          code: mediaSelection.kind === "video"
+            ? "AT_LINK_PREVIEW_SKIPPED_WITH_VIDEO"
+            : "AT_LINK_PREVIEW_SKIPPED_WITH_IMAGES",
+          message: mediaSelection.kind === "video"
+            ? "AT posts support only one embed; video attachments were prioritized over link previews."
+            : "AT posts support only one embed; image attachments were prioritized over link previews.",
+          lossiness: "minor",
+        });
+      }
+    } else if (mediaEmbed) {
+      record["embed"] = mediaEmbed;
     } else if (externalEmbed) {
       record["embed"] = externalEmbed;
     }
@@ -276,6 +354,31 @@ export class PostEditToAtProjector implements CanonicalProjector<AtProjectionCom
       warnings,
     };
   }
+}
+
+async function resolveQuotedRecordRef(
+  intent: CanonicalPostEditIntent,
+  ctx: ProjectionContext,
+  warnings: CanonicalPostEditIntent["warnings"],
+): Promise<{ uri: string; cid: string } | null> {
+  if (!intent.quoteOf) {
+    return null;
+  }
+
+  const quoteTarget = await ctx.resolveObjectRef(intent.quoteOf);
+  if (!quoteTarget.atUri || !quoteTarget.cid) {
+    warnings.push({
+      code: "AT_QUOTE_REFERENCE_SKIPPED",
+      message: "AT quoted-record projection requires both a quote target AT URI and CID; the quote embed was omitted.",
+      lossiness: "minor",
+    });
+    return null;
+  }
+
+  return {
+    uri: quoteTarget.atUri,
+    cid: quoteTarget.cid,
+  };
 }
 
 function buildReplyRef(

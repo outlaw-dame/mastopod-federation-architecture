@@ -251,7 +251,11 @@ export class AtprotoWriteGatewayPort implements AtprotoWritePort {
 
     const existingEmbed = toPlainObject(record["embed"]);
     const existingType = typeof existingEmbed?.["$type"] === "string" ? existingEmbed["$type"] : null;
-    if (existingType === "app.bsky.embed.images" || existingType === "app.bsky.embed.video") {
+    if (
+      existingType === "app.bsky.embed.images"
+      || existingType === "app.bsky.embed.video"
+      || existingType === "app.bsky.embed.recordWithMedia"
+    ) {
       return;
     }
 
@@ -271,7 +275,8 @@ export class AtprotoWriteGatewayPort implements AtprotoWritePort {
     if (preferredKind === "video") {
       const attachment = selectedHints[0]!;
       const blob = await this.resolveAttachmentBlob(command, attachment);
-      record["embed"] = buildVideoEmbed(blob, attachment);
+      const mediaEmbed = buildVideoEmbed(blob, attachment);
+      record["embed"] = mergeEmbedWithResolvedMedia(existingEmbed, mediaEmbed);
       return;
     }
 
@@ -281,10 +286,11 @@ export class AtprotoWriteGatewayPort implements AtprotoWritePort {
       images.push(buildImageEntry(blob, attachment));
     }
     if (images.length > 0) {
-      record["embed"] = {
+      const mediaEmbed = {
         $type: "app.bsky.embed.images",
         images,
       };
+      record["embed"] = mergeEmbedWithResolvedMedia(existingEmbed, mediaEmbed);
     }
   }
 
@@ -383,6 +389,22 @@ export class AtprotoWriteGatewayPort implements AtprotoWritePort {
 
     return resolved;
   }
+}
+
+function mergeEmbedWithResolvedMedia(
+  existingEmbed: Record<string, unknown> | null,
+  mediaEmbed: Record<string, unknown>,
+): Record<string, unknown> {
+  const existingType = typeof existingEmbed?.["$type"] === "string" ? existingEmbed["$type"] : null;
+  if (existingType === "app.bsky.embed.record") {
+    return {
+      $type: "app.bsky.embed.recordWithMedia",
+      record: existingEmbed!["record"],
+      media: mediaEmbed,
+    };
+  }
+
+  return mediaEmbed;
 }
 
 function toPlainObject(value: unknown): Record<string, unknown> | null {

@@ -28,8 +28,12 @@ export interface OGMetadata {
 const USER_AGENT =
   "ActivityPods-FedifySidecar/1.0 (+https://activitypods.org; +bot)";
 const TIMEOUT_MS = 4_000;
+const SAFE_BROWSING_TIMEOUT_MS = 2_500;
 const MAX_READ_BYTES = 50_000; // 50 KB is plenty to find <head> OG tags
 const ALLOW_PRIVATE_PREVIEW_FETCHES_ENV = "ALLOW_PRIVATE_PREVIEW_FETCHES";
+const GOOGLE_SAFE_BROWSING_API_KEY_ENV = "GOOGLE_SAFE_BROWSING_API_KEY";
+const SAFE_BROWSING_API_KEY_ENV = "SAFE_BROWSING_API_KEY";
+const SAFE_BROWSING_FAIL_CLOSED_ENV = "SAFE_BROWSING_FAIL_CLOSED";
 
 /**
  * Fetch OpenGraph metadata for the given URL.
@@ -46,7 +50,13 @@ export async function fetchOpenGraph(url: string): Promise<OGMetadata | null> {
   if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
     return null;
   }
+  if (parsedUrl.username || parsedUrl.password) {
+    return null;
+  }
   if (!isPreviewTargetAllowed(parsedUrl)) {
+    return null;
+  }
+  if (!(await passesSafeBrowsing(parsedUrl.toString()))) {
     return null;
   }
 
@@ -90,7 +100,57 @@ export async function fetchOpenGraph(url: string): Promise<OGMetadata | null> {
     body.on?.("error", () => { /* suppress post-destroy stream error */ });
 
     const html = Buffer.concat(chunks).toString("utf8");
-    return parseOpenGraph(url, html);
+    return parseOpenGraph(parsedUrl.toString(), html);
+  } catch {
+    return null;
+  }
+}
+
+async function passesSafeBrowsing(targetUrl: string): Promise<boolean> {
+  const apiKey = process.env[GOOGLE_SAFE_BROWSING_API_KEY_ENV]?.trim()
+    || process.env[SAFE_BROWSING_API_KEY_ENV]?.trim()
+    || "";
+  if (!apiKey) {
+    return true;
+  }
+
+  const params = new URLSearchParams();
+  params.append("urls", targetUrl);
+  const endpoint = `https://safebrowsing.googleapis.com/v5alpha1/urls:search?${params.toString()}`;
+  const failClosed = /^(1|true|yes)$/i.test(process.env[SAFE_BROWSING_FAIL_CLOSED_ENV] ?? "");
+
+  try {
+    const { statusCode, body } = await request(endpoint, {
+      method: "GET",
+      headers: {
+        "x-goog-api-key": apiKey,
+        "User-Agent": USER_AGENT,
+      },
+      headersTimeout: SAFE_BROWSING_TIMEOUT_MS,
+      bodyTimeout: SAFE_BROWSING_TIMEOUT_MS,
+    });
+
+    const payload = await body.text();
+    if (statusCode < 200 || statusCode >= 300) {
+      return !failClosed;
+    }
+
+    const parsed = parseSafeBrowsingPayload(payload);
+    if (!parsed) {
+      return !failClosed;
+    }
+
+    return parsed.threatCount === 0;
+  } catch {
+    return !failClosed;
+  }
+}
+
+function parseSafeBrowsingPayload(payload: string): { threatCount: number } | null {
+  try {
+    const parsed = JSON.parse(payload) as { threats?: unknown };
+    const threats = Array.isArray(parsed?.threats) ? parsed.threats : [];
+    return { threatCount: threats.length };
   } catch {
     return null;
   }
@@ -189,8 +249,16 @@ function parseOpenGraph(originalUri: string, html: string): OGMetadata | null {
     og["og:title"] ?? og["twitter:title"] ?? extractPageTitle(html);
   if (!title) return null;
 
+  const fallbackUri = sanitizeHttpUrl(originalUri);
+  if (!fallbackUri) {
+    return null;
+  }
+
+  const sanitizedUri = sanitizeHttpUrl(og["og:url"]) ?? fallbackUri;
+  const sanitizedThumb = sanitizeHttpUrl(og["og:image"] ?? og["twitter:image"]);
+
   return {
-    uri: og["og:url"] ?? originalUri,
+    uri: sanitizedUri,
     title: title.trim().slice(0, 300),
     description:
       (
@@ -200,8 +268,27 @@ function parseOpenGraph(originalUri: string, html: string): OGMetadata | null {
       )
         ?.trim()
         .slice(0, 1000) ?? undefined,
-    thumbUrl: og["og:image"] ?? og["twitter:image"] ?? undefined,
+    thumbUrl: sanitizedThumb ?? undefined,
   };
+}
+
+function sanitizeHttpUrl(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+    return null;
+  }
+
+  return parsed.toString();
 }
 
 /**

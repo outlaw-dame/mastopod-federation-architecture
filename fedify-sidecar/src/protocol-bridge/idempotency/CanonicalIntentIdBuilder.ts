@@ -56,6 +56,7 @@ function normalizedContentDigest(intent: CanonicalIntentDraft | CanonicalIntent)
             facets: intent.content.facets,
             attachments: intent.content.attachments,
             externalUrl: intent.content.externalUrl ?? null,
+            quoteOf: intent.quoteOf ? canonicalObjectIdentityKey(intent.quoteOf) : null,
           }),
         )
         .digest("hex");

@@ -253,6 +253,7 @@ async function buildCanonicalPostIntent(
     canonicalUrl: objectUrl,
   });
   const inReplyTo = await resolveOptionalObjectRef(activity.object["inReplyTo"], ctx);
+  const quoteOf = await resolveOptionalQuoteRef(activity.object, ctx);
   const tagFacets = await buildTagFacets(plaintext, activity.object["tag"], ctx);
   const inlineFacets = buildInlineLinkAndTagFacets(plaintext);
   const attachments = buildAttachments(activity.object["attachment"], objectId);
@@ -275,6 +276,7 @@ async function buildCanonicalPostIntent(
       : [],
     object: objectRef,
     inReplyTo,
+    quoteOf,
     content: {
       kind: contentKind,
       title: objectTitle ?? null,
@@ -321,6 +323,7 @@ async function buildCanonicalPostEditIntent(
     canonicalUrl: objectUrl,
   });
   const inReplyTo = await resolveOptionalObjectRef(activity.object["inReplyTo"], ctx);
+  const quoteOf = await resolveOptionalQuoteRef(activity.object, ctx);
   const tagFacets = await buildTagFacets(plaintext, activity.object["tag"], ctx);
   const inlineFacets = buildInlineLinkAndTagFacets(plaintext);
   const attachments = buildAttachments(activity.object["attachment"], objectId);
@@ -343,6 +346,7 @@ async function buildCanonicalPostEditIntent(
       : [],
     object: objectRef,
     inReplyTo,
+    quoteOf,
     content: {
       kind: contentKind,
       title: objectTitle ?? null,
@@ -430,6 +434,27 @@ export async function resolveOptionalObjectRef(
     canonicalObjectId: objectId,
     activityPubObjectId: objectId,
     canonicalUrl: objectId,
+  });
+}
+
+async function resolveOptionalQuoteRef(
+  activityObject: Record<string, unknown>,
+  ctx: TranslationContext,
+) {
+  const rawQuote = activityObject["quoteUrl"]
+    ?? activityObject["quoteUri"]
+    ?? activityObject["quoteURI"];
+  const quoteId = sanitizeQuoteReferenceId(extractId(rawQuote) ?? extractFirstUrl(rawQuote));
+  if (!quoteId) {
+    return null;
+  }
+
+  const quoteCanonicalUrl = sanitizeAttachmentUrl(extractFirstUrl(rawQuote));
+
+  return ctx.resolveObjectRef({
+    canonicalObjectId: quoteId,
+    activityPubObjectId: /^https?:\/\//.test(quoteId) ? quoteId : null,
+    canonicalUrl: quoteCanonicalUrl ?? (/^https?:\/\//.test(quoteId) ? quoteId : null),
   });
 }
 
@@ -536,10 +561,15 @@ export function buildAttachments(rawAttachments: unknown, objectId: string): Can
 
 function toAttachment(rawAttachment: unknown, fallbackId: string): CanonicalAttachment | null {
   if (typeof rawAttachment === "string") {
+    const sanitizedUrl = sanitizeAttachmentUrl(rawAttachment);
+    if (!sanitizedUrl) {
+      return null;
+    }
+
     return {
       attachmentId: fallbackId,
       mediaType: "application/octet-stream",
-      url: rawAttachment,
+      url: sanitizedUrl,
     };
   }
 
@@ -549,7 +579,7 @@ function toAttachment(rawAttachment: unknown, fallbackId: string): CanonicalAtta
 
   const attachment = rawAttachment as Record<string, unknown>;
   const { primaryUrl, cid: urlCid } = extractHttpUrlAndCid(attachment["url"]);
-  const url = primaryUrl;
+  const url = sanitizeAttachmentUrl(primaryUrl);
   const id = asString(attachment["id"]) ?? url ?? fallbackId;
   const mediaType = asString(attachment["mediaType"]) ?? inferMediaType(asString(attachment["type"]));
 
@@ -571,6 +601,45 @@ function toAttachment(rawAttachment: unknown, fallbackId: string): CanonicalAtta
     focalPoint: asFocalPoint(attachment["focalPoint"]),
     blurhash: asString(attachment["blurhash"]) ?? asString(attachment["blurHash"]) ?? null,
   };
+}
+
+function sanitizeAttachmentUrl(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+
+  if (parsed.protocol === "ipfs:") {
+    return parsed.toString();
+  }
+
+  if ((parsed.protocol === "http:" || parsed.protocol === "https:") && !parsed.username && !parsed.password) {
+    return parsed.toString();
+  }
+
+  return null;
+}
+
+function sanitizeQuoteReferenceId(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  if (/^at:\/\//.test(value)) {
+    return value;
+  }
+
+  if (/^urn:/.test(value)) {
+    return value;
+  }
+
+  return sanitizeAttachmentUrl(value);
 }
 
 function inferMediaType(type: string | null): string {

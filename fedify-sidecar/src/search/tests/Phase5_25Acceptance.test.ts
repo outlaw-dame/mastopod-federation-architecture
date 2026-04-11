@@ -318,4 +318,86 @@ describe('Phase 5.25 Acceptance Tests', () => {
     expect(docs.map(d => d.stableDocId)).toContain('ap:https://ap.example.com/posts/post6');
     expect(docs.map(d => d.stableDocId)).toContain('at:at://did:plc:remote2/app.bsky.feed.post/post6');
   });
+
+  it('Test 7 — AT quote posts with recordWithMedia retain quote relation and media count', async () => {
+    await atProjector.onAtCommitEvent({
+      did: 'did:plc:remote3',
+      canonicalAccountId: 'remote3',
+      rev: 'rev1',
+      commitCid: 'cid1',
+      prevCommitCid: null,
+      repoVersion: 3,
+      ops: [{
+        action: 'create',
+        collection: 'app.bsky.feed.post',
+        rkey: 'post7',
+        record: {
+          text: 'Quoted post with media',
+          createdAt: new Date().toISOString(),
+          embed: {
+            $type: 'app.bsky.embed.recordWithMedia',
+            record: {
+              uri: 'at://did:plc:quoted/app.bsky.feed.post/3kquoted',
+              cid: 'bafy-quoted'
+            },
+            media: {
+              $type: 'app.bsky.embed.images',
+              images: [
+                {
+                  alt: 'Quote image',
+                  image: {
+                    $type: 'blob',
+                    ref: { $link: 'bafy-image-1' },
+                    mimeType: 'image/png',
+                    size: 2048
+                  }
+                }
+              ]
+            }
+          }
+        }
+      } as any],
+      emittedAt: new Date().toISOString()
+    }, 'remote');
+
+    const docs = osClient.getAll();
+    expect(docs.length).toBe(1);
+
+    const doc = docs[0]!;
+    expect(doc.quoteOfStableId).toBe('at:at://did:plc:quoted/app.bsky.feed.post/3kquoted');
+    expect(doc.hasMedia).toBe(true);
+    expect(doc.mediaCount).toBe(1);
+  });
+
+  it('Test 8 — AP quote posts with media retain quote relation and media count', async () => {
+    await apProjector.onApFirehoseEvent({
+      origin: 'remote',
+      activity: {
+        type: 'Create',
+        actor: 'https://ap.example.com/users/remote4',
+        object: {
+          type: 'Note',
+          id: 'https://ap.example.com/posts/post8',
+          content: 'Quoted AP content',
+          to: ['as:Public'],
+          quoteUrl: 'https://remote.example/posts/quoted-ap',
+          attachment: [
+            {
+              type: 'Image',
+              mediaType: 'image/jpeg',
+              url: 'https://cdn.remote.example/quote-ap.jpg'
+            }
+          ]
+        }
+      }
+    });
+
+    const docs = osClient.getAll();
+    expect(docs.length).toBe(1);
+
+    const doc = docs[0]!;
+    expect(doc.quoteOfStableId).toBe('ap:https://remote.example/posts/quoted-ap');
+    expect(doc.hasMedia).toBe(true);
+    expect(doc.mediaCount).toBe(1);
+  });
 });

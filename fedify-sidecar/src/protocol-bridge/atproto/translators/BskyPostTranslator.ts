@@ -119,6 +119,7 @@ async function translateDirectEnvelope(
         cid: envelope.record.reply.parent.cid ?? null,
       })
     : null;
+  const quoteOf = await resolveQuoteRef(envelope.record.embed, ctx);
   const attachments = await parseEmbedAttachments(
     envelope.record.embed,
     envelope.repoDid,
@@ -164,6 +165,7 @@ async function translateDirectEnvelope(
     warnings: [],
     object: objectRef,
     inReplyTo,
+    quoteOf,
     content: {
       kind: "note" as const,
       title: null,
@@ -198,6 +200,68 @@ async function translateDirectEnvelope(
     ...draft,
     canonicalIntentId: buildCanonicalIntentId(draft),
   };
+}
+
+async function resolveQuoteRef(
+  embed: unknown,
+  ctx: TranslationContext,
+) {
+  const strongRef = extractQuotedRecordStrongRef(embed);
+  if (!strongRef) {
+    return null;
+  }
+
+  return ctx.resolveObjectRef({
+    canonicalObjectId: strongRef.uri,
+    atUri: strongRef.uri,
+    cid: strongRef.cid ?? null,
+    canonicalUrl: toBskyUrlFromAtUri(strongRef.uri),
+  });
+}
+
+function extractQuotedRecordStrongRef(embed: unknown): { uri: string; cid: string | null } | null {
+  const obj = toPlainObject(embed);
+  if (!obj) {
+    return null;
+  }
+
+  const type = typeof obj["$type"] === "string" ? obj["$type"] : "";
+  if (type === "app.bsky.embed.record") {
+    return parseRecordStrongRef(obj["record"]);
+  }
+
+  if (type === "app.bsky.embed.recordWithMedia") {
+    return parseRecordStrongRef(obj["record"]);
+  }
+
+  return null;
+}
+
+function parseRecordStrongRef(value: unknown): { uri: string; cid: string | null } | null {
+  const ref = toPlainObject(value);
+  if (!ref) {
+    return null;
+  }
+
+  const uri = typeof ref["uri"] === "string" ? ref["uri"].trim() : "";
+  if (!uri.startsWith("at://")) {
+    return null;
+  }
+
+  const cid = typeof ref["cid"] === "string" && ref["cid"].trim().length > 0
+    ? ref["cid"].trim()
+    : null;
+
+  return { uri, cid };
+}
+
+function toBskyUrlFromAtUri(atUri: string): string | null {
+  const match = atUri.match(/^at:\/\/([^/]+)\/app\.bsky\.feed\.post\/([^/]+)$/);
+  if (!match) {
+    return null;
+  }
+
+  return `https://bsky.app/profile/${match[1]}/post/${match[2]}`;
 }
 
 async function translateIngressEnvelope(

@@ -89,6 +89,10 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
     if (inReplyTo) {
       object["inReplyTo"] = inReplyTo;
     }
+    const quoteUrl = resolveOptionalApObjectId(intent.quoteOf);
+    if (quoteUrl) {
+      object["quoteUrl"] = quoteUrl;
+    }
     if (tag.length > 0) {
       object["tag"] = tag;
     }
