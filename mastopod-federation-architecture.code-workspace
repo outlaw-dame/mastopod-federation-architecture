@@ -45,7 +45,10 @@
 			"git add": true,
 			"git reset": true,
 			"git commit": true,
-			"git push": true
+			"git push": true,
+			"pgrep": true,
+			"command": true,
+			"k6": true
 		}
 	}
 }

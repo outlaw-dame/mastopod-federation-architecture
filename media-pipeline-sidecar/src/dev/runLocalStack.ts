@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { assertVideoToolingReady } from '../utils/videoTooling';
 
 interface ServiceDefinition {
   name: string;
@@ -152,6 +153,8 @@ function shutdown(signal: NodeJS.Signals): void {
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+await assertVideoToolingReady();
 
 for (const runtime of runtimes.values()) {
   spawnService(runtime);

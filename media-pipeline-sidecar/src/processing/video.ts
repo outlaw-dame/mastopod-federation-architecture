@@ -8,7 +8,7 @@ import { config } from '../config/config';
 import { logger } from '../logger';
 import { NonRetryableMediaPipelineError } from '../utils/errorHandling';
 import { sha256File } from '../utils/digest';
-import { getFfmpegPath, getFfprobePath } from '../utils/videoTooling';
+import { assertVideoToolingReady, getFfmpegPath, getFfprobePath } from '../utils/videoTooling';
 
 const execFileAsync = promisify(execFile);
 
@@ -87,6 +87,8 @@ export async function renderVideoRenditions(
   outputDir: string,
   sourceMimeType?: string
 ): Promise<VideoRenditionResult> {
+  await assertVideoToolingReady();
+
   const probed = await probeVideoMetadata(inputPath);
   const result: VideoRenditionResult = {
     duration: typeof probed.duration === 'number' && Number.isFinite(probed.duration)
@@ -96,10 +98,7 @@ export async function renderVideoRenditions(
     height: probed.height
   };
 
-  const ffmpegBinary = getFfmpegPath();
-  if (!ffmpegBinary) {
-    return result;
-  }
+  const ffmpegBinary = getFfmpegPath()!;
 
   const posterSourcePath = path.join(outputDir, 'video-poster.png');
   const seekOffsetSeconds = normalizePosterOffsetSeconds(probed.duration);
@@ -188,7 +187,10 @@ async function probeVideoMetadata(
 ): Promise<{ duration?: number; width?: number; height?: number; bitrateKbps?: number }> {
   const ffprobeBinary = getFfprobePath();
   if (!ffprobeBinary) {
-    return {};
+    throw new NonRetryableMediaPipelineError({
+      code: 'VIDEO_TOOLING_UNAVAILABLE',
+      message: 'ffprobe is required for video metadata extraction'
+    });
   }
 
   const { stdout } = await execFileAsync(ffprobeBinary, [
@@ -234,7 +236,10 @@ async function transcodePlaybackVariants(options: {
 }): Promise<GeneratedVideoPlaybackVariant[]> {
   const ffmpegBinary = getFfmpegPath();
   if (!ffmpegBinary) {
-    return [];
+    throw new NonRetryableMediaPipelineError({
+      code: 'VIDEO_TOOLING_UNAVAILABLE',
+      message: 'ffmpeg is required for video playback renditions'
+    });
   }
 
   const candidateWidths = buildPlaybackCandidateWidths(options.sourceMimeType, options.sourceWidth);
@@ -414,7 +419,10 @@ async function renderHlsManifest(
 ): Promise<GeneratedVideoStreamingManifest | undefined> {
   const ffmpegBinary = getFfmpegPath();
   if (!ffmpegBinary) {
-    return undefined;
+    throw new NonRetryableMediaPipelineError({
+      code: 'VIDEO_TOOLING_UNAVAILABLE',
+      message: 'ffmpeg is required for HLS manifest generation'
+    });
   }
 
   const hlsRootDir = path.join(outputDir, 'hls');
@@ -526,7 +534,14 @@ async function renderDashManifest(
   sources: StreamingSource[]
 ): Promise<GeneratedVideoStreamingManifest | undefined> {
   const ffmpegBinary = getFfmpegPath();
-  if (!ffmpegBinary || sources.length === 0) {
+  if (!ffmpegBinary) {
+    throw new NonRetryableMediaPipelineError({
+      code: 'VIDEO_TOOLING_UNAVAILABLE',
+      message: 'ffmpeg is required for DASH manifest generation'
+    });
+  }
+
+  if (sources.length === 0) {
     return undefined;
   }
 

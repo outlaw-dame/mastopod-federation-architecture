@@ -13,6 +13,7 @@ import { downloadFromFilebaseToPath } from '../storage/filebaseClient';
 import { persistVideoRenditions } from '../storage/videoArtifactPersistence';
 import { cleanupWorkerScratchDir, createWorkerScratchDir } from '../utils/tempFiles';
 import { serializePlaybackVariants, serializeStreamingManifests } from '../utils/playbackVariants';
+import { assertVideoToolingReady } from '../utils/videoTooling';
 
 /**
  * MEDIA PIPELINE RULE:
@@ -20,6 +21,8 @@ import { serializePlaybackVariants, serializeStreamingManifests } from '../utils
  * Only emits raw safety signals.
  * Policy decisions are handled by MRF.
  */
+await assertVideoToolingReady();
+
 runSecureWorker({
   stream: MediaStreams.RENDITION_VIDEO,
   group: 'media',
