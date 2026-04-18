@@ -145,6 +145,16 @@ export class RedisMRFAdminStore implements MRFAdminStore {
     return safeParse<MRFDecisionTrace>(raw);
   }
 
+  async appendTrace(trace: MRFDecisionTrace): Promise<void> {
+    const createdAtMs = new Date(trace.createdAt).getTime();
+    await this.withStoreRetry(async () => {
+      const multi = this.redis.multi();
+      multi.set(this.traceKey(trace.traceId), JSON.stringify(trace));
+      multi.zadd(this.traceIndexKey(), createdAtMs, trace.traceId);
+      await multi.exec();
+    });
+  }
+
   async createSimulationJob(job: MRFSimulationJob): Promise<void> {
     await this.withStoreRetry(() => this.redis.set(this.simulationKey(job.jobId), JSON.stringify(job)));
   }

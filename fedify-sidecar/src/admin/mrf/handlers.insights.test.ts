@@ -45,6 +45,7 @@ function makeDeps(traces: MRFDecisionTrace[]): MRFAdminDeps {
       setChainConfig: vi.fn(),
       listTraces: vi.fn().mockResolvedValue({ items: traces, nextCursor: undefined }),
       getTrace: vi.fn().mockImplementation(async (id: string) => traces.find(t => t.traceId === id) || null),
+      appendTrace: vi.fn().mockResolvedValue(undefined),
       createSimulationJob: vi.fn(),
       getSimulationJob: vi.fn(),
     },

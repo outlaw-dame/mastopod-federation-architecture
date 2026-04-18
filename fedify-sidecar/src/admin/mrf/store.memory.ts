@@ -93,6 +93,11 @@ export class InMemoryMRFAdminStore implements MRFAdminStore {
     return this.traces.get(traceId) ?? null;
   }
 
+  async appendTrace(trace: MRFDecisionTrace): Promise<void> {
+    this.traces.set(trace.traceId, trace);
+    this.traceOrder.unshift(trace.traceId);
+  }
+
   async createSimulationJob(job: MRFSimulationJob): Promise<void> {
     this.simulations.set(job.jobId, job);
   }

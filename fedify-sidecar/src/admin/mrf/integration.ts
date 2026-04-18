@@ -10,6 +10,7 @@ import { RedisMRFAdminStore } from "./store.redis.js";
 import { forbidden } from "./errors.js";
 import { withRetry } from "./utils.js";
 import type { MRFAdminDeps, MRFPermission } from "./types.js";
+import type { MRFAdminStore } from "./store.js";
 
 interface RegisterOptions {
   app: any;
@@ -42,9 +43,10 @@ function sanitizeActor(value: string | null): string {
 
 export async function registerMrfAdminIntegration(options: RegisterOptions): Promise<{
   redisClient: Redis | null;
+  store: MRFAdminStore;
 }> {
   if (!options.enabled) {
-    return { redisClient: null };
+    throw new Error("MRF admin integration requested while disabled");
   }
 
   if (!options.adminToken) {
@@ -109,5 +111,5 @@ export async function registerMrfAdminIntegration(options: RegisterOptions): Pro
     "MRF admin routes registered",
   );
 
-  return { redisClient };
+  return { redisClient, store };
 }

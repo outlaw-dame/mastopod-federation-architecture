@@ -29,6 +29,7 @@ export interface MRFAdminStore {
   }): Promise<{ items: MRFDecisionTrace[]; nextCursor?: string }>;
 
   getTrace(traceId: string): Promise<MRFDecisionTrace | null>;
+  appendTrace(trace: MRFDecisionTrace): Promise<void>;
 
   createSimulationJob(job: MRFSimulationJob): Promise<void>;
   getSimulationJob(jobId: string): Promise<MRFSimulationJob | null>;
