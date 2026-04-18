@@ -2,6 +2,7 @@ import { AnnounceTranslator } from "./translators/AnnounceTranslator.js";
 import { CreateArticleTranslator } from "./translators/CreateArticleTranslator.js";
 import { CreateNoteTranslator } from "./translators/CreateNoteTranslator.js";
 import { DeleteTranslator } from "./translators/DeleteTranslator.js";
+import { EmojiReactionTranslator } from "./translators/EmojiReactionTranslator.js";
 import { FollowTranslator } from "./translators/FollowTranslator.js";
 import { LikeTranslator } from "./translators/LikeTranslator.js";
 import { UndoTranslator } from "./translators/UndoTranslator.js";
@@ -19,6 +20,7 @@ export class ActivityPubToCanonicalTranslator extends TranslatorRegistry<unknown
       new UpdateNoteTranslator(),
       new UpdatePersonTranslator(),
       new DeleteTranslator(),
+      new EmojiReactionTranslator(),
       new LikeTranslator(),
       new AnnounceTranslator(),
       new FollowTranslator(),

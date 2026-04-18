@@ -8,6 +8,11 @@ import type { ProtocolTranslator } from "../../registry/TranslatorRegistry.js";
 import { htmlToCanonicalBlocks } from "../../text/HtmlToCanonicalBlocks.js";
 import { renderMarkdownToHtml } from "../../../utils/markdown.js";
 import { fetchOpenGraph } from "../../../utils/opengraph.js";
+import {
+  ACTIVITYPODS_CUSTOM_EMOJIS_FIELD,
+  activityPodsEmbeddedCustomEmojiFieldSchema,
+  parseActivityPodsCustomEmojiField,
+} from "../../../at-adapter/lexicon/ActivityPodsEmojiLexicon.js";
 
 const recordSchema = z.object({
   $type: z.literal("site.standard.document"),
@@ -16,6 +21,7 @@ const recordSchema = z.object({
   text: z.string().max(100_000),
   publishedAt: z.string().optional(),
   url: z.string().url().optional().nullable(),
+  [ACTIVITYPODS_CUSTOM_EMOJIS_FIELD]: activityPodsEmbeddedCustomEmojiFieldSchema.optional(),
 });
 
 const bridgeSchema = z.object({
@@ -125,6 +131,9 @@ async function translateDirectEnvelope(
         thumbUrl: ogData.thumbUrl ?? null,
       }
     : null;
+  const customEmojis = parseActivityPodsCustomEmojiField(
+    envelope.record[ACTIVITYPODS_CUSTOM_EMOJIS_FIELD],
+  );
 
   const baseDraft = {
     sourceProtocol: "atproto" as const,
@@ -146,6 +155,7 @@ async function translateDirectEnvelope(
       language: null,
       blocks,
       facets: [],
+      customEmojis,
       attachments: [],
       externalUrl: envelope.record.url ?? null,
       linkPreview,

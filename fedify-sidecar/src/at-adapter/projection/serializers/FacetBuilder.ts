@@ -26,7 +26,7 @@ export class DefaultFacetBuilder implements FacetBuilder {
     }
 
     const facets: AtRichtextFacet[] = [];
-    const hashtagPattern = /##?[\p{L}\p{N}_]{1,64}/gu;
+    const hashtagPattern = /[#＃]{1,2}[^\s#＃]{1,128}/gu;
 
     for (const match of text.matchAll(hashtagPattern)) {
       if (match.index === undefined) {

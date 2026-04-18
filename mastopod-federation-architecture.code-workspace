@@ -48,7 +48,32 @@
 			"git push": true,
 			"pgrep": true,
 			"command": true,
-			"k6": true
+			"k6": true,
+			"npm test": true,
+			"npx vitest": true,
+			"./node_modules/.bin/vitest": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node scripts/proof-hashtag-normalization\\.js \\.$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"./node_modules/.bin/jest": true,
+			"npx jest": true,
+			"/^node scripts/proof-hashtag-normalization\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods && node tests/node_modules/\\.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests pod-provider/backend/tests/hashtag-conformance-matrix\\.test\\.js pod-provider/backend/tests/user-settings-hashtag-follows\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node pod-provider/backend/tests/hashtag-conformance-matrix\\.test\\.js pod-provider/backend/tests/user-settings-hashtag-follows\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods && node tests/node_modules/\\.bin/jest --testEnvironment=node pod-provider/backend/tests/hashtag-conformance-matrix\\.test\\.js pod-provider/backend/tests/user-settings-hashtag-follows\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			}
 		}
 	}
 }

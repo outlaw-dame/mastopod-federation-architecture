@@ -2,6 +2,7 @@ import type { CanonicalAttachment, CanonicalFacet } from "../../canonical/Canoni
 import type { CanonicalIntent, CanonicalPostEditIntent } from "../../canonical/CanonicalIntent.js";
 import { canonicalActorIdentityKey } from "../../canonical/CanonicalActorRef.js";
 import { canonicalBlocksToHtml } from "../../text/CanonicalBlocksToHtml.js";
+import { linkifyHashtagsInHtml } from "../../../utils/markdown.js";
 import { maxLossiness } from "../../canonical/CanonicalWarnings.js";
 import type {
   ActivityPubProjectionCommand,
@@ -19,6 +20,7 @@ import {
   canonicalFacetsToApTags,
   canonicalMentionRecipients,
   escapeHtml,
+  safeOriginFromUrl,
 } from "./PostCreateToApProjector.js";
 import {
   buildApLinkPreviewCard,
@@ -53,11 +55,14 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
       };
     }
 
+    const actorOrigin = safeOriginFromUrl(actorId);
     const objectId = resolveApObjectId(intent.object);
-    const html = intent.content.blocks.length > 0
+    const rawHtml = intent.content.blocks.length > 0
       ? canonicalBlocksToHtml(intent.content.blocks)
       : `<p>${escapeHtml(intent.content.plaintext).replace(/\n/g, "<br>")}</p>`;
-    const tag = canonicalFacetsToApTags(intent.content.facets);
+    const html = actorOrigin ? linkifyHashtagsInHtml(rawHtml, actorOrigin) : rawHtml;
+    const customEmojis = intent.content.customEmojis ?? [];
+    const tag = canonicalFacetsToApTags(intent.content.facets, actorOrigin, customEmojis);
     const attachment = canonicalAttachmentsToApAttachments(intent.content.attachments);
     const linkPreviewCard =
       intent.content.kind === "note" && this.policy.noteLinkPreviewMode !== "disabled"
@@ -95,6 +100,14 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     if (inReplyTo) {
       object["inReplyTo"] = inReplyTo;
     }
+    // FEP-7888 / FEP-11dd: thread root as AP context.
+    const apContext = resolveOptionalApObjectId(intent.replyRoot);
+    if (apContext) {
+      object["context"] = apContext;
+    }
+    // FEP-7458: advertise the replies collection so consumers can verify reply membership.
+    // ActivityPods creates and serves this collection lazily at ${noteId}/replies.
+    object["replies"] = `${objectId}/replies`;
     const quoteUrl = resolveOptionalApObjectId(intent.quoteOf);
     if (quoteUrl) {
       object["quoteUrl"] = quoteUrl;
@@ -109,7 +122,7 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     }
 
     const activity: Record<string, unknown> = {
-      "@context": buildApActivityContext(),
+      "@context": buildApActivityContext({ includeCustomEmojis: customEmojis.length > 0 }),
       id: `${objectId}#update-${intent.canonicalIntentId.slice(0, 12)}`,
       type: "Update",
       actor: actorId,

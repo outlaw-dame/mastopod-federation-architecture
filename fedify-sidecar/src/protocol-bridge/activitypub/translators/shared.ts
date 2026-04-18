@@ -10,8 +10,9 @@ import type { CanonicalProvenance } from "../../canonical/CanonicalEnvelope.js";
 import { buildCanonicalIntentId } from "../../idempotency/CanonicalIntentIdBuilder.js";
 import type { TranslationContext } from "../../ports/ProtocolBridgePorts.js";
 import { htmlToCanonicalBlocks } from "../../text/HtmlToCanonicalBlocks.js";
-import { normalizeTag } from "../../text/TagNormalizer.js";
+import { normalizeHashtag } from "../../../utils/hashtags.js";
 import { fetchOpenGraph } from "../../../utils/opengraph.js";
+import { collectApCustomEmojis } from "../../../utils/apCustomEmojis.js";
 
 const actorSchema = z.union([
   z.string().min(1),
@@ -58,6 +59,8 @@ const deleteActivitySchema = z.object({
 });
 
 const PUBLIC_AUDIENCE = "https://www.w3.org/ns/activitystreams#Public";
+const INLINE_HASHTAG_SCAN_RE =
+  /[#＃]([\p{L}\p{M}\p{N}\p{Pc}\u00B7\u30FB\u200C]+)/gu;
 
 type ParsedCreateActivity = z.infer<typeof createActivitySchema>;
 type ParsedUpdateActivity = z.infer<typeof updateActivitySchema>;
@@ -190,6 +193,10 @@ export async function translateProfileUpdateActivity(
   const { plaintext, blocks, warning } = htmlToCanonicalBlocks(summaryHtml);
   const sourceAccountRef = await ctx.resolveActorRef({ activityPubActorUri: actorId });
   const tagFacets = await buildTagFacets(plaintext, parsed.data.object["tag"], ctx);
+  const customEmojis = collectApCustomEmojis(parsed.data.object["tag"], {
+    referencedText: [summaryHtml, asString(parsed.data.object["name"])],
+    fallbackDomain: actorId,
+  });
   const inlineFacets = buildInlineLinkAndTagFacets(plaintext);
   const attachments = [
     ...buildAttachments(parsed.data.object["icon"], `${actorId}:icon`)
@@ -221,6 +228,7 @@ export async function translateProfileUpdateActivity(
       language: null,
       blocks,
       facets: mergeFacets(tagFacets, inlineFacets),
+      customEmojis,
       attachments,
       externalUrl: extractFirstUrl(parsed.data.object["url"]) ?? actorId,
     },
@@ -255,6 +263,10 @@ async function buildCanonicalPostIntent(
   const inReplyTo = await resolveOptionalObjectRef(activity.object["inReplyTo"], ctx);
   const quoteOf = await resolveOptionalQuoteRef(activity.object, ctx);
   const tagFacets = await buildTagFacets(plaintext, activity.object["tag"], ctx);
+  const customEmojis = collectApCustomEmojis(activity.object["tag"], {
+    referencedText: [objectContent, objectSummary, objectTitle],
+    fallbackDomain: objectId,
+  });
   const inlineFacets = buildInlineLinkAndTagFacets(plaintext);
   const attachments = buildAttachments(activity.object["attachment"], objectId);
   const visibility = deriveAudience(activity.object["to"], activity.object["cc"]);
@@ -286,6 +298,7 @@ async function buildCanonicalPostIntent(
       language: asString(activity.object["contentMapLang"]) ?? null,
       blocks,
       facets: mergedFacets,
+      customEmojis,
       attachments,
       externalUrl: objectUrl,
       linkPreview,
@@ -325,6 +338,10 @@ async function buildCanonicalPostEditIntent(
   const inReplyTo = await resolveOptionalObjectRef(activity.object["inReplyTo"], ctx);
   const quoteOf = await resolveOptionalQuoteRef(activity.object, ctx);
   const tagFacets = await buildTagFacets(plaintext, activity.object["tag"], ctx);
+  const customEmojis = collectApCustomEmojis(activity.object["tag"], {
+    referencedText: [objectContent, objectSummary, objectTitle],
+    fallbackDomain: objectId,
+  });
   const inlineFacets = buildInlineLinkAndTagFacets(plaintext);
   const attachments = buildAttachments(activity.object["attachment"], objectId);
   const visibility = deriveAudience(activity.object["to"], activity.object["cc"]);
@@ -356,6 +373,7 @@ async function buildCanonicalPostEditIntent(
       language: asString(activity.object["contentMapLang"]) ?? null,
       blocks,
       facets: mergedFacets,
+      customEmojis,
       attachments,
       externalUrl: objectUrl,
       linkPreview,
@@ -496,9 +514,14 @@ export async function buildTagFacets(
     }
 
     if (tagType === "Hashtag") {
+      const normalizedTag = normalizeHashtag(name);
+      if (!normalizedTag) {
+        continue;
+      }
+
       facets.push({
         type: "tag",
-        tag: normalizeTag(name),
+        tag: normalizedTag,
         start,
         end,
       });
@@ -511,12 +534,14 @@ export async function buildTagFacets(
 export function buildInlineLinkAndTagFacets(text: string): CanonicalFacet[] {
   const facets: CanonicalFacet[] = [];
   const seen = new Set<string>();
+  const urlRanges: Array<{ start: number; end: number }> = [];
 
   for (const match of text.matchAll(/https?:\/\/[^\s]+/g)) {
     const url = match[0];
     const start = match.index ?? -1;
     const end = start + url.length;
     if (start >= 0) {
+      urlRanges.push({ start, end });
       const key = `link:${start}:${end}:${url}`;
       if (!seen.has(key)) {
         seen.add(key);
@@ -525,22 +550,32 @@ export function buildInlineLinkAndTagFacets(text: string): CanonicalFacet[] {
     }
   }
 
-  for (const match of text.matchAll(/(^|\s)#([\p{L}\p{N}_-]+)/gu)) {
-    const tag = match[2];
+  for (const match of text.matchAll(INLINE_HASHTAG_SCAN_RE)) {
+    const tag = match[1];
     if (!tag) {
       continue;
     }
+
     const whole = match[0];
+    const rawHashtag = whole;
+    const normalizedTag = normalizeHashtag(rawHashtag, { allowMissingHash: true });
+    if (!normalizedTag) {
+      continue;
+    }
+
     const baseIndex = match.index ?? -1;
-    const start = baseIndex + whole.lastIndexOf(`#${tag}`);
-    const end = start + tag.length + 1;
+    const start = baseIndex;
+    const end = start + rawHashtag.length;
+    if (urlRanges.some((range) => start >= range.start && start < range.end)) {
+      continue;
+    }
     if (start >= 0) {
-      const key = `tag:${start}:${end}:${tag}`;
+      const key = `tag:${start}:${end}:${normalizedTag}`;
       if (!seen.has(key)) {
         seen.add(key);
         facets.push({
           type: "tag",
-          tag: normalizeTag(tag),
+          tag: normalizedTag,
           start,
           end,
         });

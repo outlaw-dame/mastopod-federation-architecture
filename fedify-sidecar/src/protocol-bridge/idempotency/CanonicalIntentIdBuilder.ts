@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalActorIdentityKey } from "../canonical/CanonicalActorRef.js";
-import type { CanonicalIntent } from "../canonical/CanonicalIntent.js";
+import { canonicalReactionIdentityKey, type CanonicalIntent } from "../canonical/CanonicalIntent.js";
 import { canonicalObjectIdentityKey } from "../canonical/CanonicalObjectRef.js";
 
 type CanonicalIntentDraft = CanonicalIntent extends infer T
@@ -54,6 +54,7 @@ function normalizedContentDigest(intent: CanonicalIntentDraft | CanonicalIntent)
             plaintext: intent.content.plaintext,
             language: intent.content.language ?? null,
             facets: intent.content.facets,
+            customEmojis: intent.content.customEmojis ?? [],
             attachments: intent.content.attachments,
             externalUrl: intent.content.externalUrl ?? null,
             quoteOf: intent.quoteOf ? canonicalObjectIdentityKey(intent.quoteOf) : null,
@@ -62,7 +63,14 @@ function normalizedContentDigest(intent: CanonicalIntentDraft | CanonicalIntent)
         .digest("hex");
     case "ReactionAdd":
     case "ReactionRemove":
-      return intent.reactionType;
+      return createHash("sha256")
+        .update(
+          stableStringify({
+            reactionType: intent.reactionType,
+            reactionIdentity: canonicalReactionIdentityKey(intent),
+          }),
+        )
+        .digest("hex");
     case "ShareAdd":
     case "ShareRemove":
       return canonicalObjectIdentityKey(intent.object);
@@ -76,6 +84,7 @@ function normalizedContentDigest(intent: CanonicalIntentDraft | CanonicalIntent)
             plaintext: intent.content.plaintext,
             title: intent.content.title ?? null,
             summary: intent.content.summary ?? null,
+            customEmojis: intent.content.customEmojis ?? [],
           }),
         )
         .digest("hex");

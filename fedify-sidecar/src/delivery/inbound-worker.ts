@@ -33,6 +33,7 @@ import { CapabilityGateResult } from "../capabilities/gates.js";
 import type { SigningClient } from "../signing/signing-client.js";
 import type { FollowersSyncService } from "../federation/fep8fcf/FollowersSyncService.js";
 import { COLLECTION_SYNC_HEADER } from "../federation/fep8fcf/CollectionSyncHeader.js";
+import type { RepliesBackfillService } from "../federation/replies-backfill/RepliesBackfillService.js";
 
 // ============================================================================
 // Types
@@ -108,6 +109,14 @@ export interface InboundWorkerConfig {
    * stream writes and bridge forwarding.
    */
   seenActivityIds?: Set<string>;
+  /**
+   * Optional Mastodon-compatible replies backfill service.
+   * When present, inbound Note objects (Create/Announce/Update wrapping a Note
+   * that carries a `replies` collection URI) will trigger asynchronous
+   * recursive fetching of reply threads from origin servers.
+   * Failures are always swallowed — backfill is best-effort.
+   */
+  repliesBackfillService?: RepliesBackfillService;
 }
 
 export interface VerificationResult {
@@ -209,6 +218,43 @@ function extractDomain(uri: string): string | null {
     return null;
   }
 }
+
+/**
+ * Extract the embedded Note object from an activity, if any.
+ *
+ * Handles:
+ *   - `Create` / `Update` / `Announce` with an inline Note object
+ *   - A raw Note passed directly (e.g. from backfill synthetic envelopes)
+ *
+ * Returns `null` when the activity doesn't wrap a Note with a `replies` URI.
+ */
+function extractNoteObject(activity: unknown): Record<string, unknown> | null {
+  if (typeof activity !== "object" || activity === null) return null;
+  const act = activity as Record<string, unknown>;
+
+  // Bare Note / Article / etc. with a replies property.
+  const type = act["type"];
+  const noteTypes = new Set(["Note", "Article", "Page", "Question"]);
+  if (typeof type === "string" && noteTypes.has(type)) {
+    return act;
+  }
+
+  // Activity wrapping an object.
+  const wrappingTypes = new Set(["Create", "Update", "Announce"]);
+  if (typeof type === "string" && wrappingTypes.has(type)) {
+    const obj = act["object"];
+    if (typeof obj === "object" && obj !== null) {
+      const inner = obj as Record<string, unknown>;
+      const innerType = inner["type"];
+      if (typeof innerType === "string" && noteTypes.has(innerType)) {
+        return inner;
+      }
+    }
+  }
+
+  return null;
+}
+
 
 export class InboundWorker {
   private queue: RedisStreamsQueue;
@@ -720,6 +766,23 @@ export class InboundWorker {
           { activity, actorUri: verifiedActorUri, isPublic, isPrivate: !isPublic, isLocal: false, ...(kind ? { kind } : {}) },
           envelope.envelopeId,
         );
+      }
+
+      // Step 6.9: Mastodon-compatible replies backfill (fault-isolated).
+      // For incoming Create/Announce/Update wrapping a Note, trigger async
+      // recursive fetching of the replies collection from origin servers.
+      // This implements the same convention as Mastodon's FetchAllRepliesWorker
+      // (merged in PR #32615) to ensure conversation threads are hydrated.
+      if (this.config.repliesBackfillService && isPublic) {
+        const noteObject = extractNoteObject(activity);
+        if (noteObject) {
+          this.config.repliesBackfillService.triggerFromNote(noteObject).catch((err: Error) => {
+            logger.warn("[replies-backfill] trigger error (swallowed)", {
+              envelopeId: envelope.envelopeId,
+              error: err.message,
+            });
+          });
+        }
       }
 
       // Step 7: Ack the message

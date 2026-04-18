@@ -9,6 +9,11 @@ import { atFacetsToCanonicalFacets } from "../../text/AtFacetsToCanonicalText.js
 import { htmlToCanonicalBlocks } from "../../text/HtmlToCanonicalBlocks.js";
 import { looksLikeMarkdown, renderMarkdownToHtml } from "../../../utils/markdown.js";
 import { fetchOpenGraph } from "../../../utils/opengraph.js";
+import {
+  ACTIVITYPODS_CUSTOM_EMOJIS_FIELD,
+  activityPodsEmbeddedCustomEmojiFieldSchema,
+  parseActivityPodsCustomEmojiField,
+} from "../../../at-adapter/lexicon/ActivityPodsEmojiLexicon.js";
 
 const replySchema = z.object({
   root: z.object({
@@ -29,6 +34,7 @@ const recordSchema = z.object({
   facets: z.array(z.unknown()).optional(),
   reply: replySchema.optional(),
   embed: z.unknown().optional(),
+  [ACTIVITYPODS_CUSTOM_EMOJIS_FIELD]: activityPodsEmbeddedCustomEmojiFieldSchema.optional(),
 });
 
 const directEnvelopeSchema = z.object({
@@ -119,12 +125,35 @@ async function translateDirectEnvelope(
         cid: envelope.record.reply.parent.cid ?? null,
       })
     : null;
+  // FEP-7888 / FEP-11dd: the thread root is the authoritative context.
+  // When root === parent (direct reply to root) reuse the already-resolved ref.
+  const replyRoot: typeof inReplyTo = (() => {
+    if (!envelope.record.reply?.root) return null;
+    if (
+      inReplyTo &&
+      envelope.record.reply.root.uri === envelope.record.reply.parent?.uri
+    ) {
+      return inReplyTo;
+    }
+    return null; // will be resolved async below
+  })();
+  const resolvedReplyRoot =
+    !replyRoot && envelope.record.reply?.root
+      ? await ctx.resolveObjectRef({
+          canonicalObjectId: envelope.record.reply.root.uri,
+          atUri: envelope.record.reply.root.uri,
+          cid: envelope.record.reply.root.cid ?? null,
+        })
+      : replyRoot;
   const quoteOf = await resolveQuoteRef(envelope.record.embed, ctx);
   const attachments = await parseEmbedAttachments(
     envelope.record.embed,
     envelope.repoDid,
     objectUri,
     ctx,
+  );
+  const customEmojis = parseActivityPodsCustomEmojiField(
+    envelope.record[ACTIVITYPODS_CUSTOM_EMOJIS_FIELD],
   );
 
   // Markdown rendering (no MFM) — only when text contains Markdown syntax.
@@ -165,6 +194,7 @@ async function translateDirectEnvelope(
     warnings: [],
     object: objectRef,
     inReplyTo,
+    replyRoot: resolvedReplyRoot,
     quoteOf,
     content: {
       kind: "note" as const,
@@ -175,6 +205,7 @@ async function translateDirectEnvelope(
       language: envelope.record.langs?.[0] ?? null,
       blocks,
       facets,
+      customEmojis,
       attachments,
       externalUrl: null,
       linkPreview,

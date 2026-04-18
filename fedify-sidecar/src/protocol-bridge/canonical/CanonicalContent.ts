@@ -24,6 +24,16 @@ export type CanonicalFacet =
 
 export type CanonicalAttachmentRole = "avatar" | "banner";
 
+export interface CanonicalCustomEmoji {
+  shortcode: string;
+  emojiId?: string | null;
+  iconUrl?: string | null;
+  mediaType?: string | null;
+  updatedAt?: string | null;
+  alternateName?: string | null;
+  domain?: string | null;
+}
+
 export interface CanonicalAttachment {
   attachmentId: string;
   mediaType: string;
@@ -60,6 +70,7 @@ export interface CanonicalContent {
   language?: string | null;
   blocks: CanonicalBlock[];
   facets: CanonicalFacet[];
+  customEmojis?: CanonicalCustomEmoji[];
   attachments: CanonicalAttachment[];
   externalUrl?: string | null;
   /** Pre-fetched OpenGraph link preview for the primary URL in this content. */

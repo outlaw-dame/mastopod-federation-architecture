@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalActorIdentityKey } from "../../canonical/CanonicalActorRef.js";
+import { canonicalReactionIdentityKey } from "../../canonical/CanonicalIntent.js";
 import { canonicalObjectIdentityKey } from "../../canonical/CanonicalObjectRef.js";
 import type {
   CanonicalFollowAddIntent,
@@ -29,7 +30,7 @@ export function buildSocialApMetadata(intent: SocialIntent): ProjectionCommandMe
 
 export function buildSocialActivityId(
   actorId: string,
-  action: "Like" | "Announce" | "Follow",
+  action: "Like" | "EmojiReact" | "Announce" | "Follow",
   targetKey: string,
 ): string {
   const digest = createHash("sha256")
@@ -49,7 +50,7 @@ export function socialTargetTopic(intent: SocialIntent): "ap.atproto-ingress.v1"
 }
 
 export function reactionTargetKey(intent: CanonicalReactionAddIntent | CanonicalReactionRemoveIntent): string {
-  return canonicalObjectIdentityKey(intent.object);
+  return `${canonicalObjectIdentityKey(intent.object)}:${canonicalReactionIdentityKey(intent)}`;
 }
 
 export function shareTargetKey(intent: CanonicalShareAddIntent | CanonicalShareRemoveIntent): string {

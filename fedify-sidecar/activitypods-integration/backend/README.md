@@ -5,6 +5,7 @@ not present in this workspace. Copy these files into:
 
 - `pod-provider/backend/services/internal-identity-projection.service.js`
 - `pod-provider/backend/services/internal-identity-projection-api.service.js`
+- `pod-provider/backend/services/actor-status-normalization.service.js`
 - `pod-provider/backend/scripts/proof-unified-account-at-ready.js`
 
 ## Package Script Wiring
@@ -32,6 +33,36 @@ Useful proof cluster:
   }
 }
 ```
+
+## Actor Status Integration Contract
+
+The sidecar now supports FEP-82f6 actor statuses and expects the real backend
+to surface two capabilities:
+
+1. Actor profile writes must normalize `actor.status` using the staged
+   `actor-status-normalization` service (or equivalent logic) so local status
+   updates always have:
+   - `type: "ActorStatus"`
+   - `id`
+   - `attributedTo`
+   - `published`
+   - optional validated `endTime`
+   - optional validated rich-presence `attachment`
+
+2. An authenticated internal endpoint must expose status history at:
+
+```text
+GET /api/internal/actors/:identifier/status-history
+Authorization: Bearer <ACTIVITYPODS_TOKEN>
+Accept: application/activity+json
+```
+
+Return either:
+- an `OrderedCollection` / `Collection` with `orderedItems` or `items`, or
+- a bare array of `ActorStatus` objects.
+
+When the actor has no history support, return `404` and do not expose
+`statusHistory` on the actor document.
 
 ## Required `/api/accounts/create` Response Contract
 

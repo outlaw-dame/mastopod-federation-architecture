@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { canonicalActorIdentityKey } from "../../canonical/CanonicalActorRef.js";
 import { canonicalObjectIdentityKey } from "../../canonical/CanonicalObjectRef.js";
+import {
+  canonicalReactionIdentityKey,
+} from "../../canonical/CanonicalIntent.js";
 import type {
   CanonicalFollowAddIntent,
   CanonicalFollowRemoveIntent,
@@ -49,4 +52,16 @@ export function deriveSocialActorRefId(
 
 export function deriveSocialRkey(canonicalRefId: string): string {
   return canonicalRefId.slice(0, 13);
+}
+
+export function deriveEmojiReactionRefId(
+  actor: SocialIntent["sourceAccountRef"],
+  object: CanonicalReactionAddIntent["object"],
+  reaction: Pick<CanonicalReactionAddIntent | CanonicalReactionRemoveIntent, "reactionType" | "reactionContent" | "reactionEmoji">,
+): string {
+  return createHash("sha256")
+    .update(
+      `emojiReaction:${canonicalActorIdentityKey(actor)}:${canonicalObjectIdentityKey(object)}:${canonicalReactionIdentityKey(reaction)}`,
+    )
+    .digest("hex");
 }

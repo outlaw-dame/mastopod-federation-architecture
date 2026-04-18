@@ -1,6 +1,7 @@
 import type { CanonicalIntent, CanonicalPostCreateIntent } from "../../canonical/CanonicalIntent.js";
 import { maxLossiness } from "../../canonical/CanonicalWarnings.js";
 import { canonicalFacetsToAtFacets } from "../../text/CanonicalTextToAtFacets.js";
+import { buildActivityPodsCustomEmojiField, ACTIVITYPODS_CUSTOM_EMOJIS_FIELD } from "../../../at-adapter/lexicon/ActivityPodsEmojiLexicon.js";
 import type {
   AtProjectionCommand,
   ProjectionContext,
@@ -68,6 +69,9 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
           text: intent.content.plaintext,
           publishedAt: intent.createdAt,
           url: intent.content.externalUrl ?? intent.object.canonicalUrl ?? null,
+          ...(buildActivityPodsCustomEmojiField(intent.content.customEmojis)
+            ? { [ACTIVITYPODS_CUSTOM_EMOJIS_FIELD]: buildActivityPodsCustomEmojiField(intent.content.customEmojis)! }
+            : {}),
         },
         metadata: baseMetadata,
       });
@@ -82,6 +86,10 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
       text: teaserText,
       createdAt: intent.createdAt,
     };
+    const customEmojiField = buildActivityPodsCustomEmojiField(intent.content.customEmojis);
+    if (customEmojiField && intent.content.kind !== "article") {
+      postRecord[ACTIVITYPODS_CUSTOM_EMOJIS_FIELD] = customEmojiField;
+    }
 
     if (intent.content.language) {
       postRecord["langs"] = [intent.content.language];

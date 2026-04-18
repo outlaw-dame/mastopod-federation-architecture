@@ -6,6 +6,7 @@ import type {
 import type { CanonicalLinkPreview } from "../../canonical/CanonicalContent.js";
 import type { CanonicalObjectRef } from "../../canonical/CanonicalObjectRef.js";
 import type { ActivityPubProjectionCommand } from "../../ports/ProtocolBridgePorts.js";
+import { ACTIVITYSTREAMS_CONTEXT, LITEPUB_EMOJI_REACT_CONTEXT, MASTODON_EMOJI_CONTEXT } from "../../../utils/apCustomEmojis.js";
 
 export const PUBLIC_AUDIENCE = "https://www.w3.org/ns/activitystreams#Public";
 
@@ -23,10 +24,17 @@ type CanonicalPostIntent =
   | CanonicalPostEditIntent
   | CanonicalPostDeleteIntent;
 
-export function buildApActivityContext(): Array<string | Record<string, unknown>> {
+export function buildApActivityContext(
+  options: {
+    includeCustomEmojis?: boolean;
+    includeEmojiReact?: boolean;
+  } = {},
+): Array<string | Record<string, unknown>> {
   return [
-    "https://www.w3.org/ns/activitystreams",
+    ACTIVITYSTREAMS_CONTEXT,
     FEP1311_ATTACHMENT_CONTEXT,
+    ...(options.includeCustomEmojis ? [MASTODON_EMOJI_CONTEXT] : []),
+    ...(options.includeEmojiReact ? [LITEPUB_EMOJI_REACT_CONTEXT] : []),
   ];
 }
 

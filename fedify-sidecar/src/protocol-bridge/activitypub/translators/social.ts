@@ -11,6 +11,7 @@ import type {
 import type { CanonicalProvenance } from "../../canonical/CanonicalEnvelope.js";
 import { buildCanonicalIntentId } from "../../idempotency/CanonicalIntentIdBuilder.js";
 import type { TranslationContext } from "../../ports/ProtocolBridgePorts.js";
+import { isApEmojiReactionActivity, parseApEmojiReaction, type ApEmojiReaction } from "../../../utils/apEmojiReactions.js";
 
 const actorSchema = z.union([
   z.string().min(1),
@@ -45,6 +46,23 @@ const PUBLIC_AUDIENCE = "https://www.w3.org/ns/activitystreams#Public";
 export function supportsSocialActivity(input: unknown, type: "Like" | "Announce" | "Follow" | "Undo"): boolean {
   const parsed = baseActivitySchema.safeParse(input);
   return parsed.success && parsed.data.type === type;
+}
+
+export async function translateEmojiReactionActivity(
+  input: unknown,
+  ctx: TranslationContext,
+): Promise<CanonicalIntent | null> {
+  const parsed = baseActivitySchema.safeParse(input);
+  if (!parsed.success || !isApEmojiReactionActivity(input)) {
+    return null;
+  }
+
+  const reaction = parseApEmojiReaction(input);
+  if (!reaction) {
+    return null;
+  }
+
+  return buildReactionIntent(parsed.data, ctx, "ReactionAdd", null, reaction);
 }
 
 export async function translateLikeActivity(
@@ -109,7 +127,20 @@ export async function translateUndoActivity(
 
   switch (nestedType) {
     case "Like":
-      return buildReactionIntent(parsed.data, ctx, "ReactionRemove", object);
+      return buildReactionIntent(
+        parsed.data,
+        ctx,
+        "ReactionRemove",
+        object,
+        parseApEmojiReaction(object),
+      );
+    case "EmojiReact": {
+      const reaction = parseApEmojiReaction(object);
+      if (!reaction) {
+        return null;
+      }
+      return buildReactionIntent(parsed.data, ctx, "ReactionRemove", object, reaction);
+    }
     case "Announce":
       return buildShareIntent(parsed.data, ctx, "ShareRemove", object);
     case "Follow":
@@ -154,6 +185,7 @@ async function buildReactionIntent(
   ctx: TranslationContext,
   kind: "ReactionAdd" | "ReactionRemove",
   activityObject: Record<string, unknown> | null = null,
+  emojiReaction: ApEmojiReaction | null = null,
 ): Promise<CanonicalReactionAddIntent | CanonicalReactionRemoveIntent | null> {
   const now = (ctx.now ?? (() => new Date()))();
   const sourceAccountRef = await ctx.resolveActorRef({
@@ -179,7 +211,19 @@ async function buildReactionIntent(
     provenance: toProvenance(activity.bridge, activity.id, sourceAccountRef.canonicalAccountId ?? null),
     warnings: [],
     object: objectRef,
-    reactionType: "like" as const,
+    reactionType: emojiReaction ? "emoji" as const : "like" as const,
+    reactionContent: emojiReaction?.content ?? null,
+    reactionEmoji: emojiReaction?.customEmoji
+      ? {
+          shortcode: emojiReaction.customEmoji.shortcode,
+          emojiId: emojiReaction.customEmoji.emojiId ?? null,
+          iconUrl: emojiReaction.customEmoji.iconUrl ?? null,
+          mediaType: emojiReaction.customEmoji.mediaType ?? null,
+          updatedAt: emojiReaction.customEmoji.updatedAt ?? null,
+          alternateName: emojiReaction.customEmoji.alternateName ?? null,
+          domain: emojiReaction.customEmoji.domain ?? null,
+        }
+      : null,
   };
 
   if (kind === "ReactionAdd") {

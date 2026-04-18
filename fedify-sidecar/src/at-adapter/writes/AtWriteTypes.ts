@@ -24,7 +24,8 @@ export type SupportedAtCollection =
   | 'app.bsky.actor.profile'
   | 'app.bsky.graph.follow'
   | 'app.bsky.feed.like'
-  | 'app.bsky.feed.repost';
+  | 'app.bsky.feed.repost'
+  | 'org.activitypods.emojiReaction';
 
 export const SUPPORTED_COLLECTIONS: ReadonlySet<string> = new Set([
   'app.bsky.feed.post',
@@ -33,6 +34,7 @@ export const SUPPORTED_COLLECTIONS: ReadonlySet<string> = new Set([
   'app.bsky.graph.follow',
   'app.bsky.feed.like',
   'app.bsky.feed.repost',
+  'org.activitypods.emojiReaction',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -147,6 +149,8 @@ export interface CanonicalMutationEnvelope {
     | 'follow_delete'
     | 'like_create'
     | 'like_delete'
+    | 'emoji_reaction_create'
+    | 'emoji_reaction_delete'
     | 'repost_create'
     | 'repost_delete';
 
@@ -283,6 +287,6 @@ export interface AtWriteAliasResolver {
     rkey: string
   ): Promise<{
     canonicalRefId: string;
-    canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost';
+    canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction';
   } | null>;
 }

@@ -1,7 +1,8 @@
-import type { CanonicalAttachment, CanonicalFacet } from "../../canonical/CanonicalContent.js";
+import type { CanonicalAttachment, CanonicalCustomEmoji, CanonicalFacet } from "../../canonical/CanonicalContent.js";
 import type { CanonicalIntent, CanonicalPostCreateIntent } from "../../canonical/CanonicalIntent.js";
 import { canonicalActorIdentityKey } from "../../canonical/CanonicalActorRef.js";
 import { canonicalBlocksToHtml } from "../../text/CanonicalBlocksToHtml.js";
+import { linkifyHashtagsInHtml } from "../../../utils/markdown.js";
 import { maxLossiness } from "../../canonical/CanonicalWarnings.js";
 import type {
   ActivityPubProjectionCommand,
@@ -47,11 +48,14 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
       };
     }
 
+    const actorOrigin = safeOrigin(actorId);
     const objectId = resolveApObjectId(intent.object);
-    const html = intent.content.blocks.length > 0
+    const rawHtml = intent.content.blocks.length > 0
       ? canonicalBlocksToHtml(intent.content.blocks)
       : `<p>${escapeHtml(intent.content.plaintext).replace(/\n/g, "<br>")}</p>`;
-    const tag = canonicalFacetsToApTags(intent.content.facets);
+    const html = actorOrigin ? linkifyHashtagsInHtml(rawHtml, actorOrigin) : rawHtml;
+    const customEmojis = intent.content.customEmojis ?? [];
+    const tag = canonicalFacetsToApTags(intent.content.facets, actorOrigin, customEmojis);
     const attachment = canonicalAttachmentsToApAttachments(intent.content.attachments);
     const linkPreviewCard =
       intent.content.kind === "note" && this.policy.noteLinkPreviewMode !== "disabled"
@@ -89,6 +93,15 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
     if (inReplyTo) {
       object["inReplyTo"] = inReplyTo;
     }
+    // FEP-7888 / FEP-11dd: thread root as AP context.
+    // The root Note is resolvable and carries attributedTo, satisfying FEP-11dd ownership.
+    const apContext = resolveOptionalApObjectId(intent.replyRoot);
+    if (apContext) {
+      object["context"] = apContext;
+    }
+    // FEP-7458: advertise the replies collection so consumers can verify reply membership.
+    // ActivityPods creates and serves this collection lazily at ${noteId}/replies.
+    object["replies"] = `${objectId}/replies`;
     const quoteUrl = resolveOptionalApObjectId(intent.quoteOf);
     if (quoteUrl) {
       object["quoteUrl"] = quoteUrl;
@@ -103,7 +116,7 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
     }
 
     const activity: Record<string, unknown> = {
-      "@context": buildApActivityContext(),
+      "@context": buildApActivityContext({ includeCustomEmojis: customEmojis.length > 0 }),
       id: `${objectId}#create`,
       type: "Create",
       actor: actorId,
@@ -129,8 +142,12 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
   }
 }
 
-export function canonicalFacetsToApTags(facets: readonly CanonicalFacet[]): Array<Record<string, unknown>> {
-  return facets.flatMap((facet) => {
+export function canonicalFacetsToApTags(
+  facets: readonly CanonicalFacet[],
+  actorOrigin?: string | null,
+  customEmojis: readonly CanonicalCustomEmoji[] = [],
+): Array<Record<string, unknown>> {
+  const structuralTags = facets.flatMap((facet) => {
     switch (facet.type) {
       case "mention":
         return facet.target.activityPubActorUri
@@ -140,16 +157,51 @@ export function canonicalFacetsToApTags(facets: readonly CanonicalFacet[]): Arra
               name: facet.label,
             }]
           : [];
-      case "tag":
-        return [{
+      case "tag": {
+        const nameWithHash = facet.tag.startsWith("#") ? facet.tag : `#${facet.tag}`;
+        const tagBody = nameWithHash.slice(1).toLowerCase();
+        const entry: Record<string, unknown> = {
           type: "Hashtag",
-          name: facet.tag.startsWith("#") ? facet.tag : `#${facet.tag}`,
-        }];
+          name: nameWithHash,
+        };
+        if (actorOrigin) {
+          entry["href"] = `${actorOrigin}/tags/${encodeURIComponent(tagBody)}`;
+        }
+        return [entry];
+      }
       case "link":
         return [];
     }
   });
+
+  const emojiTags = customEmojis
+    .filter((emoji) => typeof emoji.iconUrl === "string" && emoji.iconUrl.trim().length > 0)
+    .map((emoji) => ({
+      type: "Emoji",
+      name: emoji.shortcode,
+      ...(emoji.emojiId ? { id: emoji.emojiId } : {}),
+      ...(emoji.updatedAt ? { updated: emoji.updatedAt } : {}),
+      ...(emoji.alternateName ? { alternateName: emoji.alternateName } : {}),
+      icon: {
+        type: "Image",
+        url: emoji.iconUrl,
+        ...(emoji.mediaType ? { mediaType: emoji.mediaType } : {}),
+      },
+    }));
+
+  return [...structuralTags, ...emojiTags];
 }
+
+export function safeOriginFromUrl(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+// Module-local alias used within this file.
+const safeOrigin = safeOriginFromUrl;
 
 export function canonicalAttachmentsToApAttachments(
   attachments: readonly CanonicalAttachment[],

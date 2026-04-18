@@ -4,6 +4,10 @@ import { ProfileRecordSerializer, ProfileMediaResolver } from './serializers/Pro
 import { PostRecordSerializer, FacetBuilder, EmbedBuilder } from './serializers/PostRecordSerializer.js';
 import { StandardDocumentRecordSerializer } from './serializers/StandardDocumentRecordSerializer.js';
 import {
+  DefaultEmojiReactionRecordSerializer,
+  type EmojiReactionRecordSerializer,
+} from './serializers/EmojiReactionRecordSerializer.js';
+import {
   ArticleTeaserRecordSerializer,
   DefaultArticleTeaserRecordSerializer,
 } from './serializers/ArticleTeaserRecordSerializer.js';
@@ -21,10 +25,16 @@ import {
 import { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
 import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
+import {
+  ACTIVITYPODS_EMOJI_REACTION_COLLECTION,
+  parseActivityPodsEmojiReactionRecord,
+  toActivityPodsEmojiDefinition,
+} from '../lexicon/ActivityPodsEmojiLexicon.js';
 
 export interface CoreProfileUpsertedV1 {
   profile: CanonicalProfile;
   identity: any; // CanonicalIdentity
+  nativeRecord?: Record<string, unknown>;
   bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
@@ -60,6 +70,8 @@ export interface CorePostDeletedV1 {
 }
 
 import {
+  CoreEmojiReactionCreatedV1,
+  CoreEmojiReactionDeletedV1,
   CoreFollowCreatedV1,
   CoreFollowDeletedV1,
   CoreLikeCreatedV1,
@@ -80,6 +92,8 @@ export interface AtProjectionWorker {
   onPostUpdated(event: CorePostUpdatedV1): Promise<void>;
   onPostDeleted(event: CorePostDeletedV1): Promise<void>;
   
+  onEmojiReactionCreated(event: CoreEmojiReactionCreatedV1): Promise<void>;
+  onEmojiReactionDeleted(event: CoreEmojiReactionDeletedV1): Promise<void>;
   onFollowCreated(event: CoreFollowCreatedV1): Promise<void>;
   onFollowDeleted(event: CoreFollowDeletedV1): Promise<void>;
   onLikeCreated(event: CoreLikeCreatedV1): Promise<void>;
@@ -113,12 +127,15 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       followSerializer: FollowRecordSerializer;
       likeSerializer: LikeRecordSerializer;
       repostSerializer: RepostRecordSerializer;
+      emojiReactionSerializer?: EmojiReactionRecordSerializer;
     }
   ) {
     this.articleTeaserSerializer = deps.articleTeaserSerializer ?? new DefaultArticleTeaserRecordSerializer();
+    this.emojiReactionSerializer = deps.emojiReactionSerializer ?? new DefaultEmojiReactionRecordSerializer();
   }
 
   private readonly articleTeaserSerializer: ArticleTeaserRecordSerializer;
+  private readonly emojiReactionSerializer: EmojiReactionRecordSerializer;
 
   private async getOrCreateRepoState(did: string): Promise<any | null> {
     const existing = await this.repoRegistry.getRepoState(did);
@@ -171,7 +188,13 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
     if (!repoState) return;
 
-    const record = await this.profileSerializer.serialize(event.profile, binding, this.deps.mediaResolver);
+    const serializedRecord = await this.profileSerializer.serialize(event.profile, binding, this.deps.mediaResolver);
+    const record = event.nativeRecord && this.isNativeRecordForCollection(event.nativeRecord, 'app.bsky.actor.profile')
+      ? {
+          ...serializedRecord,
+          ...cloneNativeRecord(event.nativeRecord),
+        }
+      : serializedRecord;
     const rkey = this.rkeyService.profileRkey();
     const collection = 'app.bsky.actor.profile';
 
@@ -544,6 +567,108 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     await this.aliasStore.markDeleted(event.canonicalFollowId, event.deletedAt);
   }
 
+  async onEmojiReactionCreated(event: CoreEmojiReactionCreatedV1): Promise<void> {
+    const binding = await this.identityRepo.getByCanonicalAccountId(event.actor.id);
+    if (!binding) return;
+
+    const decision = this.policy.canProjectSocialAction(binding);
+    if (!decision.allowed) return;
+
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
+    if (!repoState) return;
+
+    const targetRecord = event.nativeRecord
+      ? parseActivityPodsEmojiReactionRecord(event.nativeRecord)
+      : null;
+    const targetRef = targetRecord?.subject?.uri
+      ? {
+          uri: targetRecord.subject.uri,
+          cid: targetRecord.subject.cid ?? null,
+        }
+      : await this.deps.targetAliasResolver.resolvePostStrongRef(event.targetPost.id);
+    if (!targetRef?.uri) return;
+
+    const record = targetRecord ?? this.emojiReactionSerializer.serialize({
+      reaction: event.reaction,
+      target: targetRef,
+    });
+
+    const collection = ACTIVITYPODS_EMOJI_REACTION_COLLECTION;
+    const rkey = this.getRequestedRkey(event.atRecord, collection)
+      ?? this.rkeyService.postRkey(event.reaction.createdAt);
+
+    const op: AtSocialRepoOpV1 = {
+      did: binding.atprotoDid!,
+      canonicalAccountId: binding.canonicalAccountId,
+      opId: `op-${Date.now()}`,
+      opType: 'create',
+      collection,
+      rkey,
+      canonicalRefId: event.reaction.id,
+      record,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
+      emittedAt: new Date().toISOString(),
+    };
+
+    await this.eventPublisher.publish('at.repo.op.v1', op as any);
+    const commitResult = await this.commitBuilder.buildCommit(repoState, [op as any]);
+
+    await this.aliasStore.put({
+      canonicalRefId: event.reaction.id,
+      canonicalType: 'emojiReaction',
+      did: binding.atprotoDid!,
+      collection,
+      rkey,
+      atUri: `at://${binding.atprotoDid}/${collection}/${rkey}`,
+      ...(targetRef.uri ? { subjectUri: targetRef.uri } : {}),
+      ...(targetRef.cid ? { subjectCid: targetRef.cid } : {}),
+      reactionContent: event.reaction.content,
+      reactionEmoji: event.reaction.emoji
+        ? toActivityPodsEmojiDefinition(event.reaction.emoji)
+        : null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    await this.persistAndUpdateRepoState(repoState, commitResult);
+  }
+
+  async onEmojiReactionDeleted(event: CoreEmojiReactionDeletedV1): Promise<void> {
+    const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalActorId);
+    if (!binding) return;
+
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
+    if (!repoState) return;
+
+    const alias = await this.ensureAliasForLocator(
+      event.canonicalReactionId,
+      ACTIVITYPODS_EMOJI_REACTION_COLLECTION,
+      'emojiReaction',
+      binding.atprotoDid!,
+      event.atRecord,
+    );
+    if (!alias) return;
+
+    const op: AtSocialRepoOpV1 = {
+      did: binding.atprotoDid!,
+      canonicalAccountId: binding.canonicalAccountId,
+      opId: `op-${Date.now()}`,
+      opType: 'delete',
+      collection: alias.collection as any,
+      rkey: alias.rkey,
+      canonicalRefId: event.canonicalReactionId,
+      record: null,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
+      emittedAt: new Date().toISOString(),
+    };
+
+    await this.eventPublisher.publish('at.repo.op.v1', op as any);
+    const commitResult = await this.commitBuilder.buildCommit(repoState, [op as any]);
+
+    await this.persistAndUpdateRepoState(repoState, commitResult);
+    await this.aliasStore.markDeleted(event.canonicalReactionId, event.deletedAt);
+  }
+
   async onLikeCreated(event: CoreLikeCreatedV1): Promise<void> {
     const binding = await this.identityRepo.getByCanonicalAccountId(event.actor.id);
     if (!binding) return;
@@ -748,6 +873,8 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
         return 'like';
       case 'app.bsky.feed.repost':
         return 'repost';
+      case ACTIVITYPODS_EMOJI_REACTION_COLLECTION:
+        return 'emojiReaction';
       case 'app.bsky.feed.post':
         return 'post';
       default:
@@ -786,6 +913,8 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       subjectDid: existingAlias?.subjectDid ?? null,
       subjectUri: existingAlias?.subjectUri ?? null,
       subjectCid: existingAlias?.subjectCid ?? null,
+      reactionContent: existingAlias?.reactionContent ?? null,
+      reactionEmoji: existingAlias?.reactionEmoji ?? null,
       canonicalUrl: existingAlias?.canonicalUrl ?? null,
       activityPubObjectId: existingAlias?.activityPubObjectId ?? null,
     };
@@ -820,6 +949,8 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       subjectDid: existingAlias?.subjectDid ?? null,
       subjectUri: existingAlias?.subjectUri ?? null,
       subjectCid: existingAlias?.subjectCid ?? null,
+      reactionContent: existingAlias?.reactionContent ?? null,
+      reactionEmoji: existingAlias?.reactionEmoji ?? null,
       canonicalUrl: existingAlias?.canonicalUrl ?? teaserAlias.canonicalUrl,
       activityPubObjectId: existingAlias?.activityPubObjectId ?? null,
     });
@@ -843,8 +974,10 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
   ): boolean {
     const type = typeof record['$type'] === 'string' ? record['$type'] : null;
     return (
+      (collection === 'app.bsky.actor.profile' && type === 'app.bsky.actor.profile') ||
       (collection === 'app.bsky.feed.post' && type === 'app.bsky.feed.post') ||
-      (collection === 'site.standard.document' && type === 'site.standard.document')
+      (collection === 'site.standard.document' && type === 'site.standard.document') ||
+      (collection === ACTIVITYPODS_EMOJI_REACTION_COLLECTION && type === ACTIVITYPODS_EMOJI_REACTION_COLLECTION)
     );
   }
 }

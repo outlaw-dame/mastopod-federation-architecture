@@ -10,6 +10,7 @@ import { initRedis, redis } from '../queue/redisClient';
 import { sanitizeOptionalText } from '../ingest/sanitizeMetadata';
 import { logger } from '../logger';
 import { handleLocalMediaDelivery } from './localMediaDelivery';
+import { appendVaryHeader, resolveLocale, t, type Locale } from './i18n';
 
 const bodySchema = z.object({
   sourceUrl: z.string().url().max(2048),
@@ -24,7 +25,7 @@ const bodySchema = z.object({
     if (parsed.username || parsed.password) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'sourceUrl must not contain credentials',
+        message: 'sourceUrlCredentials',
         path: ['sourceUrl']
       });
     }
@@ -43,10 +44,17 @@ function isAuthorized(authorizationHeader: string | undefined): boolean {
   return timingSafeEqual(expected, provided);
 }
 
-function writeJson(response: ServerResponse<IncomingMessage>, statusCode: number, payload: unknown): void {
+function writeJson(
+  response: ServerResponse<IncomingMessage>,
+  statusCode: number,
+  payload: unknown,
+  locale: Locale,
+): void {
   response.statusCode = statusCode;
   response.setHeader('content-type', 'application/json; charset=utf-8');
   response.setHeader('cache-control', 'no-store');
+  response.setHeader('content-language', locale);
+  response.setHeader('vary', appendVaryHeader(response.getHeader('vary'), 'Accept-Language'));
   response.end(JSON.stringify(payload));
 }
 
@@ -60,7 +68,7 @@ function sanitizeOwnerId(value: string): string {
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   const contentType = String(request.headers['content-type'] || '').toLowerCase();
   if (!contentType.includes('application/json')) {
-    throw new Error('content-type must be application/json');
+    throw new Error('contentTypeJson');
   }
 
   const chunks: Buffer[] = [];
@@ -83,25 +91,27 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 
 const server = createServer(async (request, response) => {
   try {
+    const locale = resolveLocale(request.headers['accept-language']);
+
     if (await handleLocalMediaDelivery(request, response)) {
       return;
     }
 
     if (request.method === 'GET' && request.url === '/health') {
-      writeJson(response, 200, { status: 'ok' });
+      writeJson(response, 200, { status: 'ok' }, locale);
       return;
     }
 
     if (request.method === 'GET' && request.url === '/ready') {
       writeJson(response, 200, {
         status: redis.isReady ? 'ready' : 'not-ready'
-      });
+      }, locale);
       return;
     }
 
     if (request.method === 'POST' && request.url === '/internal/media/ingest') {
       if (!isAuthorized(typeof request.headers.authorization === 'string' ? request.headers.authorization : undefined)) {
-        writeJson(response, 401, { error: 'unauthorized' });
+        writeJson(response, 401, { error: 'unauthorized' }, locale);
         return;
       }
 
@@ -111,8 +121,10 @@ const server = createServer(async (request, response) => {
       } catch (err) {
         writeJson(response, 400, {
           error: 'invalid-request-body',
-          detail: err instanceof Error ? err.message : 'invalid body'
-        });
+          detail: err instanceof Error
+            ? translateIngressDetail(locale, err.message)
+            : t(locale, 'ingress.invalidBody')
+        }, locale);
         return;
       }
 
@@ -120,8 +132,8 @@ const server = createServer(async (request, response) => {
       if (!parsed.success) {
         writeJson(response, 400, {
           error: 'invalid-request-body',
-          details: parsed.error.flatten()
-        });
+          details: localizeFlattenedValidation(parsed.error.flatten(), locale)
+        }, locale);
         return;
       }
 
@@ -130,8 +142,8 @@ const server = createServer(async (request, response) => {
       if (!ownerId) {
         writeJson(response, 400, {
           error: 'invalid-request-body',
-          detail: 'ownerId must contain at least one printable character'
-        });
+          detail: t(locale, 'ingress.ownerPrintable')
+        }, locale);
         return;
       }
 
@@ -145,16 +157,47 @@ const server = createServer(async (request, response) => {
         isSensitive: String(Boolean(parsed.data.isSensitive))
       });
 
-      writeJson(response, 202, { status: 'queued', traceId });
+      writeJson(response, 202, { status: 'queued', traceId }, locale);
       return;
     }
 
-    writeJson(response, 404, { error: 'not-found' });
+    writeJson(response, 404, { error: 'not-found' }, locale);
   } catch (err) {
+    const locale = resolveLocale(request.headers['accept-language']);
     logger.error({ err }, 'queue-ingress-unhandled-error');
-    writeJson(response, 500, { error: 'internal-error' });
+    writeJson(response, 500, { error: 'internal-error' }, locale);
   }
 });
+
+function translateIngressDetail(locale: Locale, message: string): string {
+  if (message === 'contentTypeJson') {
+    return t(locale, 'ingress.contentTypeJson')
+  }
+  if (message === 'sourceUrlCredentials') {
+    return t(locale, 'ingress.sourceUrlCredentials')
+  }
+  return message
+}
+
+function localizeFlattenedValidation(
+  flattened: { formErrors: string[]; fieldErrors: Record<string, string[] | undefined> },
+  locale: Locale,
+) {
+  const fieldErrors = Object.fromEntries(
+    Object.entries(flattened.fieldErrors).map(([field, messages]) => [
+      field,
+      messages?.map(message => translateIngressDetail(locale, message)),
+    ]),
+  )
+
+  const formErrors = flattened.formErrors.map(message => translateIngressDetail(locale, message))
+
+  return {
+    ...flattened,
+    fieldErrors,
+    formErrors,
+  }
+}
 
 async function main(): Promise<void> {
   if (!config.token) {

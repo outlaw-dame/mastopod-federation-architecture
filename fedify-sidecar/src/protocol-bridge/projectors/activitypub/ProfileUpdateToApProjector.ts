@@ -9,7 +9,8 @@ import type {
 } from "../../ports/ProtocolBridgePorts.js";
 import type { CanonicalProjector } from "../../registry/ProjectorRegistry.js";
 import { pickProfileAttachment } from "../../profile/BridgeProfileMedia.js";
-import { buildAudience, escapeHtml } from "./PostCreateToApProjector.js";
+import { buildAudience, canonicalFacetsToApTags, escapeHtml } from "./PostCreateToApProjector.js";
+import { buildApActivityContext } from "./post-shared.js";
 
 export class ProfileUpdateToApProjector implements CanonicalProjector<ActivityPubProjectionCommand> {
   public supports(intent: CanonicalIntent): boolean {
@@ -53,6 +54,10 @@ export class ProfileUpdateToApProjector implements CanonicalProjector<ActivityPu
     if (intent.content.externalUrl) {
       object["url"] = intent.content.externalUrl;
     }
+    const tag = canonicalFacetsToApTags(intent.content.facets, null, intent.content.customEmojis ?? []);
+    if (tag.length > 0) {
+      object["tag"] = tag;
+    }
 
     const avatar = await toActivityPubImage(
       pickProfileAttachment(intent.content.attachments, "avatar"),
@@ -85,7 +90,7 @@ export class ProfileUpdateToApProjector implements CanonicalProjector<ActivityPu
     }
 
     const activity: Record<string, unknown> = {
-      "@context": "https://www.w3.org/ns/activitystreams",
+      "@context": buildApActivityContext({ includeCustomEmojis: (intent.content.customEmojis ?? []).length > 0 }),
       id: `${actorId.replace(/\/+$/, "")}/#profile-update-${intent.canonicalIntentId.slice(0, 12)}`,
       type: "Update",
       actor: actorId,

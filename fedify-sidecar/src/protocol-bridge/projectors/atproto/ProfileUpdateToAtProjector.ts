@@ -2,6 +2,7 @@ import {
   buildProfileMediaDraft,
   pickProfileAttachment,
 } from "../../profile/BridgeProfileMedia.js";
+import { ACTIVITYPODS_CUSTOM_EMOJIS_FIELD, buildActivityPodsCustomEmojiField } from "../../../at-adapter/lexicon/ActivityPodsEmojiLexicon.js";
 import type { CanonicalIntent, CanonicalProfileUpdateIntent } from "../../canonical/CanonicalIntent.js";
 import { maxLossiness } from "../../canonical/CanonicalWarnings.js";
 import type {
@@ -38,6 +39,10 @@ export class ProfileUpdateToAtProjector implements CanonicalProjector<AtProjecti
     }
     if (intent.content.plaintext) {
       record["description"] = intent.content.plaintext;
+    }
+    const customEmojiField = buildActivityPodsCustomEmojiField(intent.content.customEmojis);
+    if (customEmojiField) {
+      record[ACTIVITYPODS_CUSTOM_EMOJIS_FIELD] = customEmojiField;
     }
 
     const ownerStableId =

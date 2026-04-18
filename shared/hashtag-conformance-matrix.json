@@ -1,0 +1,64 @@
+{
+  "version": "2026-04-18",
+  "normalizeStrict": [
+    { "input": "#hashtag", "expected": "hashtag" },
+    { "input": "#Hash_Tag2", "expected": "hash_tag2" },
+    { "input": "＃ぼっち・ざ・ろっく", "expected": "ぼっち・ざ・ろっく" },
+    { "input": "#Привет", "expected": "привет" },
+    { "input": "#نرم‌افزار", "expected": "نرم‌افزار" },
+    { "input": "hashtag", "expected": null },
+    { "input": "#", "expected": null },
+    { "input": "#_hashtag", "expected": null },
+    { "input": "#hash-tag", "expected": null },
+    { "input": "#0123456", "expected": null }
+  ],
+  "normalizeAllowMissingHash": [
+    { "input": "#Hashtag", "expected": "hashtag" },
+    { "input": "Hashtag", "expected": "hashtag" },
+    { "input": "＃ハッシュタグ", "expected": "ハッシュタグ" },
+    { "input": "hash-tag", "expected": null }
+  ],
+  "extractFromText": [
+    { "input": "#hashtag", "expected": ["hashtag"] },
+    { "input": "\"#hashtag\"", "expected": ["hashtag"] },
+    { "input": " #hashtag", "expected": ["hashtag"] },
+    { "input": "(#hashtag/#hashtag)", "expected": ["hashtag"] },
+    { "input": "( #hashtag/#hashtag)", "expected": ["hashtag"] },
+    { "input": "( #hashtag /#hashtag)", "expected": ["hashtag"] },
+    { "input": "( #hashtag / #hashtag)", "expected": ["hashtag"] },
+    { "input": "-#hashtag", "expected": ["hashtag"] },
+    { "input": "_#hashtag", "expected": ["hashtag"] },
+    { "input": "!#hashtag", "expected": ["hashtag"] },
+    { "input": "?#hashtag", "expected": ["hashtag"] },
+    { "input": "@#hashtag", "expected": ["hashtag"] },
+    { "input": ";#hashtag", "expected": ["hashtag"] },
+    { "input": ",#hashtag", "expected": ["hashtag"] },
+    { "input": ".'#hashtag", "expected": ["hashtag"] },
+    { "input": "[#hashtag", "expected": ["hashtag"] },
+    { "input": "&#hashtag", "expected": ["hashtag"] },
+    { "input": "^#hashtag", "expected": ["hashtag"] },
+    {
+      "input": "Hello #Привет and #ぼっち・ざ・ろっく and #نرم‌افزار",
+      "expected": ["привет", "ぼっち・ざ・ろっく", "نرم‌افزار"]
+    },
+    {
+      "input": "https://en.wikipedia.org/wiki/Ghostbusters_(song)#Lawsuit with #realTag",
+      "expected": ["realtag"]
+    }
+  ],
+  "extractFromActivityPubTags": [
+    {
+      "input": [
+        { "type": "Hashtag", "name": "#Alpha" },
+        { "type": "Hashtag", "name": "#alpha" },
+        { "type": "Hashtag", "name": "#beta_2" },
+        { "type": "Hashtag", "name": "＃Привет" },
+        { "type": "Hashtag", "name": "#ぼっち・ざ・ろっく" },
+        { "type": "Hashtag", "name": "#bad-tag" },
+        { "type": "Mention", "name": "#ignored" },
+        { "type": "Hashtag", "name": "missingPrefix" }
+      ],
+      "expected": ["alpha", "beta_2", "привет", "ぼっち・ざ・ろっく"]
+    }
+  ]
+}

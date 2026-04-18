@@ -168,6 +168,9 @@ import { createFedifyAdapter, type FedifyFederationAdapter } from "./federation/
 import { registerFedifyRoutes } from "./federation/FedifyFastifyBridge.js";
 import { FollowersSyncService } from "./federation/fep8fcf/FollowersSyncService.js";
 import { registerFollowersSyncRoutes } from "./federation/fep8fcf/FollowersSyncFastifyBridge.js";
+import { registerBlockedCollectionRoutes } from "./federation/fep-c648/BlockedCollectionFastifyBridge.js";
+import { registerHashtagRoutes } from "./federation/HashtagFastifyBridge.js";
+import { RepliesBackfillService } from "./federation/replies-backfill/RepliesBackfillService.js";
 import { SidecarLocalSigningService } from "./signing/SidecarLocalSigningService.js";
 import {
   evaluateOutboundWebhookBackpressure,
@@ -210,6 +213,7 @@ import type { ProviderProfile } from "./capabilities/types.js";
 import { MediaAssetSyncConsumer } from "./media/MediaAssetSyncConsumer.js";
 import { evaluateMediaSignalPolicy } from "./media/MediaSignalPolicy.js";
 import type { MRFAdminStore } from "./admin/mrf/store.js";
+import { applyLocaleHeaders, resolveLocale, t as translateLocale } from "./http/locale.js";
 
 function normalizeMrfAdminStoreMode(raw: string | undefined): "memory" | "redis" {
   return raw === "redis" ? "redis" : "memory";
@@ -848,6 +852,18 @@ async function main() {
       logger.info("FEP-8fcf followers sync service enabled");
     }
 
+    const repliesBackfillService: RepliesBackfillService | undefined =
+      config.enableFedifyRuntimeIntegration
+        ? new RepliesBackfillService(signingClient, queue, {
+            signerActorUri: config.apRelayLocalActorUri || `https://${config.domain}/users/relay`,
+            requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+            userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+          })
+        : undefined;
+    if (repliesBackfillService) {
+      logger.info("Mastodon-compatible replies backfill service enabled");
+    }
+
     // Initialize RedPanda producer only when worker/indexer features need it.
     let redpanda: any = null;
     if (redpandaProducerRequired) {
@@ -1030,6 +1046,7 @@ async function main() {
           followersSyncSigningClient: signingClient,
           domain: config.domain,
         } : {}),
+        ...(repliesBackfillService ? { repliesBackfillService } : {}),
       });
       startupTasks.push({
         name: "start inbound worker",
@@ -1090,6 +1107,11 @@ async function main() {
       bodyLimit: 1024 * 1024,  // 1MB
     });
     let xrpcServerForWebSocket: any = null;
+
+    app.addHook("onRequest", async (request, reply) => {
+      const locale = resolveLocale(request.headers["accept-language"]);
+      applyLocaleHeaders(reply, locale);
+    });
 
     // Raw body parser for signature verification
     app.addContentTypeParser(
@@ -1492,8 +1514,12 @@ async function main() {
       reply: FastifyReply,
       path: string,
     ): Promise<void> => {
+      const locale = resolveLocale(request.headers["accept-language"]);
       if (!queue) {
-        reply.status(503).send({ error: "Service unavailable" });
+        reply.status(503).send({
+          error: "Service unavailable",
+          message: translateLocale(locale, "common.serviceUnavailable"),
+        });
         return;
       }
 
@@ -1514,15 +1540,22 @@ async function main() {
       reply: FastifyReply,
       path: string,
     ): Promise<void> => {
+      const locale = resolveLocale(request.headers["accept-language"]);
       if (!queue) {
-        reply.status(503).send({ error: "Service unavailable" });
+        reply.status(503).send({
+          error: "Service unavailable",
+          message: translateLocale(locale, "common.serviceUnavailable"),
+        });
         return;
       }
 
       const authHeader = (request.headers["authorization"] as string) || "";
       const [scheme, token] = authHeader.split(" ");
       if (scheme !== "Bearer" || token !== config.sidecarToken) {
-        reply.status(401).send({ error: "Unauthorized" });
+        reply.status(401).send({
+          error: "Unauthorized",
+          message: translateLocale(locale, "common.unauthorized"),
+        });
         return;
       }
 
@@ -1533,20 +1566,29 @@ async function main() {
           activity = JSON.parse(request.body) as Record<string, unknown>;
           serializedBody = request.body;
         } catch {
-          reply.status(400).send({ error: "Invalid JSON body" });
+          reply.status(400).send({
+            error: "Invalid JSON body",
+            message: translateLocale(locale, "common.invalidJsonBody"),
+          });
           return;
         }
       } else if (request.body && typeof request.body === "object" && !Array.isArray(request.body)) {
         activity = request.body as Record<string, unknown>;
         serializedBody = JSON.stringify(activity);
       } else {
-        reply.status(400).send({ error: "Invalid JSON body" });
+        reply.status(400).send({
+          error: "Invalid JSON body",
+          message: translateLocale(locale, "common.invalidJsonBody"),
+        });
         return;
       }
 
       const verifiedActorUri = typeof activity["actor"] === "string" ? activity["actor"] : null;
       if (!verifiedActorUri) {
-        reply.status(400).send({ error: "Missing string actor field" });
+        reply.status(400).send({
+          error: "Missing string actor field",
+          message: translateLocale(locale, "common.missingStringActorField"),
+        });
         return;
       }
 
@@ -1581,7 +1623,11 @@ async function main() {
             typeof request.headers.range === "string" ? request.headers.range : undefined,
           );
           if (!response) {
-            reply.status(404).send({ error: "Not Found" });
+            const locale = resolveLocale(request.headers["accept-language"]);
+            reply.status(404).send({
+              error: "Not Found",
+              message: translateLocale(locale, "common.notFound"),
+            });
             return;
           }
 
@@ -1607,8 +1653,12 @@ async function main() {
       });
 
       app.get("/internal/interop/fixtures/:fixtureName/accesses", async (request, reply) => {
+        const locale = resolveLocale(request.headers["accept-language"]);
         if (!isAuthorizedSidecarInternalRequest(request)) {
-          reply.status(401).send({ error: "Unauthorized" });
+          reply.status(401).send({
+            error: "Unauthorized",
+            message: translateLocale(locale, "common.unauthorized"),
+          });
           return;
         }
 
@@ -1622,8 +1672,12 @@ async function main() {
       });
 
       app.delete("/internal/interop/fixtures/:fixtureName/accesses", async (request, reply) => {
+        const locale = resolveLocale(request.headers["accept-language"]);
         if (!isAuthorizedSidecarInternalRequest(request)) {
-          reply.status(401).send({ error: "Unauthorized" });
+          reply.status(401).send({
+            error: "Unauthorized",
+            message: translateLocale(locale, "common.unauthorized"),
+          });
           return;
         }
 
@@ -1837,7 +1891,11 @@ async function main() {
         logger.error("Outbound webhook processing failed", {
           error: error instanceof Error ? error.message : String(error),
         });
-        reply.status(500).send({ error: "Internal server error" });
+        const locale = resolveLocale(request.headers["accept-language"]);
+        reply.status(500).send({
+          error: "Internal server error",
+          message: translateLocale(locale, "common.internalServerError"),
+        });
       }
     });
 
@@ -1857,6 +1915,25 @@ async function main() {
       });
       logger.info("FEP-8fcf followers_synchronization endpoint registered");
     }
+
+    // FEP-eb48 hashtag tag document endpoint — must be before the Fedify
+    // catch-all to ensure /tags/:tag routes are handled here.
+    registerHashtagRoutes(app, {
+      domain: config.domain,
+      searchBaseUrl: process.env["HASHTAG_SEARCH_BASE_URL"] || undefined,
+    });
+    logger.info("FEP-eb48 hashtag document endpoint registered (/tags/:tag)");
+
+    // FEP-c648 blocked collection endpoint — registered before the Fedify
+    // catch-all so /users/:id/blocked takes priority.
+    registerBlockedCollectionRoutes(app, {
+      activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://activitypods:3000",
+      activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+      domain: config.domain,
+      userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+      requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    });
+    logger.info("FEP-c648 blocked collection endpoint registered");
 
     if (fedifyAdapter) {
       registerFedifyRoutes(app, fedifyAdapter);

@@ -1,3 +1,4 @@
+import { ActivityPodsEmojiReactionTranslator } from "./translators/ActivityPodsEmojiReactionTranslator.js";
 import { BskyPostDeleteTranslator } from "./translators/BskyPostDeleteTranslator.js";
 import { BskyProfileTranslator } from "./translators/BskyProfileTranslator.js";
 import { BskyFollowTranslator } from "./translators/BskyFollowTranslator.js";
@@ -14,6 +15,7 @@ export class AtprotoToCanonicalTranslator extends TranslatorRegistry<unknown> {
       new BskyPostTranslator(),
       new BskyPostDeleteTranslator(),
       new BskyProfileTranslator(),
+      new ActivityPodsEmojiReactionTranslator(),
       new BskyLikeTranslator(),
       new BskyRepostTranslator(),
       new BskyFollowTranslator(),

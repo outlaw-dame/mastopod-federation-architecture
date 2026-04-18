@@ -66,17 +66,32 @@ describe("registerAtIdentityObservabilityFastifyRoutes", () => {
     const unauthorized = await app.inject({
       method: "GET",
       url: "/internal/admin/at-observability/identities",
+      headers: {
+        "accept-language": "es-MX,es;q=0.9",
+      },
     });
     expect(unauthorized.statusCode).toBe(401);
+    expect(unauthorized.headers["content-language"]).toBe("es");
+    expect(unauthorized.headers.vary).toContain("Accept-Language");
+    expect(unauthorized.json()).toEqual({
+      error: "unauthorized",
+      message: "No autorizado",
+    });
 
     const forbidden = await app.inject({
       method: "GET",
       url: "/internal/admin/at-observability/identities",
       headers: {
         authorization: "Bearer secret-token",
+        "accept-language": "es-ES",
       },
     });
     expect(forbidden.statusCode).toBe(403);
+    expect(forbidden.headers["content-language"]).toBe("es");
+    expect(forbidden.json()).toEqual({
+      error: "forbidden",
+      message: "Falta el permiso requerido: provider:read",
+    });
     await app.close();
   });
 

@@ -36,6 +36,8 @@ export interface ActorData {
     url: string;
     mediaType?: string;
   };
+  status?: Record<string, unknown>;
+  statusHistory?: unknown;
 }
 
 export interface KeyPair {
@@ -278,6 +280,10 @@ export class ActivityPodsClient {
       publicKey: data["publicKey"] as ActorData["publicKey"],
       icon: data["icon"] as ActorData["icon"],
       image: data["image"] as ActorData["image"],
+      status: (data["status"] && typeof data["status"] === "object" && !Array.isArray(data["status"]))
+        ? (data["status"] as Record<string, unknown>)
+        : undefined,
+      statusHistory: data["statusHistory"],
     };
   }
 

@@ -1,15 +1,16 @@
-const SHORTCODE_BODY_RE = /^[A-Za-z0-9_+-]{1,64}$/;
+import {
+  ACTIVITYSTREAMS_CONTEXT,
+  LITEPUB_EMOJI_REACT_CONTEXT,
+  extractApCustomEmoji,
+  normalizeShortcode,
+  toArray,
+  type ApCustomEmoji,
+} from "./apCustomEmojis.js";
+
 const SHORTCODE_RE = /^:([A-Za-z0-9_+-]{1,64}):$/;
 const EMOJI_GRAPHEME_RE = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator})/u;
 
 type AnyRecord = Record<string, unknown>;
-
-function toArray<T>(value: T | T[] | null | undefined): T[] {
-  if (!value) {
-    return [];
-  }
-  return Array.isArray(value) ? value : [value];
-}
 
 function splitGraphemes(input: string): string[] {
   if (!input) {
@@ -22,28 +23,6 @@ function splitGraphemes(input: string): string[] {
   }
 
   return Array.from(input);
-}
-
-function normalizeShortcode(value: unknown): string | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const direct = trimmed.match(SHORTCODE_RE);
-  if (direct) {
-    return `:${direct[1]}:`;
-  }
-
-  if (SHORTCODE_BODY_RE.test(trimmed)) {
-    return `:${trimmed}:`;
-  }
-
-  return null;
 }
 
 function normalizeDirectShortcode(value: unknown): string | null {
@@ -81,6 +60,13 @@ function normalizeUnicodeEmoji(value: unknown): string | null {
   }
 
   return EMOJI_GRAPHEME_RE.test(first) ? first : null;
+}
+
+export interface ApEmojiReaction {
+  content: string;
+  customEmoji: ApCustomEmoji | null;
+  normalizedActivity: Record<string, unknown>;
+  emittedType: "Like" | "EmojiReact";
 }
 
 function hasType(activity: AnyRecord, ...allowedTypes: string[]): boolean {
@@ -135,4 +121,162 @@ export function extractApEmojiReactionContent(activity: unknown): string | undef
   }
 
   return undefined;
+}
+
+export function parseApEmojiReaction(activity: unknown): ApEmojiReaction | null {
+  if (!isApEmojiReactionActivity(activity)) {
+    return null;
+  }
+
+  const apActivity = activity as AnyRecord;
+  const normalizedContent = extractApEmojiReactionContent(apActivity);
+  if (!normalizedContent) {
+    return null;
+  }
+
+  const shortcode = normalizeShortcode(normalizedContent);
+  const normalizedTags = normalizeEmojiReactionTags(apActivity["tag"], shortcode);
+  if (shortcode && !normalizedTags) {
+    return null;
+  }
+
+  const normalizedActivity: Record<string, unknown> = shortcode
+    ? {
+        ...apActivity,
+        content: normalizedContent,
+        tag: normalizedTags,
+      }
+    : {
+        ...apActivity,
+        content: normalizedContent,
+      };
+
+  const emittedType = hasType(
+    apActivity,
+    'EmojiReact',
+    'litepub:EmojiReact',
+    'http://litepub.social/ns#EmojiReact',
+  )
+    ? "EmojiReact"
+    : "Like";
+
+  return {
+    content: normalizedContent,
+    customEmoji: shortcode
+      ? extractApCustomEmoji(normalizedTags?.[0] ?? null, { expectedShortcode: shortcode })
+      : null,
+    normalizedActivity: ensureEmojiReactContext(normalizedActivity),
+    emittedType,
+  };
+}
+
+export function normalizeApEmojiReactionActivity(activity: unknown): unknown {
+  if (!isApEmojiReactionActivity(activity)) {
+    return activity;
+  }
+
+  const apActivity = activity as AnyRecord;
+  const normalizedContent = extractApEmojiReactionContent(apActivity);
+  if (!normalizedContent) {
+    return activity;
+  }
+
+  const shortcode = normalizeShortcode(normalizedContent);
+  const normalizedTags = normalizeEmojiReactionTags(apActivity["tag"], shortcode);
+  if (shortcode && !normalizedTags) {
+    return activity;
+  }
+
+  const nextActivity: Record<string, unknown> = shortcode
+    ? {
+        ...apActivity,
+        content: normalizedContent,
+        tag: normalizedTags,
+      }
+    : {
+        ...apActivity,
+        content: normalizedContent,
+      };
+
+  return ensureEmojiReactContext(nextActivity);
+}
+
+function ensureEmojiReactContext(activity: Record<string, unknown>): Record<string, unknown> {
+  if (
+    !hasType(
+      activity,
+      'EmojiReact',
+      'litepub:EmojiReact',
+      'http://litepub.social/ns#EmojiReact',
+    )
+  ) {
+    return activity;
+  }
+
+  const contexts = toArray(activity["@context"]);
+  const hasAsContext = contexts.some(entry => entry === ACTIVITYSTREAMS_CONTEXT);
+  const hasLitepubContext = contexts.some(
+    entry =>
+      entry
+      && typeof entry === "object"
+      && !Array.isArray(entry)
+      && (entry as AnyRecord)["EmojiReact"] === "litepub:EmojiReact",
+  );
+  if (hasAsContext && hasLitepubContext) {
+    return activity;
+  }
+
+  const nextContext = [...contexts];
+  if (!hasAsContext) {
+    nextContext.unshift(ACTIVITYSTREAMS_CONTEXT);
+  }
+  if (!hasLitepubContext) {
+    nextContext.push(LITEPUB_EMOJI_REACT_CONTEXT);
+  }
+
+  return {
+    ...activity,
+    "@context": nextContext,
+  };
+}
+
+function normalizeEmojiReactionTags(tags: unknown, shortcode: string | null): Array<Record<string, unknown>> | null {
+  if (!shortcode) {
+    return null;
+  }
+
+  const tagList = toArray(tags);
+  if (tagList.length !== 1) {
+    return null;
+  }
+
+  const normalizedTag = normalizeCustomEmojiTag(tagList[0], shortcode);
+  return normalizedTag ? [normalizedTag] : null;
+}
+
+function normalizeCustomEmojiTag(tag: unknown, shortcode: string): Record<string, unknown> | null {
+  if (!tag || typeof tag !== "object" || Array.isArray(tag)) {
+    return null;
+  }
+
+  const emojiTag = tag as AnyRecord;
+  const type = emojiTag["type"] ?? emojiTag["@type"];
+  if (
+    type !== "Emoji"
+    && type !== "toot:Emoji"
+    && type !== "http://joinmastodon.org/ns#Emoji"
+  ) {
+    return null;
+  }
+
+  const normalizedName = normalizeShortcode(emojiTag["name"] ?? shortcode);
+  if (!normalizedName || normalizedName.toLowerCase() !== shortcode.toLowerCase()) {
+    return null;
+  }
+
+  return {
+    ...emojiTag,
+    type: "Emoji",
+    name: shortcode,
+  };
 }
