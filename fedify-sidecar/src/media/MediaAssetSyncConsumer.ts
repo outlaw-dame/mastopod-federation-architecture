@@ -56,6 +56,25 @@ const NOOP_LOGGER: MediaAssetSyncLogger = {
 
 type MediaAssetEvent = z.infer<typeof mediaAssetEventSchema>;
 
+export interface MediaAssetModerationDecision {
+  moduleId: string;
+  traceId: string;
+  mode: "disabled" | "dry-run" | "enforce";
+  desiredAction: "accept" | "label" | "filter" | "reject";
+  appliedAction: "accept" | "label" | "filter" | "reject";
+  matchedLabels: string[];
+  matchedSources: string[];
+  confidence?: number;
+  reason?: string;
+  markSensitive: boolean;
+  contentWarning?: string;
+}
+
+export type MediaAssetPolicyEvaluator = (
+  event: MediaAssetEvent,
+  meta: { partition: number; offset: string },
+) => Promise<MediaAssetModerationDecision | null>;
+
 export class MediaAssetSyncConsumer {
   private consumer: Consumer | null = null;
   private running = false;
@@ -67,6 +86,7 @@ export class MediaAssetSyncConsumer {
   constructor(
     private readonly config: MediaAssetSyncConsumerConfig,
     private readonly logger: MediaAssetSyncLogger = NOOP_LOGGER,
+    private readonly policyEvaluator?: MediaAssetPolicyEvaluator,
   ) {
     this.endpointUrl = buildEndpointUrl(
       config.activityPodsBaseUrl,
@@ -200,10 +220,15 @@ export class MediaAssetSyncConsumer {
     event: MediaAssetEvent,
     meta: { partition: number; offset: string },
   ): Promise<void> {
+    const moderation = this.policyEvaluator
+      ? await this.policyEvaluator(event, meta)
+      : null;
+
     const requestBody = JSON.stringify({
       asset: event.asset,
       bindings: event.bindings ?? {},
       signals: event.signals ?? null,
+      moderation,
       receivedAt: new Date().toISOString(),
       sourceTopic: this.config.mediaAssetTopic,
       sourcePartition: meta.partition,
