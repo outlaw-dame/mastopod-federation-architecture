@@ -3,15 +3,55 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { getDatasetFromUri } = require('@semapps/ldp');
 const { Errors: WebErrors } = require('moleculer-web');
 const { MoleculerError } = require('moleculer').Errors;
 
 const JSON_LD = 'application/ld+json';
+const AS = 'https://www.w3.org/ns/activitystreams#';
+const APODS = 'http://activitypods.org/ns/core#';
 const SEMAPPS_FILE_TYPES = new Set([
   'semapps:File',
   'http://semapps.org/ns/core#File',
   'https://semapps.org/ns/core#File',
 ]);
+const SAFETY_SIGNAL_SOURCES = new Set([
+  'google-vision',
+  'google-video',
+  'safe-browsing',
+  'cloudflare-csam',
+]);
+const MAX_SIGNAL_COUNT = 8;
+const MAX_SIGNAL_LABELS = 16;
+const MAX_SIGNAL_LABEL_LENGTH = 64;
+const MAX_SIGNAL_RAW_BYTES = 2048;
+const MEDIA_PIPELINE_CONTEXT = {
+  apods: APODS,
+  as: AS,
+  xsd: 'http://www.w3.org/2001/XMLSchema#',
+  'apods:mediaPipelineSignalsUpdatedAt': { '@type': 'xsd:dateTime' },
+  'apods:mediaPipelineModerationUpdatedAt': { '@type': 'xsd:dateTime' },
+  'apods:mediaPipelineModerationConfidence': { '@type': 'xsd:double' },
+};
+const MEDIA_PIPELINE_PREDICATES = [
+  `${AS}summary`,
+  `${AS}sensitive`,
+  `${APODS}mediaPipelineSignalsJson`,
+  `${APODS}mediaPipelineSignalLabel`,
+  `${APODS}mediaPipelineSignalSource`,
+  `${APODS}mediaPipelineSignalsUpdatedAt`,
+  `${APODS}mediaPipelineModerationModuleId`,
+  `${APODS}mediaPipelineModerationTraceId`,
+  `${APODS}mediaPipelineModerationMode`,
+  `${APODS}mediaPipelineModerationDesiredAction`,
+  `${APODS}mediaPipelineModerationAction`,
+  `${APODS}mediaPipelineModerationLabel`,
+  `${APODS}mediaPipelineModerationSource`,
+  `${APODS}mediaPipelineModerationUpdatedAt`,
+  `${APODS}mediaPipelineModerationConfidence`,
+  `${APODS}mediaPipelineModerationReason`,
+  `${APODS}mediaPipelineModerationContentWarning`,
+];
 
 module.exports = {
   name: 'internal-media-pipeline-api',
@@ -118,6 +158,8 @@ module.exports = {
       }
 
       const activityPubBinding = this.normalizeActivityPubBinding(ctx.params?.bindings?.activitypub);
+      const mediaPipelineSignals = this.normalizeSignals(ctx.params?.signals);
+      const moderation = this.normalizeModerationDecision(ctx.params?.moderation);
       const candidateSourceUrls = this.resolveCandidateSourceUrls(asset);
       const updatedResources = [];
       const skippedResources = [];
@@ -139,13 +181,14 @@ module.exports = {
           throw error;
         }
 
-        const next = this.mergeMediaAsset(existing, asset, activityPubBinding);
+        const next = this.mergeMediaAsset(existing, asset, activityPubBinding, mediaPipelineSignals, moderation);
         await ctx.call('ldp.resource.put', {
           resourceUri: sourceUrl,
           resource: next,
           contentType: JSON_LD,
           webId: 'system',
         });
+        await this.persistMediaPipelineMetadata(ctx, sourceUrl, asset, mediaPipelineSignals, moderation);
 
         updatedResources.push(sourceUrl);
       }
@@ -154,6 +197,8 @@ module.exports = {
       return {
         ok: true,
         assetId: asset.assetId,
+        signalCount: mediaPipelineSignals.length,
+        moderationAction: moderation?.appliedAction || 'accept',
         updatedCount: updatedResources.length,
         updatedResources,
         skippedCount: skippedResources.length,
@@ -334,6 +379,136 @@ module.exports = {
       };
     },
 
+    normalizeSignals(signals) {
+      if (!Array.isArray(signals)) {
+        return [];
+      }
+
+      const normalized = [];
+
+      for (const signal of signals) {
+        if (!signal || typeof signal !== 'object' || Array.isArray(signal)) {
+          continue;
+        }
+
+        const source = typeof signal.source === 'string' ? signal.source.trim().toLowerCase() : '';
+        if (!SAFETY_SIGNAL_SOURCES.has(source)) {
+          continue;
+        }
+
+        const labels = [...new Set(
+          (Array.isArray(signal.labels) ? signal.labels : [])
+            .map(label => this.normalizeSignalLabel(label))
+            .filter(Boolean)
+        )].slice(0, MAX_SIGNAL_LABELS);
+
+        const next = {
+          source,
+          labels,
+        };
+
+        if (typeof signal.confidence === 'number' && Number.isFinite(signal.confidence)) {
+          next.confidence = Math.max(0, Math.min(1, signal.confidence));
+        }
+
+        const raw = this.normalizeSignalRaw(signal.raw);
+        if (raw !== undefined) {
+          next.raw = raw;
+        }
+
+        normalized.push(next);
+        if (normalized.length >= MAX_SIGNAL_COUNT) {
+          break;
+        }
+      }
+
+      return normalized;
+    },
+
+    normalizeModerationDecision(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return null;
+      }
+
+      const desiredAction = typeof value.desiredAction === 'string' ? value.desiredAction.trim().toLowerCase() : 'accept';
+      const appliedAction = typeof value.appliedAction === 'string' ? value.appliedAction.trim().toLowerCase() : 'accept';
+      const moduleId = typeof value.moduleId === 'string' ? value.moduleId.trim() : '';
+      const traceId = typeof value.traceId === 'string' ? value.traceId.trim() : '';
+
+      if (!moduleId || !traceId) {
+        return null;
+      }
+
+      const moderation = {
+        moduleId,
+        traceId,
+        mode: typeof value.mode === 'string' ? value.mode.trim().toLowerCase() : 'dry-run',
+        desiredAction: ['accept', 'label', 'filter', 'reject'].includes(desiredAction) ? desiredAction : 'accept',
+        appliedAction: ['accept', 'label', 'filter', 'reject'].includes(appliedAction) ? appliedAction : 'accept',
+        matchedLabels: [...new Set(
+          (Array.isArray(value.matchedLabels) ? value.matchedLabels : [])
+            .map(label => this.normalizeSignalLabel(label))
+            .filter(Boolean)
+        )],
+        matchedSources: [...new Set(
+          (Array.isArray(value.matchedSources) ? value.matchedSources : [])
+            .map(source => typeof source === 'string' ? source.trim().toLowerCase() : '')
+            .filter(Boolean)
+        )],
+        markSensitive: value.markSensitive === true,
+      };
+
+      if (typeof value.confidence === 'number' && Number.isFinite(value.confidence)) {
+        moderation.confidence = Math.max(0, Math.min(1, value.confidence));
+      }
+      if (typeof value.reason === 'string' && value.reason.trim()) {
+        moderation.reason = value.reason.trim().slice(0, 240);
+      }
+      if (typeof value.contentWarning === 'string' && value.contentWarning.trim()) {
+        moderation.contentWarning = value.contentWarning.trim().slice(0, 160);
+      }
+
+      return moderation;
+    },
+
+    normalizeSignalLabel(value) {
+      if (typeof value !== 'string') {
+        return undefined;
+      }
+
+      const normalized = value
+        .replace(/[\u0000-\u001F\u007F]/g, '')
+        .trim()
+        .toLowerCase();
+
+      if (!normalized) {
+        return undefined;
+      }
+
+      return normalized.slice(0, MAX_SIGNAL_LABEL_LENGTH);
+    },
+
+    normalizeSignalRaw(value) {
+      if (value === undefined) {
+        return undefined;
+      }
+
+      try {
+        const serialized = JSON.stringify(value);
+        if (typeof serialized !== 'string') {
+          return undefined;
+        }
+
+        if (Buffer.byteLength(serialized, 'utf8') <= MAX_SIGNAL_RAW_BYTES) {
+          return JSON.parse(serialized);
+        }
+      } catch {
+        return undefined;
+      }
+
+      return { truncated: true };
+    },
+
     resolveCandidateSourceUrls(asset) {
       const values = Array.isArray(asset.sourceUrls) ? asset.sourceUrls : [];
       return [...new Set(
@@ -343,10 +518,31 @@ module.exports = {
       )];
     },
 
-    mergeMediaAsset(existing, asset, activityPubBinding) {
+    ensureMediaPipelineContext(resource) {
+      const existing = Array.isArray(resource['@context'])
+        ? [...resource['@context']]
+        : resource['@context']
+          ? [resource['@context']]
+          : [];
+
+      const hasContext = existing.some(value => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        return value.apods === APODS;
+      });
+
+      if (!hasContext) {
+        existing.push(MEDIA_PIPELINE_CONTEXT);
+      }
+
+      resource['@context'] = existing;
+    },
+
+    mergeMediaAsset(existing, asset, activityPubBinding, mediaPipelineSignals, moderation) {
       const next = { ...existing };
       const preferredUrl = activityPubBinding?.url || asset.canonicalUrl;
       const preferredMimeType = activityPubBinding?.mediaType || asset.mimeType;
+
+      this.ensureMediaPipelineContext(next);
 
       next.url = preferredUrl;
       next.mediaType = preferredMimeType;
@@ -356,9 +552,11 @@ module.exports = {
       }
       if (typeof asset.contentWarning === 'string' && asset.contentWarning.trim()) {
         next.summary = asset.contentWarning.trim();
+        next['as:summary'] = asset.contentWarning.trim();
       }
       if (asset.isSensitive === true) {
         next.sensitive = true;
+        next['as:sensitive'] = true;
       }
       if (typeof asset.width === 'number' && Number.isFinite(asset.width)) {
         next.width = asset.width;
@@ -384,7 +582,164 @@ module.exports = {
         next.duration = normalizedDuration;
       }
 
+      if (Array.isArray(mediaPipelineSignals) && mediaPipelineSignals.length > 0) {
+        next.mediaPipelineSignals = mediaPipelineSignals;
+        next.mediaPipelineSignalLabels = [...new Set(
+          mediaPipelineSignals.flatMap(signal => Array.isArray(signal.labels) ? signal.labels : [])
+        )];
+        next.mediaPipelineSignalSources = [...new Set(
+          mediaPipelineSignals
+            .map(signal => (typeof signal.source === 'string' ? signal.source : ''))
+            .filter(Boolean)
+        )];
+        next.mediaPipelineSignalsUpdatedAt = new Date().toISOString();
+        next['apods:mediaPipelineSignalsJson'] = JSON.stringify(mediaPipelineSignals);
+        next['apods:mediaPipelineSignalLabel'] = next.mediaPipelineSignalLabels;
+        next['apods:mediaPipelineSignalSource'] = next.mediaPipelineSignalSources;
+        next['apods:mediaPipelineSignalsUpdatedAt'] = next.mediaPipelineSignalsUpdatedAt;
+      }
+
+      if (moderation && moderation.appliedAction && moderation.appliedAction !== 'accept') {
+        const moderationUpdatedAt = new Date().toISOString();
+        next.mediaPipelineModeration = {
+          moduleId: moderation.moduleId,
+          traceId: moderation.traceId,
+          mode: moderation.mode,
+          desiredAction: moderation.desiredAction,
+          appliedAction: moderation.appliedAction,
+          matchedLabels: moderation.matchedLabels,
+          matchedSources: moderation.matchedSources,
+          confidence: moderation.confidence,
+          reason: moderation.reason,
+          updatedAt: moderationUpdatedAt,
+        };
+        next.mediaPipelineModerationAction = moderation.appliedAction;
+        next.mediaPipelineModerationLabels = moderation.matchedLabels;
+        next['apods:mediaPipelineModerationModuleId'] = moderation.moduleId;
+        next['apods:mediaPipelineModerationTraceId'] = moderation.traceId;
+        next['apods:mediaPipelineModerationMode'] = moderation.mode;
+        next['apods:mediaPipelineModerationDesiredAction'] = moderation.desiredAction;
+        next['apods:mediaPipelineModerationAction'] = moderation.appliedAction;
+        next['apods:mediaPipelineModerationLabel'] = moderation.matchedLabels;
+        next['apods:mediaPipelineModerationSource'] = moderation.matchedSources;
+        next['apods:mediaPipelineModerationUpdatedAt'] = moderationUpdatedAt;
+        if (typeof moderation.confidence === 'number' && Number.isFinite(moderation.confidence)) {
+          next['apods:mediaPipelineModerationConfidence'] = moderation.confidence;
+        }
+        if (typeof moderation.reason === 'string' && moderation.reason) {
+          next['apods:mediaPipelineModerationReason'] = moderation.reason;
+        }
+        if (moderation.markSensitive === true) {
+          next.sensitive = true;
+          next['as:sensitive'] = true;
+        }
+        if (!next.summary && typeof moderation.contentWarning === 'string' && moderation.contentWarning) {
+          next.summary = moderation.contentWarning;
+          next['as:summary'] = moderation.contentWarning;
+        }
+        if (typeof moderation.contentWarning === 'string' && moderation.contentWarning) {
+          next['apods:mediaPipelineModerationContentWarning'] = moderation.contentWarning;
+        }
+      }
+
       return next;
+    },
+
+    async persistMediaPipelineMetadata(ctx, resourceUri, asset, mediaPipelineSignals, moderation) {
+      const metadata = this.buildMediaPipelineMetadata(resourceUri, asset, mediaPipelineSignals, moderation);
+      const quads = await ctx.call('jsonld.parser.toQuads', { input: metadata });
+      const insertQuads = quads.filter(
+        quad => quad.subject.termType === 'NamedNode' && quad.subject.value === resourceUri && MEDIA_PIPELINE_PREDICATES.includes(quad.predicate.value)
+      );
+      const deleteTriples = MEDIA_PIPELINE_PREDICATES.map((predicate, index) => `OPTIONAL { <${resourceUri}> <${predicate}> ?existing${index} . }`).join('\n');
+      const deleteTemplate = MEDIA_PIPELINE_PREDICATES.map((predicate, index) => `<${resourceUri}> <${predicate}> ?existing${index} .`).join('\n');
+      let query = `DELETE {\n${deleteTemplate}\n}`;
+      if (insertQuads.length > 0) {
+        query += `\nINSERT {\n${insertQuads.map(quad => this.quadToSparql(quad)).join('\n')}\n}`;
+      }
+      query += `\nWHERE {\n${deleteTriples}\n}`;
+
+      await ctx.call('triplestore.update', {
+        query,
+        dataset: getDatasetFromUri(resourceUri),
+        webId: 'system',
+      });
+    },
+
+    buildMediaPipelineMetadata(resourceUri, asset, mediaPipelineSignals, moderation) {
+      const metadata = {
+        '@context': ['https://www.w3.org/ns/activitystreams', MEDIA_PIPELINE_CONTEXT],
+        id: resourceUri,
+      };
+
+      if (typeof asset.contentWarning === 'string' && asset.contentWarning.trim()) {
+        metadata['as:summary'] = asset.contentWarning.trim();
+      }
+      if (asset.isSensitive === true) {
+        metadata['as:sensitive'] = true;
+      }
+      if (Array.isArray(mediaPipelineSignals) && mediaPipelineSignals.length > 0) {
+        const signalLabels = [...new Set(
+          mediaPipelineSignals.flatMap(signal => Array.isArray(signal.labels) ? signal.labels : [])
+        )];
+        const signalSources = [...new Set(
+          mediaPipelineSignals
+            .map(signal => (typeof signal.source === 'string' ? signal.source : ''))
+            .filter(Boolean)
+        )];
+        metadata['apods:mediaPipelineSignalsJson'] = JSON.stringify(mediaPipelineSignals);
+        metadata['apods:mediaPipelineSignalLabel'] = signalLabels;
+        metadata['apods:mediaPipelineSignalSource'] = signalSources;
+        metadata['apods:mediaPipelineSignalsUpdatedAt'] = new Date().toISOString();
+      }
+      if (moderation && moderation.appliedAction && moderation.appliedAction !== 'accept') {
+        const moderationUpdatedAt = new Date().toISOString();
+        metadata['apods:mediaPipelineModerationModuleId'] = moderation.moduleId;
+        metadata['apods:mediaPipelineModerationTraceId'] = moderation.traceId;
+        metadata['apods:mediaPipelineModerationMode'] = moderation.mode;
+        metadata['apods:mediaPipelineModerationDesiredAction'] = moderation.desiredAction;
+        metadata['apods:mediaPipelineModerationAction'] = moderation.appliedAction;
+        metadata['apods:mediaPipelineModerationLabel'] = moderation.matchedLabels;
+        metadata['apods:mediaPipelineModerationSource'] = moderation.matchedSources;
+        metadata['apods:mediaPipelineModerationUpdatedAt'] = moderationUpdatedAt;
+        if (typeof moderation.confidence === 'number' && Number.isFinite(moderation.confidence)) {
+          metadata['apods:mediaPipelineModerationConfidence'] = moderation.confidence;
+        }
+        if (typeof moderation.reason === 'string' && moderation.reason) {
+          metadata['apods:mediaPipelineModerationReason'] = moderation.reason;
+        }
+        if (moderation.markSensitive === true) {
+          metadata['as:sensitive'] = true;
+        }
+        if (typeof moderation.contentWarning === 'string' && moderation.contentWarning) {
+          metadata['apods:mediaPipelineModerationContentWarning'] = moderation.contentWarning;
+          if (!metadata['as:summary']) {
+            metadata['as:summary'] = moderation.contentWarning;
+          }
+        }
+      }
+
+      return metadata;
+    },
+
+    quadToSparql(quad) {
+      return `<${quad.subject.value}> <${quad.predicate.value}> ${this.rdfTermToSparql(quad.object)} .`;
+    },
+
+    rdfTermToSparql(term) {
+      if (term.termType === 'NamedNode') {
+        return `<${term.value}>`;
+      }
+      if (term.termType === 'Literal') {
+        if (term.datatype?.value === 'http://www.w3.org/2001/XMLSchema#string') {
+          return `'''${term.value?.replace(/'/g, "\\'")}'''`;
+        }
+        if (term.datatype?.value === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString') {
+          return `'''${term.value}'''@${term.language}`;
+        }
+        return `"${term.value}"^^<${term.datatype.value}>`;
+      }
+      throw new Error(`Unsupported RDF term type: ${term.termType}`);
     },
 
     normalizeDuration(value) {

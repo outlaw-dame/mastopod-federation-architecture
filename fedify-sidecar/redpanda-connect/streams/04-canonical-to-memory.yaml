@@ -20,7 +20,7 @@ input:
     topics:
       - canonical.v1
     consumer_group: rpconnect-canonical-dev-v1
-    start_from_oldest: false
+    start_offset: latest
     auto_replay_nacks: false
     commit_period: 5s
     tls:
