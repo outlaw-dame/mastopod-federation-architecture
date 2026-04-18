@@ -22,6 +22,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { FedifyFederationAdapter } from "./FedifyFederationAdapter.js";
+import { injectBlockedProperty } from "./fep-c648/BlockedCollectionFastifyBridge.js";
 import { logger } from "../utils/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -97,7 +98,18 @@ async function fedifyHandler(
   });
 
   // Stream or buffer the body.
-  const body = await response.text();
+  let body = await response.text();
+
+  // FEP-c648: inject `blocked` URL + context into actor document responses.
+  const contentType = response.headers.get("content-type") ?? "";
+  if (
+    (contentType.includes("application/activity+json") ||
+      contentType.includes("application/ld+json")) &&
+    body.length > 0
+  ) {
+    body = injectBlockedProperty(request.url, body, adapter.buildContext().domain);
+  }
+
   reply.send(body);
 }
 
