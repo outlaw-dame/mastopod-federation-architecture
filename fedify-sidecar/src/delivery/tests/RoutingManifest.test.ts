@@ -26,6 +26,7 @@ vi.mock("../../utils/logger.js", () => {
 });
 
 import { describe, it, expect, vi, beforeEach, type MockInstance } from "vitest";
+import { InboundWorker } from "../inbound-worker.js";
 
 // ── Type imports (adjust paths once bridge / canonical types are extracted) ──
 // These types are intentionally defined inline here so the skeleton compiles
@@ -176,48 +177,128 @@ interface TestContext {
   bridge: ReturnType<typeof makeActivityPodsBridge>;
   atProjection: ReturnType<typeof makeAtProjection>;
   canonical: ReturnType<typeof makeCanonicalPublisher>;
+  blockedDomains?: Set<string>;
+  _worker?: RoutingTestWorker;
+  _seenIds?: Set<string>;
 }
 
 /**
- * STUB — wire to InboundWorker / routing service under test.
- *
- * Replace this with the real `createInboundWorker(config).processEnvelope(activity, ctx)`
- * call once the routing layer is extracted into a testable unit.
+ * Minimal subclass of InboundWorker that:
+ *  - Skips signature verification (all envelopes are pre-trusted)
+ *  - Exposes processEnvelope publicly for direct test invocation
  */
-async function setupFixture(
-  _activity: Record<string, unknown>,
-  _ctx: TestContext,
-): Promise<void> {
-  // TODO: build InboundWorkerConfig from ctx stubs and instantiate the worker
-  // Example:
-  //   const worker = createInboundWorker({
-  //     redpanda: ctx.redpanda,
-  //     activityPodsBridge: ctx.bridge,
-  //     atProjection: ctx.atProjection,
-  //     canonicalPublisher: ctx.canonical,
-  //     sidecarActorPaths: new Set(["/users/relay"]),
-  //   });
-  //   ctx._worker = worker;
+class RoutingTestWorker extends InboundWorker {
+  protected override async verifySignature(
+    _envelope: import("../../queue/sidecar-redis-queue.js").InboundEnvelope,
+  ) {
+    return { valid: false, error: "verifySignature should not run in routing tests" };
+  }
+
+  /** Expose processEnvelope for direct test invocation. */
+  async runEnvelope(
+    msgId: string,
+    env: import("../../queue/sidecar-redis-queue.js").InboundEnvelope,
+  ) {
+    return this.processEnvelope(msgId, env);
+  }
 }
 
 /**
- * STUB — dispatch the activity through the routing layer.
- *
- * Replace with: `await ctx._worker.processEnvelope(activity, envelope)`
+ * Build a minimal pre-trusted InboundEnvelope wrapping the given activity.
+ */
+function makeEnvelopeFromActivity(
+  activity: Record<string, unknown>,
+  opts: { path?: string } = {},
+): import("../../queue/sidecar-redis-queue.js").InboundEnvelope {
+  const actorUri =
+    typeof activity["actor"] === "string" ? activity["actor"] : "https://remote.example/users/sender";
+  return {
+    envelopeId: `test-${Math.random().toString(36).slice(2)}`,
+    method: "POST",
+    path: opts.path ?? "/users/alice/inbox",
+    headers: {
+      host: "local.example",
+      date: new Date().toUTCString(),
+    },
+    body: JSON.stringify(activity),
+    remoteIp: "127.0.0.1",
+    receivedAt: Date.now(),
+    attempt: 0,
+    notBeforeMs: 0,
+    // Pre-trust via Fedify verification so verifySignature is never called
+    verification: {
+      source: "fedify-v2",
+      actorUri,
+      verifiedAt: Date.now(),
+    },
+  };
+}
+
+/** Build the minimal queue stub needed for test dispatch. */
+function makeNullQueue(opts: { blockedDomains?: Set<string> } = {}) {
+  return {
+    consumeInbound: async function* () {},
+    consumeOutbound: async function* () {},
+    enqueueInbound: vi.fn().mockResolvedValue(undefined),
+    enqueueOutbound: vi.fn().mockResolvedValue(undefined),
+    ack: vi.fn().mockResolvedValue(undefined),
+    moveToDlq: vi.fn().mockResolvedValue(undefined),
+    checkIdempotency: vi.fn().mockResolvedValue(true),
+    clearIdempotency: vi.fn().mockResolvedValue(undefined),
+    isDomainBlocked: vi.fn().mockImplementation(async (domain: string) =>
+      opts.blockedDomains ? opts.blockedDomains.has(domain) : false,
+    ),
+    checkDomainRateLimit: vi.fn().mockResolvedValue(true),
+    acquireDomainSlot: vi.fn().mockResolvedValue(true),
+    releaseDomainSlot: vi.fn().mockResolvedValue(undefined),
+    getClaimIdleTimeMs: () => 60_000,
+  } as any;
+}
+
+/**
+ * Wire InboundWorker with ctx stubs.
+ */
+function setupFixture(
+  _activity: Record<string, unknown>,
+  ctx: TestContext,
+): void {
+  const seenIds = new Set<string>();
+  ctx._seenIds = seenIds;
+  ctx._worker = new RoutingTestWorker(
+    makeNullQueue({ blockedDomains: ctx.blockedDomains }),
+    ctx.redpanda as any,
+    {
+      concurrency: 1,
+      activityPodsUrl: "http://localhost:3000",
+      activityPodsToken: "test-token",
+      requestTimeoutMs: 5_000,
+      userAgent: "test",
+      fedifyRuntimeIntegrationEnabled: false,
+      sidecarActorPaths: new Set(["/users/relay"]),
+      domain: "local.example",
+      activityPodsBridge: ctx.bridge,
+      atProjection: ctx.atProjection,
+      canonicalPublisher: ctx.canonical,
+      seenActivityIds: seenIds,
+    },
+  );
+}
+
+/**
+ * Dispatch the activity through the routing layer.
  */
 async function dispatchEvent(
   activity: Record<string, unknown>,
   ctx: TestContext,
 ): Promise<void> {
-  // TODO: call the real routing entrypoint.
-  // For now this is a no-op so the assertion stubs produce the right "pending" failures.
-  void activity;
-  void ctx;
+  if (!ctx._worker) {
+    setupFixture(activity, ctx);
+  }
+  const envelope = makeEnvelopeFromActivity(activity);
+  await ctx._worker!.runEnvelope("msg-test", envelope);
 }
 
-/**
- * Assert that the routing layer produced the expected side-effects.
- */
+
 function assertRouting(
   ctx: TestContext,
   expected: RoutingAssertion,
@@ -525,6 +606,7 @@ describe("F: policy gates prevent stream writes for blocked domains", () => {
       bridge: makeActivityPodsBridge(),
       atProjection: makeAtProjection(),
       canonical: makeCanonicalPublisher(),
+      blockedDomains: new Set(["blocked.example", "suspended.example"]),
     };
   });
 

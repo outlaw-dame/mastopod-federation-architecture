@@ -30,6 +30,9 @@ import {
 import { metrics } from "../metrics/index.js";
 import { logger } from "../utils/logger.js";
 import { CapabilityGateResult } from "../capabilities/gates.js";
+import type { SigningClient } from "../signing/signing-client.js";
+import type { FollowersSyncService } from "../federation/fep8fcf/FollowersSyncService.js";
+import { COLLECTION_SYNC_HEADER } from "../federation/fep8fcf/CollectionSyncHeader.js";
 
 // ============================================================================
 // Types
@@ -54,6 +57,57 @@ export interface InboundWorkerConfig {
    * ActivityPods (which has no record of these actors).
    */
   sidecarActorPaths?: Set<string>;
+  /**
+   * FEP-8fcf followers sync service.  When present, inbound activities with a
+   * Collection-Synchronization header will trigger async digest comparison and
+   * reconciliation.  Failures are swallowed — sync is optional per spec.
+   */
+  followersSyncService?: FollowersSyncService;
+  /**
+   * Signing client needed to sign the authenticated GET to the remote partial
+   * followers collection URL when a digest mismatch is detected.
+   */
+  followersSyncSigningClient?: SigningClient;
+  /**
+   * Public hostname of this sidecar (e.g. "social.example.com").
+   * Used to construct canonical local actor URIs for FEP-8fcf request signing.
+   * Also used to detect locally-authored activities (actor domain matches) and
+   * route them to Stream1 instead of Stream2.
+   */
+  domain?: string;
+  /**
+   * Optional injectable bridge for forwarding inbound activities to ActivityPods.
+   * When provided, replaces the default HTTP-based forwardToActivityPods path.
+   * Primarily used for in-process testing.
+   */
+  activityPodsBridge?: {
+    forwardInboundActivity(
+      envelope: { path: string; headers: Record<string, string> },
+      activity: unknown,
+      actorUri: string,
+    ): Promise<{ status: number }>;
+  };
+  /**
+   * Optional injectable AT projection service.
+   * When provided, called (fault-isolated) after successful ActivityPods forwarding
+   * for public activities to project AP events into the AT protocol space.
+   */
+  atProjection?: {
+    projectToCanonical(activity: unknown, actorUri: string): Promise<unknown>;
+  };
+  /**
+   * Optional injectable canonical event publisher.
+   * When provided, called (fault-isolated) after AT projection attempt.
+   */
+  canonicalPublisher?: {
+    publish(event: unknown): Promise<void>;
+  };
+  /**
+   * Optional set for in-process idempotency tracking (primarily for tests).
+   * When provided, activity IDs are checked/recorded here to gate duplicate
+   * stream writes and bridge forwarding.
+   */
+  seenActivityIds?: Set<string>;
 }
 
 export interface VerificationResult {
@@ -147,6 +201,15 @@ export function resolveActorUriFromVerificationDocument(
 // Inbound Worker
 // ============================================================================
 
+/** Extract hostname from a URI, or null if unparseable. */
+function extractDomain(uri: string): string | null {
+  try {
+    return new URL(uri).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
 export class InboundWorker {
   private queue: RedisStreamsQueue;
   private redpanda: RedPandaProducer;
@@ -185,6 +248,39 @@ export class InboundWorker {
     } catch (err: any) {
       logger.warn("FederationRuntimeAdapter hook threw (swallowed)", {
         hook,
+        error: err.message,
+      });
+    }
+  }
+
+  /** Call atProjection.projectToCanonical fault-isolated. */
+  private async invokeAtProjection(
+    activity: unknown,
+    actorUri: string,
+    envelopeId: string,
+  ): Promise<void> {
+    if (!this.config.atProjection) return;
+    try {
+      await this.config.atProjection.projectToCanonical(activity, actorUri);
+    } catch (err: any) {
+      logger.warn("AT projection failed (swallowed)", {
+        envelopeId,
+        error: err.message,
+      });
+    }
+  }
+
+  /** Call canonicalPublisher.publish fault-isolated. */
+  private async invokeCanonicalPublisher(
+    event: unknown,
+    envelopeId: string,
+  ): Promise<void> {
+    if (!this.config.canonicalPublisher) return;
+    try {
+      await this.config.canonicalPublisher.publish(event);
+    } catch (err: any) {
+      logger.warn("Canonical publisher failed (swallowed)", {
+        envelopeId,
         error: err.message,
       });
     }
@@ -308,8 +404,166 @@ export class InboundWorker {
         return;
       }
 
+      // Step 3.5: FEP-8fcf — process Collection-Synchronization header if present.
+      // Fire-and-forget: errors are swallowed so they never block activity processing.
+      const collectionSyncHeader = envelope.headers[COLLECTION_SYNC_HEADER];
+      if (
+        collectionSyncHeader &&
+        this.config.followersSyncService &&
+        this.config.followersSyncSigningClient
+      ) {
+        const syncService = this.config.followersSyncService;
+        const syncSigningClient = this.config.followersSyncSigningClient;
+        // Derive the local actor URI from the inbox path so we can sign the
+        // authenticated GET to the remote partial collection URL.
+        const localActorUri = this.deriveLocalActorUriFromInboxPath(envelope.path);
+        if (localActorUri) {
+          // Fetch the sender's actor document to get their followers collection URI.
+          // We already have it in cache from signature verification above.
+          this.fetchActorDocument(verifiedActorUri).then((actorDoc) => {
+            if (!actorDoc || typeof actorDoc !== "object") return;
+            return syncService.processInboundSyncHeader(
+              collectionSyncHeader,
+              verifiedActorUri,
+              actorDoc as Record<string, unknown>,
+              syncSigningClient,
+              localActorUri,
+            );
+          }).catch((err: Error) => {
+            logger.warn("[fep8fcf] inbound sync header processing failed (swallowed)", {
+              envelopeId: envelope.envelopeId,
+              error: err.message,
+            });
+          });
+        }
+      }
+
+      // Step 3.5b: Domain block check — reject activities from blocked domains.
+      {
+        const actorDomain = extractDomain(verifiedActorUri);
+        if (actorDomain) {
+          const blocked = await this.queue.isDomainBlocked(actorDomain);
+          if (blocked) {
+            metrics.inboundActivityPubActivities.inc({ stage: "domain_blocked", activity_type: activityType });
+            await this.queue.ack("inbound", messageId);
+            logger.info("Activity from blocked domain discarded", {
+              envelopeId: envelope.envelopeId,
+              actorDomain,
+            });
+            return;
+          }
+        }
+      }
+
+      // Step 3.75: In-process idempotency gate (primarily for testing; production
+      // idempotency is handled at the Redis queue level).
+      if (this.config.seenActivityIds && activity.id) {
+        const activityId = String(activity.id);
+        if (this.config.seenActivityIds.has(activityId)) {
+          await this.queue.ack("inbound", messageId);
+          logger.debug("Duplicate activity suppressed by in-process idempotency gate", {
+            activityId,
+          });
+          return;
+        }
+        this.config.seenActivityIds.add(activityId);
+      }
+
       // Step 4: Check if activity is public
       const isPublic = this.isPublicActivity(activity);
+
+      // Step 4.1: Detect sidecar-managed actors by actor URI path.
+      // Sidecar actors (e.g. /users/relay) take the Stream2 fast-path regardless
+      // of whether they are on the local domain; ActivityPods never manages them.
+      const isSidecarActor = (() => {
+        if (!this.config.sidecarActorPaths) return false;
+        try {
+          const actorPath = new URL(verifiedActorUri).pathname;
+          return this.config.sidecarActorPaths.has(actorPath);
+        } catch {
+          return false;
+        }
+      })();
+
+      if (isSidecarActor) {
+        metrics.inboundActivityPubActivities.inc({ stage: "sidecar_actor_uri", activity_type: activityType });
+        await this.queue.ack("inbound", messageId);
+        if (isPublic) {
+          try {
+            await this.redpanda.publishToStream2({
+              activity,
+              actorUri: verifiedActorUri,
+              receivedAt: envelope.receivedAt,
+              path: envelope.path,
+            });
+          } catch (err: any) {
+            logger.error("Failed to publish sidecar-actor activity to Stream2", {
+              envelopeId: envelope.envelopeId,
+              error: err.message,
+            });
+          }
+        }
+        // Canonical publisher (fault-isolated) for sidecar actor activities
+        await this.invokeCanonicalPublisher(
+          { activity, actorUri: verifiedActorUri, isPublic, isPrivate: !isPublic, isLocal: false },
+          envelope.envelopeId,
+        );
+        logger.info("Inbound activity handled for sidecar actor (actor URI path)", {
+          envelopeId: envelope.envelopeId,
+          actorUri: verifiedActorUri,
+          activityType,
+        });
+        return;
+      }
+
+      // Step 4.25: Detect locally-authored activities.
+      // When a local actor (domain matches config.domain) appears on the inbound
+      // path, route to Stream1 (not Stream2) and skip ActivityPods forwarding.
+      const isLocalActor =
+        typeof this.config.domain === "string" &&
+        this.config.domain.length > 0 &&
+        typeof verifiedActorUri === "string" &&
+        verifiedActorUri.includes(`://${this.config.domain}/`);
+
+      if (isLocalActor) {
+        metrics.inboundActivityPubActivities.inc({ stage: "local_actor", activity_type: activityType });
+        await this.queue.ack("inbound", messageId);
+        if (isPublic) {
+          try {
+            await this.redpanda.publishToStream1({
+              activity,
+              actorUri: verifiedActorUri,
+              receivedAt: envelope.receivedAt,
+              path: envelope.path,
+            });
+          } catch (err: any) {
+            logger.error("Failed to publish local-actor activity to Stream1", {
+              envelopeId: envelope.envelopeId,
+              error: err.message,
+            });
+          }
+        }
+        // AT projection + canonical (fault-isolated) for local activities
+        await this.invokeAtProjection(activity, verifiedActorUri, envelope.envelopeId);
+        {
+          const kind =
+            activityType === "Update"
+              ? "PostEdit"
+              : activityType === "Delete" || activityType === "Undo"
+                ? "PostDelete"
+                : undefined;
+          await this.invokeCanonicalPublisher(
+            { activity, actorUri: verifiedActorUri, isPublic, isPrivate: !isPublic, isLocal: true, ...(kind ? { kind } : {}) },
+            envelope.envelopeId,
+          );
+        }
+        logger.info("Inbound activity handled for local actor (Stream1 path)", {
+          envelopeId: envelope.envelopeId,
+          path: envelope.path,
+          activityType,
+        });
+        return;
+      }
 
       // Step 4.5: Short-circuit for sidecar-owned actor inboxes.
       // These actors (e.g. /users/relay) are managed by the sidecar, not by
@@ -344,46 +598,68 @@ export class InboundWorker {
         }
       }
 
-      // Step 5: Forward to ActivityPods
-      const forwardResult = await this.forwardToActivityPods(envelope, activity, verifiedActorUri);
-      
-      if (!forwardResult.success) {
-        metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
-        await this.queue.ack("inbound", messageId);
-
-        if (forwardResult.permanent || envelope.attempt >= MAX_INBOUND_ATTEMPTS) {
-          await this.queue.moveToDlq(
-            "inbound",
-            envelope,
-            forwardResult.permanent
-              ? (forwardResult.error || "Forward failed (permanent)")
-              : `Exhausted ${MAX_INBOUND_ATTEMPTS} attempts: ${forwardResult.error}`,
+      // Step 5: Forward to ActivityPods (via injectable bridge or HTTP).
+      let forwardedSuccessfully = false;
+      if (this.config.activityPodsBridge) {
+        try {
+          await this.config.activityPodsBridge.forwardInboundActivity(
+            { path: envelope.path, headers: envelope.headers },
+            activity,
+            verifiedActorUri,
           );
-          logger.warn("Inbound envelope moved to DLQ", {
+          forwardedSuccessfully = true;
+        } catch (err: any) {
+          metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
+          await this.queue.ack("inbound", messageId);
+          await this.queue.moveToDlq("inbound", envelope, `Bridge forward failed: ${err.message}`);
+          logger.warn("Injectable bridge forward failed", {
             envelopeId: envelope.envelopeId,
-            attempt: envelope.attempt,
-            permanent: forwardResult.permanent,
-            error: forwardResult.error,
+            error: err.message,
           });
-        } else {
-          const nextAttempt = envelope.attempt + 1;
-          const delay = backoffMs(nextAttempt);
-          await this.queue.enqueueInbound({
-            ...envelope,
-            attempt: nextAttempt,
-            notBeforeMs: Date.now() + delay,
-          });
-          logger.warn("Inbound envelope requeued with backoff", {
-            envelopeId: envelope.envelopeId,
-            attempt: nextAttempt,
-            retryAt: new Date(Date.now() + delay).toISOString(),
-            error: forwardResult.error,
-          });
+          return;
         }
-        return;
+      } else {
+        const forwardResult = await this.forwardToActivityPods(envelope, activity, verifiedActorUri);
+
+        if (!forwardResult.success) {
+          metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
+          await this.queue.ack("inbound", messageId);
+
+          if (forwardResult.permanent || envelope.attempt >= MAX_INBOUND_ATTEMPTS) {
+            await this.queue.moveToDlq(
+              "inbound",
+              envelope,
+              forwardResult.permanent
+                ? (forwardResult.error || "Forward failed (permanent)")
+                : `Exhausted ${MAX_INBOUND_ATTEMPTS} attempts: ${forwardResult.error}`,
+            );
+            logger.warn("Inbound envelope moved to DLQ", {
+              envelopeId: envelope.envelopeId,
+              attempt: envelope.attempt,
+              permanent: forwardResult.permanent,
+              error: forwardResult.error,
+            });
+          } else {
+            const nextAttempt = envelope.attempt + 1;
+            const delay = backoffMs(nextAttempt);
+            await this.queue.enqueueInbound({
+              ...envelope,
+              attempt: nextAttempt,
+              notBeforeMs: Date.now() + delay,
+            });
+            logger.warn("Inbound envelope requeued with backoff", {
+              envelopeId: envelope.envelopeId,
+              attempt: nextAttempt,
+              retryAt: new Date(Date.now() + delay).toISOString(),
+              error: forwardResult.error,
+            });
+          }
+          return;
+        }
+        forwardedSuccessfully = true;
       }
 
-      // Step 6: Publish public activities to Stream2
+      // Step 6: Publish public activities to Stream2 (remote actors only).
       if (isPublic) {
         try {
           await this.redpanda.publishToStream2({
@@ -392,17 +668,58 @@ export class InboundWorker {
             receivedAt: envelope.receivedAt,
             path: envelope.path,
           });
-          logger.debug("Published to Stream2", { 
-            activityId: activity.id, 
-            type: activity.type 
+          logger.debug("Published to Stream2", {
+            activityId: activity.id,
+            type: activity.type,
           });
         } catch (err: any) {
-          // Log but don't fail - Stream2 is best-effort
-          logger.error("Failed to publish to Stream2", { 
-            envelopeId: envelope.envelopeId, 
-            error: err.message 
+          // Log but don't fail — Stream2 is best-effort
+          logger.error("Failed to publish to Stream2", {
+            envelopeId: envelope.envelopeId,
+            error: err.message,
           });
         }
+
+        // Step 6.1: Tombstone lifecycle activities that remove content.
+        const tombstoneTypes = new Set(["Delete", "Undo"]);
+        if (tombstoneTypes.has(String(activity.type))) {
+          try {
+            const objectId =
+              typeof activity.object === "string"
+                ? activity.object
+                : typeof activity.object?.id === "string"
+                  ? activity.object.id
+                  : undefined;
+            await this.redpanda.publishTombstone({
+              activityId: String(activity.id ?? ""),
+              objectId,
+              actorUri: verifiedActorUri,
+              deletedAt: Date.now(),
+            });
+          } catch (err: any) {
+            logger.error("Failed to publish tombstone", {
+              envelopeId: envelope.envelopeId,
+              error: err.message,
+            });
+          }
+        }
+      }
+
+      // Step 6.5: AT projection (fault-isolated — never affects AP routing).
+      await this.invokeAtProjection(activity, verifiedActorUri, envelope.envelopeId);
+
+      // Step 6.7: Canonical event publisher (fault-isolated).
+      {
+        const kind =
+          activityType === "Update"
+            ? "PostEdit"
+            : activityType === "Delete" || activityType === "Undo"
+              ? "PostDelete"
+              : undefined;
+        await this.invokeCanonicalPublisher(
+          { activity, actorUri: verifiedActorUri, isPublic, isPrivate: !isPublic, isLocal: false, ...(kind ? { kind } : {}) },
+          envelope.envelopeId,
+        );
       }
 
       // Step 7: Ack the message
@@ -415,6 +732,8 @@ export class InboundWorker {
         activityType: activity.type,
         isPublic,
       });
+
+      void forwardedSuccessfully; // used above, silence lint
 
       metrics.inboundActivityPubActivities.inc({ stage: "processed", activity_type: activityType });
 
@@ -714,6 +1033,27 @@ export class InboundWorker {
   }
 
   /**
+   * Derive a local actor URI from an inbox path, e.g.:
+   *   "/users/alice/inbox" → "https://example.com/users/alice"
+   *   "/inbox"             → null (shared inbox — no single actor)
+   *
+   * Used to choose a signer for FEP-8fcf authenticated GETs.
+   */
+  private deriveLocalActorUriFromInboxPath(inboxPath: string): string | null {
+    const m = inboxPath.match(/^\/users\/([^/?#]+)\/inbox$/);
+    if (!m || !m[1]) return null;
+    // Use the configured public domain when available; otherwise fall back to
+    // the ActivityPods URL origin (useful in local dev / tests).
+    const origin = this.config.domain
+      ? `https://${this.config.domain}`
+      : (() => {
+          try { return new URL(this.config.activityPodsUrl).origin; } catch { return null; }
+        })();
+    if (!origin) return null;
+    return `${origin}/users/${m[1]}`;
+  }
+
+  /**
    * Check if an activity is public
    */
   private isPublicActivity(activity: any): boolean {
@@ -823,6 +1163,7 @@ export function createInboundWorker(
     actorCacheTtlMs: parseInt(process.env["ACTOR_CACHE_TTL_MS"] || "3600000", 10),
     fedifyRuntimeIntegrationEnabled:
       process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
+    domain: process.env["DOMAIN"],
     ...overrides,
   };
 
