@@ -119,7 +119,14 @@ export function evaluateOutboundWebhookBackpressure(
     };
   }
 
-  if (config.maxQueueDepth > 0 && snapshot.streamLength >= config.maxQueueDepth) {
+  // Redis stream length is historical and can stay high even after workers
+  // drain current load. Treat queue-depth backpressure as actionable only when
+  // there is active pending work to avoid permanent false-positive rejection.
+  if (
+    config.maxQueueDepth > 0 &&
+    snapshot.pendingCount > 0 &&
+    snapshot.streamLength >= config.maxQueueDepth
+  ) {
     return {
       reject: true,
       reason: "queue_depth",
@@ -133,7 +140,9 @@ export function evaluateOutboundWebhookBackpressure(
 export function resolveOutboundWebhookBackpressureConfigFromEnv(): OutboundWebhookBackpressureConfig {
   return {
     maxPending: parsePositiveIntEnv("OUTBOUND_WEBHOOK_MAX_PENDING", 25_000),
-    maxQueueDepth: parsePositiveIntEnv("OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH", 50_000),
+    // Stream length is historical, not just active backlog. Keep disabled by
+    // default to avoid false positives after long-running benchmarks.
+    maxQueueDepth: parseNonNegativeIntEnv("OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH", 0),
     retryAfterSeconds: parsePositiveIntEnv("OUTBOUND_WEBHOOK_RETRY_AFTER_SECONDS", 5),
     maxTargetsPerRequest: parsePositiveIntEnv("OUTBOUND_WEBHOOK_MAX_TARGETS", 5_000),
   };
@@ -207,6 +216,18 @@ function parsePositiveIntEnv(name: string, fallback: number): number {
 
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+function parseNonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
     return fallback;
   }
 

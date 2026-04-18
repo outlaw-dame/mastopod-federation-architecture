@@ -30,12 +30,17 @@ export interface QueueConfig {
   inboundStreamKey?: string;
   outboundStreamKey?: string;
   outboxIntentStreamKey?: string;
-  dlqStreamKey?: string;
+  inboundDlqStreamKey?: string;
+  outboundDlqStreamKey?: string;
+  outboxIntentDlqStreamKey?: string;
+  maxDlqLength?: number;
   consumerGroup?: string;
   consumerId?: string;
   blockTimeoutMs?: number;
   claimIdleTimeMs?: number;
   maxStreamLength?: number;
+  readBatchCount?: number;
+  claimBatchCount?: number;
 }
 
 // ============================================================================
@@ -77,6 +82,7 @@ export interface OutboundJob {
   attempt: number;
   maxAttempts: number;
   notBeforeMs: number;
+  deferCount?: number;
   /** Error message from the last delivery attempt, carried forward for DLQ diagnostics. */
   lastError?: string;
   meta?: {
@@ -139,12 +145,17 @@ export class RedisStreamsQueue {
   private readonly inboundStreamKey: string;
   private readonly outboundStreamKey: string;
   private readonly outboxIntentStreamKey: string;
-  private readonly dlqStreamKey: string;
+  private readonly inboundDlqStreamKey: string;
+  private readonly outboundDlqStreamKey: string;
+  private readonly outboxIntentDlqStreamKey: string;
+  private readonly maxDlqLength: number;
   private readonly consumerGroup: string;
   private readonly consumerId: string;
   private readonly blockTimeoutMs: number;
   private readonly claimIdleTimeMs: number;
   private readonly maxStreamLength: number;
+  private readonly readBatchCount: number;
+  private readonly claimBatchCount: number;
 
   private isConnected = false;
 
@@ -159,12 +170,17 @@ export class RedisStreamsQueue {
     this.inboundStreamKey = config.inboundStreamKey ?? "ap:queue:inbound:v1";
     this.outboundStreamKey = config.outboundStreamKey ?? "ap:queue:outbound:v1";
     this.outboxIntentStreamKey = config.outboxIntentStreamKey ?? "ap:queue:outbox-intent:v1";
-    this.dlqStreamKey = config.dlqStreamKey ?? "ap:queue:dlq:v1";
+    this.inboundDlqStreamKey = config.inboundDlqStreamKey ?? "ap:queue:dlq:inbound:v1";
+    this.outboundDlqStreamKey = config.outboundDlqStreamKey ?? "ap:queue:dlq:outbound:v1";
+    this.outboxIntentDlqStreamKey = config.outboxIntentDlqStreamKey ?? "ap:queue:dlq:outbox-intent:v1";
+    this.maxDlqLength = config.maxDlqLength ?? 10000;
     this.consumerGroup = config.consumerGroup ?? "sidecar-workers";
     this.consumerId = config.consumerId ?? `worker-${process.pid}-${Date.now()}`;
     this.blockTimeoutMs = config.blockTimeoutMs ?? 5000;
     this.claimIdleTimeMs = config.claimIdleTimeMs ?? 60000;
     this.maxStreamLength = config.maxStreamLength ?? 100000;
+    this.readBatchCount = normalizeQueueBatchCount(config.readBatchCount, process.env["QUEUE_READ_BATCH_COUNT"], 10);
+    this.claimBatchCount = normalizeQueueBatchCount(config.claimBatchCount, process.env["QUEUE_CLAIM_BATCH_COUNT"], 10);
 
     this.redis.on("error", (err) => {
       logger.error({ error: err.message }, "Redis client error");
@@ -400,7 +416,7 @@ export class RedisStreamsQueue {
           this.consumerId,
           this.claimIdleTimeMs,
           "0-0",
-          { COUNT: 10 }
+          { COUNT: this.claimBatchCount }
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
@@ -413,7 +429,7 @@ export class RedisStreamsQueue {
           this.consumerGroup,
           this.consumerId,
           { key: this.outboundStreamKey, id: ">" },
-          { COUNT: 10, BLOCK: this.blockTimeoutMs }
+          { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs }
         );
 
         if (!messages || messages.length === 0) {
@@ -471,7 +487,7 @@ export class RedisStreamsQueue {
           this.consumerId,
           this.claimIdleTimeMs,
           "0-0",
-          { COUNT: 10 },
+          { COUNT: this.claimBatchCount },
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
@@ -483,7 +499,7 @@ export class RedisStreamsQueue {
           this.consumerGroup,
           this.consumerId,
           { key: this.outboxIntentStreamKey, id: ">" },
-          { COUNT: 10, BLOCK: this.blockTimeoutMs },
+          { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs },
         );
 
         if (!messages || messages.length === 0) {
@@ -540,6 +556,7 @@ export class RedisStreamsQueue {
       attempt: parseInt(this.requireField(fields, "attempt", messageId), 10),
       maxAttempts: parseInt(this.requireField(fields, "maxAttempts", messageId), 10),
       notBeforeMs: parseInt(this.requireField(fields, "notBeforeMs", messageId), 10),
+      deferCount: parseInt(fields["deferCount"] || "0", 10),
       lastError: fields["lastError"] || undefined,
       meta: fields["meta"] ? JSON.parse(fields["meta"]) : undefined,
     };
@@ -801,8 +818,15 @@ export class RedisStreamsQueue {
       data,
     };
 
+    const dlqKey =
+      type === "inbound"
+        ? this.inboundDlqStreamKey
+        : type === "outbound"
+          ? this.outboundDlqStreamKey
+          : this.outboxIntentDlqStreamKey;
+
     await this.redis.xAdd(
-      this.dlqStreamKey,
+      dlqKey,
       "*",
       {
         type,
@@ -811,7 +835,7 @@ export class RedisStreamsQueue {
         timestamp: entry.timestamp.toString(),
         data: JSON.stringify(entry.data),
       },
-      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: 10000 } }
+      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxDlqLength } }
     );
 
     logger.warn("Message moved to DLQ", { type, id: entry.id, reason });
@@ -827,14 +851,35 @@ export class RedisStreamsQueue {
     const inboundLen = await this.redis.xLen(this.inboundStreamKey);
     const outboundLen = await this.redis.xLen(this.outboundStreamKey);
     const outboxIntentLen = await this.redis.xLen(this.outboxIntentStreamKey);
-    const dlqLen = await this.redis.xLen(this.dlqStreamKey);
+    const [dlqInboundLen, dlqOutboundLen, dlqOutboxIntentLen] = await Promise.all([
+      this.redis.xLen(this.inboundDlqStreamKey),
+      this.redis.xLen(this.outboundDlqStreamKey),
+      this.redis.xLen(this.outboxIntentDlqStreamKey),
+    ]);
 
     return {
       inboundQueueLength: inboundLen,
       outboundQueueLength: outboundLen,
       outboxIntentQueueLength: outboxIntentLen,
-      dlqLength: dlqLen,
+      dlqInboundLength: dlqInboundLen,
+      dlqOutboundLength: dlqOutboundLen,
+      dlqOutboxIntentLength: dlqOutboxIntentLen,
     };
+  }
+
+  async getDlqLength(type: "inbound" | "outbound" | "outbox_intent"): Promise<number> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+    const key =
+      type === "inbound"
+        ? this.inboundDlqStreamKey
+        : type === "outbound"
+          ? this.outboundDlqStreamKey
+          : this.outboxIntentDlqStreamKey;
+    return this.redis.xLen(key);
+  }
+
+  getClaimIdleTimeMs(): number {
+    return this.claimIdleTimeMs;
   }
 
   private async ensureConsumerGroups(): Promise<void> {
@@ -873,6 +918,7 @@ export class RedisStreamsQueue {
       attempt: job.attempt.toString(),
       maxAttempts: job.maxAttempts.toString(),
       notBeforeMs: job.notBeforeMs.toString(),
+      deferCount: (job.deferCount ?? 0).toString(),
       lastError: job.lastError ?? "",
       meta: job.meta ? JSON.stringify(job.meta) : "",
     };
@@ -956,10 +1002,11 @@ export class RedisStreamsQueue {
           'attempt', ARGV[index + 6],
           'maxAttempts', ARGV[index + 7],
           'notBeforeMs', ARGV[index + 8],
-          'lastError', ARGV[index + 9],
-          'meta', ARGV[index + 10]
+          'deferCount', ARGV[index + 9],
+          'lastError', ARGV[index + 10],
+          'meta', ARGV[index + 11]
         )
-        index = index + 11
+        index = index + 12
       end
       redis.call('HSET', stateKey, 'outboundEnqueuedAt', outboundEnqueuedAt, 'jobCount', tostring(jobCount))
       redis.call('EXPIRE', stateKey, 604800)
@@ -982,6 +1029,7 @@ export class RedisStreamsQueue {
           serialized["attempt"] ?? "0",
           serialized["maxAttempts"] ?? "0",
           serialized["notBeforeMs"] ?? "0",
+          serialized["deferCount"] ?? "0",
           serialized["lastError"] ?? "",
           serialized["meta"] ?? "",
         ];
@@ -1027,12 +1075,36 @@ export function createDefaultConfig(): QueueConfig {
     outboundStreamKey: process.env["OUTBOUND_STREAM_KEY"] || "ap:queue:outbound:v1",
     outboxIntentStreamKey:
       process.env["OUTBOX_INTENT_STREAM_KEY"] || "ap:queue:outbox-intent:v1",
-    dlqStreamKey: process.env["DLQ_STREAM_KEY"] || "ap:queue:dlq:v1",
+    inboundDlqStreamKey: process.env["DLQ_INBOUND_STREAM_KEY"] || "ap:queue:dlq:inbound:v1",
+    outboundDlqStreamKey: process.env["DLQ_OUTBOUND_STREAM_KEY"] || "ap:queue:dlq:outbound:v1",
+    outboxIntentDlqStreamKey: process.env["DLQ_OUTBOX_INTENT_STREAM_KEY"] || "ap:queue:dlq:outbox-intent:v1",
+    maxDlqLength: parseInt(process.env["MAX_DLQ_LENGTH"] || "10000", 10),
     consumerGroup: process.env["CONSUMER_GROUP"] || "sidecar-workers",
     blockTimeoutMs: parseInt(process.env["BLOCK_TIMEOUT_MS"] || "5000", 10),
     claimIdleTimeMs: parseInt(process.env["CLAIM_IDLE_TIME_MS"] || "60000", 10),
-    maxStreamLength: parseInt(process.env["MAX_STREAM_LENGTH"] || "100000", 10),
+    maxStreamLength: parseInt(process.env["MAX_STREAM_LENGTH"] || "500000", 10),
+    readBatchCount: parseInt(process.env["QUEUE_READ_BATCH_COUNT"] || "10", 10),
+    claimBatchCount: parseInt(process.env["QUEUE_CLAIM_BATCH_COUNT"] || "10", 10),
   };
+}
+
+function normalizeQueueBatchCount(
+  configured: number | undefined,
+  fromEnv: string | undefined,
+  fallback: number,
+): number {
+  if (typeof configured === "number" && Number.isFinite(configured)) {
+    return Math.max(1, Math.min(250, Math.floor(configured)));
+  }
+
+  if (typeof fromEnv === "string" && fromEnv.length > 0) {
+    const parsed = Number.parseInt(fromEnv, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, Math.min(250, parsed));
+    }
+  }
+
+  return fallback;
 }
 
 export function createInboundEnvelope(params: {
@@ -1063,11 +1135,12 @@ export function createVerifiedInboundEnvelope(params: {
   remoteIp: string;
   verifiedActorUri: string;
   verifiedAt?: number;
+  headers?: Record<string, string>;
 }): InboundEnvelope {
   return createInboundEnvelope({
     method: "POST",
     path: params.path,
-    headers: {},
+    headers: params.headers ?? {},
     body: params.body,
     remoteIp: params.remoteIp,
     verification: {

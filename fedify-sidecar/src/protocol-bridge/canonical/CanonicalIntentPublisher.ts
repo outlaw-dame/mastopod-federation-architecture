@@ -55,6 +55,17 @@ export class CanonicalIntentPublisher {
 // Serialisation helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Convert a CanonicalIntent to the CanonicalV1Event wire format that is
+ * written to the canonical.v1 Kafka topic.
+ *
+ * Exported so that observe-only paths (e.g. UnifiedFeedBridge) can produce
+ * the same payload shape without going through the Kafka publisher.
+ */
+export function serializeCanonicalIntent(intent: CanonicalIntent): CanonicalV1Event {
+  return serializeIntent(intent);
+}
+
 function serializeIntent(intent: CanonicalIntent): CanonicalV1Event {
   const actor: CanonicalV1ActorRef = {
     canonicalAccountId: intent.sourceAccountRef.canonicalAccountId ?? null,

@@ -1,186 +1,226 @@
 #!/usr/bin/env tsx
-/**
- * Chaos engineering smoke test runner
- * 
- * Validates resilience by injecting faults into the media pipeline:
- * - Service timeouts (504)
- * - Transient errors (500, 429)
- * - Connection resets
- * - Partial/slow downloads
- * 
- * Tests that the pipeline's retry logic, exponential backoff, and DLQ
- * (dead-letter queue) handling work correctly under adverse conditions.
- * 
- * Exit codes:
- * - 0: Resilience tests passed (recovery validated)
- * - 1: Resilience tests failed (retry/DLQ handling broken)
- */
 
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import { createServer, Server } from 'node:http';
-import { parseUrl } from 'node:url';
-import { randomInt } from 'node:crypto';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { randomUUID } from 'node:crypto';
+import { reloadConfigFromEnv } from '../src/config/config';
+import { MediaStreams } from '../src/contracts/MediaStreams';
+import { enqueue } from '../src/queue/producer';
+import { initRedis, redis } from '../src/queue/redisClient';
+import { runSecureWorker } from '../src/queue/secureWorker';
+import { NonRetryableMediaPipelineError, RetryableMediaPipelineError } from '../src/utils/errorHandling';
+import { sleep } from '../src/utils/retry';
 
 interface ChaosScenario {
   name: string;
-  failureMode: 'timeout' | 'transient-500' | 'transient-429' | 'connection-reset';
-  failureCount: number; // How many requests before success
+  mode: 'recover' | 'retryable-dlq' | 'nonretryable-dlq';
+  retryableFailuresBeforeSuccess?: number;
+  expectedAttempts: number;
+  expectedRetryAttempts: number;
 }
 
-/**
- * Create a chaotic fixture server that injects faults
- */
-function createChaosFixtureServer(scenario: ChaosScenario): { server: Server; url: string } {
-  let requestCount = 0;
+interface DlqEntry {
+  id: string;
+  message: Record<string, string>;
+}
 
-  const server = createServer((req, res) => {
-    if (req.url === '/chaos-image.png' && req.method === 'GET') {
-      requestCount++;
+async function main(): Promise<void> {
+  const restoreEnv = applyEnv({
+    WORKER_MAX_SCHEDULED_RETRIES: '2',
+    WORKER_RETRY_BASE_DELAY_MS: '5',
+    WORKER_RETRY_MAX_DELAY_MS: '5',
+    PENDING_MIN_IDLE_MS: '25'
+  });
 
-      // Fail on first N requests according to scenario
-      if (requestCount <= scenario.failureCount) {
-        switch (scenario.failureMode) {
-          case 'timeout':
-            // Don't respond (client times out)
-            return;
+  try {
+    reloadConfigFromEnv();
+    await initRedis();
 
-          case 'transient-500':
-            res.writeHead(500, { 'content-type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Internal server error' }));
-            return;
+    console.log('Chaos smoke: real Redis-backed worker proof\n');
 
-          case 'transient-429':
-            res.writeHead(429, {
-              'content-type': 'application/json',
-              'retry-after': '1',
-            });
-            res.end(JSON.stringify({ error: 'Too many requests' }));
-            return;
+    const scenarios: ChaosScenario[] = [
+      {
+        name: 'retryable recovery',
+        mode: 'recover',
+        retryableFailuresBeforeSuccess: 2,
+        expectedAttempts: 3,
+        expectedRetryAttempts: 0
+      },
+      {
+        name: 'retryable exhaustion to DLQ',
+        mode: 'retryable-dlq',
+        expectedAttempts: 3,
+        expectedRetryAttempts: 2
+      },
+      {
+        name: 'non-retryable direct DLQ',
+        mode: 'nonretryable-dlq',
+        expectedAttempts: 1,
+        expectedRetryAttempts: 0
+      }
+    ];
 
-          case 'connection-reset':
-            req.socket.destroy();
-            return;
-        }
+    for (const scenario of scenarios) {
+      await runScenario(scenario);
+    }
+
+    console.log('\nChaos smoke: success');
+  } finally {
+    restoreEnv();
+    reloadConfigFromEnv();
+    if (redis.isOpen) {
+      await redis.quit();
+    }
+  }
+}
+
+async function runScenario(scenario: ChaosScenario): Promise<void> {
+  const stream = `media:chaos:${randomUUID()}`;
+  const retryKey = `${stream}:retry`;
+  const traceId = `trace-${randomUUID()}`;
+  const group = `chaos-${randomUUID()}`;
+  const stopController = new AbortController();
+  let attempts = 0;
+  let successes = 0;
+
+  await redis.del(stream, retryKey);
+
+  const workerPromise = runSecureWorker({
+    stream,
+    group,
+    consumer: 'chaos-proof-worker',
+    readCount: 1,
+    blockMs: 25,
+    stopSignal: stopController.signal,
+    handler: async (message) => {
+      if (message.traceId !== traceId) {
+        return;
       }
 
-      // Success: return minimal PNG
-      res.writeHead(200, {
-        'content-type': 'image/png',
-        'content-length': '67',
-      });
-      res.end(Buffer.from([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-        0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41,
-        0x54, 0x08, 0xd7, 0x63, 0xf8, 0x0f, 0x00, 0x00,
-        0x01, 0x01, 0x00, 0x05, 0x18, 0x0b, 0xb3, 0x65,
-      ]));
-    } else {
-      res.writeHead(404);
-      res.end('Not found');
+      attempts += 1;
+
+      switch (scenario.mode) {
+        case 'recover':
+          if (attempts <= (scenario.retryableFailuresBeforeSuccess || 0)) {
+            throw new RetryableMediaPipelineError({
+              code: 'CHAOS_RECOVERABLE',
+              message: `retryable failure ${attempts}`
+            });
+          }
+          successes += 1;
+          return;
+        case 'retryable-dlq':
+          throw new RetryableMediaPipelineError({
+            code: 'CHAOS_RETRY_EXHAUSTED',
+            message: `retryable failure ${attempts}`
+          });
+        case 'nonretryable-dlq':
+          throw new NonRetryableMediaPipelineError({
+            code: 'CHAOS_PERMANENT',
+            message: 'non-retryable failure'
+          });
+      }
     }
   });
 
-  return {
-    server,
-    url: 'http://localhost:0/chaos-image.png',
+  try {
+    await enqueue(stream, {
+      traceId,
+      ownerId: 'chaos-proof-owner'
+    });
+
+    await waitForCondition(async () => {
+      const dlqEntries = await readMatchingDlqEntries(stream);
+      const pendingRetries = await redis.zCard(retryKey);
+
+      if (scenario.mode === 'recover') {
+        return successes === 1 && dlqEntries.length === 0 && pendingRetries === 0;
+      }
+
+      return dlqEntries.length === 1 && pendingRetries === 0;
+    }, 4000, 20);
+
+    const dlqEntries = await readMatchingDlqEntries(stream);
+    const dlqMessage = dlqEntries[0]?.message;
+
+    if (attempts !== scenario.expectedAttempts) {
+      throw new Error(`Scenario "${scenario.name}" observed ${attempts} attempts, expected ${scenario.expectedAttempts}`);
+    }
+
+    if (scenario.mode === 'recover') {
+      if (successes !== 1) {
+        throw new Error(`Scenario "${scenario.name}" did not complete successfully`);
+      }
+      console.log(`- ${scenario.name}: recovered after ${attempts} attempts`);
+      return;
+    }
+
+    if (!dlqMessage) {
+      throw new Error(`Scenario "${scenario.name}" did not produce a DLQ entry`);
+    }
+
+    const retryAttempts = Number.parseInt(dlqMessage.retryAttempts || '0', 10);
+    if (retryAttempts !== scenario.expectedRetryAttempts) {
+      throw new Error(`Scenario "${scenario.name}" wrote retryAttempts=${retryAttempts}, expected ${scenario.expectedRetryAttempts}`);
+    }
+
+    if (scenario.mode === 'retryable-dlq' && dlqMessage.retriesExhausted !== 'true') {
+      throw new Error(`Scenario "${scenario.name}" did not mark retriesExhausted=true`);
+    }
+
+    if (scenario.mode === 'nonretryable-dlq' && dlqMessage.retryable !== 'false') {
+      throw new Error(`Scenario "${scenario.name}" unexpectedly marked non-retryable failure as retryable`);
+    }
+
+    console.log(`- ${scenario.name}: DLQ verified after ${attempts} attempts`);
+  } finally {
+    stopController.abort();
+    await workerPromise;
+    await redis.del(stream, retryKey);
+  }
+}
+
+async function waitForCondition(
+  condition: () => Promise<boolean>,
+  timeoutMs: number,
+  intervalMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await condition()) {
+      return;
+    }
+
+    await sleep(intervalMs);
+  }
+
+  throw new Error(`Timed out waiting for condition after ${timeoutMs}ms`);
+}
+
+async function readMatchingDlqEntries(stream: string): Promise<DlqEntry[]> {
+  const entries = await redis.xRange(MediaStreams.DLQ, '-', '+');
+  return entries.filter((entry) => entry.message.stream === stream);
+}
+
+function applyEnv(overrides: Record<string, string>): () => void {
+  const previous: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(overrides)) {
+    previous[key] = process.env[key];
+    process.env[key] = value;
+  }
+
+  return () => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (typeof value === 'undefined') {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   };
 }
 
-/**
- * Run a single chaos scenario
- */
-async function runChaosScenario(scenario: ChaosScenario): Promise<boolean> {
-  console.log(`\n🔥 Chaos Scenario: ${scenario.name}`);
-  console.log(`   Failure mode: ${scenario.failureMode}`);
-  console.log(`   Fail count: ${scenario.failureCount}`);
-
-  try {
-    const { execSync } = await import('node:child_process');
-    // Note: In a real implementation, we'd inject the chaos server URL into the smoke test
-    // For now, this is a structural placeholder that documents the intent
-    console.log('   [Note: Full chaos injection requires instrumentation of fetch layer]');
-  } catch (err) {
-    console.error(`   ❌ Failed: ${err}`);
-    return false;
-  }
-
-  return true;
-}
-
-/**
- * Main entry point
- */
-async function main(): Promise<void> {
-  console.log('🐉 Chaos Engineering Smoke Test\n');
-  console.log('Testing retry logic, exponential backoff, and DLQ handling');
-  console.log('under adverse failure conditions.\n');
-
-  const scenarios: ChaosScenario[] = [
-    {
-      name: 'Single transient 500',
-      failureMode: 'transient-500',
-      failureCount: 1,
-    },
-    {
-      name: 'Multiple 500s (retry expected)',
-      failureMode: 'transient-500',
-      failureCount: 2,
-    },
-    {
-      name: 'Rate limit (429) recovery',
-      failureMode: 'transient-429',
-      failureCount: 1,
-    },
-    {
-      name: 'Connection reset',
-      failureMode: 'connection-reset',
-      failureCount: 1,
-    },
-    {
-      name: 'Excessive failures → DLQ',
-      failureMode: 'timeout',
-      failureCount: 5,
-    },
-  ];
-
-  let passed = 0;
-  let failed = 0;
-
-  for (const scenario of scenarios) {
-    const success = await runChaosScenario(scenario);
-    if (success) {
-      passed++;
-      console.log('   ✅ Recovered');
-    } else {
-      failed++;
-      console.log('   ❌ Failed');
-    }
-  }
-
-  console.log(`\n📊 Chaos Results: ${passed} passed, ${failed} failed out of ${scenarios.length}`);
-
-  if (failed > 0) {
-    console.error('❌ Chaos tests failed: Resilience issues detected');
-    process.exit(1);
-  }
-
-  console.log('✅ Chaos engineering tests PASSED: Pipeline is resilient');
-  console.log('\n   Key validations:');
-  console.log('   ✓ Exponential backoff applied to retries');
-  console.log('   ✓ Max retries enforced (prevents infinite loops)');
-  console.log('   ✓ Transient errors (500, 429) trigger retry');
-  console.log('   ✓ Permanent failures routed to DLQ');
-  console.log('   ✓ No silent failures (errors logged/tracked)');
-}
-
-main().catch((err) => {
-  console.error('Fatal error:', err);
+main().catch((error) => {
+  console.error('Chaos smoke failed');
+  console.error(error);
   process.exit(1);
 });

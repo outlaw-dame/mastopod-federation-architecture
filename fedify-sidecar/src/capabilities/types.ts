@@ -2,6 +2,21 @@ export type ProviderProfile = "ap-core" | "ap-scale" | "dual-protocol-standard";
 
 export type CapabilityStatus = "enabled" | "disabled" | "beta" | "deprecated";
 
+/**
+ * A single entry in the events catalog advertised in ProviderCapabilitiesDocument.
+ * `dlqTopic` names the dead-letter topic used when delivery to this topic fails
+ * permanently.  `dlqSemantics` describes whether the DLQ is for initial delivery
+ * failures ("dead-letter") or exhausted-retry survivors ("retry-dlq").
+ */
+export interface TopicEventEntry {
+  name: string;
+  schema: string;
+  retentionDays: number;
+  replay: boolean;
+  dlqTopic?: string;
+  dlqSemantics?: "dead-letter" | "retry-dlq";
+}
+
 export interface ProtocolStatus {
   enabled: boolean;
   version?: string;
@@ -55,12 +70,7 @@ export interface ProviderCapabilitiesDocument {
   };
   events: {
     catalogVersion: string;
-    topics: Array<{
-      name: string;
-      schema: string;
-      retentionDays: number;
-      replay: boolean;
-    }>;
+    topics: TopicEventEntry[];
   };
   security: {
     internalApisAuth: "bearer";
@@ -79,10 +89,15 @@ export interface ProviderCapabilitiesBuildInput {
   enableOutboundWorker: boolean;
   enableOpenSearchIndexer: boolean;
   enableXrpcServer: boolean;
+  enableMediaPipeline: boolean;
   enableMrf: boolean;
   atprotoEnabled: boolean;
   firehoseRetentionDays: number;
   includeAtDisabledEntries: boolean;
+  /** Whether the canonical event log Kafka topic is active. */
+  enableCanonicalEventLog?: boolean;
+  /** Whether the in-process unified fan-out stream is active. */
+  enableUnifiedFeed?: boolean;
 }
 
 export interface StartupValidationIssue {

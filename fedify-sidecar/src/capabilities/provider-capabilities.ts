@@ -4,6 +4,7 @@ import {
   ProviderCapabilitiesBuildInput,
   ProviderCapabilitiesDocument,
   ProviderProfile,
+  TopicEventEntry,
 } from "./types.js";
 
 const SUPPORTED_PROFILES: ProviderProfile[] = ["ap-core", "ap-scale", "dual-protocol-standard"];
@@ -74,6 +75,17 @@ export function buildProviderCapabilities(
       replayWindowHours: 72,
     }));
 
+    // Real-time feed subscriptions (SSE + WebSocket fan-out).
+    // This capability is always enabled for non-ap-core profiles because the
+    // DurableStreamSubscriptionService runs in-process; the unified stream is
+    // available even without Kafka.
+    caps.push(enabledCapability("ap.feeds.realtime", [], {
+      maxSseConnections: 50,
+      maxWsConnections: 25,
+      maxStreamsPerConnection: 4,
+      transports: "sse,websocket",
+    }));
+
     if (input.enableOpenSearchIndexer) {
       caps.push(enabledCapability("ap.search.opensearch", ["ap.firehose"], {
         indexRefreshSeconds: 1,
@@ -83,6 +95,13 @@ export function buildProviderCapabilities(
 
     if (input.enableMrf) {
       caps.push(enabledCapability("ap.mrf", [], { policyModules: 16 }));
+    }
+
+    if (input.enableMediaPipeline) {
+      caps.push(enabledCapability("ap.media.pipeline", ["ap.streams"], {
+        ingestMode: "activitypods-local-resolver",
+        assetEventTopic: "media.asset.created.v1",
+      }));
     }
   }
 
@@ -130,32 +149,37 @@ export function buildProviderCapabilities(
           behavior: "feeds_limited",
           contractRef: "feed-limited-v1",
         },
+        {
+          when: "ap.streams.unavailable",
+          behavior: "kafka_streams_degraded",
+          contractRef: "stream-degraded-v1",
+        },
+        {
+          when: "ap.feeds.realtime.disabled",
+          behavior: "realtime_stream_unavailable",
+          contractRef: "realtime-disabled-v1",
+        },
+        {
+          when: "ap.signing.batch.unavailable",
+          behavior: "federation_egress_paused",
+          contractRef: "egress-paused-v1",
+        },
+        ...(input.atprotoEnabled
+          ? [
+              {
+                when: "at.xrpc.server.disabled",
+                behavior: "at_routes_denied",
+                contractRef: "at-disabled-v1",
+              },
+            ]
+          : []),
       ],
     },
     events: {
       catalogVersion: "1.0.0",
       topics: input.profile === "ap-core"
         ? []
-        : [
-            {
-              name: "ap.stream1.local-public.v1",
-              schema: "activity-stream-event-v1",
-              retentionDays: input.firehoseRetentionDays,
-              replay: true,
-            },
-            {
-              name: "ap.stream2.remote-public.v1",
-              schema: "activity-stream-event-v1",
-              retentionDays: input.firehoseRetentionDays,
-              replay: true,
-            },
-            {
-              name: "ap.firehose.v1",
-              schema: "activity-stream-event-v1",
-              retentionDays: input.firehoseRetentionDays,
-              replay: true,
-            },
-          ],
+        : buildEventTopics(input),
     },
     security: {
       internalApisAuth: "bearer",
@@ -163,6 +187,71 @@ export function buildProviderCapabilities(
       failClosed: true,
     },
   };
+}
+
+/**
+ * Build the full events catalog for non-ap-core profiles.
+ * Includes Kafka-backed topics, the in-process unified stream, DLQ topics,
+ * and the canonical event log when enabled.
+ */
+function buildEventTopics(input: ProviderCapabilitiesBuildInput): TopicEventEntry[] {
+  const topics: TopicEventEntry[] = [
+    {
+      name: "ap.stream1.local-public.v1",
+      schema: "activity-stream-event-v1",
+      retentionDays: input.firehoseRetentionDays,
+      replay: true,
+      dlqTopic: "ap.stream1.local-public.dlq",
+      dlqSemantics: "dead-letter",
+    },
+    {
+      name: "ap.stream2.remote-public.v1",
+      schema: "activity-stream-event-v1",
+      retentionDays: input.firehoseRetentionDays,
+      replay: true,
+      dlqTopic: "ap.stream2.remote-public.dlq",
+      dlqSemantics: "dead-letter",
+    },
+    {
+      name: "ap.firehose.v1",
+      schema: "activity-stream-event-v1",
+      retentionDays: input.firehoseRetentionDays,
+      replay: true,
+      dlqTopic: "ap.firehose.dlq",
+      dlqSemantics: "retry-dlq",
+    },
+    // In-process unified fan-out (no Kafka retention; not replayable).
+    {
+      name: "ap.unified.v1",
+      schema: "activity-stream-event-v1",
+      retentionDays: 0,
+      replay: false,
+    },
+  ];
+
+  if (input.enableCanonicalEventLog) {
+    topics.push({
+      name: "ap.canonical.v1",
+      schema: "canonical-activity-event-v1",
+      retentionDays: input.firehoseRetentionDays,
+      replay: true,
+      dlqTopic: "ap.canonical.dlq",
+      dlqSemantics: "dead-letter",
+    });
+  }
+
+  if (input.enableMediaPipeline) {
+    topics.push({
+      name: "media.asset.created.v1",
+      schema: "media-asset-created-v1",
+      retentionDays: input.firehoseRetentionDays,
+      replay: true,
+      dlqTopic: "media.asset.created.dlq",
+      dlqSemantics: "dead-letter",
+    });
+  }
+
+  return topics;
 }
 
 export function renderCapabilitiesResponse(document: ProviderCapabilitiesDocument): {

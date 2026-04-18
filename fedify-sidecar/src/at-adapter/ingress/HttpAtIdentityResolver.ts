@@ -3,6 +3,12 @@ import type { AtIdentityResolver } from "./AtIngressVerifier.js";
 import { AtIngressHttpClient, AtIngressHttpError } from "./AtIngressHttpClient.js";
 import { isValidDid, isValidHandle } from "../identity/HandleResolutionReader.js";
 
+/** Minimal Redis interface accepted by the DID document L2 cache. Compatible with ioredis. */
+export interface DidDocRedisCache {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, exFlag: "EX", ttlSeconds: number): Promise<unknown>;
+}
+
 export interface HttpAtIdentityResolverOptions {
   fetchImpl?: typeof fetch;
   resolveTxtImpl?: typeof defaultResolveTxt;
@@ -12,6 +18,10 @@ export interface HttpAtIdentityResolverOptions {
   didDocumentCacheTtlMs?: number;
   didDocumentCacheMaxEntries?: number;
   failedResolutionCacheTtlMs?: number;
+  /** Optional Redis client for a persistent L2 DID document cache (survives process restarts). */
+  redisCache?: DidDocRedisCache;
+  /** TTL for Redis DID document cache entries in seconds. Defaults to 300 (5 min). */
+  redisCacheTtlSeconds?: number;
 }
 
 export interface ResolvedAtIdentityDocument {
@@ -37,11 +47,14 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
     expiresAt: number;
   }>();
   private readonly inFlightResolutions = new Map<string, Promise<ResolvedAtIdentityDocument>>();
+  private readonly redisCache: DidDocRedisCache | null;
+  private readonly redisCacheTtlSeconds: number;
 
   private _fetchAttempts = 0;
   private _positiveCacheHits = 0;
   private _negativeCacheHits = 0;
   private _inFlightDedup = 0;
+  private _redisCacheHits = 0;
 
   public constructor(options: HttpAtIdentityResolverOptions = {}) {
     this.httpClient = new AtIngressHttpClient({
@@ -54,6 +67,8 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
     this.didDocumentCacheTtlMs = clampInteger(options.didDocumentCacheTtlMs ?? 30_000, 0, 15 * 60_000);
     this.didDocumentCacheMaxEntries = clampInteger(options.didDocumentCacheMaxEntries ?? 2_000, 1, 50_000);
     this.failedResolutionCacheTtlMs = clampInteger(options.failedResolutionCacheTtlMs ?? 15_000, 0, 5 * 60_000);
+    this.redisCache = options.redisCache ?? null;
+    this.redisCacheTtlSeconds = clampInteger(options.redisCacheTtlSeconds ?? 300, 30, 3_600);
   }
 
   public getMetrics(): {
@@ -61,12 +76,14 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
     positiveCacheHits: number;
     negativeCacheHits: number;
     inFlightDedup: number;
+    redisCacheHits: number;
   } {
     return {
       fetchAttempts: this._fetchAttempts,
       positiveCacheHits: this._positiveCacheHits,
       negativeCacheHits: this._negativeCacheHits,
       inFlightDedup: this._inFlightDedup,
+      redisCacheHits: this._redisCacheHits,
     };
   }
 
@@ -114,6 +131,20 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
       }
       if (failedCached) {
         this.failedResolutionCache.delete(did);
+      }
+    }
+
+    if (this.redisCache) {
+      try {
+        const raw = await this.redisCache.get(`at:did:doc:${did}`);
+        if (raw) {
+          const resolved = JSON.parse(raw) as ResolvedAtIdentityDocument;
+          this._redisCacheHits += 1;
+          this.cacheDidDocument(did, resolved);
+          return resolved;
+        }
+      } catch {
+        // Redis unavailable — fall through to HTTP resolution
       }
     }
 
@@ -227,22 +258,26 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
   }
 
   private cacheDidDocument(did: string, resolved: ResolvedAtIdentityDocument): void {
-    if (this.didDocumentCacheTtlMs <= 0) {
-      return;
-    }
-
-    while (this.didDocumentCache.size >= this.didDocumentCacheMaxEntries) {
-      const oldestKey = this.didDocumentCache.keys().next().value;
-      if (!oldestKey) {
-        break;
+    if (this.didDocumentCacheTtlMs > 0) {
+      while (this.didDocumentCache.size >= this.didDocumentCacheMaxEntries) {
+        const oldestKey = this.didDocumentCache.keys().next().value;
+        if (!oldestKey) {
+          break;
+        }
+        this.didDocumentCache.delete(oldestKey);
       }
-      this.didDocumentCache.delete(oldestKey);
+
+      this.didDocumentCache.set(did, {
+        resolved,
+        expiresAt: Date.now() + this.didDocumentCacheTtlMs,
+      });
     }
 
-    this.didDocumentCache.set(did, {
-      resolved,
-      expiresAt: Date.now() + this.didDocumentCacheTtlMs,
-    });
+    if (this.redisCache) {
+      this.redisCache
+        .set(`at:did:doc:${did}`, JSON.stringify(resolved), "EX", this.redisCacheTtlSeconds)
+        .catch(() => { /* Redis write failure is non-fatal */ });
+    }
   }
 }
 

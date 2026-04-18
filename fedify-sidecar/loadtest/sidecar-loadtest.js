@@ -16,13 +16,30 @@ const expectedStatusRate = new Rate('fedify_loadtest_expected_status_rate');
 const appLatency = new Trend('fedify_loadtest_app_latency_ms', true);
 
 function inboxPayload() {
+  // ActivityPub spec: the inbox accepts Activities, not bare Objects.
+  // A Note is an Object; it must be wrapped in a Create activity so that
+  // Fedify's inbox listener (.on(Activity, …)) accepts the request.
+  const actorUri = `https://remote.example/users/loadtest-${__VU}`;
+  const noteId = `https://remote.example/notes/${__VU}-${__ITER}`;
+  const activityId = `https://remote.example/activities/create-${__VU}-${__ITER}`;
+  const ts = new Date().toISOString();
   return JSON.stringify({
     '@context': 'https://www.w3.org/ns/activitystreams',
-    id: `https://remote.example/activities/${__VU}-${__ITER}`,
-    type: 'Note',
-    actor: `https://remote.example/users/loadtest-${__VU}`,
+    id: activityId,
+    type: 'Create',
+    actor: actorUri,
+    published: ts,
     to: ['https://www.w3.org/ns/activitystreams#Public'],
-    content: `loadtest message ${__ITER}`,
+    cc: [`${actorUri}/followers`],
+    object: {
+      id: noteId,
+      type: 'Note',
+      attributedTo: actorUri,
+      content: `loadtest message ${__ITER}`,
+      published: ts,
+      to: ['https://www.w3.org/ns/activitystreams#Public'],
+      cc: [`${actorUri}/followers`],
+    },
   });
 }
 

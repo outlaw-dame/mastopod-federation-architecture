@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import crypto from 'node:crypto';
+import { config } from '../config/config';
 
 export async function processImage(input: Buffer): Promise<{
   buffer: Buffer;
@@ -7,15 +8,38 @@ export async function processImage(input: Buffer): Promise<{
   height?: number;
   thumbnail?: Buffer;
 }> {
-  const image = sharp(input);
-  const metadata = await image.metadata();
-  const buffer = await sharp(input).webp({ quality: 82 }).toBuffer();
-  const thumbnail = await sharp(input).resize({ width: 320 }).webp({ quality: 70 }).toBuffer();
+  return processImageSource(input);
+}
+
+export async function processImageFile(inputPath: string): Promise<{
+  buffer: Buffer;
+  width?: number;
+  height?: number;
+  thumbnail?: Buffer;
+}> {
+  return processImageSource(inputPath);
+}
+
+async function processImageSource(input: Buffer | string): Promise<{
+  buffer: Buffer;
+  width?: number;
+  height?: number;
+  thumbnail?: Buffer;
+}> {
+  const pipeline = sharp(input, {
+    limitInputPixels: config.imageMaxInputPixels,
+    sequentialRead: true
+  }).rotate();
+
+  const [{ data, info }, thumbnail] = await Promise.all([
+    pipeline.clone().webp({ quality: 82 }).toBuffer({ resolveWithObject: true }),
+    pipeline.clone().resize({ width: 320, withoutEnlargement: true }).webp({ quality: 70 }).toBuffer()
+  ]);
 
   return {
-    buffer,
-    width: metadata.width,
-    height: metadata.height,
+    buffer: data,
+    width: info.width,
+    height: info.height,
     thumbnail
   };
 }

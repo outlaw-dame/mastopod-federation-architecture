@@ -29,6 +29,10 @@ export async function validateMediaPayload(params: {
   buffer: Buffer;
   declaredMimeType?: string;
 }): Promise<ValidatedMedia> {
+  if (!params.buffer || params.buffer.byteLength === 0) {
+    throw new Error('Media payload is empty');
+  }
+
   const detected = await fileTypeFromBuffer(params.buffer);
   const detectedMime = normalizeMimeType(detected?.mime);
   const declaredMime = normalizeMimeType(params.declaredMimeType);

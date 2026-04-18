@@ -1,149 +1,81 @@
 #!/usr/bin/env tsx
-/**
- * Performance profiling smoke test runner
- * 
- * Measures end-to-end latency and component timings through the media pipeline.
- * Useful for:
- * - Identifying bottlenecks (fetch vs process vs finalize)
- * - Detecting performance regressions
- * - Establishing baseline metrics for optimization
- * 
- * Runs with the same setup as local smoke but captures detailed timing data.
- */
 
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import { createServer, Server } from 'node:http';
-import { createReadStream } from 'node:fs';
-import { randomUUID } from 'node:crypto';
-import { parseUrl } from 'node:url';
+import { runSmokeHarness } from './lib/smokeHarness';
+import { closeFixtureServer, createStaticFixtureServer } from './lib/staticFixtureServer';
 
-interface PipelineTimings {
-  fetchStart: number;
-  fetchEnd: number;
-  processStart: number;
-  processEnd: number;
-  finalizeStart: number;
-  finalizeEnd: number;
-  total: number;
+const pngBytes = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=',
+  'base64'
+);
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-interface SmokeProfileResult {
-  assetId: string;
-  timings: PipelineTimings;
-  indexedCount: number;
-  persistedCount: number;
+function formatMs(value: number): string {
+  return `${value.toFixed(1)}ms`;
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+function average(values: number[]): number {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
 
-/**
- * Simple in-memory timing pairs tracker for each phase
- */
-class TimingTracker {
-  private marks = new Map<string, number>();
-
-  mark(label: string): void {
-    this.marks.set(label, performance.now());
+function percentile(values: number[], ratio: number): number {
+  if (values.length === 1) {
+    return values[0];
   }
 
-  measure(startLabel: string, endLabel: string): number {
-    const start = this.marks.get(startLabel);
-    const end = this.marks.get(endLabel);
-    if (start === undefined || end === undefined) {
-      throw new Error(`Missing timing marks: ${startLabel} or ${endLabel}`);
-    }
-    return end - start;
-  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
+  return sorted[index];
 }
 
-/**
- * Create a fixture image server that serves a test PNG with latency
- */
-function createFixtureServer(): { server: Server; url: string; latencyMs?: number } {
-  const server = createServer((req, res) => {
-    if (req.url === '/test-image.png' && req.method === 'GET') {
-      // Simulate realistic network latency
-      const latencyMs = 50; // ms
-      setTimeout(() => {
-        res.writeHead(200, {
-          'content-type': 'image/png',
-          'content-length': '67',
-        });
-        // Minimal 1x1 PNG
-        res.end(Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-          0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-          0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-          0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-          0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41,
-          0x54, 0x08, 0xd7, 0x63, 0xf8, 0x0f, 0x00, 0x00,
-          0x01, 0x01, 0x00, 0x05, 0x18, 0x0b, 0xb3, 0x65,
-        ]));
-      }, latencyMs);
-    } else {
-      res.writeHead(404);
-      res.end('Not found');
-    }
-  });
-
-  return {
-    server,
-    url: 'http://localhost:0/test-image.png',
-    latencyMs: 50,
-  };
-}
-
-/**
- * Format milliseconds as human-readable string
- */
-function formatTime(ms: number): string {
-  if (ms < 1000) {
-    return `${ms.toFixed(1)}ms`;
-  }
-  return `${(ms / 1000).toFixed(2)}s`;
-}
-
-/**
- * Main entry point
- */
 async function main(): Promise<void> {
-  console.log('📊 Performance Profiling Smoke Test\n');
+  const runs = parsePositiveInt(process.env.SMOKE_PROFILE_RUNS, 3);
+  const latencyMs = parsePositiveInt(process.env.SMOKE_PROFILE_FIXTURE_LATENCY_MS, 50);
 
-  // For now, run the standard local smoke and capture via structured logging
-  // In a full implementation, this would instrument the pipeline workers themselves
-  // to emit timestamp markers that we collect and analyze.
-
-  console.log('⏱️  Running pipeline with performance instrumentation...');
-  const timingOverall = performance.now();
+  let mediaMock: Awaited<ReturnType<typeof createStaticFixtureServer>> | undefined;
+  const durations: number[] = [];
+  let lastAssetId = '';
 
   try {
-    const { execSync } = await import('node:child_process');
-    execSync('npm run -s smoke:runtime', {
-      cwd: path.dirname(__dirname),
-      stdio: 'inherit',
+    mediaMock = await createStaticFixtureServer({
+      pathname: '/media/profile-image.png',
+      contentType: 'image/png',
+      body: pngBytes,
+      latencyMs
     });
-  } catch (err) {
-    console.error('❌ Performance smoke failed');
-    process.exit(1);
+
+    for (let run = 0; run < runs; run += 1) {
+      const startedAt = performance.now();
+      const result = await runSmokeHarness({
+        sourceUrl: mediaMock.url,
+        runSsrfValidation: false,
+        expectedKind: 'image'
+      });
+      durations.push(performance.now() - startedAt);
+      lastAssetId = result.assetId;
+    }
+
+    console.log('smoke-runtime:profile success');
+    console.log(`runs=${runs}`);
+    console.log(`fixtureLatency=${latencyMs}ms`);
+    console.log(`assetId=${lastAssetId}`);
+    console.log(`min=${formatMs(Math.min(...durations))}`);
+    console.log(`avg=${formatMs(average(durations))}`);
+    console.log(`p50=${formatMs(percentile(durations, 0.5))}`);
+    console.log(`p95=${formatMs(percentile(durations, 0.95))}`);
+    console.log(`max=${formatMs(Math.max(...durations))}`);
+  } finally {
+    if (mediaMock) {
+      await closeFixtureServer(mediaMock.server);
+    }
   }
-
-  const overallMs = performance.now() - timingOverall;
-
-  // Output structured timing results
-  console.log('\n📈 Pipeline Performance Summary:');
-  console.log(`   Total end-to-end latency: ${formatTime(overallMs)}`);
-  console.log('\n   Notes:');
-  console.log('   - Includes Node startup overhead (~300-500ms)');
-  console.log('   - Queue operations are primarily I/O bound');
-  console.log('   - Image processing (sharp) typically 50-150ms');
-  console.log('   - Network operations vary by system');
-  console.log('\n✅ Performance profile captured');
-  console.log('   Baseline: ' + formatTime(overallMs));
 }
 
 main().catch((err) => {
-  console.error('Fatal error:', err);
+  console.error('smoke-runtime:profile failed');
+  console.error(err);
   process.exit(1);
 });

@@ -1,0 +1,60 @@
+# Pipeline: canonical.v1 → OpenSearch (canonical-events index)
+#
+# Indexes canonical protocol-bridge events (CanonicalIntent records) for
+# cross-protocol activity search and notification fan-out.  Produced by the
+# AP→AT and AT→AP projection workers; consumed here for durable indexing.
+#
+# Consumer group: rpconnect-canonical-indexer-v1
+# Required env vars:
+#   REDPANDA_BROKER         — single broker endpoint (default: redpanda:9092)
+#   OPENSEARCH_URL          — OpenSearch base URL  (default: http://opensearch:9200)
+#   OPENSEARCH_AUTH_ENABLED — "true" to enable basic auth (default: false)
+#   OPENSEARCH_USER         — basic auth username (default: admin)
+#   OPENSEARCH_PASSWORD     — basic auth password (default: admin)
+
+input:
+  kafka_franz:
+    seed_brokers:
+      - "${REDPANDA_BROKER:redpanda:9092}"
+    topics:
+      - canonical.v1
+    consumer_group: rpconnect-canonical-indexer-v1
+    start_from_oldest: false
+    auto_replay_nacks: false
+    commit_period: 5s
+    tls:
+      enabled: false
+
+pipeline:
+  processors:
+    - bloblang: |
+        root = this
+        root._connect_indexed_at = now().format("2006-01-02T15:04:05Z07:00")
+
+output:
+  fallback:
+    - label: os_canonical
+      elasticsearch:
+        urls:
+          - "${OPENSEARCH_URL:http://opensearch:9200}"
+        index: canonical-events
+        id: "${!this.intentId | uuid_v4()}"
+        action: index
+        auth:
+          enabled: ${OPENSEARCH_AUTH_ENABLED:false}
+          username: "${OPENSEARCH_USER:admin}"
+          password: "${OPENSEARCH_PASSWORD:admin}"
+        tls:
+          enabled: false
+        max_in_flight: 64
+        batching:
+          count: 200
+          period: 10s
+
+    - label: canonical_dlq
+      kafka_franz:
+        seed_brokers:
+          - "${REDPANDA_BROKER:redpanda:9092}"
+        topic: canonical.dlq.v1
+        tls:
+          enabled: false

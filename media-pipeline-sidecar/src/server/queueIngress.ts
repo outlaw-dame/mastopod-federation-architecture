@@ -9,13 +9,28 @@ import { enqueue } from '../queue/producer';
 import { initRedis, redis } from '../queue/redisClient';
 import { sanitizeOptionalText } from '../ingest/sanitizeMetadata';
 import { logger } from '../logger';
+import { handleLocalMediaDelivery } from './localMediaDelivery';
 
 const bodySchema = z.object({
   sourceUrl: z.string().url().max(2048),
   ownerId: z.string().min(1).max(512),
+  sourceResolver: z.enum(['activitypods-file']).optional(),
   alt: z.string().max(500).optional(),
   contentWarning: z.string().max(300).optional(),
   isSensitive: z.boolean().optional()
+}).superRefine((value, ctx) => {
+  try {
+    const parsed = new URL(value.sourceUrl);
+    if (parsed.username || parsed.password) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'sourceUrl must not contain credentials',
+        path: ['sourceUrl']
+      });
+    }
+  } catch {
+    // zod url validation already covers this path
+  }
 });
 
 function isAuthorized(authorizationHeader: string | undefined): boolean {
@@ -31,7 +46,15 @@ function isAuthorized(authorizationHeader: string | undefined): boolean {
 function writeJson(response: ServerResponse<IncomingMessage>, statusCode: number, payload: unknown): void {
   response.statusCode = statusCode;
   response.setHeader('content-type', 'application/json; charset=utf-8');
+  response.setHeader('cache-control', 'no-store');
   response.end(JSON.stringify(payload));
+}
+
+function sanitizeOwnerId(value: string): string {
+  return value
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .trim()
+    .slice(0, 512);
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
@@ -60,6 +83,10 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 
 const server = createServer(async (request, response) => {
   try {
+    if (await handleLocalMediaDelivery(request, response)) {
+      return;
+    }
+
     if (request.method === 'GET' && request.url === '/health') {
       writeJson(response, 200, { status: 'ok' });
       return;
@@ -99,16 +126,26 @@ const server = createServer(async (request, response) => {
       }
 
       const traceId = randomUUID();
+      const ownerId = sanitizeOwnerId(parsed.data.ownerId);
+      if (!ownerId) {
+        writeJson(response, 400, {
+          error: 'invalid-request-body',
+          detail: 'ownerId must contain at least one printable character'
+        });
+        return;
+      }
+
       await enqueue(MediaStreams.INGEST, {
         traceId,
         sourceUrl: parsed.data.sourceUrl,
-        ownerId: parsed.data.ownerId,
+        ownerId,
+        sourceResolver: parsed.data.sourceResolver || '',
         alt: sanitizeOptionalText(parsed.data.alt, 500),
         contentWarning: sanitizeOptionalText(parsed.data.contentWarning, 300),
         isSensitive: String(Boolean(parsed.data.isSensitive))
       });
 
-      writeJson(response, 200, { status: 'queued', traceId });
+      writeJson(response, 202, { status: 'queued', traceId });
       return;
     }
 

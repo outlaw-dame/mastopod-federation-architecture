@@ -274,6 +274,13 @@ export const inboundLatency = new Histogram({
   registers: [registry],
 });
 
+export const inboundActivityPubActivities = new Counter({
+  name: "fedify_inbound_activitypub_activities_total",
+  help: "Total ActivityPub inbound activities by stage and activity type",
+  labelNames: ["stage", "activity_type"] as const,
+  registers: [registry],
+});
+
 // ============================================================================
 // Outbound Webhook Metrics
 // ============================================================================
@@ -310,6 +317,109 @@ export const outboundWebhookBackpressureRejectionsTotal = new Counter({
   name: "fedify_outbound_webhook_backpressure_rejections_total",
   help: "Number of outbound webhook requests rejected due to queue backpressure",
   labelNames: ["reason"] as const,
+  registers: [registry],
+});
+
+// ============================================================================
+// Protocol Bridge Metrics
+// ============================================================================
+
+export const protocolBridgeProjectionOutcomes = new Counter({
+  name: "fedify_protocol_bridge_projection_outcomes_total",
+  help: "Protocol bridge projection outcomes by direction, outcome, and reason",
+  labelNames: ["direction", "outcome", "reason"] as const,
+  registers: [registry],
+});
+
+export const apRelaySubscriptionAttempts = new Counter({
+  name: "fedify_ap_relay_subscription_attempts_total",
+  help: "AP relay subscription outcomes by relay and status",
+  labelNames: ["relay", "status"] as const,
+  registers: [registry],
+});
+
+// ============================================================================
+// Feed Metrics
+// ============================================================================
+
+export const feedRequestsTotal = new Counter({
+  name: "fedify_feed_requests_total",
+  help: "Feed API requests grouped by endpoint and terminal status",
+  labelNames: ["endpoint", "status"] as const,
+  registers: [registry],
+});
+
+export const feedRequestLatency = new Histogram({
+  name: "fedify_feed_request_latency_seconds",
+  help: "Feed API request latency in seconds by endpoint",
+  labelNames: ["endpoint"] as const,
+  buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
+
+export const feedHydrationOmissionsTotal = new Counter({
+  name: "fedify_feed_hydration_omissions_total",
+  help: "Hydration omissions grouped by omission reason",
+  labelNames: ["reason"] as const,
+  registers: [registry],
+});
+
+export const feedOpenSearchRetriesTotal = new Counter({
+  name: "fedify_feed_opensearch_retries_total",
+  help: "OpenSearch retry attempts made by feed components",
+  labelNames: ["component", "reason"] as const,
+  registers: [registry],
+});
+
+export const feedStreamConnectionsTotal = new Counter({
+  name: "fedify_feed_stream_connections_total",
+  help: "Total durable stream connection attempts by transport and outcome",
+  labelNames: ["transport", "outcome"] as const,
+  registers: [registry],
+});
+
+export const feedStreamActiveConnections = new Gauge({
+  name: "fedify_feed_stream_active_connections",
+  help: "Current number of active durable stream connections by transport",
+  labelNames: ["transport"] as const,
+  registers: [registry],
+});
+
+export const feedStreamEnvelopesPublished = new Counter({
+  name: "fedify_feed_stream_envelopes_published_total",
+  help: "Total stream envelopes published to connections",
+  labelNames: ["stream"] as const,
+  registers: [registry],
+});
+
+// ============================================================================
+// Capability Metrics
+// ============================================================================
+
+/**
+ * Per-capability gate decisions.  `outcome` is one of:
+ *   "allowed"          — gate check passed
+ *   "denied_feature_disabled"   — capability is disabled
+ *   "denied_limit_exceeded"     — plan limit was exceeded
+ *   "denied_protocol_disabled"  — required protocol is inactive
+ */
+export const capabilityGateTotal = new Counter({
+  name: "fedify_capability_gate_total",
+  help: "Total capability gate decisions by capability and outcome",
+  labelNames: ["capability", "outcome"] as const,
+  registers: [registry],
+});
+
+/**
+ * Per-capability readiness gauge.
+ *   1  = enabled
+ *   0  = disabled
+ *  -1  = degraded (enabled but dependency unavailable)
+ */
+export const capabilityHealthGauge = new Gauge({
+  name: "fedify_capability_health",
+  help: "Current health status of each declared capability (1=enabled, 0=disabled, -1=degraded)",
+  labelNames: ["capability"] as const,
   registers: [registry],
 });
 
@@ -368,6 +478,7 @@ export const metrics = {
   inboundErrors,
   inboundSignatureFailures,
   inboundLatency,
+  inboundActivityPubActivities,
 
   // Outbound webhook
   outboundWebhookRequestsTotal,
@@ -375,6 +486,25 @@ export const metrics = {
   outboundWebhookQueueingLatency,
   outboundWebhookTargetsDedupedTotal,
   outboundWebhookBackpressureRejectionsTotal,
+
+  // Protocol bridge
+  protocolBridgeProjectionOutcomes,
+
+  // AP relay
+  apRelaySubscriptionAttempts,
+
+  // Feed
+  feedRequestsTotal,
+  feedRequestLatency,
+  feedHydrationOmissionsTotal,
+  feedOpenSearchRetriesTotal,
+  feedStreamConnectionsTotal,
+  feedStreamActiveConnections,
+  feedStreamEnvelopesPublished,
+
+  // Capability
+  capabilityGateTotal,
+  capabilityHealthGauge,
 };
 
 /**

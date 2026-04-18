@@ -28,6 +28,8 @@ export function validateProviderCapabilitiesConfig(
     hasSigningEndpoint: boolean;
     hasSigningToken: boolean;
     hasOpenSearchUrl: boolean;
+    hasActivityPodsUrl: boolean;
+    hasActivityPodsToken: boolean;
     enableMrf: boolean;
   },
 ): StartupValidationResult {
@@ -75,12 +77,54 @@ export function validateProviderCapabilitiesConfig(
     pushFatal(issues, "INF-004", "cap_infra_missing", "ap.signing.batch requires signing endpoint and token");
   }
 
+  if (isEnabled(document, "ap.media.pipeline")) {
+    if (!isEnabled(document, "ap.streams")) {
+      pushFatal(issues, "DEP-007", "cap_dependency_missing", "ap.media.pipeline requires ap.streams");
+    }
+
+    if (!options.hasActivityPodsUrl || !options.hasActivityPodsToken) {
+      pushFatal(
+        issues,
+        "INF-006",
+        "cap_infra_missing",
+        "ap.media.pipeline requires ActivityPods URL and token for internal media synchronization",
+      );
+    }
+  }
+
   if (options.enableMrf && !isEnabled(document, "ap.mrf")) {
     issues.push({
       severity: "warning",
       ruleId: "INF-005",
       code: "cap_module_load_failed",
       message: "MRF runtime enabled but ap.mrf capability not declared enabled",
+    });
+  }
+
+  // DEP-008: ap.feeds.realtime implies ap.streams is declared when Kafka streams
+  // are in use.  The unified in-process stream works without Kafka, so this is a
+  // warning rather than a fatal error.
+  if (isEnabled(document, "ap.feeds.realtime") && !isEnabled(document, "ap.streams")) {
+    issues.push({
+      severity: "warning",
+      ruleId: "DEP-008",
+      code: "cap_dependency_advisory",
+      message:
+        "ap.feeds.realtime is enabled but ap.streams is not declared.  " +
+        "Only the in-process unified stream will be available; " +
+        "Kafka-backed streams (stream1, stream2, firehose) will not fan-out.",
+    });
+  }
+
+  // INF-007: canonical event log has the same infra requirements as ap.streams.
+  if (isEnabled(document, "ap.feeds.realtime") && !options.hasRedisUrl) {
+    issues.push({
+      severity: "warning",
+      ruleId: "INF-007",
+      code: "cap_infra_advisory",
+      message:
+        "ap.feeds.realtime is enabled but no Redis URL was detected.  " +
+        "SSE/WS cursor state will be in-process only.",
     });
   }
 

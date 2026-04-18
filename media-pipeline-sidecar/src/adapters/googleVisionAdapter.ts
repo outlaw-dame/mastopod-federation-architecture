@@ -1,6 +1,7 @@
 import { config } from '../config/config';
 import type { SafetySignal, SafetySignalAdapter } from './safetySignals';
 import { fetch } from 'undici';
+import { RetryableMediaPipelineError } from '../utils/errorHandling';
 import { retryAsync } from '../utils/retry';
 
 /**
@@ -36,7 +37,11 @@ export class GoogleVisionAdapter implements SafetySignalAdapter {
       });
 
       if (response.status >= 500 || response.status === 429) {
-        throw new Error(`Transient Vision API error: ${response.status}`);
+        throw new RetryableMediaPipelineError({
+          code: 'VISION_API_TRANSIENT',
+          message: `Transient Vision API error: ${response.status}`,
+          statusCode: response.status
+        });
       }
 
       return response;

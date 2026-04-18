@@ -1,6 +1,19 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 
+const BLOCKED_HOSTNAMES = new Set([
+  'localhost',
+  'localhost.localdomain',
+  'metadata.google.internal'
+]);
+
+const BLOCKED_HOSTNAME_SUFFIXES = [
+  '.internal',
+  '.local',
+  '.localhost',
+  '.home.arpa'
+];
+
 const PRIVATE_IPV4_RANGES: Array<[string, string]> = [
   ['0.0.0.0', '0.255.255.255'],
   ['10.0.0.0', '10.255.255.255'],
@@ -23,12 +36,21 @@ export async function assertSafeRemoteUrl(rawUrl: string): Promise<URL> {
     throw new Error('Userinfo is not permitted in media URLs');
   }
 
-  if (net.isIP(url.hostname)) {
-    assertPublicIp(url.hostname);
+  const hostname = url.hostname.trim().toLowerCase();
+  if (!hostname) {
+    throw new Error('Remote host is required');
+  }
+
+  if (BLOCKED_HOSTNAMES.has(hostname) || BLOCKED_HOSTNAME_SUFFIXES.some((suffix) => hostname.endsWith(suffix))) {
+    throw new Error(`Blocked internal hostname: ${hostname}`);
+  }
+
+  if (net.isIP(hostname)) {
+    assertPublicIp(hostname);
     return url;
   }
 
-  const answers = await dns.lookup(url.hostname, { all: true, verbatim: true });
+  const answers = await dns.lookup(hostname, { all: true, verbatim: true });
   if (answers.length === 0) {
     throw new Error('Unable to resolve remote host');
   }

@@ -27,6 +27,7 @@ import {
   FederationRuntimeAdapter,
   NoopFederationRuntimeAdapter,
 } from "../core-domain/contracts/SigningContracts.js";
+import { metrics } from "../metrics/index.js";
 import { logger } from "../utils/logger.js";
 import { CapabilityGateResult } from "../capabilities/gates.js";
 
@@ -40,10 +41,19 @@ export interface InboundWorkerConfig {
   activityPodsToken: string;
   requestTimeoutMs: number;
   userAgent: string;
+  /** TTL for remote actor document cache entries in Redis. Defaults to 3600000 (1h). */
+  actorCacheTtlMs?: number;
   capabilityGate?: (capabilityId: string) => CapabilityGateResult;
   fedifyRuntimeIntegrationEnabled: boolean;
   /** Injected adapter — defaults to NoopFederationRuntimeAdapter when flag is off. */
   adapter?: FederationRuntimeAdapter;
+  /**
+   * Set of inbox path prefixes (e.g. "/users/relay") that correspond to
+   * sidecar-managed service actors.  Inbound activities targeting these paths
+   * are acknowledged and published to Stream2 without being forwarded to
+   * ActivityPods (which has no record of these actors).
+   */
+  sidecarActorPaths?: Set<string>;
 }
 
 export interface VerificationResult {
@@ -280,7 +290,11 @@ export class InboundWorker {
       }
 
       // Step 2: Basic activity validation
+      const activityType = this.normalizeActivityType(activity?.type);
+      metrics.inboundActivityPubActivities.inc({ stage: "received", activity_type: activityType });
+
       if (!activity.type || !activity.actor) {
+        metrics.inboundActivityPubActivities.inc({ stage: "rejected", activity_type: activityType });
         await this.queue.ack("inbound", messageId);
         await this.queue.moveToDlq("inbound", envelope, "Missing required activity fields");
         logger.warn("Invalid activity structure", { envelopeId: envelope.envelopeId });
@@ -297,10 +311,44 @@ export class InboundWorker {
       // Step 4: Check if activity is public
       const isPublic = this.isPublicActivity(activity);
 
+      // Step 4.5: Short-circuit for sidecar-owned actor inboxes.
+      // These actors (e.g. /users/relay) are managed by the sidecar, not by
+      // ActivityPods, so forwarding would always 404.  Ack immediately and
+      // fall through to Stream2 publication below.
+      if (this.config.sidecarActorPaths) {
+        const pathWithoutInbox = envelope.path.replace(/\/inbox$/, "");
+        if (this.config.sidecarActorPaths.has(pathWithoutInbox)) {
+          metrics.inboundActivityPubActivities.inc({ stage: "sidecar_actor", activity_type: activityType });
+          await this.queue.ack("inbound", messageId);
+          if (isPublic) {
+            try {
+              await this.redpanda.publishToStream2({
+                activity,
+                actorUri: verifiedActorUri,
+                receivedAt: envelope.receivedAt,
+                path: envelope.path,
+              });
+            } catch (err: any) {
+              logger.error("Failed to publish sidecar-actor activity to Stream2", {
+                envelopeId: envelope.envelopeId,
+                error: err.message,
+              });
+            }
+          }
+          logger.info("Inbound activity handled for sidecar actor", {
+            envelopeId: envelope.envelopeId,
+            path: envelope.path,
+            activityType,
+          });
+          return;
+        }
+      }
+
       // Step 5: Forward to ActivityPods
       const forwardResult = await this.forwardToActivityPods(envelope, activity, verifiedActorUri);
       
       if (!forwardResult.success) {
+        metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
         await this.queue.ack("inbound", messageId);
 
         if (forwardResult.permanent || envelope.attempt >= MAX_INBOUND_ATTEMPTS) {
@@ -368,6 +416,8 @@ export class InboundWorker {
         isPublic,
       });
 
+      metrics.inboundActivityPubActivities.inc({ stage: "processed", activity_type: activityType });
+
       logger.info("Inbound activity processed", { 
         envelopeId: envelope.envelopeId,
         activityId: activity.id,
@@ -406,6 +456,8 @@ export class InboundWorker {
     const verification = await this.verifySignature(envelope);
 
     if (!verification.valid || !verification.actorUri) {
+      const activityType = this.normalizeActivityType(activity?.type);
+      metrics.inboundActivityPubActivities.inc({ stage: "rejected", activity_type: activityType });
       await this.queue.ack("inbound", messageId);
       await this.queue.moveToDlq(
         "inbound",
@@ -431,10 +483,7 @@ export class InboundWorker {
   private getTrustedVerification(
     envelope: InboundEnvelope
   ): InboundEnvelopeVerification | null {
-    if (
-      !this.config.fedifyRuntimeIntegrationEnabled ||
-      envelope.verification?.source !== "fedify-v2"
-    ) {
+    if (envelope.verification?.source !== "fedify-v2") {
       return null;
     }
 
@@ -449,8 +498,10 @@ export class InboundWorker {
     verificationSource: string
   ): Promise<string | null> {
     const activityActorUri = this.extractActivityActorUri(activity);
+    const activityType = this.normalizeActivityType(activity?.type);
 
     if (!activityActorUri) {
+      metrics.inboundActivityPubActivities.inc({ stage: "rejected", activity_type: activityType });
       await this.queue.ack("inbound", messageId);
       await this.queue.moveToDlq(
         "inbound",
@@ -465,6 +516,7 @@ export class InboundWorker {
     }
 
     if (activityActorUri !== verifiedActorUri) {
+      metrics.inboundActivityPubActivities.inc({ stage: "rejected", activity_type: activityType });
       await this.queue.ack("inbound", messageId);
       await this.queue.moveToDlq(
         "inbound",
@@ -498,6 +550,13 @@ export class InboundWorker {
     }
 
     return null;
+  }
+
+  private normalizeActivityType(type: unknown): string {
+    if (typeof type === "string" && type.trim().length > 0) {
+      return type.trim().slice(0, 64);
+    }
+    return "unknown";
   }
 
   /**
@@ -644,7 +703,7 @@ export class InboundWorker {
       const doc = await response.body.json() as any;
 
       // Cache the document
-      await this.queue.cacheActorDoc(fetchUrl, doc);
+      await this.queue.cacheActorDoc(fetchUrl, doc, Math.ceil((this.config.actorCacheTtlMs ?? 3_600_000) / 1000));
 
       return doc;
 
@@ -686,8 +745,11 @@ export class InboundWorker {
       // Determine target inbox from path
       // Path format: /users/{username}/inbox or /{username}/inbox
       const targetInbox = `${this.config.activityPodsUrl}${envelope.path}`;
+      const isBenchmark = envelope.headers?.["x-sidecar-benchmark"] === "1";
 
-      const response = await request(`${this.config.activityPodsUrl}/api/internal/inbox/receive`, {
+      const response = await request(
+        `${this.config.activityPodsUrl}/api/internal/activitypub-bridge/inbox/receive`,
+        {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -699,10 +761,12 @@ export class InboundWorker {
           verifiedActorUri,
           receivedAt: envelope.receivedAt,
           remoteIp: envelope.remoteIp,
+          benchmark: isBenchmark,
         }),
         bodyTimeout: this.config.requestTimeoutMs,
         headersTimeout: this.config.requestTimeoutMs,
-      });
+        }
+      );
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         await response.body.text();  // Consume body
@@ -756,10 +820,24 @@ export function createInboundWorker(
     activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] || "",
     requestTimeoutMs: parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
     userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+    actorCacheTtlMs: parseInt(process.env["ACTOR_CACHE_TTL_MS"] || "3600000", 10),
     fedifyRuntimeIntegrationEnabled:
       process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
     ...overrides,
   };
+
+  // Safety invariant: claim idle timeout must exceed the per-request timeout.
+  // If claimIdleTimeMs ≤ requestTimeoutMs, xAutoClaim can reclaim a message
+  // while the original worker is still awaiting the HTTP response, causing
+  // duplicate delivery to ActivityPods.
+  const claimIdleMs = queue.getClaimIdleTimeMs();
+  if (claimIdleMs <= config.requestTimeoutMs) {
+    throw new Error(
+      `Configuration error: CLAIM_IDLE_TIME_MS (${claimIdleMs}ms) must be ` +
+      `greater than REQUEST_TIMEOUT_MS (${config.requestTimeoutMs}ms). ` +
+      `Risk of double-delivery via xAutoClaim.`
+    );
+  }
 
   return new InboundWorker(queue, redpanda, config);
 }

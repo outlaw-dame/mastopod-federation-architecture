@@ -23,10 +23,25 @@ Focused media infrastructure service for the Mastopod federation architecture.
 ## Runtime shape
 
 ```text
-queue ingress -> ingest worker -> fetch worker -> process:image|video -> finalize worker
+queue ingress -> ingest worker -> fetch worker -> process:image|video -> video:rendition -> finalize worker
 ```
 
 The finalize stage persists the canonical asset, emits a media lifecycle event, and writes a media indexing payload. Any safety signals are emitted as raw signals only for downstream MRF evaluation.
+
+Important deployment note:
+- `npm start` only runs the HTTP ingress service.
+- Production deployments must also run the queue workers for `ingest`, `fetch`, `process:image`, `process:video`, `video:rendition`, and `finalize`.
+- The `fedify-sidecar/docker-compose.yml` stack models ingress and workers as separate services so each stage can be scaled independently.
+
+## Architecture integration
+
+To wire this into the broader Mastopod stack:
+
+1. Deploy `media-pipeline-sidecar` alongside Redis and OpenSearch.
+2. Add `fedify-sidecar/activitypods-integration/media-pipeline-emitter.service.js` to the ActivityPods backend so local pod file resources are forwarded to `POST /internal/media/ingest`.
+3. Share the same Redis and RedPanda/OpenSearch infrastructure already used by the sidecar stack when you want asset persistence, lifecycle events, and indexing.
+
+This service is not the same thing as the ActivityPub bridge media resolvers used by `fedify-sidecar` for AP->AT projection. Those bridge endpoints fetch bytes synchronously for protocol projection, while `media-pipeline-sidecar` is the asynchronous derivative and analysis pipeline.
 
 ## S3 Provider Compatibility
 
@@ -39,6 +54,16 @@ Environment controls:
 - `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`: API credentials.
 - `S3_FORCE_PATH_STYLE`: defaults to `true` for broad S3-compatible support.
 - `S3_PUBLIC_BASE_URL`: optional canonical URL base for public media links.
+- `WORKER_SCRATCH_DIR`: local scratch directory used for streamed downloads and rendition staging.
+- `WORKER_MAX_SCHEDULED_RETRIES`, `WORKER_RETRY_BASE_DELAY_MS`, `WORKER_RETRY_MAX_DELAY_MS`: bounded Redis-backed worker retry scheduling before DLQ.
+- `WORKER_SCRATCH_MAX_AGE_MS`, `WORKER_SCRATCH_CLEANUP_INTERVAL_MS`: stale scratch directory self-healing.
+- `FFMPEG_PATH` and `FFPROBE_PATH`: optional overrides for video tooling.
+- `VIDEO_PLAYBACK_RENDITION_WIDTHS`, `VIDEO_PLAYBACK_CRF`, `VIDEO_PLAYBACK_AUDIO_BITRATE_KBPS`, `VIDEO_PLAYBACK_PRESET`: MP4 playback rendition ladder controls.
+- `VIDEO_STREAM_SEGMENT_DURATION_SECONDS`: shared segment duration for HLS and DASH delivery manifests.
+
+Container note:
+- The provided Alpine Docker image installs native `ffmpeg`/`ffprobe` packages and exports `FFMPEG_PATH=/usr/bin/ffmpeg` plus `FFPROBE_PATH=/usr/bin/ffprobe`.
+- Host-based development can still rely on the bundled static binaries when those env vars are not set.
 
 If set, media URLs are built as `${S3_PUBLIC_BASE_URL}/{key}`.
 If not set, fallback is `${S3_ENDPOINT}/{S3_BUCKET}/{key}`.
@@ -61,12 +86,20 @@ Operational impact versus plain S3:
 ## Production hardening defaults
 
 - Stream payloads carry object references instead of inline media bytes.
+- Fetch workers spool remote media to local scratch disk and upload transient objects by stream instead of buffering large payloads wholly in memory.
+- Retryable worker failures are rescheduled through Redis with bounded exponential backoff before falling through to DLQ.
+- Worker scratch directories are pruned opportunistically so stale crash leftovers do not accumulate forever on disk.
 - Redis Streams are trimmed with bounded retention (`STREAM_MAX_LEN`, `DLQ_MAX_LEN`).
 - Workers reclaim stale pending entries (`PENDING_MIN_IDLE_MS`, `PENDING_CLAIM_BATCH_SIZE`).
 - Canonical assets persist to Redis by default (`ASSET_STORE_BACKEND=redis`) for multi-instance consistency.
 - Legacy in-flight messages with `bytesBase64` are still accepted for safe migration.
 
 ## Supported media types
+
+Implementation status:
+- Images are normalized into canonical WebP plus preview and thumbnail derivatives.
+- Videos now move through a dedicated rendition stage that can extract poster/thumbnail derivatives, metadata, bounded MP4 playback renditions, and HLS plus DASH delivery manifests using `ffmpeg`/`ffprobe`.
+- The video stage preserves the uploaded canonical original and adds delivery-oriented playback and streaming variants rather than replacing the original asset.
 
 ### Images
 - image/jpeg
@@ -92,6 +125,7 @@ Ingress runs on Node HTTP primitives with strict JSON body size limits and const
 - `npm run worker:fetch`
 - `npm run worker:process:image`
 - `npm run worker:process:video`
+- `npm run worker:rendition:video`
 - `npm run worker:finalize`
 
 ## Smoke tests
@@ -135,19 +169,18 @@ npm run smoke:runtime:ci
 ```bash
 npm run smoke:runtime:profile
 ```
-- Measures end-to-end latency through pipeline
-- Captures component timing breakdowns
-- Identifies bottlenecks in fetch/process/finalize
-- Best for: performance regression detection, baseline establishment
-- Output: formatted timing metrics
+- Runs the full local image smoke multiple times and reports total end-to-end latency
+- Emits `min`, `avg`, `p50`, `p95`, and `max` timing summaries
+- Supports `SMOKE_PROFILE_RUNS` and `SMOKE_PROFILE_FIXTURE_LATENCY_MS`
+- Best for: regression detection and rough local baselines
 
 ### Chaos engineering smoke (resilience testing)
 ```bash
 npm run smoke:runtime:chaos
 ```
-- Injects transient failures: 500 errors, 429 rate limits, timeouts
-- Validates retry logic and exponential backoff
-- Tests dead-letter queue (DLQ) handling
+- Runs real Redis-backed worker scenarios against `runSecureWorker`
+- Validates scheduled retries, exponential backoff, recovery, and DLQ exhaustion paths
+- Confirms non-retryable failures skip retry and land in DLQ directly
 - Best for: validating error handling, resilience verification
 - Exit code: 0 if recovery validated, 1 if resilience broken
 
@@ -155,8 +188,6 @@ npm run smoke:runtime:chaos
 ```bash
 npm run smoke:runtime:video
 ```
-- Validates video processing pipeline
-- Tests with local MP4/WebM fixtures and public video URLs
-- Checks MIME detection, upload, metadata
-- Best for: video codec coverage, end-to-end video validation
-- Exit code: 0 if video processing works, 1 if failed
+- Runs a deterministic local QuickTime fixture through the full video path
+- Verifies fetch, MIME classification, storage, indexing, persistence, MP4 playback rendition generation, HLS plus DASH streaming manifests, and ActivityPub delivery projection preference
+- Best for: end-to-end regression checks on the current video pipeline behavior

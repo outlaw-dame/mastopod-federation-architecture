@@ -50,12 +50,15 @@ import {
   type Federation,
   type InboxContext,
   type KvStore,
+  type Actor,
+} from "@fedify/fedify";
+import {
   Activity,
   CryptographicKey,
   Person,
-  type Actor,
-  parseSemVer,
-} from "@fedify/fedify";
+  Service,
+} from "@fedify/fedify/vocab";
+import type { SidecarLocalSigningService } from "../signing/SidecarLocalSigningService.js";
 import { isIP } from "node:net";
 import { request } from "undici";
 import type {
@@ -95,6 +98,18 @@ export interface FedifyAdapterConfig {
   permanentFailureStatusCodes?: readonly number[];
   /** Maximum error response body bytes retained for diagnostics. */
   maxErrorResponseBodyBytes?: number;
+  /**
+   * Optional local signing service for sidecar-owned service actors
+   * (e.g. the relay actor). When provided, signing for actors whose
+   * URI is rooted in the sidecar's domain bypasses ActivityPods signing.
+   */
+  localSigningService?: SidecarLocalSigningService;
+  /**
+   * Identifiers of sidecar-owned service actors. Defaults to `["relay"]`.
+   * These actors are served with locally generated key pairs rather than
+   * proxied from ActivityPods.
+   */
+  sidecarServiceActors?: string[];
 }
 
 export interface FedifyAdapterLogger {
@@ -366,6 +381,8 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
   private readonly federation: Federation<SidecarContext>;
   private readonly logger: FedifyAdapterLogger;
   private readonly outboundRuntimeConfig: FedifyOutboundRuntimeConfig;
+  private readonly localSigningService: SidecarLocalSigningService | undefined;
+  private readonly sidecarServiceActors: Set<string>;
 
   constructor(
     kv: KvStore,
@@ -374,6 +391,8 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
   ) {
     this.logger = logger ?? NOOP_LOGGER;
     this.outboundRuntimeConfig = resolveOutboundRuntimeConfig(config);
+    this.localSigningService = config.localSigningService;
+    this.sidecarServiceActors = new Set(config.sidecarServiceActors ?? ["relay"]);
     this.federation = this.buildFederation(kv);
   }
 
@@ -483,6 +502,27 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     }
   }
 
+  /**
+   * Determine whether `actorUri` is a sidecar-owned service actor
+   * (e.g. `https://<domain>/users/relay`). When true, we use the local
+   * signing service instead of ActivityPods signing.
+   */
+  private isSidecarOwnedActor(actorUri: string): { owned: true; identifier: string } | { owned: false } {
+    try {
+      const url = new URL(actorUri);
+      // Must be on our own domain
+      if (url.hostname !== this.config.domain) return { owned: false };
+      // Path must be /users/<identifier>
+      const match = /^\/users\/([^/]+)$/.exec(url.pathname);
+      if (!match || !match[1]) return { owned: false };
+      const identifier = match[1];
+      if (!this.sidecarServiceActors.has(identifier)) return { owned: false };
+      return { owned: true, identifier };
+    } catch {
+      return { owned: false };
+    }
+  }
+
   async deliverOutbound(input: OutboundDeliveryInput): Promise<OutboundDeliveryResult> {
     const targetUrl = normalizeOutboundTargetUrl(input.targetInbox);
     if (targetUrl == null) {
@@ -492,6 +532,13 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         error: "Outbound target inbox failed safety validation",
         permanent: true,
       };
+    }
+
+    // For sidecar-owned service actors (e.g. relay), bypass ActivityPods
+    // signing and use the locally stored RSA key pair instead.
+    const ownerCheck = this.isSidecarOwnedActor(input.actorUri);
+    if (ownerCheck.owned && this.localSigningService) {
+      return this._deliverWithLocalSigning(input, targetUrl, ownerCheck.identifier);
     }
 
     let signResult;
@@ -573,6 +620,80 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     }
   }
 
+  /**
+   * Deliver an outbound activity signed with a locally stored RSA key pair
+   * (for sidecar-owned service actors like the relay actor).
+   */
+  private async _deliverWithLocalSigning(
+    input: OutboundDeliveryInput,
+    targetUrl: URL,
+    identifier: string,
+  ): Promise<OutboundDeliveryResult> {
+    const localSvc = this.localSigningService!;
+    let signedHeaders: { date: string; digest: string; signature: string };
+    try {
+      signedHeaders = await localSvc.signHttpRequest({
+        actorUri: input.actorUri,
+        identifier,
+        method: "POST",
+        targetUrl: targetUrl.href,
+        body: input.activity,
+      });
+    } catch (err) {
+      return {
+        jobId: input.jobId,
+        success: false,
+        error: `Local signing failed: ${err instanceof Error ? err.message : String(err)}`,
+        permanent: false,
+      };
+    }
+
+    try {
+      const response = await request(targetUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/activity+json",
+          accept: "application/activity+json, application/ld+json",
+          "user-agent": input.userAgent || this.outboundRuntimeConfig.userAgent,
+          date: signedHeaders.date,
+          digest: signedHeaders.digest,
+          signature: signedHeaders.signature,
+          host: targetUrl.host,
+        },
+        body: input.activity,
+        bodyTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
+        headersTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
+      });
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        await readLimitedResponseBody(response.body, this.outboundRuntimeConfig.maxErrorResponseBodyBytes);
+        return { jobId: input.jobId, success: true, statusCode: response.statusCode };
+      }
+
+      const responseBody = await readLimitedResponseBody(
+        response.body,
+        this.outboundRuntimeConfig.maxErrorResponseBodyBytes,
+      );
+      const permanent = this.outboundRuntimeConfig.permanentFailureStatusCodes.includes(response.statusCode);
+      return {
+        jobId: input.jobId,
+        success: false,
+        statusCode: response.statusCode,
+        error: `Failed to deliver (local-signed) activity to ${targetUrl.href} (${response.statusCode}):\n${responseBody}`,
+        responseBody,
+        permanent,
+        retryAfterMs: permanent ? undefined : parseRetryAfterMs(response.headers["retry-after"]),
+      };
+    } catch (err) {
+      return {
+        jobId: input.jobId,
+        success: false,
+        error: `Network error (local-signed): ${err instanceof Error ? err.message : String(err)}`,
+        permanent: false,
+      };
+    }
+  }
+
   // --------------------------------------------------------------------------
   // Federation setup
   // --------------------------------------------------------------------------
@@ -594,6 +715,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     });
 
     this.registerActorDispatcher(federation);
+    this.registerCollectionDispatchers(federation);
     this.registerInboxListeners(federation);
     this.registerNodeInfo(federation);
 
@@ -623,36 +745,47 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         // Canonical actor URL on the sidecar's public domain.
         const actorId = `https://${ctx.data.domain}/users/${identifier}`;
 
-        try {
-          // Fetch actor data from the ActivityPods INTERNAL API.
-          // This is the correct endpoint — NOT the public /users/ route which
-          // would loop back through the sidecar or serve an incompatible format.
-          const resp = await fetch(
-            `${ctx.data.activityPodsUrl}/api/internal/actors/${encodeURIComponent(identifier)}`,
-            {
-              headers: {
-                Accept: "application/activity+json",
-                // Authorization header carries the sidecar-to-ActivityPods bearer
-                // token. The token is stored in memory only (never written to disk
-                // by this adapter); it is sourced from the process environment at
-                // startup.
-                Authorization: `Bearer ${ctx.data.activityPodsToken}`,
-              },
-              signal: AbortSignal.timeout(10_000),
-            }
-          );
+        // ---------- Sidecar-owned service actors ----------
+        // Actors like "relay" are owned by the sidecar itself, not proxied
+        // from ActivityPods. Serve a synthetic Service actor with a locally
+        // managed public key.
+        if (this.sidecarServiceActors.has(identifier) && this.localSigningService) {
+          try {
+            const publicKeyPem = await this.localSigningService.getPublicKeyPem(identifier);
+            const cryptoKey = await importPublicKeyPem(publicKeyPem);
+            const publicKey = cryptoKey
+              ? new CryptographicKey({
+                  id: new URL(`${actorId}#main-key`),
+                  owner: new URL(actorId),
+                  publicKey: cryptoKey,
+                })
+              : undefined;
 
-          if (resp.status === 404) return null;
-
-          if (!resp.ok) {
-            this.logger.warn("[fedify] actor dispatcher: ActivityPods non-OK response", {
+            return new Service({
+              id: new URL(actorId),
+              name: identifier,
+              preferredUsername: identifier,
+              inbox: new URL(`https://${ctx.data.domain}/users/${identifier}/inbox`),
+              outbox: new URL(`https://${ctx.data.domain}/users/${identifier}/outbox`),
+              followers: new URL(`https://${ctx.data.domain}/users/${identifier}/followers`),
+              following: new URL(`https://${ctx.data.domain}/users/${identifier}/following`),
+              url: new URL(actorId),
+              ...(publicKey != null ? { publicKey } : {}),
+            });
+          } catch (err) {
+            this.logger.error("[fedify] actor dispatcher: failed to build sidecar service actor", {
               identifier,
-              status: resp.status,
+              err: String(err),
             });
             return null;
           }
+        }
 
-          const doc = (await resp.json()) as Record<string, unknown>;
+        try {
+          const doc = await this.fetchActivityPodsActorDocument(ctx, identifier);
+          if (doc == null) {
+            return null;
+          }
 
           // ---------- Public key ----------
           // Attempt to embed the actor's public key in the returned Person so
@@ -703,6 +836,8 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
             outbox: new URL(`https://${ctx.data.domain}/users/${identifier}/outbox`),
             followers: new URL(`https://${ctx.data.domain}/users/${identifier}/followers`),
             following: new URL(`https://${ctx.data.domain}/users/${identifier}/following`),
+            featured: new URL(`https://${ctx.data.domain}/users/${identifier}/featured`),
+            featuredTags: new URL(`https://${ctx.data.domain}/users/${identifier}/featuredTags`),
             url: actorUrl,
             // Conditionally include publicKey only when successfully imported.
             ...(activityPubPublicKey != null ? { publicKey: activityPubPublicKey } : {}),
@@ -717,6 +852,82 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         }
       }
     );
+  }
+
+  private registerCollectionDispatchers(
+    federation: Federation<SidecarContext>,
+  ): void {
+    federation.setOutboxDispatcher(
+      "/users/{identifier}/outbox",
+      async (ctx, identifier) => this.resolveSyntheticCollection(ctx, identifier, "outbox"),
+    );
+    federation.setFollowersDispatcher(
+      "/users/{identifier}/followers",
+      async (ctx, identifier) => this.resolveSyntheticCollection(ctx, identifier, "followers"),
+    );
+    federation.setFollowingDispatcher(
+      "/users/{identifier}/following",
+      async (ctx, identifier) => this.resolveSyntheticCollection(ctx, identifier, "following"),
+    );
+    federation.setFeaturedDispatcher(
+      "/users/{identifier}/featured",
+      async (ctx, identifier) => this.resolveSyntheticCollection(ctx, identifier, "featured"),
+    );
+    federation.setFeaturedTagsDispatcher(
+      "/users/{identifier}/featuredTags",
+      async (ctx, identifier) => this.resolveSyntheticCollection(ctx, identifier, "featuredTags"),
+    );
+  }
+
+  private async resolveSyntheticCollection(
+    ctx: Context<SidecarContext>,
+    identifier: string,
+    collection: "outbox" | "followers" | "following" | "featured" | "featuredTags",
+  ): Promise<{ items: [] } | null> {
+    if (!IDENTIFIER_PATTERN.test(identifier)) {
+      this.logger.warn("[fedify] collection dispatcher: rejected invalid identifier", {
+        collection,
+        identifier: identifier.slice(0, 64),
+      });
+      return null;
+    }
+
+    const actor = await this.fetchActivityPodsActorDocument(ctx, identifier);
+    if (actor == null) {
+      return null;
+    }
+
+    return { items: [] };
+  }
+
+  private async fetchActivityPodsActorDocument(
+    ctx: Context<SidecarContext>,
+    identifier: string,
+  ): Promise<Record<string, unknown> | null> {
+    const resp = await fetch(
+      `${ctx.data.activityPodsUrl}/api/internal/actors/${encodeURIComponent(identifier)}`,
+      {
+        headers: {
+          Accept: "application/activity+json",
+          Authorization: `Bearer ${ctx.data.activityPodsToken}`,
+        },
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+
+    if (resp.status === 404) {
+      return null;
+    }
+
+    if (!resp.ok) {
+      this.logger.warn("[fedify] ActivityPods actor lookup returned non-OK response", {
+        identifier,
+        status: resp.status,
+      });
+      return null;
+    }
+
+    return (await resp.json()) as Record<string, unknown>;
   }
 
   // --------------------------------------------------------------------------
@@ -801,7 +1012,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     federation.setNodeInfoDispatcher("/nodeinfo/2.1", async (_ctx) => ({
       software: {
         name: "mastopod-federation-sidecar",
-        version: parseSemVer("6.5.0"),
+        version: { major: 6, minor: 5, patch: 0 },
         homepage: new URL("https://github.com/activitypods/mastopod"),
       },
       protocols: ["activitypub"],

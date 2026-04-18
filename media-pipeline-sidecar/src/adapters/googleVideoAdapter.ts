@@ -1,6 +1,7 @@
 import { config } from '../config/config';
 import type { SafetySignal, SafetySignalAdapter } from './safetySignals';
 import { fetch } from 'undici';
+import { RetryableMediaPipelineError } from '../utils/errorHandling';
 import { retryAsync } from '../utils/retry';
 
 /**
@@ -31,7 +32,11 @@ export class GoogleVideoAdapter implements SafetySignalAdapter {
       });
 
       if (response.status >= 500 || response.status === 429) {
-        throw new Error(`Transient Video Intelligence API error: ${response.status}`);
+        throw new RetryableMediaPipelineError({
+          code: 'VIDEO_INTELLIGENCE_TRANSIENT',
+          message: `Transient Video Intelligence API error: ${response.status}`,
+          statusCode: response.status
+        });
       }
 
       return response;

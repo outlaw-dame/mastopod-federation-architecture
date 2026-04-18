@@ -1,7 +1,10 @@
+import type { VideoPlaybackVariant, VideoStreamingManifest } from './CanonicalAsset';
+
 export interface ActivityPubMediaBinding {
   type: 'Image' | 'Document' | 'Video' | 'Audio';
   url: string;
   mediaType: string;
+  canonicalUrl?: string;
   name?: string;
   summary?: string;
   sensitive?: boolean;
@@ -14,6 +17,9 @@ export interface ActivityPubMediaBinding {
   blurhash?: string;
   /** IPFS gateway URL for FEP-1311 content-addressed access (present when CID is known). */
   gatewayUrl?: string;
+  deliveryKind?: 'original' | 'playback' | 'streaming';
+  playback?: VideoPlaybackVariant[];
+  streaming?: VideoStreamingManifest[];
 }
 
 export interface ATProtoMediaBinding {

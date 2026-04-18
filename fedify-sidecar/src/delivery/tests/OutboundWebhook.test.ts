@@ -3,6 +3,7 @@ import {
   evaluateOutboundWebhookBackpressure,
   normalizeAndDedupeOutboundTargets,
   OutboundWebhookValidationError,
+  resolveOutboundWebhookBackpressureConfigFromEnv,
 } from "../outbound-webhook.js";
 
 describe("normalizeAndDedupeOutboundTargets", () => {
@@ -107,5 +108,69 @@ describe("evaluateOutboundWebhookBackpressure", () => {
       reason: "queue_depth",
       retryAfterSeconds: 7,
     });
+  });
+
+  it("does not reject on queue depth alone when there is no pending backlog", () => {
+    const result = evaluateOutboundWebhookBackpressure(
+      {
+        pendingCount: 0,
+        streamLength: 500,
+      },
+      {
+        maxPending: 200,
+        maxQueueDepth: 500,
+        retryAfterSeconds: 7,
+        maxTargetsPerRequest: 100,
+      },
+    );
+
+    expect(result).toEqual({ reject: false });
+  });
+
+  it("does not reject on stream length when queue-depth gate is disabled", () => {
+    const result = evaluateOutboundWebhookBackpressure(
+      {
+        pendingCount: 10,
+        streamLength: 500_000,
+      },
+      {
+        maxPending: 200,
+        maxQueueDepth: 0,
+        retryAfterSeconds: 7,
+        maxTargetsPerRequest: 100,
+      },
+    );
+
+    expect(result).toEqual({ reject: false });
+  });
+});
+
+describe("resolveOutboundWebhookBackpressureConfigFromEnv", () => {
+  it("defaults queue-depth gate to disabled to avoid stream-history false positives", () => {
+    const previous = process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
+    delete process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
+
+    const config = resolveOutboundWebhookBackpressureConfigFromEnv();
+    expect(config.maxQueueDepth).toBe(0);
+
+    if (previous === undefined) {
+      delete process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
+    } else {
+      process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"] = previous;
+    }
+  });
+
+  it("allows explicit queue-depth thresholds via env when desired", () => {
+    const previous = process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
+    process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"] = "75000";
+
+    const config = resolveOutboundWebhookBackpressureConfigFromEnv();
+    expect(config.maxQueueDepth).toBe(75_000);
+
+    if (previous === undefined) {
+      delete process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
+    } else {
+      process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"] = previous;
+    }
   });
 });

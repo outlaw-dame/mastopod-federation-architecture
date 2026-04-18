@@ -14,6 +14,8 @@
  *   GET  /users/:identifier/outbox
  *   GET  /users/:identifier/followers
  *   GET  /users/:identifier/following
+ *   GET  /users/:identifier/featured
+ *   GET  /users/:identifier/featuredTags
  *   POST /.well-known/webfinger       (not used; omitted)
  *   POST /inbox                       (shared inbox, verified by Fedify)
  */
@@ -26,17 +28,25 @@ import { logger } from "../utils/logger.js";
 // Internal bridge helper
 // ---------------------------------------------------------------------------
 
+function resolveExternalOrigin(
+  adapter: FedifyFederationAdapter,
+  request: FastifyRequest
+): string {
+  const scheme = (request.headers["x-forwarded-proto"] as string | undefined) ?? "https";
+  const host = (request.headers["x-forwarded-host"] as string | undefined)
+    ?? request.headers["host"]
+    ?? adapter.buildContext().domain;
+
+  return `${scheme}://${host}`;
+}
+
 async function fedifyHandler(
   adapter: FedifyFederationAdapter,
   request: FastifyRequest,
   reply: FastifyReply
 ): Promise<void> {
   // Build the full URL from Fastify's parsed pieces.
-  const scheme = (request.headers["x-forwarded-proto"] as string | undefined) ?? "https";
-  const host = (request.headers["x-forwarded-host"] as string | undefined)
-    ?? request.headers["host"]
-    ?? adapter.buildContext().domain;
-  const rawUrl = `${scheme}://${host}${request.url}`;
+  const rawUrl = `${resolveExternalOrigin(adapter, request)}${request.url}`;
 
   // Convert Fastify request → Web API Request.
   const init: RequestInit = {
@@ -91,6 +101,70 @@ async function fedifyHandler(
   reply.send(body);
 }
 
+function hostMetaXml(origin: string): string {
+  const template = `${origin}/.well-known/webfinger?resource={uri}`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">
+  <Link rel="lrdd" type="application/jrd+json" template="${template}" />
+</XRD>`;
+}
+
+function hostMetaJson(origin: string): { links: Array<{ rel: string; type: string; template: string }> } {
+  return {
+    links: [
+      {
+        rel: "lrdd",
+        type: "application/jrd+json",
+        template: `${origin}/.well-known/webfinger?resource={uri}`,
+      },
+    ],
+  };
+}
+
+function buildActorUriWebFinger(
+  origin: string,
+  resource: string | undefined
+): { aliases: string[]; links: Array<{ rel: string; type: string; href: string }>; subject: string } | null {
+  if (!resource) {
+    return null;
+  }
+
+  let resourceUrl: URL;
+  let originUrl: URL;
+
+  try {
+    resourceUrl = new URL(resource);
+    originUrl = new URL(origin);
+  } catch {
+    return null;
+  }
+
+  if (!["http:", "https:"].includes(resourceUrl.protocol)) {
+    return null;
+  }
+
+  if (resourceUrl.hostname !== originUrl.hostname) {
+    return null;
+  }
+
+  const actorMatch = /^\/users\/([^/]+)$/.exec(resourceUrl.pathname);
+  if (!actorMatch) {
+    return null;
+  }
+
+  return {
+    subject: resource,
+    aliases: [resource],
+    links: [
+      {
+        rel: "self",
+        type: "application/activity+json",
+        href: resource,
+      },
+    ],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public registration function
 // ---------------------------------------------------------------------------
@@ -102,8 +176,40 @@ export function registerFedifyRoutes(
   const handler = (req: FastifyRequest, reply: FastifyReply) =>
     fedifyHandler(adapter, req, reply);
 
+  const hostMetaHandler = (req: FastifyRequest, reply: FastifyReply) => {
+    const origin = resolveExternalOrigin(adapter, req);
+    reply
+      .type("application/xrd+xml; charset=utf-8")
+      .send(hostMetaXml(origin));
+  };
+
+  const hostMetaJsonHandler = (req: FastifyRequest, reply: FastifyReply) => {
+    const origin = resolveExternalOrigin(adapter, req);
+    reply
+      .type("application/jrd+json; charset=utf-8")
+      .send(hostMetaJson(origin));
+  };
+
+  const webfingerHandler = (req: FastifyRequest, reply: FastifyReply) => {
+    const query = req.query as { resource?: string | string[] } | undefined;
+    const resource = Array.isArray(query?.resource) ? query?.resource[0] : query?.resource;
+    const origin = resolveExternalOrigin(adapter, req);
+    const actorUriWebFinger = buildActorUriWebFinger(origin, resource);
+    if (actorUriWebFinger) {
+      reply
+        .type("application/jrd+json; charset=utf-8")
+        .send(actorUriWebFinger);
+      return;
+    }
+
+    return handler(req, reply);
+  };
+
+  app.get("/.well-known/host-meta", hostMetaHandler);
+  app.get("/.well-known/host-meta.json", hostMetaJsonHandler);
+
   // WebFinger — required for Fediverse actor discovery
-  app.get("/.well-known/webfinger", handler);
+  app.get("/.well-known/webfinger", webfingerHandler);
 
   // NodeInfo — standard capability advertisement
   app.get("/.well-known/nodeinfo", handler);
@@ -114,6 +220,8 @@ export function registerFedifyRoutes(
   app.get("/users/:identifier/outbox", handler);
   app.get("/users/:identifier/followers", handler);
   app.get("/users/:identifier/following", handler);
+  app.get("/users/:identifier/featured", handler);
+  app.get("/users/:identifier/featuredTags", handler);
 
   // Verified shared inbox ingress. Fedify validates signatures and routes
   // these requests before the sidecar persists them into Redis Streams.

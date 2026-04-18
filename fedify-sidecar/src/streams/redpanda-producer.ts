@@ -5,10 +5,10 @@
  * NOT a work queue - these are immutable event logs.
  * 
  * Topics:
- * - apub.public.local.v1 (Stream1) - Local public activities
- * - apub.public.remote.v1 (Stream2) - Remote public activities
- * - apub.public.firehose.v1 - Combined Stream1 + Stream2
- * - apub.tombstone.v1 - Delete activities (compacted)
+ * - ap.stream1.local-public.v1 (Stream1) - Local public activities
+ * - ap.stream2.remote-public.v1 (Stream2) - Remote public activities
+ * - ap.firehose.v1 - Combined Stream1 + Stream2
+ * - ap.tombstones.v1 - Delete activities (compacted)
  */
 
 import { Kafka, Producer, CompressionTypes, logLevel } from "kafkajs";
@@ -62,6 +62,7 @@ export interface ActivityEvent {
   meta?: ActivityEventMeta;
   /** Durable local outbox intent identifier for downstream dedupe/replay diagnostics. */
   outboxIntentId?: string;
+  streamTimestamp?: number;
 }
 
 export interface TombstoneEvent {
@@ -70,6 +71,7 @@ export interface TombstoneEvent {
   actorUri: string;
   deletedAt: number;
   outboxIntentId?: string;
+  streamTimestamp?: number;
 }
 
 // ============================================================================
@@ -311,6 +313,22 @@ export class RedPandaProducer {
 // ============================================================================
 
 export function createRedPandaProducer(overrides?: Partial<RedPandaConfig>): RedPandaProducer {
+  const compressionEnv = (process.env["REDPANDA_COMPRESSION"] || "gzip").toLowerCase();
+  const compressionType = (() => {
+    switch (compressionEnv) {
+      case "gzip":
+        return CompressionTypes.GZIP;
+      case "snappy":
+        return CompressionTypes.Snappy;
+      case "lz4":
+        return CompressionTypes.LZ4;
+      case "zstd":
+        return CompressionTypes.ZSTD;
+      default:
+        return CompressionTypes.GZIP;
+    }
+  })();
+
   const config: RedPandaConfig = {
     brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092").split(","),
     clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
@@ -321,9 +339,9 @@ export function createRedPandaProducer(overrides?: Partial<RedPandaConfig>): Red
     // is an alias kept for backwards-compat — prefer the shared name.
     stream1Topic: process.env["STREAM1_TOPIC"] || process.env["REDPANDA_STREAM1_TOPIC"] || "ap.stream1.local-public.v1",
     stream2Topic: process.env["STREAM2_TOPIC"] || process.env["REDPANDA_STREAM2_TOPIC"] || "ap.stream2.remote-public.v1",
-    firehoseTopic: process.env["REDPANDA_FIREHOSE_TOPIC"] || "apub.public.firehose.v1",
-    tombstoneTopic: process.env["REDPANDA_TOMBSTONE_TOPIC"] || "apub.tombstone.v1",
-    compressionType: CompressionTypes.ZSTD,
+    firehoseTopic: process.env["FIREHOSE_TOPIC"] || process.env["REDPANDA_FIREHOSE_TOPIC"] || "ap.firehose.v1",
+    tombstoneTopic: process.env["TOMBSTONE_TOPIC"] || process.env["REDPANDA_TOMBSTONE_TOPIC"] || "ap.tombstones.v1",
+    compressionType,
     batchSize: parseInt(process.env["REDPANDA_BATCH_SIZE"] || "16384", 10),
     lingerMs: parseInt(process.env["REDPANDA_LINGER_MS"] || "5", 10),
     ...overrides,
@@ -360,7 +378,7 @@ export const TOPIC_CONFIGS = {
   },
   
   // Firehose: Combined Stream1 + Stream2
-  [process.env["REDPANDA_FIREHOSE_TOPIC"] || "apub.public.firehose.v1"]: {
+  [process.env["FIREHOSE_TOPIC"] || process.env["REDPANDA_FIREHOSE_TOPIC"] || "ap.firehose.v1"]: {
     numPartitions: 24,
     replicationFactor: 3,
     configEntries: [
@@ -371,7 +389,7 @@ export const TOPIC_CONFIGS = {
   },
   
   // Tombstones: Delete events (compacted)
-  [process.env["REDPANDA_TOMBSTONE_TOPIC"] || "apub.tombstone.v1"]: {
+  [process.env["TOMBSTONE_TOPIC"] || process.env["REDPANDA_TOMBSTONE_TOPIC"] || "ap.tombstones.v1"]: {
     numPartitions: 6,
     replicationFactor: 3,
     configEntries: [

@@ -101,6 +101,7 @@ services:
       ENABLE_FEDIFY_RUNTIME_INTEGRATION: "true"
       ENABLE_PROTOCOL_BRIDGE_AP_TO_AT: "false"
       ENABLE_PROTOCOL_BRIDGE_AT_TO_AP: "false"
+      AP_INTEROP_ENABLE_MEDIA_FIXTURES: "true"
       REQUEST_TIMEOUT_MS: "10000"
       LOG_LEVEL: info
       NODE_EXTRA_CA_CERTS: /interop/runtime/certs/rootCA.crt
@@ -326,13 +327,15 @@ services:
       AP_INTEROP_TARGET_HOST: ${AP_INTEROP_TARGET_HOST:-}
       AP_INTEROP_TARGET_USERNAME: ${AP_INTEROP_TARGET_USERNAME:-interop}
       AP_INTEROP_TIMEOUT_MS: ${AP_INTEROP_TIMEOUT_MS:-120000}
+      AP_INTEROP_ATTACHMENT_PROOF_ENABLED: ${AP_INTEROP_ATTACHMENT_PROOF_ENABLED:-true}
+      AP_INTEROP_RESULT_PATH: ${AP_INTEROP_RESULT_PATH:-}
     depends_on:
       fedify-sidecar:
         condition: service_healthy
       ap-proxy:
         condition: service_started
     volumes:
-      - ./runtime:/interop/runtime:ro
+      - ./runtime:/interop/runtime
     networks:
       - ap-interop
 

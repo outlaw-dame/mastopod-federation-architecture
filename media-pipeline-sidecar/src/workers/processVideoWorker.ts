@@ -1,12 +1,12 @@
-import { safetyAdapters } from '../adapters';
-import { runSafetyAdapters } from '../adapters/safetySignals';
+import path from 'node:path';
 import { MediaStreams } from '../contracts/MediaStreams';
-import { processVideo } from '../processing/video';
-import { sha256 } from '../processing/image';
+import { logger } from '../logger';
+import { processVideoFile, videoExtensionForMime } from '../processing/video';
 import { enqueue } from '../queue/producer';
 import { runSecureWorker } from '../queue/secureWorker';
 import { buildCanonicalMediaUrl, buildGatewayUrl } from '../storage/cdnUrlBuilder';
-import { deleteFromFilebase, downloadFromFilebase, uploadToFilebase } from '../storage/filebaseClient';
+import { deleteFromFilebase, downloadFromFilebaseToPath, uploadFileToFilebase } from '../storage/filebaseClient';
+import { cleanupWorkerScratchDir, createWorkerScratchDir } from '../utils/tempFiles';
 
 /**
  * MEDIA PIPELINE RULE:
@@ -20,57 +20,62 @@ runSecureWorker({
   consumer: 'process-video-worker-1',
   handler: async (message) => {
     const transientKey = message.sourceObjectKey || '';
-    const input = transientKey
-      ? await downloadFromFilebase(transientKey)
-      : Buffer.from(message.bytesBase64 || '', 'base64');
+    let scratchDir: string | undefined;
+    let deleteTransientOnExit = false;
 
-    if (!input.byteLength) {
-      throw new Error('Missing video payload for processing');
-    }
+    try {
+      if (!transientKey) {
+        throw new Error('Missing transient video object reference');
+      }
 
-    const processed = await processVideo(input, message.mimeType);
+      scratchDir = await createWorkerScratchDir('process-video');
+      const inputPath = path.join(scratchDir, 'source-video.bin');
+      await downloadFromFilebaseToPath(transientKey, inputPath);
 
-    const fileHash = sha256(processed.buffer);
-    const extension = processed.mimeType === 'video/webm'
-      ? 'webm'
-      : processed.mimeType === 'video/quicktime'
-        ? 'mov'
-        : 'mp4';
-    const originalKey = `${fileHash}.${extension}`;
+      const processed = await processVideoFile(inputPath, message.mimeType);
+      const original = await uploadFileToFilebase({
+        key: `${processed.sha256}.${videoExtensionForMime(processed.mimeType)}`,
+        filePath: inputPath,
+        contentType: processed.mimeType,
+        resolveCid: true,
+        objectClass: 'canonical-original'
+      });
 
-    const original = await uploadToFilebase({
-      key: originalKey,
-      body: processed.buffer,
-      contentType: processed.mimeType
-    });
+      await enqueue(MediaStreams.RENDITION_VIDEO, {
+        traceId: message.traceId,
+        ownerId: message.ownerId,
+        sourceUrl: message.sourceUrl || '',
+        alt: message.alt || '',
+        contentWarning: message.contentWarning || '',
+        isSensitive: message.isSensitive || 'false',
+        sha256: processed.sha256,
+        cid: original.cid || '',
+        originalObjectKey: original.key,
+        canonicalUrl: buildCanonicalMediaUrl(original.key),
+        gatewayUrl: buildGatewayUrl(original.cid) || '',
+        mimeType: processed.mimeType,
+        size: String(processed.size),
+        signals: message.signals || '[]'
+      });
 
-    const existingSignals = message.signals ? JSON.parse(message.signals) : [];
-    const contentSignals = await runSafetyAdapters(safetyAdapters, {
-      url: buildCanonicalMediaUrl(original.key),
-      mimeType: processed.mimeType
-    });
-
-    await enqueue(MediaStreams.FINALIZE, {
-      traceId: message.traceId,
-      ownerId: message.ownerId,
-      alt: message.alt || '',
-      contentWarning: message.contentWarning || '',
-      isSensitive: message.isSensitive || 'false',
-      sha256: fileHash,
-      cid: original.cid || '',
-      canonicalUrl: buildCanonicalMediaUrl(original.key),
-      gatewayUrl: buildGatewayUrl(original.cid) || '',
-      previewUrl: '',
-      thumbnailUrl: '',
-      mimeType: processed.mimeType,
-      size: String(processed.buffer.byteLength),
-      width: '',
-      height: '',
-      signals: JSON.stringify([...existingSignals, ...contentSignals])
-    });
-
-    if (transientKey) {
-      await deleteFromFilebase(transientKey);
+      deleteTransientOnExit = true;
+    } finally {
+      if (deleteTransientOnExit && transientKey) {
+        await deleteTransientObject(transientKey, message.traceId);
+      }
+      await cleanupWorkerScratchDir(scratchDir);
     }
   }
 });
+
+async function deleteTransientObject(key: string, traceId: string | undefined): Promise<void> {
+  try {
+    await deleteFromFilebase(key);
+  } catch (error) {
+    logger.warn({
+      traceId: traceId || null,
+      key,
+      error: error instanceof Error ? error.message : String(error)
+    }, 'process-video-worker-transient-cleanup-failed');
+  }
+}

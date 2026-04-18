@@ -389,6 +389,13 @@ function buildTopicDefinitions(profile: DurabilityProfile): TopicDefinition[] {
       cleanupPolicy: "compact,delete",
       retentionMs: 30 * 24 * 60 * 60 * 1000,
     },
+    {
+      topic: sanitizeTopicName(process.env["MEDIA_ASSET_TOPIC"] || "media.asset.created.v1"),
+      partitions: 3,
+      replicationFactor: profileSettings.replicationFactor,
+      cleanupPolicy: "delete",
+      retentionMs: 30 * 24 * 60 * 60 * 1000,
+    },
   ];
 
   // DLQ topics — produced to by Redpanda Connect on sink failure.

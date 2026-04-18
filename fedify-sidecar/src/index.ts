@@ -138,6 +138,13 @@ import { AtprotoProfileMediaResolver } from "./protocol-bridge/runtime/AtprotoPr
 import { AtprotoLinkPreviewThumbResolver } from "./protocol-bridge/runtime/AtprotoLinkPreviewThumbResolver.js";
 import { AtIngressRuntime } from "./at-adapter/ingress/AtIngressRuntime.js";
 import { buildAtExternalFirehoseBootstrap, parseAtExternalFirehoseSources } from "./at-adapter/ingress/AtExternalFirehoseBootstrap.js";
+import {
+  isApInteropMediaFixtureEnabled,
+  listApInteropMediaFixtureAccesses,
+  recordApInteropMediaFixtureAccess,
+  resetApInteropMediaFixtureAccesses,
+  resolveApInteropMediaFixtureResponse,
+} from "./interop/ap/mediaFixtures.js";
 import { HttpAtIdentityResolver } from "./at-adapter/ingress/HttpAtIdentityResolver.js";
 import { ProductionAtCommitVerifier } from "./at-adapter/ingress/ProductionAtCommitVerifier.js";
 import { normalizeActivityPubNoteLinkPreviewMode } from "./protocol-bridge/projectors/activitypub/ActivityPubProjectionPolicy.js";
@@ -148,14 +155,18 @@ import { ProtocolBridgeRuntime } from "./protocol-bridge/runtime/ProtocolBridgeR
 import { createProtocolBridgeContexts } from "./protocol-bridge/runtime/createProtocolBridgeContexts.js";
 import { RedisBridgeProfileMediaStore } from "./protocol-bridge/profile/BridgeProfileMedia.js";
 import { RedisBridgePostMediaStore } from "./protocol-bridge/post/BridgePostMedia.js";
+import { RedisObservedAtIdentityStore } from "./protocol-bridge/identity/ObservedAtIdentityStore.js";
+import { AtIdentityObservationService } from "./protocol-bridge/identity/AtIdentityObservationService.js";
 import { ApToAtProjectionWorker } from "./protocol-bridge/workers/ApToAtProjectionWorker.js";
 import { AtToApProjectionWorker } from "./protocol-bridge/workers/AtToApProjectionWorker.js";
 import { CanonicalIntentPublisher, CANONICAL_V1_TOPIC } from "./protocol-bridge/canonical/CanonicalIntentPublisher.js";
 import { CanonicalNotificationConsumer } from "./protocol-bridge/notifications/CanonicalNotificationConsumer.js";
+import { registerAtIdentityObservabilityFastifyRoutes } from "./admin/at-observability/fastify-routes.js";
 // Fedify runtime integration (feature-flagged: ENABLE_FEDIFY_RUNTIME_INTEGRATION=true)
 import { FedifyKvAdapter } from "./federation/FedifyKvAdapter.js";
 import { createFedifyAdapter, type FedifyFederationAdapter } from "./federation/FedifyFederationAdapter.js";
 import { registerFedifyRoutes } from "./federation/FedifyFastifyBridge.js";
+import { SidecarLocalSigningService } from "./signing/SidecarLocalSigningService.js";
 import {
   evaluateOutboundWebhookBackpressure,
   normalizeAndDedupeOutboundTargets,
@@ -172,6 +183,29 @@ import {
   AtJetstreamService,
   parseJetstreamUrl,
 } from "./at-adapter/jetstream/AtJetstreamService.js";
+import { Client as OpenSearchNativeClient } from "@opensearch-project/opensearch";
+import { DefaultFeedCandidateService } from "./search/queries/FeedCandidateService.js";
+import { FeedRegistry } from "./feed/FeedRegistry.js";
+import { DefaultPodFeedService } from "./feed/PodFeedService.js";
+import { DefaultPodHydrationService } from "./feed/PodHydrationService.js";
+import { OpenSearchFeedProvider } from "./feed/OpenSearchFeedProvider.js";
+import { OpenSearchHydrator } from "./feed/OpenSearchHydrator.js";
+import type { FeedDefinition } from "./feed/contracts.js";
+import { registerFeedFastifyRoutes, attachFeedStreamWebSocket } from "./feed/fastify-routes.js";
+import { DurableStreamSubscriptionService, buildCapabilityLookup } from "./feed/DurableStreamSubscriptionService.js";
+import { FeedStreamKafkaConsumer } from "./feed/FeedStreamKafkaConsumer.js";
+import { UnifiedFeedBridge } from "./feed/UnifiedFeedBridge.js";
+import type { DurableStreamCapability } from "./feed/DurableStreamContracts.js";
+import {
+  buildProviderCapabilities,
+  inferProviderProfile,
+  renderCapabilitiesResponse,
+} from "./capabilities/provider-capabilities.js";
+import { evaluateCapabilityGate } from "./capabilities/gates.js";
+import { validateProviderCapabilitiesConfig } from "./capabilities/startup-validator.js";
+import { buildEntitlementOverridesFromEnv, checkCapabilityLimit } from "./capabilities/entitlement.js";
+import type { ProviderProfile } from "./capabilities/types.js";
+import { MediaAssetSyncConsumer } from "./media/MediaAssetSyncConsumer.js";
 
 function normalizeMrfAdminStoreMode(raw: string | undefined): "memory" | "redis" {
   return raw === "redis" ? "redis" : "memory";
@@ -204,6 +238,18 @@ function resolveStartupMode(raw: string | undefined, nodeEnv: string): StartupMo
   return nodeEnv === "production" ? "blocking" : "background";
 }
 
+function resolveProviderProfile(raw: string | undefined, enableXrpcServer: boolean): ProviderProfile {
+  if (
+    raw === "ap-core" ||
+    raw === "ap-scale" ||
+    raw === "dual-protocol-standard"
+  ) {
+    return raw;
+  }
+
+  return inferProviderProfile(enableXrpcServer);
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -219,6 +265,15 @@ const config = {
   host: process.env["HOST"] || "0.0.0.0",
   domain: process.env["DOMAIN"] || "localhost",
   sidecarToken: process.env["SIDECAR_TOKEN"] || "",
+  providerProfile: process.env["PROVIDER_PROFILE"],
+  providerPlan: process.env["PROVIDER_PLAN"] || "standard",
+  providerDisplayName: process.env["PROVIDER_DISPLAY_NAME"] || "ActivityPods Provider",
+  providerRegion: process.env["PROVIDER_REGION"] || "unknown",
+  enableProviderCapabilitiesEndpoint:
+    process.env["ENABLE_PROVIDER_CAPABILITIES_ENDPOINT"] !== "false",
+  enableMediaAssetSync:
+    process.env["ENABLE_MEDIA_ASSET_SYNC"] !== "false",
+  mediaAssetTopic: process.env["MEDIA_ASSET_TOPIC"] || "media.asset.created.v1",
   
   // Feature flags
   enableOutboundWorker: process.env["ENABLE_OUTBOUND_WORKER"] !== "false",
@@ -236,6 +291,7 @@ const config = {
     (process.env["ENABLE_AT_JETSTREAM"] === "true" &&
       process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] !== "false"),
   enableMrfAdminApi: process.env["ENABLE_MRF_ADMIN_API"] === "true",
+  enableApInteropMediaFixtures: isApInteropMediaFixtureEnabled(),
   mrfAdminToken: process.env["MRF_ADMIN_TOKEN"] || "",
   mrfAdminStore: normalizeMrfAdminStoreMode(process.env["MRF_ADMIN_STORE"]),
   mrfAdminRedisPrefix: process.env["MRF_ADMIN_REDIS_PREFIX"] || "mrf:admin",
@@ -415,6 +471,7 @@ const config = {
   ),
   externalPdsTimeoutMs: Number.parseInt(process.env["EXTERNAL_PDS_TIMEOUT_MS"] || "8000", 10),
   externalPdsMaxAttempts: Number.parseInt(process.env["EXTERNAL_PDS_MAX_ATTEMPTS"] || "5", 10),
+  didDocCacheTtlSeconds: Number.parseInt(process.env["DID_DOC_CACHE_TTL_SECONDS"] || "300", 10),
   atOauthRouteRateLimits: parseOAuthRouteRateLimitsFromEnv(process.env),
   protocolBridgeConsumerGroupId:
     process.env["PROTOCOL_BRIDGE_CONSUMER_GROUP_ID"] || "fedify-sidecar-protocol-bridge",
@@ -507,12 +564,16 @@ let atEventPublisher: RedpandaEventPublisher | null = null;
 let atFirehoseRuntime: AtFirehoseRuntime | null = null;
 let atExternalFirehoseRuntime: AtIngressRuntime | null = null;
 let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
+let mediaAssetSyncConsumer: MediaAssetSyncConsumer | null = null;
 let searchIndexerRedis: Redis | null = null;
 let mrfAdminRedisClient: Redis | null = null;
 let moderationBridgeRedisClient: Redis | null = null;
 let fedifyAdapter: FedifyFederationAdapter | null = null;
 let apRelaySubscriptionService: ApRelaySubscriptionService | null = null;
 let atJetstreamService: AtJetstreamService | null = null;
+let streamSubscriptionService: DurableStreamSubscriptionService | null = null;
+let feedStreamKafkaConsumer: FeedStreamKafkaConsumer | null = null;
+let unifiedFeedBridge: UnifiedFeedBridge | null = null;
 let isShuttingDown = false;
 const startupState: StartupState = {
   mode: config.startupMode,
@@ -577,6 +638,20 @@ function markStartupReady(): void {
   startupState.error = null;
 }
 
+/**
+ * Populate Prometheus capability health gauges from the live capabilities
+ * document.  Called once after all startup tasks complete.
+ *   1  = enabled
+ *   0  = disabled
+ *  -1  = degraded (reserved for future runtime checks)
+ */
+function populateCapabilityHealthGauges(doc: import("./capabilities/types.js").ProviderCapabilitiesDocument): void {
+  for (const cap of doc.capabilities) {
+    const value = cap.status === "enabled" ? 1 : 0;
+    promMetrics.capabilityHealthGauge.set({ capability: cap.id }, value);
+  }
+}
+
 // ============================================================================
 // Main Application
 // ============================================================================
@@ -593,6 +668,69 @@ async function main() {
     richNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewRichDomains,
     disabledNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewDisabledDomains,
   } as const;
+  const providerProfile = resolveProviderProfile(
+    config.providerProfile,
+    config.enableXrpcServer,
+  );
+  const providerCapabilitiesDocument = buildProviderCapabilities({
+    providerId: config.domain,
+    providerDisplayName: config.providerDisplayName,
+    providerRegion: config.providerRegion,
+    profile: providerProfile,
+    plan: config.providerPlan,
+    enableInboundWorker: config.enableInboundWorker,
+    enableOutboundWorker: config.enableOutboundWorker,
+    enableOpenSearchIndexer: config.enableOpenSearchIndexer,
+    enableXrpcServer: config.enableXrpcServer,
+    enableMediaPipeline: config.enableMediaAssetSync,
+    enableMrf: config.enableMrfAdminApi,
+    atprotoEnabled: config.enableXrpcServer,
+    firehoseRetentionDays: Number.parseInt(process.env["FIREHOSE_RETENTION_DAYS"] || "30", 10),
+    includeAtDisabledEntries: true,
+    enableCanonicalEventLog: config.enableCanonicalEventLog,
+    enableUnifiedFeed: true,
+  });
+  const providerCapabilitiesResponse = renderCapabilitiesResponse(providerCapabilitiesDocument);
+  const capabilityGate = (capabilityId: string) =>
+    evaluateCapabilityGate(providerCapabilitiesDocument, capabilityId);
+  const providerValidation = validateProviderCapabilitiesConfig(providerCapabilitiesDocument, {
+    profile: providerProfile,
+    // Redis and Redpanda have safe localhost defaults; treat as present unless
+    // the operator has explicitly disabled them.
+    hasRedisUrl: true,
+    hasRedpandaBrokers: true,
+    // Signing endpoint / ActivityPods URL have no safe default in production.
+    hasSigningEndpoint: !!(process.env["ACTIVITYPODS_URL"]) || config.atLocalFixture,
+    hasSigningToken: !!(process.env["ACTIVITYPODS_TOKEN"]) || config.atLocalFixture,
+    // OpenSearch also has a localhost default but treat missing URL as advisory.
+    hasOpenSearchUrl: true,
+    hasActivityPodsUrl: !!(process.env["ACTIVITYPODS_URL"]) || config.atLocalFixture,
+    hasActivityPodsToken: !!(process.env["ACTIVITYPODS_TOKEN"]) || config.atLocalFixture,
+    enableMrf: config.enableMrfAdminApi,
+  });
+
+  for (const issue of providerValidation.issues) {
+    const logMessage = "Provider capability validation issue";
+    if (issue.severity === "fatal") {
+      logger.error({
+        ruleId: issue.ruleId,
+        code: issue.code,
+        message: issue.message,
+        details: issue.details,
+      }, logMessage);
+    } else {
+      logger.warn({
+        ruleId: issue.ruleId,
+        code: issue.code,
+        message: issue.message,
+        details: issue.details,
+      }, logMessage);
+    }
+  }
+
+  if (!providerValidation.ok) {
+    throw new Error("Provider capability validation failed");
+  }
 
   const redpandaProducerRequired =
     config.enableOutboxIntentWorker
@@ -607,7 +745,8 @@ async function main() {
     || config.enableAtJetstream
     || config.enableAtExternalFirehose
     || config.enableCanonicalEventLog
-    || config.enableCanonicalNotifications;
+    || config.enableCanonicalNotifications
+    || config.enableMediaAssetSync;
   const startupTasks: StartupTask[] = [];
 
   const enforceTopicGovernance = process.env["REDPANDA_ENFORCE_TOPIC_GOVERNANCE"] !== "false";
@@ -708,6 +847,15 @@ async function main() {
         logger.error("Fedify KV Redis error", { error: err.message }),
       );
       const kv = new FedifyKvAdapter(fedifyRedis);
+
+      // Local signing service for sidecar-owned service actors (e.g. relay).
+      // Key pairs are generated on first use and persisted in Redis.
+      const localSigningRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      localSigningRedis.on("error", (err: Error) =>
+        logger.error("Local signing Redis error", { error: err.message }),
+      );
+      const localSigningService = new SidecarLocalSigningService(localSigningRedis);
+
       fedifyAdapter = createFedifyAdapter(
         kv,
         {
@@ -716,6 +864,7 @@ async function main() {
           activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
           requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
           userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+          localSigningService,
           enqueueVerifiedInbox: async (delivery) => {
             if (!queue) {
               throw new Error("Redis queue not initialized");
@@ -738,6 +887,7 @@ async function main() {
     }
 
     // Initialize AP relay subscription service (requires Fedify + outbox intent worker)
+    let relayLocalActorPath: string | null = null;
     if (
       config.enableFedifyRuntimeIntegration &&
       config.enableOutboxIntentWorker &&
@@ -745,6 +895,12 @@ async function main() {
     ) {
       const relayLocalActorUri =
         config.apRelayLocalActorUri || `https://${config.domain}/users/relay`;
+      // Derive the path portion (e.g. "/users/relay") for the inbound bypass.
+      try {
+        relayLocalActorPath = new URL(relayLocalActorUri).pathname;
+      } catch {
+        // ignore malformed URI
+      }
       const relayRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
       relayRedis.on("error", (err: Error) =>
         logger.error("Relay subscription Redis error", { error: err.message }),
@@ -801,6 +957,7 @@ async function main() {
     // Initialize outbound worker
     if (config.enableOutboundWorker) {
       outboundWorker = createOutboundWorker(queue, signingClient, redpanda, {
+        capabilityGate,
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
       });
@@ -832,9 +989,15 @@ async function main() {
 
     // Initialize inbound worker
     if (config.enableInboundWorker) {
+      const sidecarActorPaths = new Set<string>();
+      if (relayLocalActorPath) {
+        sidecarActorPaths.add(relayLocalActorPath);
+      }
       inboundWorker = createInboundWorker(queue, redpanda, {
+        capabilityGate,
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
+        ...(sidecarActorPaths.size > 0 ? { sidecarActorPaths } : {}),
       });
       startupTasks.push({
         name: "start inbound worker",
@@ -843,6 +1006,36 @@ async function main() {
             logger.error("Inbound worker error", { error: err.message });
           });
           logger.info("Inbound worker started");
+        },
+      });
+    }
+
+    if (config.enableMediaAssetSync) {
+      mediaAssetSyncConsumer = new MediaAssetSyncConsumer(
+        {
+          brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+            .split(",")
+            .map((broker) => broker.trim())
+            .filter(Boolean),
+          clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+          consumerGroupId: `${config.protocolBridgeConsumerGroupId}-media-assets`,
+          mediaAssetTopic: config.mediaAssetTopic,
+          activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+          activityPodsBearerToken: process.env["ACTIVITYPODS_TOKEN"] || "",
+        },
+        {
+          info: (message, meta) => logger.info(meta || {}, message),
+          warn: (message, meta) => logger.warn(meta || {}, message),
+          error: (message, meta) => logger.error(meta || {}, message),
+        },
+      );
+      startupTasks.push({
+        name: "start media asset sync consumer",
+        start: async () => {
+          await mediaAssetSyncConsumer!.start();
+          logger.info("Media asset sync consumer started", {
+            topic: config.mediaAssetTopic,
+          });
         },
       });
     }
@@ -871,8 +1064,34 @@ async function main() {
         version: config.version,
         uptime: process.uptime(),
         startup: snapshotStartupState(),
+        capabilities: providerCapabilitiesDocument.capabilities.map((cap) => ({
+          id: cap.id,
+          status: cap.status,
+        })),
       };
     });
+
+    if (config.enableProviderCapabilitiesEndpoint) {
+      app.get("/.well-known/provider-capabilities", async (request, reply) => {
+        const currentEtag = `"${providerCapabilitiesResponse.etag}"`;
+        const ifNoneMatch = request.headers["if-none-match"];
+        const normalizedIfNoneMatch = typeof ifNoneMatch === "string"
+          ? ifNoneMatch.split(",").map((value) => value.trim())
+          : [];
+
+        if (normalizedIfNoneMatch.includes(currentEtag) || normalizedIfNoneMatch.includes(providerCapabilitiesResponse.etag)) {
+          reply.code(304);
+          reply.header("etag", currentEtag);
+          reply.header("cache-control", "public, max-age=60, stale-while-revalidate=300");
+          return reply.send();
+        }
+
+        reply.header("content-type", "application/json; charset=utf-8");
+        reply.header("cache-control", "public, max-age=60, stale-while-revalidate=300");
+        reply.header("etag", currentEtag);
+        return reply.send(providerCapabilitiesResponse.body);
+      });
+    }
 
     // Readiness check endpoint
     app.get("/ready", async (_request, reply) => {
@@ -894,12 +1113,22 @@ async function main() {
         };
       }
       
-      const [outboundPending, inboundPending, outboxIntentPending] = await Promise.all([
+      const [
+        outboundPending,
+        inboundPending,
+        outboxIntentPending,
+        dlqInboundLen,
+        dlqOutboundLen,
+        dlqOutboxIntentLen,
+      ] = await Promise.all([
         queue.getPendingCount("outbound"),
         queue.getPendingCount("inbound"),
         queue.getPendingCount("outbox_intent"),
+        queue.getDlqLength("inbound"),
+        queue.getDlqLength("outbound"),
+        queue.getDlqLength("outbox_intent"),
       ]);
-      
+
       return {
         status: "ready",
         startup,
@@ -907,6 +1136,11 @@ async function main() {
           outbound: { pending: outboundPending },
           inbound: { pending: inboundPending },
           outboxIntent: { pending: outboxIntentPending },
+          dlq: {
+            inbound: dlqInboundLen,
+            outbound: dlqOutboundLen,
+            outboxIntent: dlqOutboxIntentLen,
+          },
         },
         workers: {
           outbound: config.enableOutboundWorker,
@@ -938,6 +1172,11 @@ async function main() {
         queue.getStreamLength("inbound"),
         queue.getStreamLength("outbox_intent"),
       ]);
+      const [dlqInboundLength, dlqOutboundLength, dlqOutboxIntentLength] = await Promise.all([
+        queue.getDlqLength("inbound"),
+        queue.getDlqLength("outbound"),
+        queue.getDlqLength("outbox_intent"),
+      ]);
 
       promMetrics.queueDepth.set({ topic: "outbound" }, outboundLength);
       promMetrics.queueDepth.set({ topic: "inbound" }, inboundLength);
@@ -964,11 +1203,230 @@ async function main() {
         `# HELP fedify_outbox_intent_stream_length Total outbox intent stream length`,
         `# TYPE fedify_outbox_intent_stream_length gauge`,
         `fedify_outbox_intent_stream_length ${outboxIntentLength}`,
+        `# HELP fedify_dlq_inbound_length Inbound DLQ entries (signature failures, validation errors)`,
+        `# TYPE fedify_dlq_inbound_length gauge`,
+        `fedify_dlq_inbound_length ${dlqInboundLength}`,
+        `# HELP fedify_dlq_outbound_length Outbound DLQ entries (exhausted/deferred delivery jobs)`,
+        `# TYPE fedify_dlq_outbound_length gauge`,
+        `fedify_dlq_outbound_length ${dlqOutboundLength}`,
+        `# HELP fedify_dlq_outbox_intent_length Outbox-intent DLQ entries`,
+        `# TYPE fedify_dlq_outbox_intent_length gauge`,
+        `fedify_dlq_outbox_intent_length ${dlqOutboxIntentLength}`,
         `# HELP fedify_uptime_seconds Uptime in seconds`,
         `# TYPE fedify_uptime_seconds gauge`,
         `fedify_uptime_seconds ${Math.floor(process.uptime())}`,
         ...renderOAuthSecurityMetricsLines(),
       ].filter((line) => line.length > 0).join("\n") + "\n";
+    });
+
+    const openSearchReader = new OpenSearchNativeClient(
+      process.env["OPENSEARCH_USERNAME"]
+        ? {
+            node: process.env["OPENSEARCH_URL"] ?? "http://localhost:9200",
+            auth: {
+              username: process.env["OPENSEARCH_USERNAME"],
+              password: process.env["OPENSEARCH_PASSWORD"] ?? "",
+            },
+            ssl: {
+              rejectUnauthorized: process.env["OPENSEARCH_SSL_VERIFY"] !== "false",
+            },
+          }
+        : {
+            node: process.env["OPENSEARCH_URL"] ?? "http://localhost:9200",
+            ssl: {
+              rejectUnauthorized: process.env["OPENSEARCH_SSL_VERIFY"] !== "false",
+            },
+          },
+    );
+
+    const feedDefinitions: FeedDefinition[] = [
+      {
+        id: "urn:activitypods:feed:public-discovery:v1",
+        kind: "discovery",
+        visibility: "public",
+        title: "Public Discovery",
+        description: "Public relay and canonical-discovery feed skeletons",
+        sourcePolicy: {
+          includeStream1: false,
+          includeStream2: true,
+          includeCanonical: true,
+          includeFirehose: false,
+          includeUnified: true,
+        },
+        rankingPolicy: { mode: "ranked", providerHint: "opensearch-feed-candidates" },
+        hydrationShape: "card",
+        realtimeCapable: true,
+        supportsSse: true,
+        supportsWebSocket: true,
+        experimental: false,
+        providerId: "opensearch.candidates.v1",
+      },
+      {
+        id: "urn:activitypods:feed:graph-personalized:v1",
+        kind: "graph",
+        visibility: "authenticated",
+        title: "Graph Personalized",
+        description: "Viewer-scoped graph feed skeletons",
+        sourcePolicy: {
+          includeStream1: true,
+          includeStream2: true,
+          includeCanonical: true,
+          includeFirehose: false,
+          includeUnified: true,
+        },
+        rankingPolicy: { mode: "blended", providerHint: "opensearch-feed-candidates" },
+        hydrationShape: "card",
+        realtimeCapable: true,
+        supportsSse: true,
+        supportsWebSocket: true,
+        experimental: false,
+        providerId: "opensearch.candidates.v1",
+      },
+      {
+        id: "urn:activitypods:feed:topic:v1",
+        kind: "topic",
+        visibility: "public",
+        title: "Topic",
+        description: "Topic-filtered public feed skeletons",
+        sourcePolicy: {
+          includeStream1: false,
+          includeStream2: true,
+          includeCanonical: true,
+          includeFirehose: false,
+          includeUnified: true,
+        },
+        rankingPolicy: { mode: "blended", providerHint: "opensearch-feed-candidates" },
+        hydrationShape: "card",
+        realtimeCapable: true,
+        supportsSse: true,
+        supportsWebSocket: true,
+        experimental: false,
+        providerId: "opensearch.candidates.v1",
+      },
+    ];
+
+    const feedRegistry = new FeedRegistry(feedDefinitions);
+    const feedProvider = new OpenSearchFeedProvider(
+      openSearchReader as any,
+      new DefaultFeedCandidateService(openSearchReader as any),
+    );
+    const feedService = new DefaultPodFeedService(
+      feedRegistry,
+      new Map([["opensearch.candidates.v1", feedProvider]]),
+      {
+        maxAttempts: 3,
+        initialDelayMs: 150,
+        maxDelayMs: 2_000,
+      },
+    );
+    const hydrationService = new DefaultPodHydrationService(
+      new Map([
+        ["default", new OpenSearchHydrator(openSearchReader as any)],
+      ]),
+      {
+        concurrency: 4,
+        maxAttempts: 3,
+        initialDelayMs: 150,
+        maxDelayMs: 2_000,
+      },
+    );
+    // Build stream capabilities by scanning feed definitions for SSE/WS support per source.
+    const sourceSseSupport = new Map<string, boolean>();
+    const sourceWsSupport = new Map<string, boolean>();
+    const sourceToPolicy: Array<[string, keyof typeof feedDefinitions[0]["sourcePolicy"]]> = [
+      ["stream1", "includeStream1"],
+      ["stream2", "includeStream2"],
+      ["canonical", "includeCanonical"],
+      ["firehose", "includeFirehose"],
+      ["unified", "includeUnified"],
+    ];
+    for (const def of feedDefinitions) {
+      for (const [source, policyKey] of sourceToPolicy) {
+        if (def.sourcePolicy[policyKey]) {
+          if (def.supportsSse) sourceSseSupport.set(source, true);
+          if (def.supportsWebSocket) sourceWsSupport.set(source, true);
+        }
+      }
+    }
+    const streamCapabilities: DurableStreamCapability[] = (["stream1", "stream2", "canonical", "firehose", "unified"] as const)
+      .filter((s) => sourceSseSupport.has(s) || sourceWsSupport.has(s))
+      .map((s) => ({
+        stream: s,
+        supportsSse: sourceSseSupport.get(s) ?? false,
+        supportsWebSocket: sourceWsSupport.get(s) ?? false,
+        requiresAuthentication: false,
+        replayCapable: false,
+      }));
+    streamSubscriptionService = new DurableStreamSubscriptionService({
+      sidecarToken: config.sidecarToken,
+      capabilityLookup: buildCapabilityLookup(streamCapabilities),
+    });
+    streamSubscriptionService.start();
+
+    feedStreamKafkaConsumer = new FeedStreamKafkaConsumer(
+      {
+        brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+          .split(",")
+          .map((b) => b.trim())
+          .filter(Boolean),
+        clientId: "fedify-feed-stream-consumer",
+        groupId: process.env["FEED_STREAM_CONSUMER_GROUP_ID"] || "fedify-feed-stream-consumer-v1",
+        stream1Topic: process.env["STREAM1_TOPIC"] || "ap.stream1.local-public.v1",
+        stream2Topic: process.env["STREAM2_TOPIC"] || "ap.stream2.remote-public.v1",
+        canonicalTopic: config.canonicalTopic,
+        firehoseTopic: process.env["FIREHOSE_TOPIC"] || "ap.firehose.v1",
+      },
+      streamSubscriptionService,
+    );
+    void feedStreamKafkaConsumer.start().catch((err) => {
+      logger.error("FeedStreamKafkaConsumer failed to start", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    unifiedFeedBridge = new UnifiedFeedBridge(
+      {
+        brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+          .split(",")
+          .map((b) => b.trim())
+          .filter(Boolean),
+        clientId: "fedify-unified-feed-bridge",
+        groupId: process.env["UNIFIED_FEED_BRIDGE_GROUP_ID"] || "fedify-unified-feed-bridge-v1",
+        canonicalTopic: config.canonicalTopic,
+        stream2Topic: process.env["STREAM2_TOPIC"] || "ap.stream2.remote-public.v1",
+      },
+      streamSubscriptionService,
+    );
+    void unifiedFeedBridge.start().catch((err) => {
+      logger.error("UnifiedFeedBridge failed to start", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    const entitlementOverrides = buildEntitlementOverridesFromEnv(process.env);
+    const checkStreamEntitlement = (
+      transport: "sse" | "websocket",
+      currentCount: number,
+    ) => {
+      const field = transport === "sse" ? "maxSseConnections" : "maxWsConnections";
+      const result = checkCapabilityLimit(
+        providerCapabilitiesDocument.entitlements.plan,
+        "ap.feeds.realtime",
+        field,
+        currentCount,
+        entitlementOverrides,
+      );
+      return { allowed: result.allowed, effectiveLimit: result.effectiveLimit };
+    };
+
+    registerFeedFastifyRoutes(app, {
+      sidecarToken: config.sidecarToken,
+      feedRegistry,
+      feedService,
+      hydrationService,
+      streamSubscriptionService,
+      capabilityGate,
+      checkStreamEntitlement,
     });
 
     if (config.enableMrfAdminApi) {
@@ -1007,6 +1465,130 @@ async function main() {
       reply.status(202).send({ accepted: true, envelopeId: envelope.envelopeId });
     };
 
+    const enqueueVerifiedBenchmarkInboundRequest = async (
+      request: FastifyRequest,
+      reply: FastifyReply,
+      path: string,
+    ): Promise<void> => {
+      if (!queue) {
+        reply.status(503).send({ error: "Service unavailable" });
+        return;
+      }
+
+      const authHeader = (request.headers["authorization"] as string) || "";
+      const [scheme, token] = authHeader.split(" ");
+      if (scheme !== "Bearer" || token !== config.sidecarToken) {
+        reply.status(401).send({ error: "Unauthorized" });
+        return;
+      }
+
+      let activity: Record<string, unknown>;
+      let serializedBody: string;
+      if (typeof request.body === "string") {
+        try {
+          activity = JSON.parse(request.body) as Record<string, unknown>;
+          serializedBody = request.body;
+        } catch {
+          reply.status(400).send({ error: "Invalid JSON body" });
+          return;
+        }
+      } else if (request.body && typeof request.body === "object" && !Array.isArray(request.body)) {
+        activity = request.body as Record<string, unknown>;
+        serializedBody = JSON.stringify(activity);
+      } else {
+        reply.status(400).send({ error: "Invalid JSON body" });
+        return;
+      }
+
+      const verifiedActorUri = typeof activity["actor"] === "string" ? activity["actor"] : null;
+      if (!verifiedActorUri) {
+        reply.status(400).send({ error: "Missing string actor field" });
+        return;
+      }
+
+      const envelope = createVerifiedInboundEnvelope({
+        path,
+        body: serializedBody,
+        remoteIp: request.ip,
+        verifiedActorUri,
+        headers: {
+          "x-sidecar-benchmark": "1",
+        },
+      });
+
+      await queue.enqueueInbound(envelope);
+      reply.status(202).send({ accepted: true, envelopeId: envelope.envelopeId });
+    };
+
+    const isAuthorizedSidecarInternalRequest = (request: FastifyRequest): boolean => {
+      const authHeader = (request.headers["authorization"] as string) || "";
+      const [scheme, token] = authHeader.split(" ");
+      return scheme === "Bearer" && token === config.sidecarToken;
+    };
+
+    if (config.enableApInteropMediaFixtures) {
+      app.route({
+        method: ["GET", "HEAD"],
+        url: "/interop-fixtures/:fixtureName",
+        handler: async (request, reply) => {
+          const { fixtureName } = request.params as { fixtureName: string };
+          const response = resolveApInteropMediaFixtureResponse(
+            fixtureName,
+            typeof request.headers.range === "string" ? request.headers.range : undefined,
+          );
+          if (!response) {
+            reply.status(404).send({ error: "Not Found" });
+            return;
+          }
+
+          recordApInteropMediaFixtureAccess(fixtureName, {
+            method: request.method,
+            receivedAt: Date.now(),
+            userAgent: typeof request.headers["user-agent"] === "string"
+              ? request.headers["user-agent"]
+              : undefined,
+            remoteAddress: typeof request.headers["x-forwarded-for"] === "string"
+              ? request.headers["x-forwarded-for"]
+              : request.ip,
+            range: typeof request.headers.range === "string" ? request.headers.range : undefined,
+            accept: typeof request.headers.accept === "string" ? request.headers.accept : undefined,
+          });
+
+          for (const [headerName, headerValue] of Object.entries(response.headers)) {
+            reply.header(headerName, headerValue);
+          }
+          reply.status(response.statusCode);
+          reply.send(request.method === "HEAD" ? undefined : response.body);
+        },
+      });
+
+      app.get("/internal/interop/fixtures/:fixtureName/accesses", async (request, reply) => {
+        if (!isAuthorizedSidecarInternalRequest(request)) {
+          reply.status(401).send({ error: "Unauthorized" });
+          return;
+        }
+
+        const { fixtureName } = request.params as { fixtureName: string };
+        const accesses = listApInteropMediaFixtureAccesses(fixtureName);
+        reply.send({
+          fixtureName,
+          count: accesses.length,
+          accesses,
+        });
+      });
+
+      app.delete("/internal/interop/fixtures/:fixtureName/accesses", async (request, reply) => {
+        if (!isAuthorizedSidecarInternalRequest(request)) {
+          reply.status(401).send({ error: "Unauthorized" });
+          return;
+        }
+
+        const { fixtureName } = request.params as { fixtureName: string };
+        resetApInteropMediaFixtureAccesses(fixtureName);
+        reply.status(204).send();
+      });
+    }
+
     // Shared inbox uses Fedify as the primary verifier/router when enabled.
     // Actor-specific inboxes stay on the sidecar-native verifier so the sidecar
     // never needs local private keys to satisfy Fedify's authenticated
@@ -1020,6 +1602,26 @@ async function main() {
     app.post("/users/:username/inbox", async (request, reply) => {
       const { username } = request.params as { username: string };
       await enqueueRawInboundRequest(request, reply, `/users/${username}/inbox`);
+    });
+
+    // Internal benchmark-only ingress that enqueues a trusted envelope while
+    // preserving the downstream target inbox path for ActivityPods forwarding.
+    app.post("/internal/bench/users/:username/inbox", async (request, reply) => {
+      const { username } = request.params as { username: string };
+      await enqueueVerifiedBenchmarkInboundRequest(
+        request,
+        reply,
+        `/users/${username}/inbox`,
+      );
+    });
+
+    app.post("/internal/bench/:username/inbox", async (request, reply) => {
+      const { username } = request.params as { username: string };
+      await enqueueVerifiedBenchmarkInboundRequest(
+        request,
+        reply,
+        `/${username}/inbox`,
+      );
     });
 
     // Legacy compatibility alias. Canonical actor documents advertise
@@ -1228,6 +1830,29 @@ async function main() {
 
         // ---- Identity binding repository ----
         const identityRepo = new RedisIdentityBindingRepository(atRedis);
+        const observedAtIdentityStore = new RedisObservedAtIdentityStore(atRedis);
+        const observedAtIdentityResolver = new HttpAtIdentityResolver({
+          timeoutMs: config.externalPdsTimeoutMs,
+          maxAttempts: config.externalPdsMaxAttempts,
+          failedResolutionCacheTtlMs: 60_000,
+          redisCache: atRedis,
+          redisCacheTtlSeconds: config.didDocCacheTtlSeconds,
+        });
+        const atIdentityObservationService = new AtIdentityObservationService(
+          observedAtIdentityStore,
+          identityRepo,
+          observedAtIdentityResolver,
+          {
+            warn: (message, meta) => logger.warn(meta || {}, message),
+          },
+        );
+
+        if (config.mrfAdminToken) {
+          registerAtIdentityObservabilityFastifyRoutes(app, {
+            adminToken: config.mrfAdminToken,
+            store: observedAtIdentityStore,
+          });
+        }
 
         // ---- Repo / alias stores ----
         const aliasStore   = new RedisAtAliasStore(atRedis);
@@ -1631,6 +2256,7 @@ async function main() {
                   projectionContext,
                   undefined,
                   canonicalPublisher,
+                  atIdentityObservationService,
                 )
               : undefined,
             apIngressForwarder: bridgeApIngressForwarder,
@@ -1816,6 +2442,7 @@ async function main() {
           xrpcServer,
           sessionService,
           oauthTokenVerifier,
+          capabilityGate,
         });
         xrpcServerForWebSocket = xrpcServer;
 
@@ -1872,12 +2499,15 @@ async function main() {
                 const externalFirehoseSources = parseAtExternalFirehoseSources(
                   process.env["AT_EXTERNAL_FIREHOSE_SOURCES"],
                 );
-                const externalDidFailureCacheTtlMs = 60_000;
                 const externalIdentityResolver = new HttpAtIdentityResolver({
                   fetchImpl: fetch,
                   timeoutMs: config.externalPdsTimeoutMs,
                   maxAttempts: config.externalPdsMaxAttempts,
-                  failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
+                  failedResolutionCacheTtlMs: 60_000,
+                  ...(atRedisClient ? {
+                    redisCache: atRedisClient,
+                    redisCacheTtlSeconds: config.didDocCacheTtlSeconds,
+                  } : {}),
                 });
                 const externalCommitVerifier = new ProductionAtCommitVerifier({
                   identityResolver: externalIdentityResolver,
@@ -1906,7 +2536,7 @@ async function main() {
                   identityResolverOptions: {
                     timeoutMs: config.externalPdsTimeoutMs,
                     maxAttempts: config.externalPdsMaxAttempts,
-                    failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
+                    failedResolutionCacheTtlMs: 60_000,
                   },
                   syncRebuilderOptions: {
                     fetchImpl: fetch,
@@ -2029,6 +2659,10 @@ async function main() {
     if (xrpcServerForWebSocket) {
       attachSubscribeReposWebSocket(app, xrpcServerForWebSocket);
     }
+    attachFeedStreamWebSocket(app, streamSubscriptionService, {
+      capabilityGate,
+      checkStreamEntitlement,
+    });
 
     // Start HTTP server only after all HTTP and WebSocket routes are registered.
     if (config.startupMode === "blocking") {
@@ -2041,10 +2675,12 @@ async function main() {
     logger.info(`Metrics available at http://${config.host}:${config.port}/metrics`);
     logger.info("Configuration summary", {
       domain: config.domain,
+      providerProfile,
       startupMode: config.startupMode,
       enableOutboundWorker: config.enableOutboundWorker,
       enableInboundWorker: config.enableInboundWorker,
       enableOpenSearchIndexer: config.enableOpenSearchIndexer,
+      enableMediaAssetSync: config.enableMediaAssetSync,
     });
 
     if (config.startupMode === "background") {
@@ -2056,6 +2692,7 @@ async function main() {
         try {
           await runStartupTasks(startupTasks);
           markStartupReady();
+          populateCapabilityHealthGauges(providerCapabilitiesDocument);
           logger.info("Background startup completed", {
             startup: snapshotStartupState(),
           });
@@ -2071,6 +2708,7 @@ async function main() {
       })();
     } else {
       markStartupReady();
+      populateCapabilityHealthGauges(providerCapabilitiesDocument);
       logger.info("Startup completed", {
         startup: snapshotStartupState(),
       });
@@ -2121,6 +2759,21 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("AP relay subscription service stopped");
     }
 
+    if (streamSubscriptionService) {
+      streamSubscriptionService.shutdown();
+      logger.info("Feed stream subscription service stopped");
+    }
+
+    if (feedStreamKafkaConsumer) {
+      await feedStreamKafkaConsumer.shutdown();
+      logger.info("Feed stream Kafka consumer stopped");
+    }
+
+    if (unifiedFeedBridge) {
+      await unifiedFeedBridge.shutdown();
+      logger.info("Unified feed bridge stopped");
+    }
+
     if (atJetstreamService) {
       atJetstreamService.shutdown();
       logger.info("AT Jetstream service stopped");
@@ -2140,6 +2793,12 @@ async function shutdown(signal: string): Promise<void> {
     if (inboundWorker) {
       await inboundWorker.stop();
       logger.info("Inbound worker stopped");
+    }
+
+    if (mediaAssetSyncConsumer) {
+      await mediaAssetSyncConsumer.stop();
+      mediaAssetSyncConsumer = null;
+      logger.info("Media asset sync consumer stopped");
     }
 
     if (opensearchIndexer) {

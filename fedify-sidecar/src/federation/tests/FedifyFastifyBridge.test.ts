@@ -79,6 +79,69 @@ describe("FedifyFastifyBridge", () => {
     await app.close();
   });
 
+  it("serves host-meta discovery without going through Fedify", async () => {
+    const fetchSpy = vi.fn<
+      (request: Request, options?: { contextData?: { remoteIp?: string } }) => Promise<Response>
+    >(async (_request: Request) =>
+      new Response(null, { status: 204 }),
+    );
+
+    const { app } = createAppWithBridge(fetchSpy);
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/host-meta",
+      headers: {
+        host: "sidecar",
+        "x-forwarded-proto": "https",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/xrd+xml");
+    expect(response.body).toContain("/.well-known/webfinger?resource={uri}");
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it("serves actor-uri webfinger locally without going through Fedify", async () => {
+    const fetchSpy = vi.fn<
+      (request: Request, options?: { contextData?: { remoteIp?: string } }) => Promise<Response>
+    >(async (_request: Request) =>
+      new Response(null, { status: 204 }),
+    );
+
+    const { app } = createAppWithBridge(fetchSpy);
+    const response = await app.inject({
+      method: "GET",
+      url: "/.well-known/webfinger",
+      headers: {
+        host: "sidecar",
+        "x-forwarded-proto": "https",
+      },
+      query: {
+        resource: "https://sidecar/users/alice",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/jrd+json");
+    expect(response.json()).toEqual({
+      subject: "https://sidecar/users/alice",
+      aliases: ["https://sidecar/users/alice"],
+      links: [
+        {
+          rel: "self",
+          type: "application/activity+json",
+          href: "https://sidecar/users/alice",
+        },
+      ],
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
   it("does not claim the per-user inbox POST route", async () => {
     const fetchSpy = vi.fn<
       (request: Request, options?: { contextData?: { remoteIp?: string } }) => Promise<Response>

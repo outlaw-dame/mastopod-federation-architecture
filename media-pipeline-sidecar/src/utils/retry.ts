@@ -1,3 +1,5 @@
+import { isLikelyTransientError } from './errorHandling';
+
 export interface RetryOptions {
   retries?: number;
   baseDelayMs?: number;
@@ -5,8 +7,18 @@ export interface RetryOptions {
   shouldRetry?: (error: unknown) => boolean;
 }
 
-function sleep(ms: number): Promise<void> {
+export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function calculateExponentialBackoffDelayMs(
+  attempt: number,
+  baseDelayMs: number,
+  maxDelayMs: number
+): number {
+  const boundedAttempt = Math.max(0, attempt);
+  const exponentialDelayMs = Math.min(maxDelayMs, baseDelayMs * 2 ** boundedAttempt);
+  return Math.floor(Math.random() * Math.max(1, exponentialDelayMs + 1));
 }
 
 export async function retryAsync<T>(
@@ -16,7 +28,7 @@ export async function retryAsync<T>(
   const retries = options.retries ?? 3;
   const baseDelayMs = options.baseDelayMs ?? 250;
   const maxDelayMs = options.maxDelayMs ?? 5000;
-  const shouldRetry = options.shouldRetry ?? (() => true);
+  const shouldRetry = options.shouldRetry ?? isLikelyTransientError;
 
   let attempt = 0;
   let lastError: unknown;
@@ -30,9 +42,8 @@ export async function retryAsync<T>(
         throw error;
       }
 
-      const exponential = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
-      const jitter = Math.floor(Math.random() * Math.max(50, Math.floor(exponential * 0.2)));
-      await sleep(exponential + jitter);
+      const sleepMs = calculateExponentialBackoffDelayMs(attempt, baseDelayMs, maxDelayMs);
+      await sleep(sleepMs);
       attempt += 1;
     }
   }

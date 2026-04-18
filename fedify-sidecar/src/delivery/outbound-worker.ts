@@ -13,6 +13,7 @@
  */
 
 import { request } from "undici";
+import { isIP } from "node:net";
 import { 
   RedisStreamsQueue, 
   OutboundJob, 
@@ -38,13 +39,86 @@ export interface OutboundWorkerConfig {
   maxConcurrentPerDomain: number;
   requestTimeoutMs: number;
   userAgent: string;
+  notReadyMaxRequeues?: number;
+  notReadyMinDelayMs?: number;
+  notReadyJitterMs?: number;
+  queueTelemetryIntervalMs?: number;
+  heapWarnMb?: number;
   capabilityGate?: (capabilityId: string) => CapabilityGateResult;
   fedifyRuntimeIntegrationEnabled: boolean;
   /** Injected adapter — defaults to NoopFederationRuntimeAdapter when flag is off. */
   adapter?: FederationRuntimeAdapter;
 }
 
+type NormalizedOutboundWorkerConfig = OutboundWorkerConfig & {
+  notReadyMaxRequeues: number;
+  notReadyMinDelayMs: number;
+  notReadyJitterMs: number;
+  queueTelemetryIntervalMs: number;
+  heapWarnMb: number;
+};
+
 export interface DeliveryResult extends OutboundDeliveryResult {}
+
+const MAX_RETRY_AFTER_MS = 60 * 60 * 1000;
+const MAX_ERROR_TEXT_LENGTH = 512;
+const MAX_RESPONSE_BODY_LOG_LENGTH = 2048;
+
+export function sanitizeErrorText(value: unknown): string {
+  const text = typeof value === "string" ? value : String(value ?? "unknown");
+  const compact = text.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  return compact
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
+    .slice(0, MAX_ERROR_TEXT_LENGTH);
+}
+
+export function sanitizeResponseBodySnippet(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const compact = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]+/g, "").trim();
+  if (!compact) return undefined;
+  return compact.slice(0, MAX_RESPONSE_BODY_LOG_LENGTH);
+}
+
+export function parseRetryAfterMs(
+  retryAfterHeader: string | undefined,
+  nowMs: number = Date.now(),
+): number | undefined {
+  if (!retryAfterHeader) return undefined;
+
+  const asSeconds = Number.parseInt(retryAfterHeader, 10);
+  if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+    return Math.min(asSeconds * 1000, MAX_RETRY_AFTER_MS);
+  }
+
+  const asDateMs = Date.parse(retryAfterHeader);
+  if (Number.isNaN(asDateMs)) return undefined;
+
+  const delta = Math.max(0, asDateMs - nowMs);
+  return Math.min(delta, MAX_RETRY_AFTER_MS);
+}
+
+export function isSafeTargetInboxUrl(targetInbox: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(targetInbox);
+  } catch {
+    return false;
+  }
+
+  if (parsed.username || parsed.password) {
+    return false;
+  }
+
+  const protocol = parsed.protocol.toLowerCase();
+  const host = parsed.hostname.toLowerCase();
+
+  if (protocol === "https:") return true;
+  if (protocol !== "http:") return false;
+
+  if (host === "localhost" || host === "::1") return true;
+  const ipVersion = isIP(host);
+  return ipVersion === 4 && host.startsWith("127.");
+}
 
 // ============================================================================
 // Outbound Worker
@@ -54,10 +128,11 @@ export class OutboundWorker {
   private queue: RedisStreamsQueue;
   private signingClient: SigningClient;
   private redpanda: RedPandaProducer;
-  private config: OutboundWorkerConfig;
+  private config: NormalizedOutboundWorkerConfig;
   private adapter: FederationRuntimeAdapter;
   private isRunning = false;
   private activeJobs = 0;
+  private telemetryTimer: NodeJS.Timeout | null = null;
 
   constructor(
     queue: RedisStreamsQueue,
@@ -68,7 +143,14 @@ export class OutboundWorker {
     this.queue = queue;
     this.signingClient = signingClient;
     this.redpanda = redpanda;
-    this.config = config;
+    this.config = {
+      ...config,
+      notReadyMaxRequeues: config.notReadyMaxRequeues ?? 32,
+      notReadyMinDelayMs: config.notReadyMinDelayMs ?? 500,
+      notReadyJitterMs: config.notReadyJitterMs ?? 250,
+      queueTelemetryIntervalMs: config.queueTelemetryIntervalMs ?? 15000,
+      heapWarnMb: config.heapWarnMb ?? 1024,
+    } as NormalizedOutboundWorkerConfig;
     this.adapter = config.fedifyRuntimeIntegrationEnabled
       ? (config.adapter ?? NoopFederationRuntimeAdapter)
       : NoopFederationRuntimeAdapter;
@@ -105,6 +187,7 @@ export class OutboundWorker {
    */
   async start(): Promise<void> {
     this.isRunning = true;
+    this.startTelemetryLoop();
     logger.info("Outbound worker started", {
       concurrency: this.config.concurrency,
       fedifyRuntimeIntegrationEnabled: this.config.fedifyRuntimeIntegrationEnabled,
@@ -130,6 +213,10 @@ export class OutboundWorker {
    */
   async stop(): Promise<void> {
     this.isRunning = false;
+    if (this.telemetryTimer) {
+      clearInterval(this.telemetryTimer);
+      this.telemetryTimer = null;
+    }
     
     // Wait for active jobs to complete (with timeout)
     const timeout = Date.now() + 30000;
@@ -200,10 +287,12 @@ export class OutboundWorker {
 
       // Step 1: Check notBeforeMs (delayed job)
       if (job.notBeforeMs > 0 && Date.now() < job.notBeforeMs) {
-        // Not ready yet - requeue without incrementing attempt
         await this.queue.ack("outbound", messageId);
-        await this.queue.enqueueOutbound(job);
-        logger.debug("Job not ready, requeued", { jobId: job.jobId, notBefore: new Date(job.notBeforeMs).toISOString() });
+        const remainingDelayMs = Math.max(0, job.notBeforeMs - Date.now());
+        await this.deferOrParkJob(job, {
+          reason: "not_ready",
+          baseDelayMs: Math.max(remainingDelayMs, this.config.notReadyMinDelayMs),
+        });
         return;
       }
 
@@ -230,20 +319,22 @@ export class OutboundWorker {
         // Rate limited - requeue with short delay
         await this.queue.ack("outbound", messageId);
         await this.queue.clearIdempotency(job);  // Clear since we didn't actually send
-        const delayedJob = { ...job, notBeforeMs: Date.now() + 5000 };
-        await this.queue.enqueueOutbound(delayedJob);
-        logger.debug("Domain rate limited, delayed", { jobId: job.jobId, domain: job.targetDomain });
+        await this.deferOrParkJob(job, {
+          reason: "domain_rate_limited",
+          baseDelayMs: 5000,
+        });
         return;
       }
 
       // Step 5: Acquire domain concurrency slot
-      if (!await this.queue.acquireDomainSlot(job.targetDomain)) {
+      if (!await this.queue.acquireDomainSlot(job.targetDomain, this.config.maxConcurrentPerDomain)) {
         // At concurrency limit - requeue with short delay
         await this.queue.ack("outbound", messageId);
         await this.queue.clearIdempotency(job);
-        const delayedJob = { ...job, notBeforeMs: Date.now() + 1000 };
-        await this.queue.enqueueOutbound(delayedJob);
-        logger.debug("Domain at concurrency limit, delayed", { jobId: job.jobId, domain: job.targetDomain });
+        await this.deferOrParkJob(job, {
+          reason: "domain_concurrency_limit",
+          baseDelayMs: 1000,
+        });
         return;
       }
 
@@ -335,7 +426,7 @@ export class OutboundWorker {
               jobId: job.jobId, 
               attempt: nextAttempt,
               retryAt: new Date(retryJob.notBeforeMs).toISOString(),
-              error: result.error,
+              error: sanitizeErrorText(result.error),
             });
           }
         }
@@ -345,10 +436,19 @@ export class OutboundWorker {
       }
 
     } catch (err: any) {
-      logger.error("Error processing outbound job", { jobId: job.jobId, error: err.message });
-      // On unexpected error, ack to prevent infinite reprocessing
-      // The job will be in an inconsistent state, but that's better than a loop
-      await this.queue.ack("outbound", messageId);
+      const sanitized = sanitizeErrorText(err?.message ?? err);
+      logger.error("Error processing outbound job", { jobId: job.jobId, error: sanitized });
+      try {
+        await this.queue.moveToDlq(
+          "outbound",
+          { ...job, lastError: sanitized },
+          `Worker processing error: ${sanitized}`,
+        );
+        metrics.deliveryDlq.inc({ domain: job.targetDomain });
+      } finally {
+        // Ack even if DLQ insertion fails, to prevent infinite poison-message loops.
+        await this.queue.ack("outbound", messageId);
+      }
     } finally {
       this.activeJobs--;
     }
@@ -358,6 +458,15 @@ export class OutboundWorker {
    * Deliver an activity to a remote inbox
    */
   protected async deliver(job: OutboundJob): Promise<DeliveryResult> {
+    if (!isSafeTargetInboxUrl(job.targetInbox)) {
+      return {
+        jobId: job.jobId,
+        success: false,
+        error: `Unsafe target inbox URL rejected: ${job.targetInbox}`,
+        permanent: true,
+      };
+    }
+
     if (this.adapter.enabled && this.adapter.deliverOutbound) {
       return await this.adapter.deliverOutbound({
         jobId: job.jobId,
@@ -445,12 +554,20 @@ export class OutboundWorker {
         body: job.activity,  // Send the exact bytes that were signed
         bodyTimeout: this.config.requestTimeoutMs,
         headersTimeout: this.config.requestTimeoutMs,
+        maxRedirections: 0,
       });
 
       const statusCode = response.statusCode;
+      const retryAfterMs = parseRetryAfterMs(
+        typeof response.headers["retry-after"] === "string"
+          ? response.headers["retry-after"]
+          : Array.isArray(response.headers["retry-after"])
+            ? response.headers["retry-after"][0]
+            : undefined,
+      );
 
       // Consume body to release connection
-      await response.body.text();
+      const responseBody = sanitizeResponseBodySnippet(await response.body.text());
 
       // Success: 2xx status codes
       if (statusCode >= 200 && statusCode < 300) {
@@ -468,6 +585,7 @@ export class OutboundWorker {
           success: false,
           statusCode,
           error: `HTTP ${statusCode}`,
+          responseBody,
           permanent: true,
         };
       }
@@ -478,6 +596,8 @@ export class OutboundWorker {
         success: false,
         statusCode,
         error: `HTTP ${statusCode}`,
+        responseBody,
+        retryAfterMs,
         permanent: false,
       };
 
@@ -486,7 +606,7 @@ export class OutboundWorker {
       return {
         jobId: job.jobId,
         success: false,
-        error: `Network error: ${err.message}`,
+        error: `Network error: ${sanitizeErrorText(err?.message ?? err)}`,
         permanent: false,
       };
     }
@@ -494,6 +614,102 @@ export class OutboundWorker {
 
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private async deferOrParkJob(
+    job: OutboundJob,
+    options: { reason: string; baseDelayMs: number },
+  ): Promise<void> {
+    const nextDeferCount = (job.deferCount ?? 0) + 1;
+
+    if (nextDeferCount > this.config.notReadyMaxRequeues) {
+      await this.queue.moveToDlq(
+        "outbound",
+        {
+          ...job,
+          deferCount: nextDeferCount,
+          lastError: `Deferred too many times (${options.reason})`,
+        },
+        `Deferred requeue limit exceeded: ${options.reason}`,
+      );
+      metrics.deliveryDlq.inc({ domain: job.targetDomain });
+      metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "deferred_exhausted" });
+      logger.warn("Outbound job parked in DLQ after excessive deferrals", {
+        jobId: job.jobId,
+        domain: job.targetDomain,
+        reason: options.reason,
+        deferCount: nextDeferCount,
+        maxDeferCount: this.config.notReadyMaxRequeues,
+      });
+      return;
+    }
+
+    const jitterMs = this.config.notReadyJitterMs > 0
+      ? Math.floor(Math.random() * this.config.notReadyJitterMs)
+      : 0;
+    const delayMs = Math.max(options.baseDelayMs, this.config.notReadyMinDelayMs) + jitterMs;
+    const nextNotBeforeMs = Date.now() + delayMs;
+
+    await this.queue.enqueueOutbound({
+      ...job,
+      deferCount: nextDeferCount,
+      notBeforeMs: nextNotBeforeMs,
+      lastError: `Deferred (${options.reason})`,
+    });
+
+    metrics.deliveryRetries.inc({ domain: job.targetDomain });
+    logger.debug("Outbound job deferred", {
+      jobId: job.jobId,
+      domain: job.targetDomain,
+      reason: options.reason,
+      deferCount: nextDeferCount,
+      deferUntil: new Date(nextNotBeforeMs).toISOString(),
+      delayMs,
+    });
+  }
+
+  private startTelemetryLoop(): void {
+    if (this.config.queueTelemetryIntervalMs <= 0 || this.telemetryTimer) {
+      return;
+    }
+
+    this.telemetryTimer = setInterval(() => {
+      void this.emitQueueTelemetry();
+    }, this.config.queueTelemetryIntervalMs);
+    this.telemetryTimer.unref?.();
+  }
+
+  private async emitQueueTelemetry(): Promise<void> {
+    try {
+      const [outboundPending, outboundLength] = await Promise.all([
+        this.queue.getPendingCount("outbound"),
+        this.queue.getStreamLength("outbound"),
+      ]);
+
+      metrics.queueDepth.set({ topic: "outbound" }, outboundLength);
+
+      const heapUsedMb = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
+      if (heapUsedMb >= this.config.heapWarnMb) {
+        logger.warn("Outbound worker heap usage is high", {
+          heapUsedMb,
+          heapWarnMb: this.config.heapWarnMb,
+          outboundPending,
+          outboundLength,
+          activeJobs: this.activeJobs,
+        });
+      } else {
+        logger.info("Outbound queue telemetry", {
+          outboundPending,
+          outboundLength,
+          activeJobs: this.activeJobs,
+          heapUsedMb,
+        });
+      }
+    } catch (error: any) {
+      logger.debug("Outbound queue telemetry failed", {
+        error: sanitizeErrorText(error?.message ?? error),
+      });
+    }
   }
 }
 
@@ -508,14 +724,33 @@ export function createOutboundWorker(
   overrides?: Partial<OutboundWorkerConfig>
 ): OutboundWorker {
   const config: OutboundWorkerConfig = {
-    concurrency: parseInt(process.env["OUTBOUND_CONCURRENCY"] || "64", 10),
-    maxConcurrentPerDomain: parseInt(process.env["MAX_CONCURRENT_PER_DOMAIN"] || "10", 10),
-    requestTimeoutMs: parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    concurrency: parsePositiveIntEnv("OUTBOUND_CONCURRENCY", 64),
+    maxConcurrentPerDomain: parsePositiveIntEnv("MAX_CONCURRENT_PER_DOMAIN", 10),
+    requestTimeoutMs: parsePositiveIntEnv("REQUEST_TIMEOUT_MS", 30000),
     userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+    notReadyMaxRequeues: parsePositiveIntEnv("OUTBOUND_NOT_READY_MAX_REQUEUES", 32),
+    notReadyMinDelayMs: parsePositiveIntEnv("OUTBOUND_NOT_READY_MIN_DELAY_MS", 500),
+    notReadyJitterMs: parseNonNegativeIntEnv("OUTBOUND_NOT_READY_JITTER_MS", 250),
+    queueTelemetryIntervalMs: parsePositiveIntEnv("OUTBOUND_TELEMETRY_INTERVAL_MS", 15000),
+    heapWarnMb: parsePositiveIntEnv("OUTBOUND_HEAP_WARN_MB", 1024),
     fedifyRuntimeIntegrationEnabled:
       process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
     ...overrides,
   };
 
   return new OutboundWorker(queue, signingClient, redpanda, config);
+}
+
+function parsePositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseNonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }

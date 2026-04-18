@@ -21,6 +21,7 @@ describe("provider capabilities schema conformance", () => {
       enableOutboundWorker: true,
       enableOpenSearchIndexer: true,
       enableXrpcServer: false,
+      enableMediaPipeline: true,
       enableMrf: true,
       atprotoEnabled: false,
       firehoseRetentionDays: 30,

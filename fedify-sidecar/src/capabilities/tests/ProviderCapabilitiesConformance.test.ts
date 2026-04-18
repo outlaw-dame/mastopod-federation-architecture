@@ -15,6 +15,7 @@ describe("provider capabilities conformance", () => {
       enableOutboundWorker: true,
       enableOpenSearchIndexer: true,
       enableXrpcServer: false,
+      enableMediaPipeline: true,
       enableMrf: true,
       atprotoEnabled: false,
       firehoseRetentionDays: 30,
@@ -40,6 +41,7 @@ describe("provider capabilities conformance", () => {
       enableOutboundWorker: true,
       enableOpenSearchIndexer: true,
       enableXrpcServer: true,
+      enableMediaPipeline: true,
       enableMrf: true,
       atprotoEnabled: true,
       firehoseRetentionDays: 30,
@@ -53,6 +55,8 @@ describe("provider capabilities conformance", () => {
       hasSigningEndpoint: true,
       hasSigningToken: true,
       hasOpenSearchUrl: true,
+      hasActivityPodsUrl: true,
+      hasActivityPodsToken: true,
       enableMrf: true,
     });
 
@@ -71,6 +75,7 @@ describe("provider capabilities conformance", () => {
       enableOutboundWorker: true,
       enableOpenSearchIndexer: true,
       enableXrpcServer: false,
+      enableMediaPipeline: true,
       enableMrf: true,
       atprotoEnabled: false,
       firehoseRetentionDays: 30,
@@ -86,6 +91,8 @@ describe("provider capabilities conformance", () => {
       hasSigningEndpoint: true,
       hasSigningToken: true,
       hasOpenSearchUrl: true,
+      hasActivityPodsUrl: true,
+      hasActivityPodsToken: true,
       enableMrf: true,
     });
 

@@ -26,6 +26,17 @@ export interface FollowActivity {
   to: [string];
 }
 
+export interface CreateActivity {
+  "@context": "https://www.w3.org/ns/activitystreams";
+  id: string;
+  type: "Create";
+  actor: string;
+  object: Record<string, unknown>;
+  to: string[];
+  cc?: string[];
+  published: string;
+}
+
 export function selectActivityPubSelfLink(document: WebFingerDocument): string {
   if (!Array.isArray(document.links)) {
     throw new Error("WebFinger response is missing links");
@@ -95,6 +106,75 @@ export function buildFollowActivity(params: {
     object: params.targetActorUri,
     to: [params.targetActorUri],
   };
+}
+
+export function buildCreateNoteWithVideoAttachment(params: {
+  actorUri: string;
+  targetActorUri: string;
+  mediaUrl: string;
+  mediaType: string;
+  contentMarker?: string;
+  id?: string;
+  published?: string;
+}): CreateActivity {
+  const published = params.published ?? new Date().toISOString();
+  const actorUri = params.actorUri.replace(/\/+$/, "");
+  const followersCollection = `${actorUri}/followers`;
+  const publicAudience = "https://www.w3.org/ns/activitystreams#Public";
+  const activityId = params.id ?? `${actorUri}/activities/create-${randomUUID()}`;
+  const objectId = `${activityId}#object`;
+  const marker = params.contentMarker?.trim() || `ap-interop-media-${randomUUID()}`;
+  const mentionName = formatMentionName(params.targetActorUri);
+  const body = `${mentionName} AP interop media proof ${marker}`;
+
+  return {
+    "@context": "https://www.w3.org/ns/activitystreams",
+    id: activityId,
+    type: "Create",
+    actor: actorUri,
+    object: {
+      id: objectId,
+      type: "Note",
+      attributedTo: actorUri,
+      content: `<p>${body}</p>`,
+      published,
+      to: [publicAudience],
+      cc: [followersCollection, params.targetActorUri],
+      url: objectId,
+      tag: [
+        {
+          type: "Mention",
+          href: params.targetActorUri,
+          name: mentionName,
+        },
+      ],
+      attachment: [
+        {
+          type: "Video",
+          mediaType: params.mediaType,
+          url: params.mediaUrl,
+          name: body,
+          width: 320,
+          height: 180,
+          duration: "PT1S",
+        },
+      ],
+    },
+    published,
+    to: [publicAudience],
+    cc: [followersCollection, params.targetActorUri],
+  };
+}
+
+function formatMentionName(actorUri: string): string {
+  try {
+    const parsed = new URL(actorUri);
+    const pathSegments = parsed.pathname.split("/").filter(Boolean);
+    const username = pathSegments.at(-1)?.replace(/^@+/, "") || parsed.hostname;
+    return `@${username}@${parsed.hostname}`;
+  } catch {
+    return actorUri;
+  }
 }
 
 export function matchesAcceptForFollow(
