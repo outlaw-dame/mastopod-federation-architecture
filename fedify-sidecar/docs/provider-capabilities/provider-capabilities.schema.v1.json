@@ -115,8 +115,10 @@
             "properties": {
               "name": { "type": "string", "minLength": 1 },
               "schema": { "type": "string", "minLength": 1 },
-              "retentionDays": { "type": "integer", "minimum": 1 },
-              "replay": { "type": "boolean" }
+              "retentionDays": { "type": "integer", "minimum": 0 },
+              "replay": { "type": "boolean" },
+              "dlqTopic": { "type": "string", "minLength": 1 },
+              "dlqSemantics": { "type": "string", "minLength": 1 }
             }
           }
         }

@@ -166,6 +166,8 @@ import { registerAtIdentityObservabilityFastifyRoutes } from "./admin/at-observa
 import { FedifyKvAdapter } from "./federation/FedifyKvAdapter.js";
 import { createFedifyAdapter, type FedifyFederationAdapter } from "./federation/FedifyFederationAdapter.js";
 import { registerFedifyRoutes } from "./federation/FedifyFastifyBridge.js";
+import { FollowersSyncService } from "./federation/fep8fcf/FollowersSyncService.js";
+import { registerFollowersSyncRoutes } from "./federation/fep8fcf/FollowersSyncFastifyBridge.js";
 import { SidecarLocalSigningService } from "./signing/SidecarLocalSigningService.js";
 import {
   evaluateOutboundWebhookBackpressure,
@@ -206,6 +208,8 @@ import { validateProviderCapabilitiesConfig } from "./capabilities/startup-valid
 import { buildEntitlementOverridesFromEnv, checkCapabilityLimit } from "./capabilities/entitlement.js";
 import type { ProviderProfile } from "./capabilities/types.js";
 import { MediaAssetSyncConsumer } from "./media/MediaAssetSyncConsumer.js";
+import { evaluateMediaSignalPolicy } from "./media/MediaSignalPolicy.js";
+import type { MRFAdminStore } from "./admin/mrf/store.js";
 
 function normalizeMrfAdminStoreMode(raw: string | undefined): "memory" | "redis" {
   return raw === "redis" ? "redis" : "memory";
@@ -283,6 +287,7 @@ const config = {
   enableXrpcServer: process.env["ENABLE_XRPC_SERVER"] !== "false",
   enableFedifyRuntimeIntegration:
     process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
+  enableFollowersSync: process.env["ENABLE_FOLLOWERS_SYNC"] === "true",
   enableProtocolBridgeApToAt: process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true",
   // AT→AP is auto-enabled when Jetstream is on, so Bluesky content reaches the AP timeline.
   // Can be explicitly set to "false" to disable even when ENABLE_AT_JETSTREAM=true.
@@ -567,6 +572,7 @@ let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
 let mediaAssetSyncConsumer: MediaAssetSyncConsumer | null = null;
 let searchIndexerRedis: Redis | null = null;
 let mrfAdminRedisClient: Redis | null = null;
+let mrfAdminStore: MRFAdminStore | null = null;
 let moderationBridgeRedisClient: Redis | null = null;
 let fedifyAdapter: FedifyFederationAdapter | null = null;
 let apRelaySubscriptionService: ApRelaySubscriptionService | null = null;
@@ -825,6 +831,23 @@ async function main() {
     const signingClient = createSigningClient();
     logger.info("Signing client initialized");
 
+    // FEP-8fcf Followers Sync Service (optional, feature-flagged)
+    const followersSyncService: FollowersSyncService | undefined = config.enableFollowersSync
+      ? new FollowersSyncService({
+          domain: config.domain,
+          activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://localhost:3000",
+          activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+          requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+          userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+          digestCacheTtlSeconds: Number.parseInt(
+            process.env["FOLLOWERS_SYNC_DIGEST_TTL_SECONDS"] || "300", 10,
+          ),
+        })
+      : undefined;
+    if (followersSyncService) {
+      logger.info("FEP-8fcf followers sync service enabled");
+    }
+
     // Initialize RedPanda producer only when worker/indexer features need it.
     let redpanda: any = null;
     if (redpandaProducerRequired) {
@@ -960,6 +983,10 @@ async function main() {
         capabilityGate,
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
+        ...(followersSyncService ? {
+          followersSyncService,
+          domain: config.domain,
+        } : {}),
       });
       startupTasks.push({
         name: "start outbound worker",
@@ -998,6 +1025,11 @@ async function main() {
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
         ...(sidecarActorPaths.size > 0 ? { sidecarActorPaths } : {}),
+        ...(followersSyncService ? {
+          followersSyncService,
+          followersSyncSigningClient: signingClient,
+          domain: config.domain,
+        } : {}),
       });
       startupTasks.push({
         name: "start inbound worker",
@@ -1027,6 +1059,17 @@ async function main() {
           info: (message, meta) => logger.info(meta || {}, message),
           warn: (message, meta) => logger.warn(meta || {}, message),
           error: (message, meta) => logger.error(meta || {}, message),
+        },
+        async (event) => {
+          const bindingUrl = event.bindings?.activitypub?.url;
+          const activityId = bindingUrl || event.asset.canonicalUrl;
+          return evaluateMediaSignalPolicy(mrfAdminStore, {
+            activityId,
+            originHost: bindingUrl ? new URL(bindingUrl).host : undefined,
+            actorId: event.asset.ownerId,
+            visibility: "public",
+            signals: event.signals ?? null,
+          });
         },
       );
       startupTasks.push({
@@ -1440,6 +1483,7 @@ async function main() {
         redisPrefix: config.mrfAdminRedisPrefix,
       });
       mrfAdminRedisClient = registration.redisClient;
+      mrfAdminStore = registration.store;
     }
 
     // Shared inbox endpoint
@@ -1801,6 +1845,19 @@ async function main() {
     // Fedify 2.x HTTP routes (WebFinger, NodeInfo, actor documents)
     // Only registered when the runtime integration flag is on.
     // -----------------------------------------------------------------------
+    // FEP-8fcf partial followers collection endpoint — must be registered
+    // before the Fedify catch-all so it takes priority over Fedify's own
+    // /users/:id/followers dispatcher.
+    if (followersSyncService) {
+      registerFollowersSyncRoutes(app, {
+        service: followersSyncService,
+        domain: config.domain,
+        userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+        requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+      });
+      logger.info("FEP-8fcf followers_synchronization endpoint registered");
+    }
+
     if (fedifyAdapter) {
       registerFedifyRoutes(app, fedifyAdapter);
       logger.info(

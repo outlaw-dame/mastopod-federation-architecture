@@ -14,9 +14,9 @@
 
 import { request } from "undici";
 import { isIP } from "node:net";
-import { 
-  RedisStreamsQueue, 
-  OutboundJob, 
+import {
+  RedisStreamsQueue,
+  OutboundJob,
   backoffMs,
 } from "../queue/sidecar-redis-queue.js";
 import { SigningClient, SignResult, SignErrorResult } from "../signing/signing-client.js";
@@ -29,6 +29,9 @@ import {
 import { metrics } from "../metrics/index.js";
 import { logger } from "../utils/logger.js";
 import type { CapabilityGateResult } from "../capabilities/gates.js";
+import type { FollowersSyncService } from "../federation/fep8fcf/FollowersSyncService.js";
+import { extractActorIdentifier } from "../federation/fep8fcf/PartialFollowersDigest.js";
+import { COLLECTION_SYNC_HEADER } from "../federation/fep8fcf/CollectionSyncHeader.js";
 
 // ============================================================================
 // Types
@@ -48,6 +51,17 @@ export interface OutboundWorkerConfig {
   fedifyRuntimeIntegrationEnabled: boolean;
   /** Injected adapter — defaults to NoopFederationRuntimeAdapter when flag is off. */
   adapter?: FederationRuntimeAdapter;
+  /**
+   * FEP-8fcf followers sync service.  When present and the outbound job has
+   * `meta.visibility === "followers"`, the worker appends a
+   * Collection-Synchronization header to the HTTP delivery request.
+   */
+  followersSyncService?: FollowersSyncService;
+  /**
+   * Public hostname of this sidecar (e.g. "social.example.com").  Required
+   * to extract the actor identifier from an actorUri for FEP-8fcf.
+   */
+  domain?: string;
 }
 
 type NormalizedOutboundWorkerConfig = OutboundWorkerConfig & {
@@ -130,6 +144,7 @@ export class OutboundWorker {
   private redpanda: RedPandaProducer;
   private config: NormalizedOutboundWorkerConfig;
   private adapter: FederationRuntimeAdapter;
+  private followersSyncService: FollowersSyncService | null;
   private isRunning = false;
   private activeJobs = 0;
   private telemetryTimer: NodeJS.Timeout | null = null;
@@ -154,6 +169,7 @@ export class OutboundWorker {
     this.adapter = config.fedifyRuntimeIntegrationEnabled
       ? (config.adapter ?? NoopFederationRuntimeAdapter)
       : NoopFederationRuntimeAdapter;
+    this.followersSyncService = config.followersSyncService ?? null;
   }
 
   /**
@@ -548,6 +564,27 @@ export class OutboundWorker {
         headers["digest"] = successResult.signedHeaders.digest;
       }
 
+      // FEP-8fcf: add Collection-Synchronization header for follower-addressed
+      // activities when the sync service is configured.
+      if (
+        this.followersSyncService &&
+        job.meta?.visibility === "followers" &&
+        this.config.domain
+      ) {
+        const actorIdentifier = extractActorIdentifier(job.actorUri, this.config.domain);
+        if (actorIdentifier) {
+          const followersUri = `${job.actorUri}/followers`;
+          const syncHeaderValue = await this.followersSyncService.buildSenderHeader(
+            actorIdentifier,
+            followersUri,
+            job.targetInbox,
+          ).catch(() => null);
+          if (syncHeaderValue) {
+            headers[COLLECTION_SYNC_HEADER] = syncHeaderValue;
+          }
+        }
+      }
+
       const response = await request(job.targetInbox, {
         method: "POST",
         headers,
@@ -735,6 +772,7 @@ export function createOutboundWorker(
     heapWarnMb: parsePositiveIntEnv("OUTBOUND_HEAP_WARN_MB", 1024),
     fedifyRuntimeIntegrationEnabled:
       process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
+    domain: process.env["DOMAIN"],
     ...overrides,
   };
 
