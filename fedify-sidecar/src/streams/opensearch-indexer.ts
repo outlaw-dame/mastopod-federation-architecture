@@ -13,6 +13,7 @@
 import { Client } from "@opensearch-project/opensearch";
 import { Kafka, Consumer, EachBatchPayload } from "kafkajs";
 import { logger } from "../utils/logger.js";
+import { normalizePublicSearchConsent } from "../utils/searchConsent.js";
 
 // ============================================================================
 // Types
@@ -260,10 +261,11 @@ export class OpenSearchIndexer {
           // searchableBy to something OTHER than as:Public, do not index.
           // (Activities that reach the Firehose with no explicit signal are
           // publicly addressed and are indexed under the liberal default.)
-          const consent = event.meta?.searchConsent;
-          if (consent?.explicitlySet === true && consent?.isPublic === false) {
+          const consent = normalizePublicSearchConsent(event.meta?.searchConsent);
+          if (consent?.isPublic === false) {
             logger.debug("Skipping non-searchable activity per FEP-268d opt-out", {
               activityId: event.activity?.id,
+              source: consent.source,
             });
             resolveOffset(message.offset);
             await heartbeat();
@@ -387,10 +389,8 @@ export class OpenSearchIndexer {
 
     // Resolve search consent fields from event metadata (populated by the
     // outbox-emitter via FEP-268d searchableBy; absent for legacy events).
-    const consent = event.meta?.searchConsent;
-    const isSearchable = consent?.explicitlySet
-      ? (consent.isPublic ?? false)
-      : true;  // liberal default: publicly-addressed with no explicit signal
+    const consent = normalizePublicSearchConsent(event.meta?.searchConsent);
+    const isSearchable = consent?.isPublic ?? true;
     const searchConsentExplicit = consent?.explicitlySet ?? false;
 
     // Prefer pre-parsed hashtags from event.meta (avoids re-parsing HTML).

@@ -8,14 +8,16 @@
 import { SearchAuthorUpsertV1, SearchAuthorDeleteV1 } from '../events/SearchEvents.js';
 import { PublicAuthorDocument } from '../models/PublicAuthorDocument.js';
 
-export interface OpenSearchAuthorClient {
+export interface PublicAuthorStore {
   get(id: string): Promise<PublicAuthorDocument | null>;
   upsert(id: string, doc: Partial<PublicAuthorDocument>): Promise<void>;
   delete(id: string): Promise<void>;
 }
 
+export type OpenSearchAuthorClient = PublicAuthorStore;
+
 export class PublicAuthorIndexWriter {
-  constructor(private readonly osClient: OpenSearchAuthorClient) {}
+  constructor(private readonly osClient: PublicAuthorStore) {}
 
   async onUpsert(event: SearchAuthorUpsertV1): Promise<void> {
     const targetId = event.stableAuthorId;
@@ -42,6 +44,14 @@ export class PublicAuthorIndexWriter {
     if (event.summaryText) doc.summaryText = event.summaryText;
     if (event.labels) doc.labels = event.labels;
     if (event.langs) doc.langs = event.langs;
+    if (event.searchConsent) {
+      doc.searchConsentPublic = event.searchConsent.publicSearchable;
+      doc.searchConsentExplicit = event.searchConsent.explicitlySet;
+      doc.searchConsentSource = event.searchConsent.source;
+      doc.searchableBy = event.searchConsent.searchableBy;
+      doc.indexable =
+        typeof event.searchConsent.indexable === "boolean" ? event.searchConsent.indexable : undefined;
+    }
     
     doc.updatedAt = event.updatedAt;
 

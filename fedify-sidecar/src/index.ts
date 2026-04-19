@@ -27,6 +27,14 @@ import { createSigningClient } from "./signing/signing-client.js";
 import { createRedPandaProducer } from "./streams/redpanda-producer.js";
 import { createSearchIndexerService, SearchIndexerService } from "./search/service/SearchIndexerService.js";
 import {
+  OpenSearchBootstrapService,
+  createOpenSearchBootstrapConfig,
+} from "./search/service/OpenSearchBootstrapService.js";
+import {
+  QdrantBootstrapService,
+  createQdrantBootstrapConfig,
+} from "./search/service/QdrantBootstrapService.js";
+import {
   resolveTopicGovernanceOptionsFromEnv,
   verifyRedpandaTopics,
 } from "./streams/redpanda-topic-governance.js";
@@ -190,11 +198,15 @@ import {
 } from "./at-adapter/jetstream/AtJetstreamService.js";
 import { Client as OpenSearchNativeClient } from "@opensearch-project/opensearch";
 import { DefaultFeedCandidateService } from "./search/queries/FeedCandidateService.js";
+import { QdrantFeedCandidateService } from "./search/queries/QdrantFeedCandidateService.js";
 import { FeedRegistry } from "./feed/FeedRegistry.js";
 import { DefaultPodFeedService } from "./feed/PodFeedService.js";
 import { DefaultPodHydrationService } from "./feed/PodHydrationService.js";
 import { OpenSearchFeedProvider } from "./feed/OpenSearchFeedProvider.js";
 import { OpenSearchHydrator } from "./feed/OpenSearchHydrator.js";
+import { QdrantFeedProvider } from "./feed/QdrantFeedProvider.js";
+import { QdrantHydrator } from "./feed/QdrantHydrator.js";
+import { QdrantDocumentStore } from "./feed/QdrantDocumentStore.js";
 import type { FeedDefinition } from "./feed/contracts.js";
 import { registerFeedFastifyRoutes, attachFeedStreamWebSocket } from "./feed/fastify-routes.js";
 import { DurableStreamSubscriptionService, buildCapabilityLookup } from "./feed/DurableStreamSubscriptionService.js";
@@ -288,6 +300,12 @@ const config = {
   enableInboundWorker: process.env["ENABLE_INBOUND_WORKER"] !== "false",
   enableOutboxIntentWorker: process.env["ENABLE_OUTBOX_INTENT_WORKER"] !== "false",
   enableOpenSearchIndexer: process.env["ENABLE_OPENSEARCH_INDEXER"] !== "false",
+  searchBackend:
+    process.env["SEARCH_BACKEND"] === "opensearch" ||
+    process.env["SEARCH_BACKEND"] === "qdrant" ||
+    process.env["SEARCH_BACKEND"] === "dual"
+      ? process.env["SEARCH_BACKEND"]
+      : "dual",
   enableXrpcServer: process.env["ENABLE_XRPC_SERVER"] !== "false",
   enableFedifyRuntimeIntegration:
     process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
@@ -980,15 +998,44 @@ async function main() {
       );
       opensearchIndexer = createSearchIndexerService({
         redis: searchIndexerRedis as any,
+        searchBackend: config.searchBackend as 'opensearch' | 'qdrant' | 'dual',
       });
+      if (config.searchBackend === "opensearch" || config.searchBackend === "dual") {
+        startupTasks.push({
+          name: "bootstrap OpenSearch indices and pipelines",
+          start: async () => {
+            const bootstrapConfig = createOpenSearchBootstrapConfig();
+            const bootstrap = new OpenSearchBootstrapService(bootstrapConfig);
+            try {
+              await bootstrap.bootstrap();
+            } finally {
+              await bootstrap.close();
+            }
+          },
+        });
+      }
+      if (config.searchBackend === "qdrant" || config.searchBackend === "dual") {
+        startupTasks.push({
+          name: "bootstrap Qdrant collection and payload indexes",
+          start: async () => {
+            const bootstrap = new QdrantBootstrapService(createQdrantBootstrapConfig());
+            await bootstrap.bootstrap();
+          },
+        });
+      }
       startupTasks.push({
-        name: "start OpenSearch indexer",
+        name: "start search indexer",
         start: async () => {
           await opensearchIndexer!.initialize();
           opensearchIndexer!.start().catch(err => {
-            logger.error("OpenSearch indexer error", { error: err.message });
+            logger.error("Search indexer error", {
+              backend: config.searchBackend,
+              error: err.message,
+            });
           });
-          logger.info("OpenSearch indexer started");
+          logger.info("Search indexer started", {
+            backend: config.searchBackend,
+          });
         },
       });
     }
@@ -1284,25 +1331,35 @@ async function main() {
       ].filter((line) => line.length > 0).join("\n") + "\n";
     });
 
-    const openSearchReader = new OpenSearchNativeClient(
-      process.env["OPENSEARCH_USERNAME"]
-        ? {
-            node: process.env["OPENSEARCH_URL"] ?? "http://localhost:9200",
-            auth: {
-              username: process.env["OPENSEARCH_USERNAME"],
-              password: process.env["OPENSEARCH_PASSWORD"] ?? "",
-            },
-            ssl: {
-              rejectUnauthorized: process.env["OPENSEARCH_SSL_VERIFY"] !== "false",
-            },
-          }
-        : {
-            node: process.env["OPENSEARCH_URL"] ?? "http://localhost:9200",
-            ssl: {
-              rejectUnauthorized: process.env["OPENSEARCH_SSL_VERIFY"] !== "false",
-            },
-          },
-    );
+    const openSearchReader =
+      config.searchBackend === "opensearch"
+        ? new OpenSearchNativeClient(
+            process.env["OPENSEARCH_USERNAME"]
+              ? {
+                  node: process.env["OPENSEARCH_URL"] ?? "http://localhost:9200",
+                  auth: {
+                    username: process.env["OPENSEARCH_USERNAME"],
+                    password: process.env["OPENSEARCH_PASSWORD"] ?? "",
+                  },
+                  ssl: {
+                    rejectUnauthorized: process.env["OPENSEARCH_SSL_VERIFY"] !== "false",
+                  },
+                }
+              : {
+                  node: process.env["OPENSEARCH_URL"] ?? "http://localhost:9200",
+                  ssl: {
+                    rejectUnauthorized: process.env["OPENSEARCH_SSL_VERIFY"] !== "false",
+                  },
+                },
+          )
+        : null;
+
+    const qdrantReadConfig = {
+      baseUrl: process.env["QDRANT_URL"] ?? "http://localhost:6333",
+      apiKey: process.env["QDRANT_API_KEY"],
+      collectionName: process.env["QDRANT_COLLECTION_NAME"] ?? "public-content-v1",
+      requestTimeoutMs: parseInt(process.env["QDRANT_REQUEST_TIMEOUT_MS"] ?? "5000", 10),
+    };
 
     const feedDefinitions: FeedDefinition[] = [
       {
@@ -1318,13 +1375,13 @@ async function main() {
           includeFirehose: false,
           includeUnified: true,
         },
-        rankingPolicy: { mode: "ranked", providerHint: "opensearch-feed-candidates" },
+        rankingPolicy: { mode: "ranked", providerHint: "search-feed-candidates" },
         hydrationShape: "card",
         realtimeCapable: true,
         supportsSse: true,
         supportsWebSocket: true,
         experimental: false,
-        providerId: "opensearch.candidates.v1",
+        providerId: "search.candidates.v1",
       },
       {
         id: "urn:activitypods:feed:graph-personalized:v1",
@@ -1339,13 +1396,13 @@ async function main() {
           includeFirehose: false,
           includeUnified: true,
         },
-        rankingPolicy: { mode: "blended", providerHint: "opensearch-feed-candidates" },
+        rankingPolicy: { mode: "blended", providerHint: "search-feed-candidates" },
         hydrationShape: "card",
         realtimeCapable: true,
         supportsSse: true,
         supportsWebSocket: true,
         experimental: false,
-        providerId: "opensearch.candidates.v1",
+        providerId: "search.candidates.v1",
       },
       {
         id: "urn:activitypods:feed:topic:v1",
@@ -1360,24 +1417,30 @@ async function main() {
           includeFirehose: false,
           includeUnified: true,
         },
-        rankingPolicy: { mode: "blended", providerHint: "opensearch-feed-candidates" },
+        rankingPolicy: { mode: "blended", providerHint: "search-feed-candidates" },
         hydrationShape: "card",
         realtimeCapable: true,
         supportsSse: true,
         supportsWebSocket: true,
         experimental: false,
-        providerId: "opensearch.candidates.v1",
+        providerId: "search.candidates.v1",
       },
     ];
 
     const feedRegistry = new FeedRegistry(feedDefinitions);
-    const feedProvider = new OpenSearchFeedProvider(
-      openSearchReader as any,
-      new DefaultFeedCandidateService(openSearchReader as any),
-    );
+    const feedProvider =
+      config.searchBackend === "opensearch"
+        ? new OpenSearchFeedProvider(
+            openSearchReader as any,
+            new DefaultFeedCandidateService(openSearchReader as any),
+          )
+        : new QdrantFeedProvider(
+            qdrantReadConfig,
+            new QdrantFeedCandidateService(new QdrantDocumentStore(qdrantReadConfig)),
+          );
     const feedService = new DefaultPodFeedService(
       feedRegistry,
-      new Map([["opensearch.candidates.v1", feedProvider]]),
+      new Map([["search.candidates.v1", feedProvider]]),
       {
         maxAttempts: 3,
         initialDelayMs: 150,
@@ -1386,7 +1449,12 @@ async function main() {
     );
     const hydrationService = new DefaultPodHydrationService(
       new Map([
-        ["default", new OpenSearchHydrator(openSearchReader as any)],
+        [
+          "default",
+          config.searchBackend === "opensearch"
+            ? new OpenSearchHydrator(openSearchReader as any)
+            : new QdrantHydrator(qdrantReadConfig),
+        ],
       ]),
       {
         concurrency: 4,

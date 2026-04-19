@@ -27,6 +27,7 @@ import {
   buildActorStatusHistoryCollection,
   withActorStatusProperties,
 } from "./fep-82f6/ActorStatusBridge.js";
+import { withActorSearchConsentProperties } from "./fep-5feb-268d/ActorSearchConsentBridge.js";
 import { logger } from "../utils/logger.js";
 
 type SyndicationFormat = "rss" | "atom";
@@ -229,7 +230,8 @@ async function maybeInjectActorStatus(
 
   try {
     const actorUrl = `${resolveExternalOrigin(adapter, request)}${requestPath}`;
-    return withActorStatusProperties(actorUrl, JSON.parse(body), internalActor.body);
+    const withSearchConsent = withActorSearchConsentProperties(JSON.parse(body), internalActor.body);
+    return withActorStatusProperties(actorUrl, JSON.parse(withSearchConsent), internalActor.body);
   } catch (err: unknown) {
     logger.warn(
       {

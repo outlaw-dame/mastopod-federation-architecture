@@ -61,6 +61,13 @@ export interface CanonicalLinkPreview {
   thumbUrl?: string | null;
 }
 
+export interface CanonicalPollOption {
+  /** The label text of this poll option. MUST be unique within a poll. */
+  name: string;
+  /** Number of votes for this option (0 when unknown). */
+  voteCount: number;
+}
+
 export interface CanonicalContent {
   kind: CanonicalContentKind;
   title?: string | null;

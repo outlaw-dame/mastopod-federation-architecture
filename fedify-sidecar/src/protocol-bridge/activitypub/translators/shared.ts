@@ -1,10 +1,13 @@
 import { z } from "zod";
 import type { CanonicalAttachment, CanonicalFacet, CanonicalContentKind } from "../../canonical/CanonicalContent.js";
 import type {
+  CanonicalInteractionPolicy,
   CanonicalPostCreateIntent,
   CanonicalPostDeleteIntent,
   CanonicalPostEditIntent,
   CanonicalProfileUpdateIntent,
+  CanonicalQuotePolicy,
+  CanonicalReplyPolicy,
 } from "../../canonical/CanonicalIntent.js";
 import type { CanonicalProvenance } from "../../canonical/CanonicalEnvelope.js";
 import { buildCanonicalIntentId } from "../../idempotency/CanonicalIntentIdBuilder.js";
@@ -262,6 +265,7 @@ async function buildCanonicalPostIntent(
   });
   const inReplyTo = await resolveOptionalObjectRef(activity.object["inReplyTo"], ctx);
   const quoteOf = await resolveOptionalQuoteRef(activity.object, ctx);
+  const interactionPolicy = parseApInteractionPolicy(activity.object, actorId);
   const tagFacets = await buildTagFacets(plaintext, activity.object["tag"], ctx);
   const customEmojis = collectApCustomEmojis(activity.object["tag"], {
     referencedText: [objectContent, objectSummary, objectTitle],
@@ -289,6 +293,7 @@ async function buildCanonicalPostIntent(
     object: objectRef,
     inReplyTo,
     quoteOf,
+    interactionPolicy,
     content: {
       kind: contentKind,
       title: objectTitle ?? null,
@@ -337,6 +342,7 @@ async function buildCanonicalPostEditIntent(
   });
   const inReplyTo = await resolveOptionalObjectRef(activity.object["inReplyTo"], ctx);
   const quoteOf = await resolveOptionalQuoteRef(activity.object, ctx);
+  const interactionPolicy = parseApInteractionPolicy(activity.object, actorId);
   const tagFacets = await buildTagFacets(plaintext, activity.object["tag"], ctx);
   const customEmojis = collectApCustomEmojis(activity.object["tag"], {
     referencedText: [objectContent, objectSummary, objectTitle],
@@ -364,6 +370,7 @@ async function buildCanonicalPostEditIntent(
     object: objectRef,
     inReplyTo,
     quoteOf,
+    interactionPolicy,
     content: {
       kind: contentKind,
       title: objectTitle ?? null,
@@ -439,6 +446,121 @@ function resolvePrimaryLinkPreviewUrl(
   return firstLinkFacet?.url ?? null;
 }
 
+// ---------------------------------------------------------------------------
+// AP interaction policy parsing (GoToSocial `interactionPolicy` vocabulary)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse an ActivityPub `interactionPolicy` object (GoToSocial vocabulary) into
+ * a `CanonicalInteractionPolicy`.  Returns `null` when the object is absent or
+ * when both fields resolve to their defaults ("everyone"), so callers can
+ * treat a null result as "no non-default policy".
+ *
+ * Reading rules:
+ *   canReply:
+ *     automaticApproval = PUBLIC_AUDIENCE                → "everyone" (default)
+ *     automaticApproval = any followers URI              → "followers"
+ *     automaticApproval = other IRI                     → "mentioned"
+ *     automaticApproval absent (incl. empty object)     → "nobody"
+ *   canQuote:
+ *     automaticApproval = PUBLIC_AUDIENCE                → "everyone" (default)
+ *     automaticApproval absent (incl. empty object)     → "nobody"
+ */
+export function parseApInteractionPolicy(
+  activityObject: Record<string, unknown>,
+  actorId: string,
+): CanonicalInteractionPolicy | null {
+  const rawPolicy = asObject(activityObject["interactionPolicy"]);
+  if (!rawPolicy) {
+    return null;
+  }
+
+  const canReply = parseReplyPolicy(asObject(rawPolicy["canReply"]), actorId);
+  const canQuote = parseQuotePolicy(asObject(rawPolicy["canQuote"]));
+
+  // Return null when both are defaults to avoid storing no-op policy objects.
+  if (canReply === "everyone" && canQuote === "everyone") {
+    return null;
+  }
+
+  return { canReply, canQuote };
+}
+
+function parseReplyPolicy(
+  raw: Record<string, unknown> | null,
+  actorId: string,
+): CanonicalReplyPolicy {
+  if (!raw) {
+    return "everyone"; // absent interactionPolicy → default
+  }
+
+  const autoApproval = extractFirstIri(raw["automaticApproval"]);
+  if (!autoApproval) {
+    return "nobody"; // present but no automaticApproval → nobody allowed automatically
+  }
+
+  if (autoApproval === PUBLIC_AUDIENCE) {
+    return "everyone";
+  }
+
+  // Followers URI: either the well-known pattern or the actor's own followers collection.
+  const followersUri = `${actorId}/followers`;
+  if (autoApproval === followersUri || autoApproval.endsWith("/followers")) {
+    return "followers";
+  }
+
+  // A non-public, non-followers IRI is best interpreted as a specific audience
+  // (e.g. a list or "mentioned users" substitute).
+  return "mentioned";
+}
+
+function parseQuotePolicy(
+  raw: Record<string, unknown> | null,
+): CanonicalQuotePolicy {
+  if (!raw) {
+    return "everyone"; // absent interactionPolicy → default
+  }
+
+  const autoApproval = extractFirstIri(raw["automaticApproval"]);
+  if (!autoApproval) {
+    return "nobody"; // present but no automaticApproval → quoting disabled
+  }
+
+  if (autoApproval === PUBLIC_AUDIENCE) {
+    return "everyone";
+  }
+
+  // Any non-public automaticApproval on canQuote is treated as restricted.
+  return "nobody";
+}
+
+/**
+ * Extract the first IRI string from an ActivityPub audience value.
+ * Accepts a plain string, an array of strings, or a `{id: string}` object.
+ */
+function extractFirstIri(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const iri = extractFirstIri(entry);
+      if (iri) {
+        return iri;
+      }
+    }
+    return null;
+  }
+
+  if (value && typeof value === "object") {
+    const id = (value as Record<string, unknown>)["id"];
+    return typeof id === "string" && id.trim().length > 0 ? id.trim() : null;
+  }
+
+  return null;
+}
+
 export async function resolveOptionalObjectRef(
   rawValue: unknown,
   ctx: TranslationContext,
@@ -459,7 +581,9 @@ async function resolveOptionalQuoteRef(
   activityObject: Record<string, unknown>,
   ctx: TranslationContext,
 ) {
-  const rawQuote = activityObject["quoteUrl"]
+  // FEP-044f primary term first, then backwards-compat aliases
+  const rawQuote = activityObject["quote"]
+    ?? activityObject["quoteUrl"]
     ?? activityObject["quoteUri"]
     ?? activityObject["quoteURI"];
   const quoteId = sanitizeQuoteReferenceId(extractId(rawQuote) ?? extractFirstUrl(rawQuote));

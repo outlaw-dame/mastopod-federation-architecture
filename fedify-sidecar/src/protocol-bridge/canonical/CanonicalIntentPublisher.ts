@@ -90,12 +90,20 @@ function serializeIntent(intent: CanonicalIntent): CanonicalV1Event {
     intent.kind === "PostCreate" ||
     intent.kind === "PostEdit" ||
     intent.kind === "PostDelete" ||
+    intent.kind === "PostInteractionPolicyUpdate" ||
+    intent.kind === "PollCreate" ||
+    intent.kind === "PollEdit" ||
+    intent.kind === "PollDelete" ||
+    intent.kind === "PollVoteAdd" ||
     intent.kind === "ReactionAdd" ||
     intent.kind === "ReactionRemove" ||
     intent.kind === "ShareAdd" ||
-    intent.kind === "ShareRemove"
+    intent.kind === "ShareRemove" ||
+    ((intent.kind === "FollowAdd" || intent.kind === "FollowRemove") && Boolean(intent.targetObject))
   ) {
-    const obj = intent.object;
+    const obj = intent.kind === "FollowAdd" || intent.kind === "FollowRemove"
+      ? intent.targetObject!
+      : intent.object;
     const objectRef: CanonicalV1ObjectRef = {
       canonicalObjectId: obj.canonicalObjectId,
       atUri: obj.atUri ?? null,
@@ -107,12 +115,14 @@ function serializeIntent(intent: CanonicalIntent): CanonicalV1Event {
 
   // Attach subject ref for follow actions
   if (intent.kind === "FollowAdd" || intent.kind === "FollowRemove") {
-    base.subject = {
-      canonicalAccountId: intent.subject.canonicalAccountId ?? null,
-      did: intent.subject.did ?? null,
-      activityPubActorUri: intent.subject.activityPubActorUri ?? null,
-      handle: intent.subject.handle ?? null,
-    };
+    if (intent.subject) {
+      base.subject = {
+        canonicalAccountId: intent.subject.canonicalAccountId ?? null,
+        did: intent.subject.did ?? null,
+        activityPubActorUri: intent.subject.activityPubActorUri ?? null,
+        handle: intent.subject.handle ?? null,
+      };
+    }
   }
 
   // Extract mention targets for notification fan-out

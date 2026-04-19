@@ -6,9 +6,9 @@
  */
 
 export interface FeedCursor {
-  graphCursor?: any[];
-  trendingCursor?: any[];
-  interestCursor?: any[];
+  graphCursor?: unknown;
+  trendingCursor?: unknown;
+  interestCursor?: unknown;
 }
 
 export interface FeedCandidateRequest {
@@ -79,7 +79,7 @@ export class DefaultFeedCandidateService implements FeedCandidateService {
     };
   }
 
-  private async fetchGraphBucket(followedIds: string[], limit: number, searchAfter?: any[]): Promise<{items: FeedCandidate[], lastSort?: any[]}> {
+  private async fetchGraphBucket(followedIds: string[], limit: number, searchAfter?: unknown): Promise<{items: FeedCandidate[], lastSort?: any[]}> {
     try {
       const body: any = {
         size: limit,
@@ -95,7 +95,7 @@ export class DefaultFeedCandidateService implements FeedCandidateService {
         sort: [{ createdAt: 'desc' }, { stableDocId: 'asc' }]
       };
       
-      if (searchAfter) {
+      if (Array.isArray(searchAfter)) {
         body.search_after = searchAfter;
       }
 
@@ -118,7 +118,7 @@ export class DefaultFeedCandidateService implements FeedCandidateService {
     }
   }
 
-  private async fetchTrendingBucket(limit: number, searchAfter?: any[]): Promise<{items: FeedCandidate[], lastSort?: any[]}> {
+  private async fetchTrendingBucket(limit: number, searchAfter?: unknown): Promise<{items: FeedCandidate[], lastSort?: any[]}> {
     try {
       const body: any = {
         size: limit,
@@ -139,7 +139,7 @@ export class DefaultFeedCandidateService implements FeedCandidateService {
         ]
       };
 
-      if (searchAfter) {
+      if (Array.isArray(searchAfter)) {
         body.search_after = searchAfter;
       }
 
@@ -162,7 +162,7 @@ export class DefaultFeedCandidateService implements FeedCandidateService {
     }
   }
 
-  private async fetchInterestBucket(tags: string[], limit: number, searchAfter?: any[]): Promise<{items: FeedCandidate[], lastSort?: any[]}> {
+  private async fetchInterestBucket(tags: string[], limit: number, searchAfter?: unknown): Promise<{items: FeedCandidate[], lastSort?: any[]}> {
     try {
       const body: any = {
         size: limit,
@@ -180,7 +180,7 @@ export class DefaultFeedCandidateService implements FeedCandidateService {
         sort: [{ createdAt: 'desc' }, { stableDocId: 'asc' }]
       };
 
-      if (searchAfter) {
+      if (Array.isArray(searchAfter)) {
         body.search_after = searchAfter;
       }
 

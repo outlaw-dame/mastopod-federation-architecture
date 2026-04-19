@@ -268,7 +268,12 @@ export class OutboxIntentWorker {
       return;
     }
 
-    if (!intent.meta?.isPublicIndexable) {
+    const isPublicActivity =
+      intent.meta?.isPublicActivity === true ||
+      intent.meta?.visibility === "public" ||
+      intent.meta?.visibility === "unlisted";
+
+    if (!isPublicActivity) {
       return;
     }
 

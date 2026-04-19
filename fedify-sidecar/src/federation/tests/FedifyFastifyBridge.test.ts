@@ -483,6 +483,68 @@ describe("FedifyFastifyBridge", () => {
     await app.close();
   });
 
+  it("injects actor search-consent metadata from the internal ActivityPods actor document", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url === "http://localhost:3000/api/internal/actors/alice") {
+          return new Response(
+            JSON.stringify({
+              id: "https://pods.example/users/alice",
+              searchableBy: "https://www.w3.org/ns/activitystreams#Public",
+              indexable: true,
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/activity+json" },
+            },
+          );
+        }
+
+        return new Response(null, { status: 404 });
+      }),
+    );
+
+    const fetchSpy = vi.fn<
+      (request: Request, options?: { contextData?: { remoteIp?: string } }) => Promise<Response>
+    >(async (_request: Request) =>
+      new Response(
+        JSON.stringify({
+          id: "https://sidecar/users/alice",
+          type: "Person",
+          name: "alice",
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/activity+json" },
+        },
+      ),
+    );
+
+    const { app } = createAppWithBridge(fetchSpy);
+    const response = await app.inject({
+      method: "GET",
+      url: "/users/alice",
+      headers: {
+        host: "sidecar",
+        "x-forwarded-proto": "https",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      id: "https://sidecar/users/alice",
+      type: "Person",
+      searchableBy: "https://www.w3.org/ns/activitystreams#Public",
+      indexable: true,
+    });
+    expect(response.body).toContain("https://w3id.org/fep/268d");
+    expect(response.body).toContain('"indexable":"toot:indexable"');
+
+    await app.close();
+  });
+
   it("filters expired actor status values from the public actor document", async () => {
     vi.stubGlobal(
       "fetch",

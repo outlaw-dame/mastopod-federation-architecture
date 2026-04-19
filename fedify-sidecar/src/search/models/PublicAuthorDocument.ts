@@ -16,6 +16,11 @@ export interface PublicAuthorDocument {
   summaryText?: string;
   labels?: string[];
   langs?: string[];
+  searchConsentPublic?: boolean;
+  searchConsentExplicit?: boolean;
+  searchConsentSource?: "actor_searchableBy" | "actor_indexable" | "none";
+  searchableBy?: string[];
+  indexable?: boolean;
 
   protocolPresence: Array<'ap' | 'at'>;
   sourceKind: 'local' | 'remote';

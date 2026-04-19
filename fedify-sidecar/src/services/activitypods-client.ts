@@ -36,6 +36,8 @@ export interface ActorData {
     url: string;
     mediaType?: string;
   };
+  indexable?: boolean;
+  searchableBy?: string | string[];
   status?: Record<string, unknown>;
   statusHistory?: unknown;
 }
@@ -280,6 +282,11 @@ export class ActivityPodsClient {
       publicKey: data["publicKey"] as ActorData["publicKey"],
       icon: data["icon"] as ActorData["icon"],
       image: data["image"] as ActorData["image"],
+      indexable: typeof data["indexable"] === "boolean" ? (data["indexable"] as boolean) : undefined,
+      searchableBy:
+        typeof data["searchableBy"] === "string" || Array.isArray(data["searchableBy"])
+          ? (data["searchableBy"] as string | string[])
+          : undefined,
       status: (data["status"] && typeof data["status"] === "object" && !Array.isArray(data["status"]))
         ? (data["status"] as Record<string, unknown>)
         : undefined,

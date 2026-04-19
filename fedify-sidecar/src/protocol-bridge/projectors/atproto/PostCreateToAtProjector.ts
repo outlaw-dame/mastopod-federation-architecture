@@ -12,6 +12,8 @@ import {
   articleTeaserCanonicalRefId,
   buildExternalLinkEmbed,
   buildImageEmbedFromAttachments,
+  buildPostgateRecord,
+  buildThreadgateRecord,
   buildVideoEmbedFromAttachments,
   buildArticleTeaser,
   buildTeaserAtFacets,
@@ -199,13 +201,15 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
       postRecord["embed"] = externalEmbed;
     }
 
+    const postRkey = intent.content.kind === "article"
+      ? deriveArticleTeaserRkey(articleRkey!)
+      : deriveProjectedPostRkey(intent, "note");
+
     commands.push({
       kind: "createRecord",
       collection: "app.bsky.feed.post",
       repoDid: actor.did,
-      rkey: intent.content.kind === "article"
-        ? deriveArticleTeaserRkey(articleRkey!)
-        : deriveProjectedPostRkey(intent, "note"),
+      rkey: postRkey,
       canonicalRefIdHint:
         intent.content.kind === "article"
           ? articleTeaserCanonicalRefId(intent.object.canonicalObjectId)
@@ -217,6 +221,36 @@ export class PostCreateToAtProjector implements CanonicalProjector<AtProjectionC
       record: postRecord,
       metadata: baseMetadata,
     });
+
+    // Emit companion gate records when the interaction policy is non-default.
+    // Both records MUST use the same rkey as the post (AT protocol requirement).
+    // These are only emitted at creation time; policy changes after the fact
+    // require a separate gate update flow (not yet modelled in CanonicalIntent).
+    const postAtUri = `at://${actor.did}/app.bsky.feed.post/${postRkey}`;
+
+    const threadgateRecord = buildThreadgateRecord(intent.interactionPolicy, postAtUri, intent.createdAt);
+    if (threadgateRecord) {
+      commands.push({
+        kind: "createRecord",
+        collection: "app.bsky.feed.threadgate",
+        repoDid: actor.did,
+        rkey: postRkey,
+        record: threadgateRecord,
+        metadata: baseMetadata,
+      });
+    }
+
+    const postgateRecord = buildPostgateRecord(intent.interactionPolicy, postAtUri, intent.createdAt);
+    if (postgateRecord) {
+      commands.push({
+        kind: "createRecord",
+        collection: "app.bsky.feed.postgate",
+        repoDid: actor.did,
+        rkey: postRkey,
+        record: postgateRecord,
+        metadata: baseMetadata,
+      });
+    }
 
     return {
       kind: "success",

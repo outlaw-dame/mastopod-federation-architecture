@@ -3,6 +3,7 @@ import type {
   CanonicalFollowAddIntent,
   CanonicalFollowRemoveIntent,
   CanonicalIntent,
+  CanonicalPostCreateIntent,
   CanonicalReactionAddIntent,
   CanonicalReactionRemoveIntent,
   CanonicalShareAddIntent,
@@ -12,6 +13,14 @@ import type { CanonicalProvenance } from "../../canonical/CanonicalEnvelope.js";
 import { buildCanonicalIntentId } from "../../idempotency/CanonicalIntentIdBuilder.js";
 import type { TranslationContext } from "../../ports/ProtocolBridgePorts.js";
 import { isApEmojiReactionActivity, parseApEmojiReaction, type ApEmojiReaction } from "../../../utils/apEmojiReactions.js";
+import { htmlToCanonicalBlocks } from "../../text/HtmlToCanonicalBlocks.js";
+import {
+  asString,
+  buildAttachments,
+  buildInlineLinkAndTagFacets,
+  buildTagFacets,
+  resolveOptionalObjectRef,
+} from "./shared.js";
 
 const actorSchema = z.union([
   z.string().min(1),
@@ -42,6 +51,7 @@ const baseActivitySchema = z.object({
 type ParsedActivity = z.infer<typeof baseActivitySchema>;
 
 const PUBLIC_AUDIENCE = "https://www.w3.org/ns/activitystreams#Public";
+const ACTOR_TYPES = new Set(["Person", "Group", "Organization", "Application", "Service"]);
 
 export function supportsSocialActivity(input: unknown, type: "Like" | "Announce" | "Follow" | "Undo"): boolean {
   const parsed = baseActivitySchema.safeParse(input);
@@ -84,6 +94,18 @@ export async function translateAnnounceActivity(
   const parsed = baseActivitySchema.safeParse(input);
   if (!parsed.success || parsed.data.type !== "Announce") {
     return null;
+  }
+
+  // FEP-dd4b: Announce with a non-empty `content` field is a quote post with commentary.
+  // Translate it as a PostCreate with quoteOf set to the announced object.
+  const rawContent = asString((input as Record<string, unknown>)["content"]);
+  if (rawContent?.trim()) {
+    return buildQuotePostIntentFromAnnounce(
+      parsed.data,
+      rawContent.trim(),
+      input as Record<string, unknown>,
+      ctx,
+    );
   }
 
   return buildShareIntent(parsed.data, ctx, "ShareAdd");
@@ -247,6 +269,81 @@ async function buildReactionIntent(
   };
 }
 
+/**
+ * FEP-dd4b: Build a PostCreate intent from an Announce activity that carries commentary content.
+ * The quoted object is the Announce's `object`; the commentary is the Announce's `content`.
+ */
+async function buildQuotePostIntentFromAnnounce(
+  activity: ParsedActivity,
+  contentHtml: string,
+  rawActivity: Record<string, unknown>,
+  ctx: TranslationContext,
+): Promise<CanonicalPostCreateIntent | null> {
+  const now = (ctx.now ?? (() => new Date()))();
+  const actorId = getActorId(activity.actor);
+  // The Announce activity's ID serves as the quote post's object ID.
+  const objectId = activity.id;
+  const objectUrl = extractFirstUrl(rawActivity["url"]) ?? objectId;
+  const { plaintext, blocks, warning } = htmlToCanonicalBlocks(contentHtml);
+  const sourceAccountRef = await ctx.resolveActorRef({ activityPubActorUri: actorId });
+  const objectRef = await ctx.resolveObjectRef({
+    canonicalObjectId: objectId,
+    activityPubObjectId: objectId,
+    canonicalUrl: objectUrl,
+  });
+  // The quoted post is the Announce's `object`.
+  const quotedId = extractId(activity.object);
+  const quoteOf = quotedId
+    ? await ctx.resolveObjectRef({
+        canonicalObjectId: quotedId,
+        activityPubObjectId: /^https?:\/\//.test(quotedId) ? quotedId : null,
+        canonicalUrl: /^https?:\/\//.test(quotedId) ? quotedId : null,
+      })
+    : null;
+  const inReplyTo = await resolveOptionalObjectRef(rawActivity["inReplyTo"], ctx);
+  const tagFacets = await buildTagFacets(plaintext, rawActivity["tag"], ctx);
+  const inlineFacets = buildInlineLinkAndTagFacets(plaintext);
+  const attachments = buildAttachments(rawActivity["attachment"], objectId);
+  const visibility = deriveAudience(activity.to, activity.cc);
+  const provenance = toProvenance(activity.bridge, activity.id, sourceAccountRef.canonicalAccountId ?? null);
+
+  const draft: Omit<CanonicalPostCreateIntent, "canonicalIntentId"> = {
+    kind: "PostCreate",
+    sourceProtocol: "activitypub",
+    sourceEventId: activity.id,
+    sourceAccountRef,
+    createdAt: activity.published ?? now.toISOString(),
+    observedAt: now.toISOString(),
+    visibility,
+    provenance,
+    warnings: warning
+      ? [{ code: "AP_HTML_NORMALIZED", message: warning, lossiness: "minor" as const }]
+      : [],
+    object: objectRef,
+    inReplyTo,
+    quoteOf,
+    content: {
+      kind: "note",
+      title: null,
+      summary: null,
+      plaintext,
+      html: contentHtml,
+      language: null,
+      blocks,
+      facets: [...tagFacets, ...inlineFacets],
+      customEmojis: [],
+      attachments,
+      externalUrl: objectUrl !== objectId ? objectUrl : null,
+      linkPreview: null,
+    },
+  };
+
+  return {
+    ...draft,
+    canonicalIntentId: buildCanonicalIntentId(draft),
+  };
+}
+
 async function buildShareIntent(
   activity: ParsedActivity,
   ctx: TranslationContext,
@@ -310,16 +407,30 @@ async function buildFollowIntent(
   const sourceAccountRef = await ctx.resolveActorRef({
     activityPubActorUri: getActorId(activity.actor),
   });
-  const subjectId = extractId((activityObject ?? asObject(activity.object))?.["object"] ?? activity.object);
-  if (!subjectId) {
+  const followTargetValue = (activityObject ?? asObject(activity.object))?.["object"] ?? activity.object;
+  const followTargetObject = asObject(followTargetValue);
+  const targetId = extractId(followTargetValue);
+  if (!targetId) {
     return null;
   }
 
-  const subject = await ctx.resolveActorRef({
-    activityPubActorUri: subjectId.startsWith("http://") || subjectId.startsWith("https://") ? subjectId : null,
-    did: subjectId.startsWith("did:") ? subjectId : null,
-    webId: subjectId.startsWith("http://") || subjectId.startsWith("https://") ? subjectId : null,
-  });
+  const primaryRecipientUri = extractPrimaryFollowRecipient(activity);
+  const attributedToUri = extractId(followTargetObject?.["attributedTo"]);
+  const objectType = extractTypeName(followTargetObject);
+  const shouldTreatAsObjectTarget =
+    isFollowableObjectTarget(followTargetObject, objectType)
+    || (Boolean(primaryRecipientUri) && primaryRecipientUri !== targetId);
+
+  let subject = null;
+  if (shouldTreatAsObjectTarget) {
+    const subjectCandidate = attributedToUri ?? (primaryRecipientUri && primaryRecipientUri !== targetId ? primaryRecipientUri : null);
+    if (subjectCandidate) {
+      subject = await ctx.resolveActorRef(toActorLookupRef(subjectCandidate));
+    }
+  } else {
+    subject = await ctx.resolveActorRef(toActorLookupRef(targetId));
+  }
+
   const draft = {
     sourceProtocol: "activitypub" as const,
     sourceEventId: activity.id,
@@ -329,7 +440,20 @@ async function buildFollowIntent(
     visibility: deriveAudience(activity.to, activity.cc),
     provenance: toProvenance(activity.bridge, activity.id, sourceAccountRef.canonicalAccountId ?? null),
     warnings: [],
-    subject,
+    ...(subject ? { subject } : {}),
+    ...(shouldTreatAsObjectTarget
+      ? {
+          targetObject: await ctx.resolveObjectRef({
+            canonicalObjectId: targetId,
+            activityPubObjectId: targetId,
+            canonicalUrl: extractFirstUrl(followTargetValue) ?? targetId,
+          }),
+          activityPubRecipientUri: primaryRecipientUri ?? attributedToUri ?? targetId,
+          activityPubInboxUri: extractId(followTargetObject?.["inbox"]),
+          activityPubFollowersUri: extractId(followTargetObject?.["followers"]),
+          recursionDepthUsed: extractFollowRecursionDepth(followTargetObject, primaryRecipientUri, targetId),
+        }
+      : {}),
   };
 
   if (kind === "FollowAdd") {
@@ -406,6 +530,73 @@ function extractFirstUrl(value: unknown): string | null {
     return extractFirstUrl(url);
   }
   return null;
+}
+
+function extractTypeName(value: Record<string, unknown> | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const rawType = value["type"] ?? value["@type"];
+  if (typeof rawType === "string" && rawType.trim().length > 0) {
+    return rawType.trim();
+  }
+  if (Array.isArray(rawType)) {
+    for (const entry of rawType) {
+      if (typeof entry === "string" && entry.trim().length > 0) {
+        return entry.trim();
+      }
+    }
+  }
+  return null;
+}
+
+function isFollowableObjectTarget(target: Record<string, unknown> | null, typeName: string | null): boolean {
+  if (!target) {
+    return false;
+  }
+
+  if (typeName && ACTOR_TYPES.has(typeName)) {
+    return false;
+  }
+
+  return Boolean(extractId(target["followers"]) || extractId(target["inbox"]) || extractId(target["attributedTo"]) || typeName);
+}
+
+function extractPrimaryFollowRecipient(activity: ParsedActivity): string | null {
+  for (const recipient of [...toRecipientArray(activity.to), ...toRecipientArray(activity.cc)]) {
+    if (recipient === PUBLIC_AUDIENCE || recipient === "as:Public") {
+      continue;
+    }
+    return recipient;
+  }
+
+  return null;
+}
+
+function extractFollowRecursionDepth(
+  target: Record<string, unknown> | null,
+  primaryRecipientUri: string | null,
+  targetId: string,
+): number | null {
+  if (extractId(target?.["inbox"])) {
+    return 0;
+  }
+
+  const attributedToUri = extractId(target?.["attributedTo"]);
+  if (attributedToUri && primaryRecipientUri && primaryRecipientUri !== targetId) {
+    return 1;
+  }
+
+  return null;
+}
+
+function toActorLookupRef(value: string) {
+  return {
+    activityPubActorUri: value.startsWith("http://") || value.startsWith("https://") ? value : null,
+    did: value.startsWith("did:") ? value : null,
+    webId: value.startsWith("http://") || value.startsWith("https://") ? value : null,
+  };
 }
 
 function deriveAudience(rawTo: unknown, rawCc: unknown) {

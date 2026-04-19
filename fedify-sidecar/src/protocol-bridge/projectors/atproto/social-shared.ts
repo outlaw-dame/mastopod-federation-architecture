@@ -43,7 +43,7 @@ export function deriveSocialObjectRefId(
 export function deriveSocialActorRefId(
   action: "follow",
   actor: SocialIntent["sourceAccountRef"],
-  subject: CanonicalFollowAddIntent["subject"],
+  subject: NonNullable<CanonicalFollowAddIntent["subject"]>,
 ): string {
   return createHash("sha256")
     .update(`${action}:${canonicalActorIdentityKey(actor)}:${canonicalActorIdentityKey(subject)}`)

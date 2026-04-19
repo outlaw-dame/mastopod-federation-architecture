@@ -51,6 +51,65 @@ services:
       - fedify
 
   # ============================================================================
+  # OpenSearch (legacy read-side dependency during feed migration)
+  # ============================================================================
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    container_name: fedify-opensearch
+    environment:
+      # Single-node discovery for dev/local — override for multi-node prod
+      discovery.type: single-node
+      # Disable demo security plugin for local dev; prod should use TLS + RBAC
+      DISABLE_SECURITY_PLUGIN: 'true'
+      # k-NN plugin requires native memory outside JVM heap
+      OPENSEARCH_JAVA_OPTS: '-Xms512m -Xmx512m'
+      # Cluster name scoped to this compose project
+      cluster.name: fedify-search
+      node.name: os-node-1
+      # Ensure k-NN circuit breaker allows reasonable vector usage
+      knn.memory.circuit_breaker.limit: '50%'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - '9200:9200'
+      - '9600:9600'
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1']
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - fedify
+
+  # ============================================================================
+  # Qdrant (primary vector search backend)
+  # ============================================================================
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    container_name: fedify-qdrant
+    ports:
+      - '6333:6333'
+      - '6334:6334'
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:6333/healthz || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - fedify
+
+  # ============================================================================
   # Fedify Sidecar (V6)
   # ============================================================================
   fedify-sidecar:
@@ -97,6 +156,15 @@ services:
       OUTBOUND_CONSUMER_GROUP: 'fedify-outbound-v6'
       INDEXER_CONSUMER_GROUP: 'fedify-indexer-v6'
 
+      # Search backends
+      SEARCH_BACKEND: 'dual'
+      OPENSEARCH_URL: 'http://opensearch:9200'
+      OPENSEARCH_SSL_VERIFY: 'false'
+      QDRANT_URL: 'http://qdrant:6333'
+      QDRANT_COLLECTION_NAME: 'public-content-v1'
+      QDRANT_VECTOR_SIZE: '1024'
+      ENABLE_OPENSEARCH_INDEXER: 'true'
+
       # Workers
       ENABLE_INBOUND_WORKER: 'true'
       ENABLE_OUTBOUND_WORKER: 'true'
@@ -118,6 +186,10 @@ services:
       redis:
         condition: service_healthy
       redpanda:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      qdrant:
         condition: service_healthy
     networks:
       - fedify
@@ -160,6 +232,8 @@ services:
 volumes:
   redis_data:
   redpanda_data:
+  opensearch_data:
+  qdrant_data:
   # postgres_data:
 
 networks:

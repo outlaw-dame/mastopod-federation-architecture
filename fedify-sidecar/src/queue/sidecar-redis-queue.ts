@@ -20,6 +20,7 @@
 
 import { createClient, RedisClientType } from "redis";
 import { logger } from "../utils/logger.js";
+import type { PublicSearchConsentSignal } from "../utils/searchConsent.js";
 
 // ============================================================================
 // Configuration
@@ -86,14 +87,11 @@ export interface OutboundJob {
   /** Error message from the last delivery attempt, carried forward for DLQ diagnostics. */
   lastError?: string;
   meta?: {
+    isPublicActivity?: boolean;
     isPublicIndexable?: boolean;
     isDeleteOrTombstone?: boolean;
     visibility?: "public" | "unlisted" | "followers" | "direct";
-    searchConsent?: {
-      raw?: string[];
-      isPublic?: boolean;
-      explicitlySet?: boolean;
-    };
+    searchConsent?: PublicSearchConsentSignal;
   };
 }
 

@@ -36,6 +36,7 @@ function buildPipeline() {
 
   bus.on('search.public.upsert.v1', async (p) => writer.onUpsert(p as SearchPublicUpsertV1));
   bus.on('search.public.delete.v1', async (p) => writer.onDelete(p as SearchPublicDeleteV1));
+  bus.on('search.public.delete-by-author.v1', async (p: any) => writer.onDeleteByAuthor(p));
 
   return { osClient, bus, projector };
 }
@@ -46,7 +47,18 @@ function makeCreateNote(overrides: Record<string, unknown> = {}) {
     origin: 'local',
     actorUri: 'https://pod.example/alice',
     receivedAt: new Date().toISOString(),
-    meta: {},
+    meta: {
+      searchConsent: {
+        raw: [],
+        isPublic: true,
+        explicitlySet: true,
+        source: 'actor_indexable',
+        objectSearchableBy: [],
+        actorSearchableBy: [],
+        actorIndexable: true,
+        actorIndexableExplicit: true,
+      },
+    },
     activity: {
       id: 'https://pod.example/alice/activities/1',
       type: 'Create',
@@ -201,7 +213,7 @@ describe('SearchIndexerService pipeline — FEP-268d consent gate', () => {
     event: ReturnType<typeof makeCreateNote>,
   ): boolean {
     const consent = (event.meta as any)?.searchConsent;
-    if (consent?.explicitlySet === true && consent?.isPublic === false) {
+    if (consent?.isPublic === false) {
       return false; // blocked
     }
     return true;
@@ -231,6 +243,31 @@ describe('SearchIndexerService pipeline — FEP-268d consent gate', () => {
     if (applyConsumerConsentGate(event)) {
       await projector.onApFirehoseEvent(event);
     }
+
+    expect(osClient.getAll()).toHaveLength(0);
+  });
+
+  it('removes existing documents when an actor revokes public search consent', async () => {
+    const { osClient, projector } = buildPipeline();
+
+    await projector.onApFirehoseEvent(makeCreateNote());
+    expect(osClient.getAll()).toHaveLength(1);
+
+    await projector.onApFirehoseEvent({
+      origin: 'local',
+      actorUri: 'https://pod.example/alice',
+      activity: {
+        id: 'https://pod.example/alice/activities/actor-update',
+        type: 'Update',
+        actor: 'https://pod.example/alice',
+        object: {
+          id: 'https://pod.example/alice',
+          type: 'Person',
+          preferredUsername: 'alice',
+          indexable: false,
+        },
+      },
+    });
 
     expect(osClient.getAll()).toHaveLength(0);
   });

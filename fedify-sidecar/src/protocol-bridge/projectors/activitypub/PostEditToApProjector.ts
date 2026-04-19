@@ -23,6 +23,8 @@ import {
   safeOriginFromUrl,
 } from "./PostCreateToApProjector.js";
 import {
+  buildApArticlePreview,
+  buildApInteractionPolicy,
   buildApLinkPreviewCard,
   apTargetTopic,
   buildApActivityContext,
@@ -90,8 +92,21 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     const previewIcon = intent.content.kind === "article"
       ? buildApLinkPreviewIcon(intent.content.linkPreview)
       : null;
+    const articlePreview = intent.content.kind === "article"
+      ? buildApArticlePreview({
+          title: intent.content.title,
+          summary: intent.content.summary,
+          linkPreview: intent.content.linkPreview,
+          attributedTo: actorId,
+          updated: intent.createdAt,
+          tag,
+        })
+      : null;
     if (previewIcon) {
       object["icon"] = previewIcon;
+    }
+    if (articlePreview) {
+      object["preview"] = articlePreview;
     }
     if (linkPreviewCard && this.policy.noteLinkPreviewMode === "attachment_and_preview") {
       object["preview"] = linkPreviewCard;
@@ -108,12 +123,28 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     // FEP-7458: advertise the replies collection so consumers can verify reply membership.
     // ActivityPods creates and serves this collection lazily at ${noteId}/replies.
     object["replies"] = `${objectId}/replies`;
-    const quoteUrl = resolveOptionalApObjectId(intent.quoteOf);
-    if (quoteUrl) {
-      object["quoteUrl"] = quoteUrl;
+    const quoteId = resolveOptionalApObjectId(intent.quoteOf);
+    if (quoteId) {
+      // FEP-044f primary quote property + compatibility aliases
+      object["quote"] = quoteId;
+      object["quoteUrl"] = quoteId;
+      object["quoteUri"] = quoteId;
+      object["_misskey_quote"] = quoteId;
     }
-    if (tag.length > 0) {
-      object["tag"] = tag;
+    // GoToSocial / FEP-044f interaction policy: advertise reply + quote policy on all published objects.
+    object["interactionPolicy"] = buildApInteractionPolicy(intent.interactionPolicy, actorId);
+    // Misskey FEP-e232 compatibility: include quote ref as a Link tag so tag-array consumers also find the quote ref
+    const quoteLinkTags: Array<Record<string, unknown>> = quoteId
+      ? [{
+          type: "Link",
+          mediaType: "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"",
+          rel: "https://misskey-hub.net/ns#_misskey_quote",
+          href: quoteId,
+        }]
+      : [];
+    const allTags = [...tag, ...quoteLinkTags];
+    if (allTags.length > 0) {
+      object["tag"] = allTags;
     }
     if (attachment.length > 0 || linkPreviewCard) {
       object["attachment"] = linkPreviewCard

@@ -13,6 +13,7 @@
 
 import { Kafka, Producer, CompressionTypes, logLevel } from "kafkajs";
 import { logger } from "../utils/logger.js";
+import type { PublicSearchConsentSignal } from "../utils/searchConsent.js";
 
 // ============================================================================
 // Types
@@ -37,16 +38,11 @@ export interface RedPandaConfig {
 }
 
 export interface ActivityEventMeta {
+  isPublicActivity?: boolean;
   isPublicIndexable?: boolean;
   isDeleteOrTombstone?: boolean;
   visibility?: "public" | "unlisted" | "followers" | "direct";
-  searchConsent?: {
-    raw?: string[];
-    /** True when the actor explicitly set searchableBy to as:Public (FEP-268d). */
-    isPublic?: boolean;
-    /** True when the actor set any searchableBy value (explicit consent signal). */
-    explicitlySet?: boolean;
-  };
+  searchConsent?: PublicSearchConsentSignal;
   /** Hashtags extracted from the object content — pre-parsed to avoid re-HTML-parsing downstream. */
   hashtags?: string[];
 }

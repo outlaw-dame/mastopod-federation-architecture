@@ -121,6 +121,26 @@ describe("article link preview parity", () => {
         }),
       ]),
     );
+
+    const apProjector = new CanonicalToActivityPubProjector();
+    const apProjected = await apProjector.project(intent, projectionContext);
+    expect(apProjected.kind).toBe("success");
+    if (apProjected.kind !== "success") {
+      return;
+    }
+
+    const activityObject = apProjected.commands[0]?.activity["object"] as Record<string, unknown>;
+    expect(activityObject["preview"]).toEqual({
+      type: "Note",
+      content: "<p><strong>Bridge Article</strong></p><p>Canonical bridge article preview</p>",
+      attributedTo: "https://example.com/users/alice",
+      published: "2026-04-03T10:00:00.000Z",
+      attachment: [{
+        type: "Image",
+        url: "https://cdn.example.com/article-1.jpg",
+        name: "Bridge Article",
+      }],
+    });
   });
 
   it("keeps article teaser previews on AP article updates projected to AT", async () => {
@@ -175,6 +195,26 @@ describe("article link preview parity", () => {
         description: "Updated bridge article preview",
       },
     });
+
+    const apProjector = new CanonicalToActivityPubProjector();
+    const apProjected = await apProjector.project(intent, projectionContext);
+    expect(apProjected.kind).toBe("success");
+    if (apProjected.kind !== "success") {
+      return;
+    }
+
+    const activityObject = apProjected.commands[0]?.activity["object"] as Record<string, unknown>;
+    expect(activityObject["preview"]).toEqual({
+      type: "Note",
+      content: "<p><strong>Bridge Article Updated</strong></p><p>Updated bridge article preview</p>",
+      attributedTo: "https://example.com/users/alice",
+      updated: "2026-04-03T10:00:00.000Z",
+      attachment: [{
+        type: "Image",
+        url: "https://cdn.example.com/article-1-updated.jpg",
+        name: "Bridge Article Updated",
+      }],
+    });
   });
 
   it("projects AT article previews to ActivityPub Article icons", async () => {
@@ -221,6 +261,17 @@ describe("article link preview parity", () => {
       type: "Image",
       url: "https://cdn.example.com/article-1.jpg",
       name: "Bridge Article",
+    });
+    expect(activityObject["preview"]).toEqual({
+      type: "Note",
+      content: "<p><strong>Bridge Article</strong></p><p>Canonical bridge article preview</p>",
+      attributedTo: "https://example.com/users/alice",
+      published: "2026-04-03T10:00:00.000Z",
+      attachment: [{
+        type: "Image",
+        url: "https://cdn.example.com/article-1.jpg",
+        name: "Bridge Article",
+      }],
     });
   });
 });

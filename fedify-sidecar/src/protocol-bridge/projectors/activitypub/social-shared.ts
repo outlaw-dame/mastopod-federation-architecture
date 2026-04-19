@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalActorIdentityKey } from "../../canonical/CanonicalActorRef.js";
+import { canonicalFollowTargetIdentityKey } from "../../canonical/CanonicalIntent.js";
 import { canonicalReactionIdentityKey } from "../../canonical/CanonicalIntent.js";
 import { canonicalObjectIdentityKey } from "../../canonical/CanonicalObjectRef.js";
 import type {
@@ -58,7 +59,7 @@ export function shareTargetKey(intent: CanonicalShareAddIntent | CanonicalShareR
 }
 
 export function followTargetKey(intent: CanonicalFollowAddIntent | CanonicalFollowRemoveIntent): string {
-  return canonicalActorIdentityKey(intent.subject);
+  return canonicalFollowTargetIdentityKey(intent);
 }
 
 export function toApIri(value: string): string {

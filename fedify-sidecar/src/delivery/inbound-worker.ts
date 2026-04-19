@@ -34,6 +34,11 @@ import type { SigningClient } from "../signing/signing-client.js";
 import type { FollowersSyncService } from "../federation/fep8fcf/FollowersSyncService.js";
 import { COLLECTION_SYNC_HEADER } from "../federation/fep8fcf/CollectionSyncHeader.js";
 import type { RepliesBackfillService } from "../federation/replies-backfill/RepliesBackfillService.js";
+import {
+  resolvePublicSearchConsent,
+  isPublicSearchIndexable,
+  type PublicSearchConsentSignal,
+} from "../utils/searchConsent.js";
 
 // ============================================================================
 // Types
@@ -517,6 +522,9 @@ export class InboundWorker {
 
       // Step 4: Check if activity is public
       const isPublic = this.isPublicActivity(activity);
+      const searchEventMeta = isPublic
+        ? await this.buildPublicSearchEventMeta(activity, verifiedActorUri)
+        : undefined;
 
       // Step 4.1: Detect sidecar-managed actors by actor URI path.
       // Sidecar actors (e.g. /users/relay) take the Stream2 fast-path regardless
@@ -541,6 +549,7 @@ export class InboundWorker {
               actorUri: verifiedActorUri,
               receivedAt: envelope.receivedAt,
               path: envelope.path,
+              meta: searchEventMeta,
             });
           } catch (err: any) {
             logger.error("Failed to publish sidecar-actor activity to Stream2", {
@@ -581,6 +590,7 @@ export class InboundWorker {
               actorUri: verifiedActorUri,
               receivedAt: envelope.receivedAt,
               path: envelope.path,
+              meta: searchEventMeta,
             });
           } catch (err: any) {
             logger.error("Failed to publish local-actor activity to Stream1", {
@@ -627,6 +637,7 @@ export class InboundWorker {
                 actorUri: verifiedActorUri,
                 receivedAt: envelope.receivedAt,
                 path: envelope.path,
+                meta: searchEventMeta,
               });
             } catch (err: any) {
               logger.error("Failed to publish sidecar-actor activity to Stream2", {
@@ -713,6 +724,7 @@ export class InboundWorker {
             actorUri: verifiedActorUri,
             receivedAt: envelope.receivedAt,
             path: envelope.path,
+            meta: searchEventMeta,
           });
           logger.debug("Published to Stream2", {
             activityId: activity.id,
@@ -1133,6 +1145,68 @@ export class InboundWorker {
     };
 
     return checkAddressing(activity.to) || checkAddressing(activity.cc);
+  }
+
+  private determineVisibility(activity: any): "public" | "unlisted" | "followers" | "direct" {
+    const checkAddressing = (field: any): string[] => {
+      if (!field) return [];
+      return Array.isArray(field) ? field : [field];
+    };
+
+    const to = checkAddressing(activity?.to);
+    const cc = checkAddressing(activity?.cc);
+
+    if (to.includes("https://www.w3.org/ns/activitystreams#Public") || to.includes("as:Public")) {
+      return "public";
+    }
+    if (cc.includes("https://www.w3.org/ns/activitystreams#Public") || cc.includes("as:Public")) {
+      return "unlisted";
+    }
+    if (to.some((recipient) => typeof recipient === "string" && recipient.endsWith("/followers"))) {
+      return "followers";
+    }
+    return "direct";
+  }
+
+  private extractSearchableObject(activity: unknown): Record<string, unknown> | null {
+    if (!activity || typeof activity !== "object" || Array.isArray(activity)) {
+      return null;
+    }
+
+    const record = activity as Record<string, unknown>;
+    const object = record["object"];
+    if (object && typeof object === "object" && !Array.isArray(object)) {
+      return object as Record<string, unknown>;
+    }
+
+    return record;
+  }
+
+  private async buildPublicSearchEventMeta(
+    activity: any,
+    actorUri: string,
+  ): Promise<{
+    isPublicActivity: true;
+    isPublicIndexable: boolean;
+    visibility: "public" | "unlisted" | "followers" | "direct";
+    searchConsent: PublicSearchConsentSignal;
+  } | undefined> {
+    const searchableObject = this.extractSearchableObject(activity);
+    if (!searchableObject) {
+      return undefined;
+    }
+
+    const actorDocument = await this.fetchActorDocument(actorUri).catch(() => null);
+    const searchConsent = resolvePublicSearchConsent(searchableObject, {
+      attributedToActor: actorDocument,
+    });
+
+    return {
+      isPublicActivity: true,
+      isPublicIndexable: isPublicSearchIndexable(searchableObject, { consent: searchConsent }),
+      visibility: this.determineVisibility(activity),
+      searchConsent,
+    };
   }
 
   /**

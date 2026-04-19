@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { canonicalActorIdentityKey } from "../canonical/CanonicalActorRef.js";
-import { canonicalReactionIdentityKey, type CanonicalIntent } from "../canonical/CanonicalIntent.js";
+import {
+  canonicalFollowTargetIdentityKey,
+  canonicalReactionIdentityKey,
+  type CanonicalIntent,
+} from "../canonical/CanonicalIntent.js";
 import { canonicalObjectIdentityKey } from "../canonical/CanonicalObjectRef.js";
 
 type CanonicalIntentDraft = CanonicalIntent extends infer T
@@ -27,6 +31,11 @@ function normalizedTarget(intent: CanonicalIntentDraft | CanonicalIntent): strin
     case "PostCreate":
     case "PostEdit":
     case "PostDelete":
+    case "PostInteractionPolicyUpdate":
+    case "PollCreate":
+    case "PollEdit":
+    case "PollDelete":
+    case "PollVoteAdd":
     case "ReactionAdd":
     case "ReactionRemove":
     case "ShareAdd":
@@ -34,7 +43,7 @@ function normalizedTarget(intent: CanonicalIntentDraft | CanonicalIntent): strin
       return canonicalObjectIdentityKey(intent.object);
     case "FollowAdd":
     case "FollowRemove":
-      return canonicalActorIdentityKey(intent.subject);
+      return canonicalFollowTargetIdentityKey(intent);
     case "ProfileUpdate":
     case "AccountState":
       return canonicalActorIdentityKey(intent.sourceAccountRef);
@@ -76,7 +85,7 @@ function normalizedContentDigest(intent: CanonicalIntentDraft | CanonicalIntent)
       return canonicalObjectIdentityKey(intent.object);
     case "FollowAdd":
     case "FollowRemove":
-      return canonicalActorIdentityKey(intent.subject);
+      return canonicalFollowTargetIdentityKey(intent);
     case "ProfileUpdate":
       return createHash("sha256")
         .update(
@@ -89,7 +98,37 @@ function normalizedContentDigest(intent: CanonicalIntentDraft | CanonicalIntent)
         )
         .digest("hex");
     case "PostDelete":
+    case "PollDelete":
       return canonicalObjectIdentityKey(intent.object);
+    case "PollCreate":
+    case "PollEdit":
+      return createHash("sha256")
+        .update(
+          stableStringify({
+            mode: intent.mode,
+            options: intent.options.map((o) => ({ name: o.name, voteCount: o.voteCount })),
+            endTime: intent.endTime ?? null,
+          }),
+        )
+        .digest("hex");
+    case "PollVoteAdd":
+      return createHash("sha256")
+        .update(
+          stableStringify({
+            pollRef: canonicalObjectIdentityKey(intent.pollRef),
+            optionName: intent.optionName,
+          }),
+        )
+        .digest("hex");
+    case "PostInteractionPolicyUpdate":
+      return createHash("sha256")
+        .update(
+          stableStringify({
+            canReply: intent.canReply ?? null,
+            canQuote: intent.canQuote ?? null,
+          }),
+        )
+        .digest("hex");
     case "AccountState":
       return intent.state;
   }

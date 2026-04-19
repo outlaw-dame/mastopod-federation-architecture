@@ -113,7 +113,7 @@ export const mrfConfig = {
 
 export const opensearchConfig = {
   enabled: process.env["ENABLE_OPENSEARCH_INDEXER"] !== 'false',
-  node: process.env["OPENSEARCH_NODE"] || 'http://localhost:9200',
+  node: process.env["OPENSEARCH_URL"] || process.env["OPENSEARCH_NODE"] || 'http://localhost:9200',
   indexName: process.env["OPENSEARCH_INDEX_NAME"] || 'ap-activities',
   auth: process.env["OPENSEARCH_USERNAME"]
     ? {
@@ -125,6 +125,18 @@ export const opensearchConfig = {
     flushBytes: parseInt(process.env["OPENSEARCH_BULK_FLUSH_BYTES"] || '5000000', 10),
     flushInterval: parseInt(process.env["OPENSEARCH_BULK_FLUSH_INTERVAL"] || '5000', 10),
   },
+};
+
+export const searchBackendConfig = {
+  backend:
+    process.env['SEARCH_BACKEND'] === 'opensearch' ||
+    process.env['SEARCH_BACKEND'] === 'qdrant' ||
+    process.env['SEARCH_BACKEND'] === 'dual'
+      ? process.env['SEARCH_BACKEND']
+      : 'dual',
+  qdrantUrl: process.env['QDRANT_URL'] || 'http://localhost:6333',
+  qdrantCollectionName: process.env['QDRANT_COLLECTION_NAME'] || 'public-content-v1',
+  qdrantVectorSize: parseInt(process.env['QDRANT_VECTOR_SIZE'] || '1024', 10),
 };
 
 // ============================================================================
@@ -145,6 +157,7 @@ export const featureFlags = {
   enableOutboundWorker: process.env["ENABLE_OUTBOUND_WORKER"] !== 'false',
   enableMrf: process.env["ENABLE_MRF"] !== 'false',
   enableOpensearchIndexer: process.env["ENABLE_OPENSEARCH_INDEXER"] !== 'false',
+  searchBackend: searchBackendConfig.backend,
   enableWebfinger: process.env["ENABLE_WEBFINGER"] !== 'false',
   enableActorServing: process.env["ENABLE_ACTOR_SERVING"] !== 'false',
 };

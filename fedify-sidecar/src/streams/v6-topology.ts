@@ -214,6 +214,11 @@ export interface CanonicalV1Event {
     | "PostCreate"
     | "PostEdit"
     | "PostDelete"
+    | "PostInteractionPolicyUpdate"
+    | "PollCreate"
+    | "PollEdit"
+    | "PollDelete"
+    | "PollVoteAdd"
     | "ReactionAdd"
     | "ReactionRemove"
     | "ShareAdd"
@@ -230,11 +235,15 @@ export interface CanonicalV1Event {
   actor: CanonicalV1ActorRef;
   /**
    * Primary object of the action (posts, reactions, shares, deletes).
-   * Absent for FollowAdd/FollowRemove/ProfileUpdate/AccountState.
+   * Also present for FollowAdd/FollowRemove when the followed target is an
+   * ActivityPub object instead of an actor.
+   * Absent for actor-target follows, ProfileUpdate, and AccountState.
    */
   object?: CanonicalV1ObjectRef;
   /**
-   * Target actor (for FollowAdd/FollowRemove — the person being followed).
+   * Target actor (for actor-target FollowAdd/FollowRemove — the person being
+   * followed). For object-target follows this may carry the owning or delivery
+   * actor when one is known.
    */
   subject?: CanonicalV1ActorRef;
   /**

@@ -33,7 +33,9 @@ import { Client as OpenSearchNativeClient } from '@opensearch-project/opensearch
 import { logger } from '../../utils/logger.js';
 import { ApSearchProjector } from '../projectors/ApSearchProjector.js';
 import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter.js';
-import { DefaultOpenSearchClient } from '../writer/OpenSearchClient.js';
+import { PublicAuthorIndexWriter } from '../writer/PublicAuthorIndexWriter.js';
+import { DefaultOpenSearchClient, DefaultOpenSearchAuthorClient } from '../writer/OpenSearchClient.js';
+import { DefaultQdrantContentClient, NoopPublicAuthorStore } from '../writer/QdrantClient.js';
 import { DefaultSearchDedupService } from '../aliases/SearchDedupService.js';
 import {
   InMemorySearchDocAliasCache,
@@ -42,8 +44,15 @@ import {
 } from '../writer/SearchDocAliasCache.js';
 import { SearchEventBus } from './SearchEventBus.js';
 import type { IdentityAliasResolver, ResolvedIdentity } from '../identity/IdentityAliasResolver.js';
-import type { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents.js';
+import type {
+  SearchPublicUpsertV1,
+  SearchPublicDeleteV1,
+  SearchPublicDeleteByAuthorV1,
+  SearchAuthorUpsertV1,
+  SearchAuthorDeleteV1,
+} from '../events/SearchEvents.js';
 import { OutboxIntentDeduper, extractOutboxIntentId } from '../../utils/OutboxIntentDeduper.js';
+import { normalizePublicSearchConsent } from '../../utils/searchConsent.js';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -69,13 +78,26 @@ export interface SearchIndexerServiceConfig {
   /** Whether to reject self-signed TLS certs (default: true) */
   opensearchSslVerify: boolean;
 
+  /** Active search backend. `dual` mirrors writes to Qdrant-ready payloads while retaining OpenSearch. */
+  searchBackend: 'opensearch' | 'qdrant' | 'dual';
+  /** Qdrant base URL */
+  qdrantUrl: string;
+  /** Optional Qdrant API key */
+  qdrantApiKey?: string;
+  /** Qdrant collection name */
+  qdrantCollectionName: string;
+  /** Qdrant dense vector size */
+  qdrantVectorSize: number;
+  /** Qdrant request timeout */
+  qdrantRequestTimeoutMs: number;
+
   /** Redis client for alias cache (provide `null` to use in-memory fallback) */
   redis: {
     get(key: string): Promise<string | null>;
     set(key: string, value: string, ...args: Array<string | number>): Promise<unknown>;
   } | null;
 
-  /** How long to wait before retrying after an OpenSearch bulk failure (ms) */
+  /** How long to wait before retrying after a backend write failure (ms) */
   backpressureRetryDelayMs: number;
   /** TTL for local outbox-intent dedupe keys. */
   outboxIntentDedupTtlSec: number;
@@ -106,7 +128,9 @@ export class SearchIndexerService {
   private readonly bus: SearchEventBus;
   private readonly projector: ApSearchProjector;
   private readonly writer: PublicContentIndexWriter;
-  private readonly osClient: DefaultOpenSearchClient;
+  private readonly authorWriter: PublicAuthorIndexWriter;
+  private readonly contentStore: DefaultOpenSearchClient | DefaultQdrantContentClient;
+  private readonly authorStore: DefaultOpenSearchAuthorClient | NoopPublicAuthorStore;
   private readonly outboxIntentDeduper: OutboxIntentDeduper;
 
   private isRunning = false;
@@ -126,23 +150,45 @@ export class SearchIndexerService {
     });
     this.consumer = this.kafka.consumer({ groupId: config.groupId });
 
-    // ── OpenSearch ───────────────────────────────────────────────────────
-    const osNative = new OpenSearchNativeClient(
-      config.opensearchUsername
-        ? {
-            node: config.opensearchUrl,
-            auth: {
-              username: config.opensearchUsername,
-              password: config.opensearchPassword ?? '',
+    // ── Search backend clients ──────────────────────────────────────────
+    const enableOpenSearch = config.searchBackend === 'opensearch' || config.searchBackend === 'dual';
+    const enableQdrant = config.searchBackend === 'qdrant' || config.searchBackend === 'dual';
+
+    let openSearchClient: DefaultOpenSearchClient | undefined;
+    let authorClient: DefaultOpenSearchAuthorClient | undefined;
+
+    if (enableOpenSearch) {
+      const osNative = new OpenSearchNativeClient(
+        config.opensearchUsername
+          ? {
+              node: config.opensearchUrl,
+              auth: {
+                username: config.opensearchUsername,
+                password: config.opensearchPassword ?? '',
+              },
+              ssl: { rejectUnauthorized: config.opensearchSslVerify },
+            }
+          : {
+              node: config.opensearchUrl,
+              ssl: { rejectUnauthorized: config.opensearchSslVerify },
             },
-            ssl: { rejectUnauthorized: config.opensearchSslVerify },
-          }
-        : {
-            node: config.opensearchUrl,
-            ssl: { rejectUnauthorized: config.opensearchSslVerify },
-          },
-    );
-    this.osClient = new DefaultOpenSearchClient(osNative);
+      );
+      openSearchClient = new DefaultOpenSearchClient(osNative);
+      authorClient = new DefaultOpenSearchAuthorClient(osNative);
+    }
+
+    const qdrantClient = enableQdrant
+      ? new DefaultQdrantContentClient({
+          baseUrl: config.qdrantUrl,
+          apiKey: config.qdrantApiKey,
+          collectionName: config.qdrantCollectionName,
+          vectorSize: config.qdrantVectorSize,
+          requestTimeoutMs: config.qdrantRequestTimeoutMs,
+        })
+      : undefined;
+
+    this.contentStore = qdrantClient ?? openSearchClient!;
+    this.authorStore = authorClient ?? new NoopPublicAuthorStore();
 
     // ── Alias cache ──────────────────────────────────────────────────────
     const aliasCache: SearchDocAliasCache = config.redis
@@ -158,7 +204,7 @@ export class SearchIndexerService {
 
     // ── In-process event bus ──────────────────────────────────────────────
     this.bus = new SearchEventBus();
-    this.writer = new PublicContentIndexWriter(this.osClient, aliasCache, dedupService);
+    this.writer = new PublicContentIndexWriter(this.contentStore, aliasCache, dedupService);
 
     // Wire bus → writer
     this.bus.on('search.public.upsert.v1', async (payload) => {
@@ -167,6 +213,16 @@ export class SearchIndexerService {
     this.bus.on('search.public.delete.v1', async (payload) => {
       await this.writer.onDelete(payload as SearchPublicDeleteV1);
     });
+    this.authorWriter = new PublicAuthorIndexWriter(this.authorStore);
+    this.bus.on('search.public.delete-by-author.v1', async (payload) => {
+      await this.writer.onDeleteByAuthor(payload as SearchPublicDeleteByAuthorV1);
+    });
+    this.bus.on('search.author.upsert.v1', async (payload) => {
+      await this.authorWriter.onUpsert(payload as SearchAuthorUpsertV1);
+    });
+    this.bus.on('search.author.delete.v1', async (payload) => {
+      await this.authorWriter.onDelete(payload as SearchAuthorDeleteV1);
+    });
 
     // ── Projector ────────────────────────────────────────────────────────
     const resolver = identityResolver ?? new PassThroughIdentityAliasResolver();
@@ -174,15 +230,22 @@ export class SearchIndexerService {
   }
 
   /**
-   * Initialize the OpenSearch index (idempotent — safe to call on every startup).
+   * Initialize the active backend (idempotent — safe to call on every startup).
    */
   async initialize(): Promise<void> {
-    await this.osClient.initializeIndex();
-    logger.info('[SearchIndexerService] OpenSearch index initialized');
+    if (this.contentStore instanceof DefaultOpenSearchClient) {
+      await this.contentStore.initializeIndex();
+    }
+    if (this.authorStore instanceof DefaultOpenSearchAuthorClient) {
+      await this.authorStore.initializeIndex();
+    }
+    logger.info('[SearchIndexerService] Search backend initialized', {
+      backend: this.config.searchBackend,
+    });
   }
 
   /**
-   * Start consuming from Redpanda and indexing into OpenSearch.
+   * Start consuming from Redpanda and indexing into the configured search backend.
    */
   async start(): Promise<void> {
     if (this.isRunning) return;
@@ -204,6 +267,7 @@ export class SearchIndexerService {
       firehoseTopic: this.config.firehoseTopic,
       tombstoneTopic: this.config.tombstoneTopic,
       groupId: this.config.groupId,
+      backend: this.config.searchBackend,
     });
   }
 
@@ -261,10 +325,11 @@ export class SearchIndexerService {
           await this.projector.onApTombstoneEvent(event);
         } else {
           // FEP-268d consent gate: explicit opt-out skips indexing.
-          const consent = (event["meta"] as any)?.searchConsent;
-          if (consent?.explicitlySet === true && consent?.isPublic === false) {
+          const consent = normalizePublicSearchConsent((event["meta"] as any)?.searchConsent);
+          if (consent?.isPublic === false) {
             logger.debug('[SearchIndexerService] Skipping non-searchable activity (FEP-268d)', {
               activityId: (event["activity"] as any)?.id,
+              source: consent.source,
             });
             resolveOffset(message.offset);
             await heartbeat();
@@ -319,6 +384,12 @@ export function createSearchIndexerService(
     opensearchUsername: process.env['OPENSEARCH_USERNAME'],
     opensearchPassword: process.env['OPENSEARCH_PASSWORD'],
     opensearchSslVerify: process.env['OPENSEARCH_SSL_VERIFY'] !== 'false',
+    searchBackend: resolveSearchBackend(process.env['SEARCH_BACKEND']),
+    qdrantUrl: process.env['QDRANT_URL'] ?? 'http://localhost:6333',
+    qdrantApiKey: process.env['QDRANT_API_KEY'],
+    qdrantCollectionName: process.env['QDRANT_COLLECTION_NAME'] ?? 'public-content-v1',
+    qdrantVectorSize: parseInt(process.env['QDRANT_VECTOR_SIZE'] ?? '1024', 10),
+    qdrantRequestTimeoutMs: parseInt(process.env['QDRANT_REQUEST_TIMEOUT_MS'] ?? '5000', 10),
     redis: null, // callers inject a Redis client if available
     backpressureRetryDelayMs: parseInt(
       process.env['SEARCH_INDEXER_BACKPRESSURE_RETRY_MS'] ?? '10000',
@@ -332,4 +403,12 @@ export function createSearchIndexerService(
   };
 
   return new SearchIndexerService(config, identityResolver);
+}
+
+function resolveSearchBackend(raw: string | undefined): 'opensearch' | 'qdrant' | 'dual' {
+  if (raw === 'opensearch' || raw === 'qdrant' || raw === 'dual') {
+    return raw;
+  }
+
+  return 'dual';
 }

@@ -12,22 +12,51 @@ const TARGET_AT_URI = "at://did:plc:bob/app.bsky.feed.post/3kpost";
 const TARGET_AP_URI = "https://remote.example/notes/1";
 const FOLLOW_SUBJECT_DID = "did:plc:bob";
 const FOLLOW_SUBJECT_AP = "https://remote.example/users/bob";
+const FOLLOW_OBJECT_AP = "https://remote.example/articles/1";
+const FOLLOW_OBJECT_OWNER_AP = "https://remote.example/users/editor";
+const FOLLOW_OBJECT_OWNER_DID = "did:plc:editor";
 
 const translationContext: TranslationContext = {
   now: () => new Date("2026-04-03T10:00:00.000Z"),
   resolveActorRef: async (ref: CanonicalActorRef) => {
     const did = ref.did
-      ?? (ref.activityPubActorUri === FOLLOW_SUBJECT_AP ? FOLLOW_SUBJECT_DID : "did:plc:alice");
+      ?? (
+        ref.activityPubActorUri === FOLLOW_SUBJECT_AP
+          ? FOLLOW_SUBJECT_DID
+          : ref.activityPubActorUri === FOLLOW_OBJECT_OWNER_AP
+            ? FOLLOW_OBJECT_OWNER_DID
+            : "did:plc:alice"
+      );
     const activityPubActorUri = ref.activityPubActorUri
-      ?? (did === FOLLOW_SUBJECT_DID ? FOLLOW_SUBJECT_AP : "https://example.com/users/alice");
+      ?? (
+        did === FOLLOW_SUBJECT_DID
+          ? FOLLOW_SUBJECT_AP
+          : did === FOLLOW_OBJECT_OWNER_DID
+            ? FOLLOW_OBJECT_OWNER_AP
+            : "https://example.com/users/alice"
+      );
 
     return {
       canonicalAccountId:
         ref.canonicalAccountId
-        ?? (did === FOLLOW_SUBJECT_DID ? "acct:bob" : "acct:alice"),
+        ?? (
+          did === FOLLOW_SUBJECT_DID
+            ? "acct:bob"
+            : did === FOLLOW_OBJECT_OWNER_DID
+              ? "acct:editor"
+              : "acct:alice"
+        ),
       did,
       activityPubActorUri,
-      handle: ref.handle ?? (did === FOLLOW_SUBJECT_DID ? "bob.remote.example" : "alice.example.com"),
+      handle:
+        ref.handle
+        ?? (
+          did === FOLLOW_SUBJECT_DID
+            ? "bob.remote.example"
+            : did === FOLLOW_OBJECT_OWNER_DID
+              ? "editor.remote.example"
+              : "alice.example.com"
+        ),
       webId: ref.webId ?? `${activityPubActorUri}#me`,
     };
   },
@@ -469,6 +498,57 @@ describe("protocol bridge social slice", () => {
     expect(addProjected.commands[0]?.record?.["subject"]).toBe(FOLLOW_SUBJECT_DID);
     expect(removeProjected.commands[0]?.collection).toBe("app.bsky.graph.follow");
     expect(removeProjected.commands[0]?.rkey).toBe(addProjected.commands[0]?.rkey);
+  });
+
+  it("preserves AP followable-object follows and refuses lossy AT follow projection", async () => {
+    const translator = new ActivityPubToCanonicalTranslator();
+    const atProjector = new CanonicalToAtprotoProjector();
+    const apProjector = new CanonicalToActivityPubProjector();
+
+    const addIntent = await translator.translate(
+      {
+        id: "https://example.com/activities/follow-article-1",
+        type: "Follow",
+        actor: "https://example.com/users/alice",
+        object: {
+          id: FOLLOW_OBJECT_AP,
+          followers: `${FOLLOW_OBJECT_AP}/followers`,
+          attributedTo: FOLLOW_OBJECT_OWNER_AP,
+        },
+        to: [FOLLOW_OBJECT_OWNER_AP],
+      },
+      translationContext,
+    );
+
+    expect(addIntent?.kind).toBe("FollowAdd");
+    if (!addIntent || addIntent.kind !== "FollowAdd") return;
+    expect(addIntent.targetObject?.activityPubObjectId).toBe(FOLLOW_OBJECT_AP);
+    expect(addIntent.subject?.activityPubActorUri).toBe(FOLLOW_OBJECT_OWNER_AP);
+    expect(addIntent.activityPubRecipientUri).toBe(FOLLOW_OBJECT_OWNER_AP);
+    expect(addIntent.activityPubFollowersUri).toBe(`${FOLLOW_OBJECT_AP}/followers`);
+    expect(addIntent.recursionDepthUsed).toBe(1);
+
+    const atProjected = await atProjector.project(addIntent, projectionContext);
+    expect(atProjected.kind).toBe("unsupported");
+    if (atProjected.kind !== "unsupported") return;
+    expect(atProjected.reason).toContain("followable-object");
+
+    const apProjected = await apProjector.project(addIntent, projectionContext);
+    expect(apProjected.kind).toBe("success");
+    if (apProjected.kind !== "success") return;
+
+    expect(apProjected.commands[0]?.activity).toEqual(
+      expect.objectContaining({
+        type: "Follow",
+        actor: "https://example.com/users/alice",
+        object: {
+          id: FOLLOW_OBJECT_AP,
+          followers: `${FOLLOW_OBJECT_AP}/followers`,
+          attributedTo: FOLLOW_OBJECT_OWNER_AP,
+        },
+        to: [FOLLOW_OBJECT_OWNER_AP],
+      }),
+    );
   });
 
   it("translates AT like create/delete envelopes to AP Like and Undo", async () => {

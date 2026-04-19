@@ -23,8 +23,28 @@ export class FollowRemoveToApProjector implements CanonicalProjector<ActivityPub
       };
     }
 
-    const subject = await ctx.resolveActorRef(intent.subject);
-    const subjectIri = toApIri(subject.activityPubActorUri ?? subject.webId ?? subject.did ?? subject.handle ?? followTargetKey(intent));
+    const targetObject = intent.targetObject ? await ctx.resolveObjectRef(intent.targetObject) : null;
+    const subject = intent.subject ? await ctx.resolveActorRef(intent.subject) : null;
+    const followObjectValue = buildFollowObjectValue(intent, targetObject, subject);
+    const recipientIri = toApIri(
+      intent.activityPubRecipientUri
+      ?? subject?.activityPubActorUri
+      ?? subject?.webId
+      ?? subject?.did
+      ?? subject?.handle
+      ?? (targetObject
+        ? targetObject.activityPubObjectId ?? targetObject.canonicalUrl ?? targetObject.atUri ?? targetObject.canonicalObjectId
+        : followTargetKey(intent)),
+    );
+
+    if (!targetObject && !subject) {
+      return {
+        kind: "error",
+        code: "AP_FOLLOW_TARGET_MISSING",
+        message: `Cannot project follow removal ${followTargetKey(intent)} to ActivityPub without a target actor or object.`,
+      };
+    }
+
     const followId = buildSocialActivityId(actor.activityPubActorUri, "Follow", followTargetKey(intent));
     const activity: Record<string, unknown> = {
       "@context": "https://www.w3.org/ns/activitystreams",
@@ -35,9 +55,9 @@ export class FollowRemoveToApProjector implements CanonicalProjector<ActivityPub
         id: followId,
         type: "Follow",
         actor: actor.activityPubActorUri,
-        object: subjectIri,
+        object: followObjectValue,
       },
-      to: [subjectIri],
+      to: [recipientIri],
       published: intent.createdAt,
     };
 
@@ -55,4 +75,34 @@ export class FollowRemoveToApProjector implements CanonicalProjector<ActivityPub
       warnings: intent.warnings,
     };
   }
+}
+
+function buildFollowObjectValue(
+  intent: CanonicalFollowRemoveIntent,
+  targetObject: Awaited<ReturnType<ProjectionContext["resolveObjectRef"]>> | null,
+  subject: Awaited<ReturnType<ProjectionContext["resolveActorRef"]>> | null,
+): string | Record<string, unknown> {
+  if (!targetObject) {
+    if (!subject) {
+      return toApIri(followTargetKey(intent));
+    }
+
+    return toApIri(subject.activityPubActorUri ?? subject.webId ?? subject.did ?? subject.handle ?? followTargetKey(intent));
+  }
+
+  const objectIri = toApIri(
+    targetObject.activityPubObjectId ?? targetObject.canonicalUrl ?? targetObject.atUri ?? targetObject.canonicalObjectId,
+  );
+  const objectValue: Record<string, unknown> = { id: objectIri };
+  if (intent.activityPubFollowersUri) {
+    objectValue["followers"] = intent.activityPubFollowersUri;
+  }
+  if (intent.activityPubInboxUri) {
+    objectValue["inbox"] = intent.activityPubInboxUri;
+  }
+  if (subject?.activityPubActorUri) {
+    objectValue["attributedTo"] = subject.activityPubActorUri;
+  }
+
+  return Object.keys(objectValue).length === 1 ? objectIri : objectValue;
 }

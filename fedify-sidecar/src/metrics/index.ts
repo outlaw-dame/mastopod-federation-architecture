@@ -371,6 +371,13 @@ export const feedOpenSearchRetriesTotal = new Counter({
   registers: [registry],
 });
 
+export const feedSearchReadRetriesTotal = new Counter({
+  name: "fedify_feed_search_read_retries_total",
+  help: "Retry attempts made by feed search read components grouped by backend",
+  labelNames: ["backend", "component", "reason"] as const,
+  registers: [registry],
+});
+
 export const feedStreamConnectionsTotal = new Counter({
   name: "fedify_feed_stream_connections_total",
   help: "Total durable stream connection attempts by transport and outcome",
@@ -498,6 +505,7 @@ export const metrics = {
   feedRequestLatency,
   feedHydrationOmissionsTotal,
   feedOpenSearchRetriesTotal,
+  feedSearchReadRetriesTotal,
   feedStreamConnectionsTotal,
   feedStreamActiveConnections,
   feedStreamEnvelopesPublished,
