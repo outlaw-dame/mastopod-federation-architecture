@@ -633,10 +633,14 @@ describe("protocol bridge runtime adapters", () => {
             content: "<p>Check this out</p>",
             attachment: [
               {
-                type: "Document",
+                type: "Link",
                 mediaType: "text/html",
-                url: "https://example.com/page",
+                href: "https://example.com/page",
                 name: "Example Page",
+                preview: {
+                  type: "Article",
+                  name: "Example Page",
+                },
               },
               {
                 type: "Image",
@@ -675,15 +679,15 @@ describe("protocol bridge runtime adapters", () => {
 
     expect(richEvent.activity.object.preview).toEqual(
       expect.objectContaining({
-        type: "Document",
-        url: "https://example.com/page",
+        type: "Link",
+        href: "https://example.com/page",
       }),
     );
     expect(richEvent.activity.object.attachment).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          type: "Document",
-          url: "https://example.com/page",
+          type: "Link",
+          href: "https://example.com/page",
         }),
       ]),
     );

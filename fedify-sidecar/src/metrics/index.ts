@@ -338,6 +338,49 @@ export const apRelaySubscriptionAttempts = new Counter({
   registers: [registry],
 });
 
+export const originReconciliationJobsTotal = new Counter({
+  name: "fedify_origin_reconciliation_jobs_total",
+  help: "Origin reconciliation job outcomes by result and scheduling reason",
+  labelNames: ["result", "reason"] as const,
+  registers: [registry],
+});
+
+export const originReconciliationFetchesTotal = new Counter({
+  name: "fedify_origin_reconciliation_fetches_total",
+  help: "Origin reconciliation fetch attempts by host and result",
+  labelNames: ["origin_host", "result"] as const,
+  registers: [registry],
+});
+
+export const originReconciliationFetchLatency = new Histogram({
+  name: "fedify_origin_reconciliation_fetch_latency_seconds",
+  help: "Origin reconciliation fetch latency by host",
+  labelNames: ["origin_host"] as const,
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+  registers: [registry],
+});
+
+export const originReconciliationNoopTotal = new Counter({
+  name: "fedify_origin_reconciliation_noop_total",
+  help: "Origin reconciliation polls that observed no meaningful change",
+  labelNames: ["origin_host"] as const,
+  registers: [registry],
+});
+
+export const originReconciliationChangedTotal = new Counter({
+  name: "fedify_origin_reconciliation_changed_total",
+  help: "Origin reconciliation polls that observed meaningful change",
+  labelNames: ["origin_host"] as const,
+  registers: [registry],
+});
+
+export const originReconciliationHostBackoffTotal = new Counter({
+  name: "fedify_origin_reconciliation_host_backoff_total",
+  help: "Origin reconciliation host-level deferrals and permanent stops",
+  labelNames: ["origin_host", "reason"] as const,
+  registers: [registry],
+});
+
 // ============================================================================
 // Feed Metrics
 // ============================================================================
@@ -396,6 +439,54 @@ export const feedStreamEnvelopesPublished = new Counter({
   name: "fedify_feed_stream_envelopes_published_total",
   help: "Total stream envelopes published to connections",
   labelNames: ["stream"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingControlRequestsTotal = new Counter({
+  name: "fedify_fep_streaming_control_requests_total",
+  help: "Public FEP-3ab2 control-plane request outcomes by endpoint and outcome",
+  labelNames: ["endpoint", "outcome"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingSessionsTotal = new Counter({
+  name: "fedify_fep_streaming_sessions_total",
+  help: "Public FEP-3ab2 streaming session lifecycle actions",
+  labelNames: ["action"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingConnectionsTotal = new Counter({
+  name: "fedify_fep_streaming_connections_total",
+  help: "Public FEP-3ab2 stream connection attempts grouped by outcome",
+  labelNames: ["outcome"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingActiveConnections = new Gauge({
+  name: "fedify_fep_streaming_active_connections",
+  help: "Current number of active public FEP-3ab2 SSE connections",
+  registers: [registry],
+});
+
+export const fepStreamingReplayRequestsTotal = new Counter({
+  name: "fedify_fep_streaming_replay_requests_total",
+  help: "Public FEP-3ab2 replay request outcomes during SSE reconnect handling",
+  labelNames: ["outcome"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingReplayEventsTotal = new Counter({
+  name: "fedify_fep_streaming_replay_events_total",
+  help: "Public FEP-3ab2 replay event lifecycle actions",
+  labelNames: ["action"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingEventsPublished = new Counter({
+  name: "fedify_fep_streaming_events_published_total",
+  help: "Public FEP-3ab2 events published to active SSE subscribers",
+  labelNames: ["topic_group", "event"] as const,
   registers: [registry],
 });
 
@@ -500,6 +591,14 @@ export const metrics = {
   // AP relay
   apRelaySubscriptionAttempts,
 
+  // Origin reconciliation
+  originReconciliationJobsTotal,
+  originReconciliationFetchesTotal,
+  originReconciliationFetchLatency,
+  originReconciliationNoopTotal,
+  originReconciliationChangedTotal,
+  originReconciliationHostBackoffTotal,
+
   // Feed
   feedRequestsTotal,
   feedRequestLatency,
@@ -509,6 +608,13 @@ export const metrics = {
   feedStreamConnectionsTotal,
   feedStreamActiveConnections,
   feedStreamEnvelopesPublished,
+  fepStreamingControlRequestsTotal,
+  fepStreamingSessionsTotal,
+  fepStreamingConnectionsTotal,
+  fepStreamingActiveConnections,
+  fepStreamingReplayRequestsTotal,
+  fepStreamingReplayEventsTotal,
+  fepStreamingEventsPublished,
 
   // Capability
   capabilityGateTotal,

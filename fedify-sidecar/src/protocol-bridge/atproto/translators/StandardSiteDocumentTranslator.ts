@@ -124,13 +124,16 @@ async function translateDirectEnvelope(
   const previewUrl = envelope.record.url ?? null;
   const ogData = previewUrl ? await fetchOpenGraph(previewUrl) : null;
   const linkPreview = ogData
-    ? {
+      ? {
         uri: ogData.uri,
         title: ogData.title,
         description: ogData.description ?? null,
         thumbUrl: ogData.thumbUrl ?? null,
+        ...(ogData.authorName ? { authorName: ogData.authorName } : {}),
+        ...(ogData.authorUrl ? { authorUrl: ogData.authorUrl } : {}),
+        ...(ogData.authors && ogData.authors.length > 0 ? { authors: ogData.authors } : {}),
       }
-    : null;
+      : null;
   const customEmojis = parseActivityPodsCustomEmojiField(
     envelope.record[ACTIVITYPODS_CUSTOM_EMOJIS_FIELD],
   );

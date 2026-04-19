@@ -12,6 +12,9 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   RepliesBackfillService,
   extractRepliesUri,
+  extractContextCollectionUri,
+  extractContextHistoryUri,
+  extractHistoryCollectionUri,
   extractItems,
   extractNextUri,
   extractId,
@@ -44,6 +47,57 @@ describe("extractRepliesUri", () => {
 
   it("returns null for empty string", () => {
     expect(extractRepliesUri({ replies: "" })).toBeNull();
+  });
+});
+
+describe("extractContextHistoryUri", () => {
+  it("returns contextHistory string URI", () => {
+    expect(extractContextHistoryUri({ contextHistory: "https://example.com/posts/1/context/history" }))
+      .toBe("https://example.com/posts/1/context/history");
+  });
+
+  it("returns contextHistory object id URI", () => {
+    expect(extractContextHistoryUri({ contextHistory: { id: "https://example.com/posts/1/context/history" } }))
+      .toBe("https://example.com/posts/1/context/history");
+  });
+
+  it("returns null for non-http values", () => {
+    expect(extractContextHistoryUri({ contextHistory: "urn:test:history" })).toBeNull();
+  });
+});
+
+describe("extractContextCollectionUri", () => {
+  it("returns context string URI", () => {
+    expect(extractContextCollectionUri({ context: "https://example.com/posts/1/context" }))
+      .toBe("https://example.com/posts/1/context");
+  });
+
+  it("returns context object id URI", () => {
+    expect(extractContextCollectionUri({ context: { id: "https://example.com/posts/1/context" } }))
+      .toBe("https://example.com/posts/1/context");
+  });
+
+  it("returns null for non-http values", () => {
+    expect(extractContextCollectionUri({ context: "not-a-url" })).toBeNull();
+  });
+});
+
+describe("extractHistoryCollectionUri", () => {
+  it("returns history URI from compact key", () => {
+    expect(extractHistoryCollectionUri({ history: "https://example.com/posts/1/context/history" }))
+      .toBe("https://example.com/posts/1/context/history");
+  });
+
+  it("returns history URI from expanded bad1 key", () => {
+    expect(extractHistoryCollectionUri({
+      "https://w3id.org/fep/bad1#history": {
+        id: "https://example.com/posts/1/context/history",
+      },
+    })).toBe("https://example.com/posts/1/context/history");
+  });
+
+  it("returns null for non-http values", () => {
+    expect(extractHistoryCollectionUri({ history: "urn:history:test" })).toBeNull();
   });
 });
 

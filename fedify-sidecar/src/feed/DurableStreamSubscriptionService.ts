@@ -126,6 +126,8 @@ export interface DurableStreamSubscriptionServiceOptions {
   heartbeatIntervalMs?: number;
 }
 
+export type DurableStreamEnvelopeObserver = (envelope: StreamEnvelope) => void;
+
 // ---------------------------------------------------------------------------
 // Validated subscription context (result of authoriseRequest)
 // ---------------------------------------------------------------------------
@@ -148,6 +150,7 @@ export class DurableStreamSubscriptionService {
 
   /** All active connections keyed by connectionId. */
   private readonly connections = new Map<string, ConnectionHandle>();
+  private readonly envelopeObservers = new Set<DurableStreamEnvelopeObserver>();
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -339,6 +342,14 @@ export class DurableStreamSubscriptionService {
 
     const envelope: StreamEnvelope = parse.data;
 
+    for (const observer of this.envelopeObservers) {
+      try {
+        observer(envelope);
+      } catch {
+        // Observer failures must not break delivery to stream consumers.
+      }
+    }
+
     for (const conn of this.connections.values()) {
       if (!conn.streams.has(envelope.stream)) continue;
 
@@ -370,6 +381,13 @@ export class DurableStreamSubscriptionService {
   /** Number of currently registered connections. Exposed for metrics. */
   get connectionCount(): number {
     return this.connections.size;
+  }
+
+  public registerEnvelopeObserver(observer: DurableStreamEnvelopeObserver): () => void {
+    this.envelopeObservers.add(observer);
+    return () => {
+      this.envelopeObservers.delete(observer);
+    };
   }
 
   // -------------------------------------------------------------------------

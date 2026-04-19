@@ -36,6 +36,30 @@ const FEP1311_ATTACHMENT_CONTEXT = {
  * type declarations, and the GoToSocial interaction policy vocabulary for
  * advertising `canQuote` policies on all published objects.
  */
+/**
+ * FEP-f228: Conversation context history.
+ *
+ * `contextHistory` is the ordered activity-history collection parallel to the
+ * FEP-2931 context posts collection.  It is not defined in the ActivityStreams
+ * vocabulary, so we declare it here as a JSON-LD term so that processors can
+ * expand it to the canonical IRI.
+ */
+const FEP_F228_CONTEXT_HISTORY_CONTEXT: Record<string, unknown> = {
+  contextHistory: {
+    "@id": "https://w3id.org/fep/f228#contextHistory",
+    "@type": "@id",
+  },
+};
+
+/**
+ * FEP-044f: Consent-respecting quote posts.
+ * FEP-dd4b: Quote posts via Announce with commentary.
+ *
+ * Includes the primary FEP-044f `quote` property, compatibility aliases
+ * (quoteUrl, quoteUri, _misskey_quote), the QuoteAuthorization/QuoteRequest
+ * type declarations, and the GoToSocial interaction policy vocabulary for
+ * advertising `canQuote` policies on all published objects.
+ */
 const FEP044F_QUOTE_CONTEXT: Record<string, unknown> = {
   // FEP-044f primary terms
   quote: {
@@ -103,6 +127,7 @@ export function buildApActivityContext(
   return [
     ACTIVITYSTREAMS_CONTEXT,
     FEP1311_ATTACHMENT_CONTEXT,
+    FEP_F228_CONTEXT_HISTORY_CONTEXT,
     FEP044F_QUOTE_CONTEXT,
     ...(options.includeCustomEmojis ? [MASTODON_EMOJI_CONTEXT] : []),
     ...(options.includeEmojiReact ? [LITEPUB_EMOJI_REACT_CONTEXT] : []),
@@ -147,6 +172,33 @@ export function resolveOptionalApObjectId(ref: CanonicalObjectRef | null | undef
   return resolveApObjectId(ref);
 }
 
+/**
+ * Derive FEP-f228 conversation collection URIs.
+ *
+ * - `context` points to the conversation post collection.
+ * - `contextHistory` points to the activity history collection for the same conversation.
+ */
+export function deriveConversationCollectionUris(
+  objectId: string,
+  replyRootId: string | null,
+): { context: string; contextHistory: string } {
+  const rootId = sanitizeConversationRootId(replyRootId ?? objectId);
+  return {
+    context: `${rootId}/context`,
+    contextHistory: `${rootId}/context/history`,
+  };
+}
+
+function sanitizeConversationRootId(value: string): string {
+  try {
+    const parsed = new URL(value);
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return value.replace(/#.*$/, "").replace(/\/$/, "");
+  }
+}
+
 export function buildApLinkPreviewIcon(
   linkPreview: CanonicalLinkPreview | null | undefined,
 ): Record<string, unknown> | null {
@@ -163,7 +215,39 @@ export function buildApLinkPreviewIcon(
   };
 }
 
-export function buildApLinkPreviewCard(
+function buildApLinkPreviewAttribution(
+  linkPreview: CanonicalLinkPreview | null | undefined,
+): Record<string, unknown> | null {
+  const previewAuthors = Array.isArray(linkPreview?.authors)
+    ? linkPreview.authors.filter((author) => author && typeof author.name === "string" && author.name.trim().length > 0)
+    : [];
+  const primaryAuthor = previewAuthors[0];
+  const fallbackName = typeof linkPreview?.authorName === "string" ? linkPreview.authorName.trim() : "";
+  const fallbackUrl = normalizeHttpUrl(linkPreview?.authorUrl);
+  const authorName = primaryAuthor?.name?.trim() || fallbackName;
+  const authorUrl = normalizeHttpUrl(primaryAuthor?.url) ?? fallbackUrl;
+  const authorAvatarUrl = normalizeHttpUrl(primaryAuthor?.account?.avatarUrl);
+
+  if (!authorName) {
+    return null;
+  }
+
+  return {
+    type: "Person",
+    name: authorName.slice(0, 300),
+    ...(authorUrl ? { url: authorUrl } : {}),
+    ...(authorAvatarUrl
+      ? {
+          icon: {
+            type: "Image",
+            url: authorAvatarUrl,
+          },
+        }
+      : {}),
+  };
+}
+
+export function buildApLinkPreviewPreview(
   linkPreview: CanonicalLinkPreview | null | undefined,
 ): Record<string, unknown> | null {
   const url = normalizeHttpUrl(linkPreview?.uri);
@@ -172,18 +256,44 @@ export function buildApLinkPreviewCard(
     return null;
   }
 
-  const icon = buildApLinkPreviewIcon(linkPreview);
   const description = typeof linkPreview?.description === "string"
     ? linkPreview.description.trim()
     : "";
+  const image = buildApLinkPreviewIcon(linkPreview);
+  const attributedTo = buildApLinkPreviewAttribution(linkPreview);
 
   return {
-    type: "Document",
+    type: "Article",
+    name: title.slice(0, 300),
+    ...(description ? { summary: description.slice(0, 1000) } : {}),
+    ...(image ? { image } : {}),
+    ...(attributedTo ? { attributedTo } : {}),
+  };
+}
+
+export function buildApLinkPreviewAttachment(
+  linkPreview: CanonicalLinkPreview | null | undefined,
+): Record<string, unknown> | null {
+  const href = normalizeHttpUrl(linkPreview?.uri);
+  const title = typeof linkPreview?.title === "string" ? linkPreview.title.trim() : "";
+  if (!href || !title) {
+    return null;
+  }
+
+  const description = typeof linkPreview?.description === "string"
+    ? linkPreview.description.trim()
+    : "";
+  const icon = buildApLinkPreviewIcon(linkPreview);
+  const preview = buildApLinkPreviewPreview(linkPreview);
+
+  return {
+    type: "Link",
     mediaType: "text/html",
-    url,
+    href,
     name: title.slice(0, 300),
     ...(description ? { summary: description.slice(0, 1000) } : {}),
     ...(icon ? { icon } : {}),
+    ...(preview ? { preview } : {}),
   };
 }
 

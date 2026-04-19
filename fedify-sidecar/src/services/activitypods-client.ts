@@ -9,6 +9,7 @@
 
 import { logger } from "../utils/logger.js";
 import { config } from "../config/index.js";
+import { getAttributionDomains } from "../utils/authorAttribution.js";
 
 export interface ActorData {
   id: string;
@@ -38,6 +39,7 @@ export interface ActorData {
   };
   indexable?: boolean;
   searchableBy?: string | string[];
+  attributionDomains?: string[];
   status?: Record<string, unknown>;
   statusHistory?: unknown;
 }
@@ -287,6 +289,7 @@ export class ActivityPodsClient {
         typeof data["searchableBy"] === "string" || Array.isArray(data["searchableBy"])
           ? (data["searchableBy"] as string | string[])
           : undefined,
+      attributionDomains: getAttributionDomains(data),
       status: (data["status"] && typeof data["status"] === "object" && !Array.isArray(data["status"]))
         ? (data["status"] as Record<string, unknown>)
         : undefined,

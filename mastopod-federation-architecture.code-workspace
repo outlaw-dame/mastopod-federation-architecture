@@ -73,7 +73,23 @@
 			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods && node tests/node_modules/\\.bin/jest --testEnvironment=node pod-provider/backend/tests/hashtag-conformance-matrix\\.test\\.js pod-provider/backend/tests/user-settings-hashtag-follows\\.test\\.js$/": {
 				"approve": true,
 				"matchCommandLine": true
-			}
+			},
+			"npm run -s build": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && ls -R services/ \\| grep activitypub-conversation-context\\.service\\.js && node -e \"require\\('\\./services/activitypub-conversation-context\\.service\\.js'\\); console\\.log\\('loaded-service-ok'\\)\" \\|\\| node -e \"require\\('\\./services/activitypub-conversation-context\\.service'\\); console\\.log\\('loaded-service-ok'\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"yarn add": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node -e \"require\\('\\./services/passkeys-api\\.service\\.js'\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npx eslint": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node -e \"require\\('\\./services/passkeys-api\\.service\\.js'\\)\" && echo \"Backend validation successful\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npm run build": true
 		}
 	}
 }

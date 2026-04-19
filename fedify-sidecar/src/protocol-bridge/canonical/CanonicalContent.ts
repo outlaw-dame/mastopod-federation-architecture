@@ -59,6 +59,30 @@ export interface CanonicalLinkPreview {
   description?: string | null;
   /** Preview thumbnail image URL (from og:image). */
   thumbUrl?: string | null;
+  /** Deprecated Mastodon-style single-author compatibility fields. */
+  authorName?: string | null;
+  authorUrl?: string | null;
+  /** Mastodon-compatible preview authors, enriched with ActivityPods verification state. */
+  authors?: CanonicalLinkPreviewAuthor[] | null;
+}
+
+export interface CanonicalLinkPreviewAuthorAccount {
+  acct: string;
+  uri?: string | null;
+  url?: string | null;
+  displayName?: string | null;
+  avatarUrl?: string | null;
+  attributionDomains?: string[];
+}
+
+export interface CanonicalLinkPreviewAuthor {
+  name: string;
+  url: string;
+  handle?: string | null;
+  account?: CanonicalLinkPreviewAuthorAccount | null;
+  verified?: boolean;
+  verificationState?: "verified" | "claimed";
+  verificationReason?: string | null;
 }
 
 export interface CanonicalPollOption {

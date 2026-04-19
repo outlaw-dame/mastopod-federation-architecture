@@ -44,6 +44,10 @@ import {
   createOutboxIntentWorker,
   OutboxIntentWorker,
 } from "./delivery/outbox-intent-worker.js";
+import {
+  createOriginReconciliationWorker,
+  OriginReconciliationWorker,
+} from "./delivery/origin-reconciliation-worker.js";
 import { logger } from "./utils/logger.js";
 import { registerAtXrpcRoutes, attachSubscribeReposWebSocket } from "./at-adapter/xrpc/AtXrpcFastifyBridge.js";
 import { registerOAuthRoutes } from "./at-adapter/oauth/OAuthFastifyBridge.js";
@@ -179,6 +183,7 @@ import { registerFollowersSyncRoutes } from "./federation/fep8fcf/FollowersSyncF
 import { registerBlockedCollectionRoutes } from "./federation/fep-c648/BlockedCollectionFastifyBridge.js";
 import { registerHashtagRoutes } from "./federation/HashtagFastifyBridge.js";
 import { RepliesBackfillService } from "./federation/replies-backfill/RepliesBackfillService.js";
+import { OriginReconciliationService } from "./federation/origin-reconciliation/OriginReconciliationService.js";
 import { SidecarLocalSigningService } from "./signing/SidecarLocalSigningService.js";
 import {
   evaluateOutboundWebhookBackpressure,
@@ -213,6 +218,7 @@ import { DurableStreamSubscriptionService, buildCapabilityLookup } from "./feed/
 import { FeedStreamKafkaConsumer } from "./feed/FeedStreamKafkaConsumer.js";
 import { UnifiedFeedBridge } from "./feed/UnifiedFeedBridge.js";
 import type { DurableStreamCapability } from "./feed/DurableStreamContracts.js";
+import { Fep3ab2Runtime } from "./fep3ab2/Fep3ab2Runtime.js";
 import {
   buildProviderCapabilities,
   inferProviderProfile,
@@ -299,6 +305,9 @@ const config = {
   enableOutboundWorker: process.env["ENABLE_OUTBOUND_WORKER"] !== "false",
   enableInboundWorker: process.env["ENABLE_INBOUND_WORKER"] !== "false",
   enableOutboxIntentWorker: process.env["ENABLE_OUTBOX_INTENT_WORKER"] !== "false",
+  enableOriginReconciliation:
+    process.env["ENABLE_ORIGIN_RECONCILIATION"] !== "false" &&
+    process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
   enableOpenSearchIndexer: process.env["ENABLE_OPENSEARCH_INDEXER"] !== "false",
   searchBackend:
     process.env["SEARCH_BACKEND"] === "opensearch" ||
@@ -583,6 +592,7 @@ let queue: RedisStreamsQueue | null = null;
 let outboundWorker: OutboundWorker | null = null;
 let inboundWorker: InboundWorker | null = null;
 let outboxIntentWorker: OutboxIntentWorker | null = null;
+let originReconciliationWorker: OriginReconciliationWorker | null = null;
 let opensearchIndexer: SearchIndexerService | null = null;
 let atRedisClient: Redis | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
@@ -602,6 +612,7 @@ let atJetstreamService: AtJetstreamService | null = null;
 let streamSubscriptionService: DurableStreamSubscriptionService | null = null;
 let feedStreamKafkaConsumer: FeedStreamKafkaConsumer | null = null;
 let unifiedFeedBridge: UnifiedFeedBridge | null = null;
+let fep3ab2Runtime: Fep3ab2Runtime | null = null;
 let isShuttingDown = false;
 const startupState: StartupState = {
   mode: config.startupMode,
@@ -878,8 +889,30 @@ async function main() {
             userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
           })
         : undefined;
+    const originReconciliationService: OriginReconciliationService | undefined =
+      config.enableOriginReconciliation
+        ? new OriginReconciliationService({
+            queue,
+            domain: config.domain,
+            initialDelayMs: Number.parseInt(
+              process.env["ORIGIN_RECONCILIATION_INITIAL_DELAY_MS"] || "30000",
+              10,
+            ),
+            activationWindowMs: Number.parseInt(
+              process.env["ORIGIN_RECONCILIATION_WINDOW_MS"] || `${30 * 60 * 1000}`,
+              10,
+            ),
+            maxAttempts: Number.parseInt(
+              process.env["ORIGIN_RECONCILIATION_MAX_ATTEMPTS"] || "5",
+              10,
+            ),
+          })
+        : undefined;
     if (repliesBackfillService) {
       logger.info("Mastodon-compatible replies backfill service enabled");
+    }
+    if (originReconciliationService) {
+      logger.info("Origin reconciliation service enabled");
     }
 
     // Initialize RedPanda producer only when worker/indexer features need it.
@@ -1077,6 +1110,21 @@ async function main() {
       });
     }
 
+    if (config.enableOriginReconciliation) {
+      originReconciliationWorker = createOriginReconciliationWorker(queue, signingClient, {
+        signerActorUri: config.apRelayLocalActorUri || `https://${config.domain}/users/relay`,
+      });
+      startupTasks.push({
+        name: "start origin reconciliation worker",
+        start: async () => {
+          originReconciliationWorker!.start().catch((err) => {
+            logger.error("Origin reconciliation worker error", { error: err.message });
+          });
+          logger.info("Origin reconciliation worker started");
+        },
+      });
+    }
+
     // Initialize inbound worker
     if (config.enableInboundWorker) {
       const sidecarActorPaths = new Set<string>();
@@ -1094,6 +1142,7 @@ async function main() {
           domain: config.domain,
         } : {}),
         ...(repliesBackfillService ? { repliesBackfillService } : {}),
+        ...(originReconciliationService ? { originReconciliationService } : {}),
       });
       startupTasks.push({
         name: "start inbound worker",
@@ -1229,16 +1278,20 @@ async function main() {
         outboundPending,
         inboundPending,
         outboxIntentPending,
+        originReconcilePending,
         dlqInboundLen,
         dlqOutboundLen,
         dlqOutboxIntentLen,
+        dlqOriginReconcileLen,
       ] = await Promise.all([
         queue.getPendingCount("outbound"),
         queue.getPendingCount("inbound"),
         queue.getPendingCount("outbox_intent"),
+        queue.getPendingCount("origin_reconcile"),
         queue.getDlqLength("inbound"),
         queue.getDlqLength("outbound"),
         queue.getDlqLength("outbox_intent"),
+        queue.getDlqLength("origin_reconcile"),
       ]);
 
       return {
@@ -1248,16 +1301,19 @@ async function main() {
           outbound: { pending: outboundPending },
           inbound: { pending: inboundPending },
           outboxIntent: { pending: outboxIntentPending },
+          originReconcile: { pending: originReconcilePending },
           dlq: {
             inbound: dlqInboundLen,
             outbound: dlqOutboundLen,
             outboxIntent: dlqOutboxIntentLen,
+            originReconcile: dlqOriginReconcileLen,
           },
         },
         workers: {
           outbound: config.enableOutboundWorker,
           inbound: config.enableInboundWorker,
           outboxIntent: config.enableOutboxIntentWorker,
+          originReconcile: config.enableOriginReconciliation,
           opensearch: config.enableOpenSearchIndexer,
         },
       };
@@ -1273,26 +1329,32 @@ async function main() {
         outboundPending,
         inboundPending,
         outboxIntentPending,
+        originReconcilePending,
         outboundLength,
         inboundLength,
         outboxIntentLength,
+        originReconcileLength,
       ] = await Promise.all([
         queue.getPendingCount("outbound"),
         queue.getPendingCount("inbound"),
         queue.getPendingCount("outbox_intent"),
+        queue.getPendingCount("origin_reconcile"),
         queue.getStreamLength("outbound"),
         queue.getStreamLength("inbound"),
         queue.getStreamLength("outbox_intent"),
+        queue.getStreamLength("origin_reconcile"),
       ]);
-      const [dlqInboundLength, dlqOutboundLength, dlqOutboxIntentLength] = await Promise.all([
+      const [dlqInboundLength, dlqOutboundLength, dlqOutboxIntentLength, dlqOriginReconcileLength] = await Promise.all([
         queue.getDlqLength("inbound"),
         queue.getDlqLength("outbound"),
         queue.getDlqLength("outbox_intent"),
+        queue.getDlqLength("origin_reconcile"),
       ]);
 
       promMetrics.queueDepth.set({ topic: "outbound" }, outboundLength);
       promMetrics.queueDepth.set({ topic: "inbound" }, inboundLength);
       promMetrics.queueDepth.set({ topic: "outbox_intent" }, outboxIntentLength);
+      promMetrics.queueDepth.set({ topic: "origin_reconcile" }, originReconcileLength);
       const prometheusMetrics = (await renderPrometheusMetrics()).trimEnd();
 
       return [
@@ -1306,6 +1368,9 @@ async function main() {
         `# HELP fedify_outbox_intent_pending Number of pending outbox intents`,
         `# TYPE fedify_outbox_intent_pending gauge`,
         `fedify_outbox_intent_pending ${outboxIntentPending}`,
+        `# HELP fedify_origin_reconcile_pending Number of pending origin reconciliation jobs`,
+        `# TYPE fedify_origin_reconcile_pending gauge`,
+        `fedify_origin_reconcile_pending ${originReconcilePending}`,
         `# HELP fedify_outbound_stream_length Total outbound stream length`,
         `# TYPE fedify_outbound_stream_length gauge`,
         `fedify_outbound_stream_length ${outboundLength}`,
@@ -1315,6 +1380,9 @@ async function main() {
         `# HELP fedify_outbox_intent_stream_length Total outbox intent stream length`,
         `# TYPE fedify_outbox_intent_stream_length gauge`,
         `fedify_outbox_intent_stream_length ${outboxIntentLength}`,
+        `# HELP fedify_origin_reconcile_stream_length Total origin reconciliation stream length`,
+        `# TYPE fedify_origin_reconcile_stream_length gauge`,
+        `fedify_origin_reconcile_stream_length ${originReconcileLength}`,
         `# HELP fedify_dlq_inbound_length Inbound DLQ entries (signature failures, validation errors)`,
         `# TYPE fedify_dlq_inbound_length gauge`,
         `fedify_dlq_inbound_length ${dlqInboundLength}`,
@@ -1324,6 +1392,9 @@ async function main() {
         `# HELP fedify_dlq_outbox_intent_length Outbox-intent DLQ entries`,
         `# TYPE fedify_dlq_outbox_intent_length gauge`,
         `fedify_dlq_outbox_intent_length ${dlqOutboxIntentLength}`,
+        `# HELP fedify_dlq_origin_reconcile_length Origin reconciliation DLQ entries`,
+        `# TYPE fedify_dlq_origin_reconcile_length gauge`,
+        `fedify_dlq_origin_reconcile_length ${dlqOriginReconcileLength}`,
         `# HELP fedify_uptime_seconds Uptime in seconds`,
         `# TYPE fedify_uptime_seconds gauge`,
         `fedify_uptime_seconds ${Math.floor(process.uptime())}`,
@@ -1561,6 +1632,53 @@ async function main() {
       capabilityGate,
       checkStreamEntitlement,
     });
+
+    const enableFep3ab2Streaming = (process.env["ENABLE_FEP_3AB2_STREAMING"] ?? "true") !== "false";
+    if (enableFep3ab2Streaming) {
+      const activityPodsBaseUrl = process.env["ACTIVITYPODS_URL"] || "";
+      const activityPodsToken = process.env["ACTIVITYPODS_TOKEN"] || "";
+      const ticketSecret = process.env["FEP_3AB2_TICKET_SECRET"] || config.sidecarToken;
+      if (activityPodsBaseUrl && activityPodsToken && ticketSecret) {
+        const allowedOrigins = String(process.env["FEP_3AB2_ALLOWED_ORIGINS"] || "")
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        const sameSiteRaw = String(process.env["FEP_3AB2_COOKIE_SAMESITE"] || "Lax").trim();
+        const cookieSameSite = sameSiteRaw === "Strict" || sameSiteRaw === "None" ? sameSiteRaw : "Lax";
+        fep3ab2Runtime = new Fep3ab2Runtime({
+          app,
+          streamSubscriptionService,
+          redisUrl: process.env["REDIS_URL"] ?? "redis://localhost:6379",
+          activityPodsBaseUrl,
+          activityPodsToken,
+          ticketSecret,
+          publicBaseUrl: process.env["FEP_3AB2_PUBLIC_BASE_URL"],
+          allowedOrigins,
+          ticketTtlSec: Number.parseInt(process.env["FEP_3AB2_TICKET_TTL_SEC"] || "900", 10),
+          heartbeatIntervalMs: Number.parseInt(process.env["FEP_3AB2_HEARTBEAT_INTERVAL_MS"] || "20000", 10),
+          cookieName: process.env["FEP_3AB2_COOKIE_NAME"] || "ap_stream_ticket",
+          cookiePath: process.env["FEP_3AB2_COOKIE_PATH"] || "/streaming",
+          cookieSameSite,
+          cookieSecure: process.env["FEP_3AB2_COOKIE_SECURE"] === "false" ? false : undefined,
+          cookieDomain: process.env["FEP_3AB2_COOKIE_DOMAIN"] || undefined,
+          prefix: process.env["FEP_3AB2_REDIS_PREFIX"] || "fep3ab2",
+          privateRealtimeChannel:
+            process.env["FEP_3AB2_PRIVATE_REALTIME_CHANNEL"] || "fep3ab2:private-events",
+          replayTtlSec: Number.parseInt(process.env["FEP_3AB2_REPLAY_TTL_SEC"] || "900", 10),
+          replayMaxEvents: Number.parseInt(process.env["FEP_3AB2_REPLAY_MAX_EVENTS"] || "500", 10),
+          replayMaxIndexSize: Number.parseInt(process.env["FEP_3AB2_REPLAY_MAX_INDEX_SIZE"] || "10000", 10),
+          maxPendingReplayPublishes:
+            Number.parseInt(process.env["FEP_3AB2_MAX_PENDING_REPLAY_PUBLISHES"] || "2048", 10),
+          maxStreamBufferBytes:
+            Number.parseInt(process.env["FEP_3AB2_MAX_STREAM_BUFFER_BYTES"] || "1048576", 10),
+        });
+        await fep3ab2Runtime.start();
+      } else {
+        logger.warn(
+          "FEP-3ab2 streaming routes were not started because ACTIVITYPODS_URL or ACTIVITYPODS_TOKEN is missing",
+        );
+      }
+    }
 
     if (config.enableMrfAdminApi) {
       const registration = await registerMrfAdminIntegration({
@@ -2976,6 +3094,11 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("Unified feed bridge stopped");
     }
 
+    if (fep3ab2Runtime) {
+      await fep3ab2Runtime.shutdown();
+      logger.info("FEP-3ab2 runtime stopped");
+    }
+
     if (atJetstreamService) {
       atJetstreamService.shutdown();
       logger.info("AT Jetstream service stopped");
@@ -2985,6 +3108,11 @@ async function shutdown(signal: string): Promise<void> {
     if (outboxIntentWorker) {
       await outboxIntentWorker.stop();
       logger.info("Outbox intent worker stopped");
+    }
+
+    if (originReconciliationWorker) {
+      await originReconciliationWorker.stop();
+      logger.info("Origin reconciliation worker stopped");
     }
 
     if (outboundWorker) {

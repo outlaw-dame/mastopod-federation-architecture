@@ -177,8 +177,8 @@ function dedupeAttachmentCards(cards: readonly Record<string, unknown>[]): Recor
 function buildCardKey(card: Record<string, unknown>): string {
   const type = typeof card["type"] === "string" ? card["type"] : "";
   const mediaType = typeof card["mediaType"] === "string" ? card["mediaType"] : "";
-  const url = typeof card["url"] === "string" ? card["url"] : "";
-  return `${type}|${mediaType}|${url}`;
+  const linkTarget = normalizeLinkPreviewTarget(card);
+  return `${type}|${mediaType}|${linkTarget ?? ""}`;
 }
 
 function isMatchingNoteLinkPreviewCard(
@@ -189,7 +189,8 @@ function isMatchingNoteLinkPreviewCard(
     return false;
   }
 
-  if (value["type"] !== "Document") {
+  const type = typeof value["type"] === "string" ? value["type"] : "";
+  if (type !== "Link" && type !== "Document") {
     return false;
   }
 
@@ -198,12 +199,22 @@ function isMatchingNoteLinkPreviewCard(
     return false;
   }
 
-  const url = normalizeHttpUrl(typeof value["url"] === "string" ? value["url"] : null);
-  if (!url || !previewUrls.has(url)) {
+  const target = normalizeLinkPreviewTarget(value);
+  if (!target || !previewUrls.has(target)) {
     return false;
   }
 
   return typeof value["name"] === "string" && value["name"].trim().length > 0;
+}
+
+function normalizeLinkPreviewTarget(value: Record<string, unknown>): string | null {
+  return normalizeHttpUrl(
+    typeof value["href"] === "string"
+      ? value["href"]
+      : typeof value["url"] === "string"
+      ? value["url"]
+      : null,
+  );
 }
 
 function domainMatchesAny(domain: string, rules: readonly string[]): boolean {

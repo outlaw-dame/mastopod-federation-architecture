@@ -198,7 +198,8 @@ describe("AP-side note parity", () => {
       expect(obj).toEqual(
         expect.objectContaining({
           inReplyTo: "https://bsky.app/profile/did:plc:alice/post/3kroot",
-          context:   "https://bsky.app/profile/did:plc:alice/post/3kroot",
+          context: "https://bsky.app/profile/did:plc:alice/post/3kroot/context",
+          contextHistory: "https://bsky.app/profile/did:plc:alice/post/3kroot/context/history",
         }),
       );
     });
@@ -264,12 +265,13 @@ describe("AP-side note parity", () => {
       expect(obj).toEqual(
         expect.objectContaining({
           inReplyTo: "https://bsky.app/profile/did:plc:bob/post/3kmid2",
-          context:   "https://bsky.app/profile/did:plc:alice/post/3kroot2",
+          context: "https://bsky.app/profile/did:plc:alice/post/3kroot2/context",
+          contextHistory: "https://bsky.app/profile/did:plc:alice/post/3kroot2/context/history",
         }),
       );
     });
 
-    it("omits context for a root (non-reply) AT post", async () => {
+    it("projects root (non-reply) AT post with collection-backed context and contextHistory", async () => {
       const aliasStore = new InMemoryAtAliasStore();
       const { translationContext, projectionContext } = createProtocolBridgeContexts(
         createIdentityRepo() as any,
@@ -300,6 +302,11 @@ describe("AP-side note parity", () => {
       if (projected.kind !== "success") return;
 
       const obj = projected.commands[0]?.activity?.["object"] as Record<string, unknown>;
-      expect(obj).not.toHaveProperty("context");
+      expect(obj).toEqual(
+        expect.objectContaining({
+          context: "https://bsky.app/profile/did:plc:alice/post/3kstandalone/context",
+          contextHistory: "https://bsky.app/profile/did:plc:alice/post/3kstandalone/context/history",
+        }),
+      );
     });
   });

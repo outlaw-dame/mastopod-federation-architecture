@@ -42,9 +42,9 @@ What is included here:
   - ActivityPub `Note` translation now promotes the first explicit link facet into canonical link preview metadata
   - mirrored note posts on the AT side now carry the same external-card thumbnail blob treatment as mirrored articles
   - ActivityPub note projection now supports policy-driven output for link previews:
-    - `attachment_only` (default, Mastodon-safe): emit a standards-aligned `Document` card on `attachment`
-    - `attachment_and_preview` (richer AP mode): emit the same card on both `attachment` and `preview`
-    - `disabled`: omit AP-side note preview cards entirely
+    - `attachment_only` (default, Mastodon-safe): emit a FEP-8967 `Link` attachment with `href`, preserving Mastodon 4.5 attached-link detection while avoiding root-level preview mirroring
+    - `attachment_and_preview` (richer AP mode): emit the same FEP-8967 `Link` on both `attachment` and `preview`
+    - `disabled`: omit AP-side note link-preview signals entirely
   - runtime policy is controlled by `PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_MODE`
   - outbound delivery can now tailor note preview shape per target domain by carrying explicit internal preview URL hints and applying them at the final publish/enqueue step:
     - `PROTOCOL_BRIDGE_AP_NOTE_LINK_PREVIEW_RICH_DOMAINS`: domains that should receive `attachment_and_preview`

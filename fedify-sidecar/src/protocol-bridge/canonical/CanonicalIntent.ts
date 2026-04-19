@@ -69,6 +69,14 @@ export interface CanonicalPostCreateIntent extends CanonicalIntentBase {
   replyRoot?: CanonicalObjectRef | null;
   quoteOf?: CanonicalObjectRef | null;
   /**
+   * FEP-7888 §"Keeping relevant entities in the loop": `attributedTo` of the
+   * foreign context collection, extracted from an inbound AP object whose
+   * `context` field was an inline Collection carrying an `attributedTo` actor.
+   * When set and the actor is a different origin than the publisher, they are
+   * added to the activity's CC so the context owner stays in the loop.
+   */
+  contextAttributedTo?: string | null;
+  /**
    * Cross-protocol interaction policy.  Absent/null means "use defaults"
    * (everyone can reply, everyone can quote).  Set only when the originating
    * platform advertises a non-default policy.
@@ -84,6 +92,11 @@ export interface CanonicalPostEditIntent extends CanonicalIntentBase {
   /** FEP-7888 / FEP-11dd: root of the reply thread, used as the AP `context` property. */
   replyRoot?: CanonicalObjectRef | null;
   quoteOf?: CanonicalObjectRef | null;
+  /**
+   * FEP-7888 §"Keeping relevant entities in the loop": `attributedTo` of the
+   * foreign context collection.  See `CanonicalPostCreateIntent.contextAttributedTo`.
+   */
+  contextAttributedTo?: string | null;
   /**
    * Cross-protocol interaction policy.  Absent/null means "use defaults"
    * (everyone can reply, everyone can quote).  Set only when the originating

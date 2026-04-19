@@ -34,6 +34,7 @@ import type { SigningClient } from "../signing/signing-client.js";
 import type { FollowersSyncService } from "../federation/fep8fcf/FollowersSyncService.js";
 import { COLLECTION_SYNC_HEADER } from "../federation/fep8fcf/CollectionSyncHeader.js";
 import type { RepliesBackfillService } from "../federation/replies-backfill/RepliesBackfillService.js";
+import type { OriginReconciliationService } from "../federation/origin-reconciliation/OriginReconciliationService.js";
 import {
   resolvePublicSearchConsent,
   isPublicSearchIndexable,
@@ -122,6 +123,12 @@ export interface InboundWorkerConfig {
    * Failures are always swallowed — backfill is best-effort.
    */
   repliesBackfillService?: RepliesBackfillService;
+  /**
+   * Optional bounded origin reconciliation scheduler.
+   * When present, public conversation-shaped remote notes open a short-lived
+   * reconciliation window so the origin can correct later mutations.
+   */
+  originReconciliationService?: OriginReconciliationService;
 }
 
 export interface VerificationResult {
@@ -788,8 +795,20 @@ export class InboundWorker {
       if (this.config.repliesBackfillService && isPublic) {
         const noteObject = extractNoteObject(activity);
         if (noteObject) {
-          this.config.repliesBackfillService.triggerFromNote(noteObject).catch((err: Error) => {
+          this.config.repliesBackfillService.triggerFromActivity(activity).catch((err: Error) => {
             logger.warn("[replies-backfill] trigger error (swallowed)", {
+              envelopeId: envelope.envelopeId,
+              error: err.message,
+            });
+          });
+        }
+      }
+
+      if (this.config.originReconciliationService && isPublic) {
+        const noteObject = extractNoteObject(activity);
+        if (noteObject) {
+          this.config.originReconciliationService.scheduleFromActivity(activity).catch((err: Error) => {
+            logger.warn("[origin-reconcile] schedule error (swallowed)", {
               envelopeId: envelope.envelopeId,
               error: err.message,
             });

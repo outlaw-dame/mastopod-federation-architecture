@@ -1,5 +1,10 @@
 import { z } from "zod";
-import type { CanonicalAttachment, CanonicalFacet, CanonicalContentKind } from "../../canonical/CanonicalContent.js";
+import type {
+  CanonicalAttachment,
+  CanonicalContentKind,
+  CanonicalFacet,
+  CanonicalLinkPreview,
+} from "../../canonical/CanonicalContent.js";
 import type {
   CanonicalInteractionPolicy,
   CanonicalPostCreateIntent,
@@ -264,6 +269,14 @@ async function buildCanonicalPostIntent(
     canonicalUrl: objectUrl,
   });
   const inReplyTo = await resolveOptionalObjectRef(activity.object["inReplyTo"], ctx);
+  // FEP-7888 / FEP-2931: derive the thread root from the AP `context` property.
+  // The context collection URI typically follows the pattern `{rootId}/context`;
+  // stripping that suffix gives us the canonical root object ID.
+  const replyRoot = await resolveApContextAsReplyRoot(activity.object["context"], inReplyTo, ctx);
+  // FEP-7888 §"Keeping relevant entities in the loop": if the context was an
+  // inline Collection object carrying an `attributedTo`, capture it so the
+  // projector can CC the context owner on outbound activities.
+  const contextAttributedTo = extractContextAttributedTo(activity.object["context"]);
   const quoteOf = await resolveOptionalQuoteRef(activity.object, ctx);
   const interactionPolicy = parseApInteractionPolicy(activity.object, actorId);
   const tagFacets = await buildTagFacets(plaintext, activity.object["tag"], ctx);
@@ -276,7 +289,12 @@ async function buildCanonicalPostIntent(
   const visibility = deriveAudience(activity.object["to"], activity.object["cc"]);
   const provenance = toProvenance(activity.bridge, activity.id, sourceAccountRef.canonicalAccountId ?? null);
   const mergedFacets = mergeFacets(tagFacets, inlineFacets);
-  const linkPreview = await resolvePrimaryLinkPreview(contentKind, objectUrl, mergedFacets);
+  const linkPreview = await resolvePrimaryLinkPreview(
+    contentKind,
+    objectUrl,
+    mergedFacets,
+    activity.object["attachment"],
+  );
 
   const draft: Omit<CanonicalPostCreateIntent, "canonicalIntentId"> = {
     kind: "PostCreate",
@@ -292,6 +310,8 @@ async function buildCanonicalPostIntent(
       : [],
     object: objectRef,
     inReplyTo,
+    replyRoot,
+    ...(contextAttributedTo ? { contextAttributedTo } : {}),
     quoteOf,
     interactionPolicy,
     content: {
@@ -341,6 +361,9 @@ async function buildCanonicalPostEditIntent(
     canonicalUrl: objectUrl,
   });
   const inReplyTo = await resolveOptionalObjectRef(activity.object["inReplyTo"], ctx);
+  // FEP-7888 / FEP-2931: derive thread root from the AP `context` property.
+  const replyRoot = await resolveApContextAsReplyRoot(activity.object["context"], inReplyTo, ctx);
+  const contextAttributedTo = extractContextAttributedTo(activity.object["context"]);
   const quoteOf = await resolveOptionalQuoteRef(activity.object, ctx);
   const interactionPolicy = parseApInteractionPolicy(activity.object, actorId);
   const tagFacets = await buildTagFacets(plaintext, activity.object["tag"], ctx);
@@ -353,7 +376,12 @@ async function buildCanonicalPostEditIntent(
   const visibility = deriveAudience(activity.object["to"], activity.object["cc"]);
   const provenance = toProvenance(activity.bridge, activity.id, sourceAccountRef.canonicalAccountId ?? null);
   const mergedFacets = mergeFacets(tagFacets, inlineFacets);
-  const linkPreview = await resolvePrimaryLinkPreview(contentKind, objectUrl, mergedFacets);
+  const linkPreview = await resolvePrimaryLinkPreview(
+    contentKind,
+    objectUrl,
+    mergedFacets,
+    activity.object["attachment"],
+  );
 
   const draft: Omit<CanonicalPostEditIntent, "canonicalIntentId"> = {
     kind: "PostEdit",
@@ -369,6 +397,8 @@ async function buildCanonicalPostEditIntent(
       : [],
     object: objectRef,
     inReplyTo,
+    replyRoot,
+    ...(contextAttributedTo ? { contextAttributedTo } : {}),
     quoteOf,
     interactionPolicy,
     content: {
@@ -411,8 +441,14 @@ async function resolvePrimaryLinkPreview(
   contentKind: CanonicalContentKind,
   objectUrl: string | null | undefined,
   facets: readonly CanonicalFacet[],
+  rawAttachments: unknown,
 ) {
-  const previewUrl = resolvePrimaryLinkPreviewUrl(contentKind, objectUrl, facets);
+  const attachedLinkPreview = extractPrimaryAttachedLinkPreview(rawAttachments);
+  if (attachedLinkPreview?.preview) {
+    return attachedLinkPreview.preview;
+  }
+
+  const previewUrl = resolvePrimaryLinkPreviewUrl(contentKind, objectUrl, facets, rawAttachments);
   if (!previewUrl) {
     return null;
   }
@@ -427,6 +463,9 @@ async function resolvePrimaryLinkPreview(
     title: ogData.title,
     description: ogData.description ?? null,
     thumbUrl: ogData.thumbUrl ?? null,
+    ...(ogData.authorName ? { authorName: ogData.authorName } : {}),
+    ...(ogData.authorUrl ? { authorUrl: ogData.authorUrl } : {}),
+    ...(ogData.authors && ogData.authors.length > 0 ? { authors: ogData.authors } : {}),
   };
 }
 
@@ -434,6 +473,7 @@ function resolvePrimaryLinkPreviewUrl(
   contentKind: CanonicalContentKind,
   objectUrl: string | null | undefined,
   facets: readonly CanonicalFacet[],
+  rawAttachments: unknown,
 ): string | null {
   if (contentKind === "article") {
     return objectUrl ?? null;
@@ -442,8 +482,155 @@ function resolvePrimaryLinkPreviewUrl(
     return null;
   }
 
+  const attachedLinkPreview = extractPrimaryAttachedLinkPreview(rawAttachments);
+  if (attachedLinkPreview?.href) {
+    return attachedLinkPreview.href;
+  }
+
   const firstLinkFacet = facets.find((facet) => facet.type === "link");
   return firstLinkFacet?.url ?? null;
+}
+
+function extractPrimaryAttachedLinkPreview(rawAttachments: unknown): CanonicalLinkPreviewAttachment | null {
+  const attachments = Array.isArray(rawAttachments) ? rawAttachments : rawAttachments ? [rawAttachments] : [];
+  for (const attachment of attachments) {
+    const candidate = toCanonicalLinkPreviewAttachment(attachment);
+    if (candidate) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+interface CanonicalLinkPreviewAttachment {
+  href: string;
+  preview: CanonicalLinkPreview | null;
+}
+
+function toCanonicalLinkPreviewAttachment(rawAttachment: unknown): CanonicalLinkPreviewAttachment | null {
+  if (!rawAttachment || typeof rawAttachment !== "object" || Array.isArray(rawAttachment)) {
+    return null;
+  }
+
+  const attachment = rawAttachment as Record<string, unknown>;
+  const type = asString(attachment["type"]);
+  const mediaType = asString(attachment["mediaType"])?.trim().toLowerCase() ?? "";
+  const href = sanitizeAttachmentUrl(
+    extractFirstUrl(
+      typeof attachment["href"] === "string" || typeof attachment["url"] === "string"
+        ? attachment["href"] ?? attachment["url"]
+        : attachment,
+    ),
+  );
+
+  if (!href) {
+    return null;
+  }
+
+  if (type === "Image" || type === "Video" || type === "Audio") {
+    return null;
+  }
+  if (mediaType.startsWith("image/") || mediaType.startsWith("video/") || mediaType.startsWith("audio/")) {
+    return null;
+  }
+
+  const isExplicitLink = type === "Link" || (!type && typeof attachment["href"] === "string");
+  const isLegacyHtmlDocument = type === "Document" && (!mediaType || mediaType === "text/html");
+  if (!isExplicitLink && !isLegacyHtmlDocument) {
+    return null;
+  }
+
+  return {
+    href,
+    preview: extractCanonicalLinkPreviewFromAttachment(attachment, href),
+  };
+}
+
+function extractCanonicalLinkPreviewFromAttachment(
+  attachment: Record<string, unknown>,
+  href: string,
+): CanonicalLinkPreview | null {
+  const preview = asObject(attachment["preview"]);
+  const previewTitle = normalizePreviewText(asString(preview?.["name"]));
+  const previewSummary = normalizePreviewText(asString(preview?.["summary"]));
+  const previewImageUrl = sanitizeAttachmentUrl(
+    extractFirstUrl(preview?.["image"] && typeof preview["image"] === "object"
+      ? (preview["image"] as Record<string, unknown>)["url"] ?? preview["image"]
+      : preview?.["image"]),
+  );
+  const previewAttribution = extractPreviewAttribution(preview?.["attributedTo"]);
+  if (previewTitle) {
+    return {
+      uri: href,
+      title: previewTitle,
+      ...(previewSummary ? { description: previewSummary } : {}),
+      ...(previewImageUrl ? { thumbUrl: previewImageUrl } : {}),
+      ...previewAttribution,
+    };
+  }
+
+  const attachmentTitle = normalizePreviewText(asString(attachment["name"]));
+  const attachmentSummary = normalizePreviewText(asString(attachment["summary"]));
+  const attachmentIconUrl = sanitizeAttachmentUrl(
+    extractFirstUrl(attachment["icon"] && typeof attachment["icon"] === "object"
+      ? (attachment["icon"] as Record<string, unknown>)["url"] ?? attachment["icon"]
+      : attachment["icon"]),
+  );
+  const legacyAttribution = extractLegacyAttachmentAttribution(attachment);
+  if (!attachmentTitle) {
+    return null;
+  }
+
+  return {
+    uri: href,
+    title: attachmentTitle,
+    ...(attachmentSummary ? { description: attachmentSummary } : {}),
+    ...(attachmentIconUrl ? { thumbUrl: attachmentIconUrl } : {}),
+    ...legacyAttribution,
+  };
+}
+
+function extractPreviewAttribution(
+  value: unknown,
+): Partial<Pick<CanonicalLinkPreview, "authorName" | "authorUrl">> {
+  const attribution = Array.isArray(value)
+    ? value.map((entry) => asObject(entry)).find((entry) => entry !== null) ?? null
+    : asObject(value);
+  if (!attribution) {
+    return {};
+  }
+
+  const authorName = normalizePreviewText(asString(attribution["name"]));
+  const authorUrl = sanitizeAttachmentUrl(extractFirstUrl(attribution["url"]));
+  return {
+    ...(authorName ? { authorName } : {}),
+    ...(authorUrl ? { authorUrl } : {}),
+  };
+}
+
+function extractLegacyAttachmentAttribution(
+  attachment: Record<string, unknown>,
+): Partial<Pick<CanonicalLinkPreview, "authorName" | "authorUrl">> {
+  const legacyAuthors = Array.isArray(attachment["authors"])
+    ? attachment["authors"].map((entry) => asObject(entry)).find((entry) => entry !== null) ?? null
+    : null;
+  const legacyAuthorName = normalizePreviewText(asString(legacyAuthors?.["name"]));
+  const legacyAuthorUrl = sanitizeAttachmentUrl(extractFirstUrl(legacyAuthors?.["url"]));
+  const authorName = normalizePreviewText(asString(attachment["authorName"]));
+  const authorUrl = sanitizeAttachmentUrl(asString(attachment["authorUrl"]));
+  return {
+    ...(authorName ?? legacyAuthorName ? { authorName: authorName ?? legacyAuthorName } : {}),
+    ...(authorUrl ?? legacyAuthorUrl ? { authorUrl: authorUrl ?? legacyAuthorUrl } : {}),
+  };
+}
+
+function normalizePreviewText(value: string | null | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized.slice(0, 1000) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +901,7 @@ export function buildAttachments(rawAttachments: unknown, objectId: string): Can
   const attachments = Array.isArray(rawAttachments) ? rawAttachments : rawAttachments ? [rawAttachments] : [];
 
   return attachments
+    .filter((attachment) => !toCanonicalLinkPreviewAttachment(attachment))
     .map((attachment, index) => toAttachment(attachment, `${objectId}:attachment:${index}`))
     .filter((attachment): attachment is CanonicalAttachment => attachment !== null);
 }
@@ -737,7 +925,9 @@ function toAttachment(rawAttachment: unknown, fallbackId: string): CanonicalAtta
   }
 
   const attachment = rawAttachment as Record<string, unknown>;
-  const { primaryUrl, cid: urlCid } = extractHttpUrlAndCid(attachment["url"]);
+  const { primaryUrl, cid: urlCid } = extractHttpUrlAndCid(
+    attachment["url"] ?? attachment["href"] ?? null,
+  );
   const url = sanitizeAttachmentUrl(primaryUrl);
   const id = asString(attachment["id"]) ?? url ?? fallbackId;
   const mediaType = asString(attachment["mediaType"]) ?? inferMediaType(asString(attachment["type"]));
@@ -971,6 +1161,131 @@ export function asObject(value: unknown): Record<string, unknown> | null {
 function findRange(text: string, value: string): [number, number] {
   const index = text.indexOf(value);
   return index >= 0 ? [index, index + value.length] : [-1, -1];
+}
+
+// ---------------------------------------------------------------------------
+// FEP-2931 / FEP-7888: AP `context` property helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the canonical thread-root object ref from an AP `context` property.
+ *
+ * Per FEP-2931, when a `context` property dereferences to a Collection or
+ * OrderedCollection, the canonical context collection id IS that object's id.
+ * Our convention (FEP-f228) is that the collection URI is `{rootId}/context`.
+ * Stripping that suffix gives us the root object id, which we resolve as
+ * `replyRoot` in the canonical intent.
+ *
+ * If the context URI does not follow that suffix convention (e.g. a foreign
+ * server uses a completely different scheme), we return null and rely on the
+ * caller's other heuristics (`inReplyTo` chain, etc.).
+ *
+ * When the inbound `context` resolves to the same object as `inReplyTo`
+ * (direct reply to root), we reuse the already-resolved ref to avoid a
+ * redundant lookup.
+ */
+async function resolveApContextAsReplyRoot(
+  contextValue: unknown,
+  inReplyTo: import("../../canonical/CanonicalObjectRef.js").CanonicalObjectRef | null | undefined,
+  ctx: TranslationContext,
+): Promise<import("../../canonical/CanonicalObjectRef.js").CanonicalObjectRef | null> {
+  const contextUri = extractApContextUri(contextValue);
+  if (!contextUri) return null;
+
+  const rootId = deriveRootFromContextCollectionUri(contextUri);
+  if (!rootId) return null;
+
+  // Reuse already-resolved ref when root === parent (direct reply to root).
+  if (inReplyTo) {
+    const parentId = inReplyTo.activityPubObjectId ?? inReplyTo.canonicalObjectId;
+    if (parentId === rootId) return inReplyTo;
+  }
+
+  return ctx.resolveObjectRef({
+    canonicalObjectId: rootId,
+    activityPubObjectId: rootId,
+    canonicalUrl: rootId,
+  });
+}
+
+/**
+ * Extract a URL string from an AP `context` field.
+ *
+ * Accepts:
+ *   - A plain HTTP(S) URI string
+ *   - An inline Collection/Object carrying an `id` field (FEP-2931 §"Example")
+ *
+ * Returns null for non-HTTP values, arrays, or missing ids.
+ */
+function extractApContextUri(value: unknown): string | null {
+  if (typeof value === "string") {
+    return isHttpsOrHttpUrl(value) ? value : null;
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const id = (value as Record<string, unknown>)["id"];
+    if (typeof id === "string" && isHttpsOrHttpUrl(id)) {
+      return id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Derive the root object id from a context collection URI that follows the
+ * FEP-f228 `{rootId}/context` pattern.  Returns null for non-conforming URIs.
+ */
+function deriveRootFromContextCollectionUri(contextUri: string): string | null {
+  try {
+    const url = new URL(contextUri);
+    if (url.pathname.endsWith("/context")) {
+      url.pathname = url.pathname.slice(0, -"/context".length);
+      url.hash = "";
+      const root = url.toString().replace(/\/$/, "");
+      return root.length > 0 ? root : null;
+    }
+  } catch {
+    // Not a valid absolute URL.
+  }
+  return null;
+}
+
+/**
+ * Extract FEP-7888 `attributedTo` from an inline AP `context` Collection.
+ *
+ * Per FEP-7888 §"Keeping relevant entities in the loop", when a publisher
+ * provides the context as an inline object with an `attributedTo` field, that
+ * actor is the context owner and should be CC'd on activities that copy this
+ * context.  We only read from inline objects — if the context is a bare URI
+ * we do not fetch it (the caller should not incur a network round-trip here).
+ *
+ * Returns null when context is a plain string URI, an array, or lacks
+ * a string `attributedTo`.
+ */
+function extractContextAttributedTo(contextValue: unknown): string | null {
+  if (!contextValue || typeof contextValue !== "object" || Array.isArray(contextValue)) {
+    return null;
+  }
+  const obj = contextValue as Record<string, unknown>;
+  const raw = obj["attributedTo"];
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    return raw.trim();
+  }
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const id = (raw as Record<string, unknown>)["id"];
+    if (typeof id === "string" && id.trim().length > 0) {
+      return id.trim();
+    }
+  }
+  return null;
+}
+
+function isHttpsOrHttpUrl(value: string): boolean {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "https:" || protocol === "http:";
+  } catch {
+    return false;
+  }
 }
 
 function mergeFacets(primary: CanonicalFacet[], secondary: CanonicalFacet[]): CanonicalFacet[] {

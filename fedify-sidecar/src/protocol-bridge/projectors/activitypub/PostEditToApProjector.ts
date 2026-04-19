@@ -25,7 +25,8 @@ import {
 import {
   buildApArticlePreview,
   buildApInteractionPolicy,
-  buildApLinkPreviewCard,
+  buildApLinkPreviewAttachment,
+  deriveConversationCollectionUris,
   apTargetTopic,
   buildApActivityContext,
   buildApLinkPreviewIcon,
@@ -66,12 +67,15 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     const customEmojis = intent.content.customEmojis ?? [];
     const tag = canonicalFacetsToApTags(intent.content.facets, actorOrigin, customEmojis);
     const attachment = canonicalAttachmentsToApAttachments(intent.content.attachments);
-    const linkPreviewCard =
+    const linkPreviewAttachment =
       intent.content.kind === "note" && this.policy.noteLinkPreviewMode !== "disabled"
-        ? buildApLinkPreviewCard(intent.content.linkPreview)
+        ? buildApLinkPreviewAttachment(intent.content.linkPreview)
         : null;
     const mentionRecipients = canonicalMentionRecipients(intent.content.facets);
-    const audience = buildAudience(actorId, intent.visibility, mentionRecipients);
+    // FEP-7888: include context owner in CC when editing a post that carries a
+    // foreign context with a known attributedTo actor.
+    const contextOwnerUris = intent.contextAttributedTo ? [intent.contextAttributedTo] : [];
+    const audience = buildAudience(actorId, intent.visibility, mentionRecipients, contextOwnerUris);
     const object: Record<string, unknown> = {
       id: objectId,
       type: intent.content.kind === "article" ? "Article" : "Note",
@@ -108,18 +112,18 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     if (articlePreview) {
       object["preview"] = articlePreview;
     }
-    if (linkPreviewCard && this.policy.noteLinkPreviewMode === "attachment_and_preview") {
-      object["preview"] = linkPreviewCard;
+    if (linkPreviewAttachment && this.policy.noteLinkPreviewMode === "attachment_and_preview") {
+      object["preview"] = { ...linkPreviewAttachment };
     }
     const inReplyTo = resolveOptionalApObjectId(intent.inReplyTo);
     if (inReplyTo) {
       object["inReplyTo"] = inReplyTo;
     }
-    // FEP-7888 / FEP-11dd: thread root as AP context.
-    const apContext = resolveOptionalApObjectId(intent.replyRoot);
-    if (apContext) {
-      object["context"] = apContext;
-    }
+    // FEP-f228: expose collection-backed conversation context and context history.
+    const conversationRoot = resolveOptionalApObjectId(intent.replyRoot);
+    const conversationUris = deriveConversationCollectionUris(objectId, conversationRoot);
+    object["context"] = conversationUris.context;
+    object["contextHistory"] = conversationUris.contextHistory;
     // FEP-7458: advertise the replies collection so consumers can verify reply membership.
     // ActivityPods creates and serves this collection lazily at ${noteId}/replies.
     object["replies"] = `${objectId}/replies`;
@@ -146,9 +150,9 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     if (allTags.length > 0) {
       object["tag"] = allTags;
     }
-    if (attachment.length > 0 || linkPreviewCard) {
-      object["attachment"] = linkPreviewCard
-        ? [...attachment, linkPreviewCard]
+    if (attachment.length > 0 || linkPreviewAttachment) {
+      object["attachment"] = linkPreviewAttachment
+        ? [...attachment, linkPreviewAttachment]
         : attachment;
     }
 

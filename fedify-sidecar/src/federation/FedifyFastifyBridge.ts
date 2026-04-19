@@ -28,6 +28,7 @@ import {
   withActorStatusProperties,
 } from "./fep-82f6/ActorStatusBridge.js";
 import { withActorSearchConsentProperties } from "./fep-5feb-268d/ActorSearchConsentBridge.js";
+import { withActorAuthorAttributionProperties } from "./fep-mastodon-author-attribution/ActorAuthorAttributionBridge.js";
 import { logger } from "../utils/logger.js";
 
 type SyndicationFormat = "rss" | "atom";
@@ -231,7 +232,8 @@ async function maybeInjectActorStatus(
   try {
     const actorUrl = `${resolveExternalOrigin(adapter, request)}${requestPath}`;
     const withSearchConsent = withActorSearchConsentProperties(JSON.parse(body), internalActor.body);
-    return withActorStatusProperties(actorUrl, JSON.parse(withSearchConsent), internalActor.body);
+    const withAuthorAttribution = withActorAuthorAttributionProperties(JSON.parse(withSearchConsent), internalActor.body);
+    return withActorStatusProperties(actorUrl, JSON.parse(withAuthorAttribution), internalActor.body);
   } catch (err: unknown) {
     logger.warn(
       {

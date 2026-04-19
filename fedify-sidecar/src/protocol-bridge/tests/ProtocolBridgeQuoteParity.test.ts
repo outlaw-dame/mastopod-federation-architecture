@@ -186,11 +186,16 @@ describe("quote-post parity", () => {
               height: 900,
             }),
             expect.objectContaining({
-              type: "Document",
+              type: "Link",
               mediaType: "text/html",
-              url: "https://example.com/articles/quoted-link",
+              href: "https://example.com/articles/quoted-link",
               name: "Quoted Link Preview",
               summary: "Linked context for the quoted post",
+              preview: expect.objectContaining({
+                type: "Article",
+                name: "Quoted Link Preview",
+                summary: "Linked context for the quoted post",
+              }),
             }),
           ]),
         }),

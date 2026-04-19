@@ -170,13 +170,16 @@ async function translateDirectEnvelope(
     (facets.find((f) => f.type === "link") as { url: string } | undefined)?.url ?? null;
   const ogData = firstLinkUrl ? await fetchOpenGraph(firstLinkUrl) : null;
   const linkPreview = ogData
-    ? {
+      ? {
         uri: ogData.uri,
         title: ogData.title,
         description: ogData.description ?? null,
         thumbUrl: ogData.thumbUrl ?? null,
+        ...(ogData.authorName ? { authorName: ogData.authorName } : {}),
+        ...(ogData.authorUrl ? { authorUrl: ogData.authorUrl } : {}),
+        ...(ogData.authors && ogData.authors.length > 0 ? { authors: ogData.authors } : {}),
       }
-    : null;
+      : null;
 
   const provenance = toProvenance(
     envelope.bridge,

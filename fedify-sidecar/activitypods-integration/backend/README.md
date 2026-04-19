@@ -1,7 +1,9 @@
 # ActivityPods Backend Deterministic Signup Patch Set
 
-This folder stages backend-ready artifacts for the ActivityPods repo that is
-not present in this workspace. Copy these files into:
+This folder stages backend-ready artifacts for the ActivityPods backend.
+When the live backend repo is available in the same workspace, prefer applying
+the corresponding files directly there and treat this folder as a mirror of the
+integration patch set. Copy these files into:
 
 - `pod-provider/backend/services/internal-identity-projection.service.js`
 - `pod-provider/backend/services/internal-identity-projection-api.service.js`

@@ -17,7 +17,8 @@ import {
 import {
   buildApArticlePreview,
   buildApInteractionPolicy,
-  buildApLinkPreviewCard,
+  buildApLinkPreviewAttachment,
+  deriveConversationCollectionUris,
   apTargetTopic,
   buildApActivityContext,
   buildApLinkPreviewIcon,
@@ -59,12 +60,15 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
     const customEmojis = intent.content.customEmojis ?? [];
     const tag = canonicalFacetsToApTags(intent.content.facets, actorOrigin, customEmojis);
     const attachment = canonicalAttachmentsToApAttachments(intent.content.attachments);
-    const linkPreviewCard =
+    const linkPreviewAttachment =
       intent.content.kind === "note" && this.policy.noteLinkPreviewMode !== "disabled"
-        ? buildApLinkPreviewCard(intent.content.linkPreview)
+        ? buildApLinkPreviewAttachment(intent.content.linkPreview)
         : null;
     const mentionRecipients = canonicalMentionRecipients(intent.content.facets);
-    const audience = buildAudience(actorId, intent.visibility, mentionRecipients);
+    // FEP-7888: include context owner in CC for public/unlisted posts when the
+    // context was copied from a foreign inline Collection with attributedTo.
+    const contextOwnerUris = intent.contextAttributedTo ? [intent.contextAttributedTo] : [];
+    const audience = buildAudience(actorId, intent.visibility, mentionRecipients, contextOwnerUris);
     const object: Record<string, unknown> = {
       id: objectId,
       type: intent.content.kind === "article" ? "Article" : "Note",
@@ -101,19 +105,19 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
     if (articlePreview) {
       object["preview"] = articlePreview;
     }
-    if (linkPreviewCard && this.policy.noteLinkPreviewMode === "attachment_and_preview") {
-      object["preview"] = linkPreviewCard;
+    if (linkPreviewAttachment && this.policy.noteLinkPreviewMode === "attachment_and_preview") {
+      object["preview"] = { ...linkPreviewAttachment };
     }
     const inReplyTo = resolveOptionalApObjectId(intent.inReplyTo);
     if (inReplyTo) {
       object["inReplyTo"] = inReplyTo;
     }
-    // FEP-7888 / FEP-11dd: thread root as AP context.
-    // The root Note is resolvable and carries attributedTo, satisfying FEP-11dd ownership.
-    const apContext = resolveOptionalApObjectId(intent.replyRoot);
-    if (apContext) {
-      object["context"] = apContext;
-    }
+    // FEP-f228: expose collection-backed conversation context and context history.
+    // Root posts use their own object ID as conversation root.
+    const conversationRoot = resolveOptionalApObjectId(intent.replyRoot);
+    const conversationUris = deriveConversationCollectionUris(objectId, conversationRoot);
+    object["context"] = conversationUris.context;
+    object["contextHistory"] = conversationUris.contextHistory;
     // FEP-7458: advertise the replies collection so consumers can verify reply membership.
     // ActivityPods creates and serves this collection lazily at ${noteId}/replies.
     object["replies"] = `${objectId}/replies`;
@@ -140,9 +144,9 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
     if (allTags.length > 0) {
       object["tag"] = allTags;
     }
-    if (attachment.length > 0 || linkPreviewCard) {
-      object["attachment"] = linkPreviewCard
-        ? [...attachment, linkPreviewCard]
+    if (attachment.length > 0 || linkPreviewAttachment) {
+      object["attachment"] = linkPreviewAttachment
+        ? [...attachment, linkPreviewAttachment]
         : attachment;
     }
 
@@ -304,16 +308,42 @@ export function buildAudience(
   actorId: string,
   visibility: CanonicalPostCreateIntent["visibility"],
   mentionRecipients: readonly string[],
+  /**
+   * FEP-7888 §"Keeping relevant entities in the loop": URI(s) of actors that
+   * own the conversation context being copied.  When provided and the actor
+   * origin differs from our own, they are added to the activity CC so the
+   * context owner is kept in the loop.  Only applied to public/unlisted posts
+   * where adding a foreign recipient cannot expose private content.
+   */
+  contextOwnerUris?: readonly string[],
 ) {
   const followers = `${actorId}/followers`;
   const unique = (values: readonly string[]) => [...new Set(values.filter(Boolean))];
 
+  // Exclude the publishing actor and their own collections from context owners
+  // to avoid self-addressing, then exclude any non-HTTP values for safety.
+  const foreignContextOwners = (contextOwnerUris ?? []).filter(
+    (uri) =>
+      uri &&
+      uri !== actorId &&
+      !uri.startsWith(`${actorId}/`) &&
+      /^https?:\/\//.test(uri),
+  );
+
   switch (visibility) {
     case "public":
-      return { to: [PUBLIC_AUDIENCE], cc: unique([followers, ...mentionRecipients]) };
+      return {
+        to: [PUBLIC_AUDIENCE],
+        cc: unique([followers, ...mentionRecipients, ...foreignContextOwners]),
+      };
     case "unlisted":
-      return { to: [followers], cc: unique([PUBLIC_AUDIENCE, ...mentionRecipients]) };
+      return {
+        to: [followers],
+        cc: unique([PUBLIC_AUDIENCE, ...mentionRecipients, ...foreignContextOwners]),
+      };
     case "followers":
+      // For followers-only posts we do not CC foreign context owners — adding
+      // them would expose follower-gated content to a potentially unknown actor.
       return { to: [followers], cc: unique(mentionRecipients) };
     case "direct":
     case "unknown":
