@@ -1,11 +1,12 @@
-const serviceDefinition = require('../services/streaming-topic-authorization.service');
+import { describe, expect, test, vi } from 'vitest';
+import serviceDefinition from '../services/streaming-topic-authorization.service.js';
 
 function createService(overrides = {}) {
   return {
     logger: {
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn()
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn()
     },
     ...serviceDefinition.methods,
     ...overrides

@@ -140,6 +140,7 @@ export const FeedRequestSchema = z.object({
   limit: z.number().int().min(1).max(100),
   cursor: nonControlTrimmedString(512, "cursor").optional(),
   filters: FeedRequestFiltersSchema.optional(),
+  excludeViewed: z.boolean().optional(),
 });
 
 export const FeedHintsSchema = z.object({

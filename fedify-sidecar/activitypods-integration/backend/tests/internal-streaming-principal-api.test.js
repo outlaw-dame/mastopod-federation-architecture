@@ -1,5 +1,6 @@
-const crypto = require('crypto');
-const serviceDefinition = require('../services/internal-streaming-principal-api.service');
+import crypto from 'node:crypto';
+import { describe, expect, test, vi } from 'vitest';
+import serviceDefinition from '../services/internal-streaming-principal-api.service.js';
 
 function createService(overrides = {}) {
   return {
@@ -13,9 +14,9 @@ function createService(overrides = {}) {
       }
     },
     logger: {
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn()
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn()
     },
     ...serviceDefinition.methods,
     ...overrides
@@ -40,7 +41,7 @@ describe('internal-streaming-principal-api', () => {
         authorization: 'Bearer user-token'
       },
       meta: {},
-      call: jest.fn().mockResolvedValue({ webId: 'https://example.com/users/alice' })
+      call: vi.fn().mockResolvedValue({ webId: 'https://example.com/users/alice' })
     };
 
     const result = await serviceDefinition.actions.resolvePrincipal.call(service, ctx);
@@ -59,7 +60,7 @@ describe('internal-streaming-principal-api', () => {
         cookie: buildOauthSessionCookie(service, 'https://example.com/users/alice')
       },
       meta: {},
-      call: jest.fn()
+      call: vi.fn()
     };
 
     const result = await serviceDefinition.actions.resolvePrincipal.call(service, ctx);
@@ -76,7 +77,7 @@ describe('internal-streaming-principal-api', () => {
     const ctx = {
       params: {},
       meta: {},
-      call: jest.fn()
+      call: vi.fn()
     };
 
     await expect(

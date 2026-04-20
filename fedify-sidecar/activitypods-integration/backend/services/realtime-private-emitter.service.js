@@ -1,9 +1,48 @@
-'use strict';
+import crypto from 'node:crypto';
+import Redis from 'ioredis';
+import { createRequire } from 'node:module';
 
-const crypto = require('crypto');
-const Redis = require('ioredis');
-const { Errors: WebErrors } = require('moleculer-web');
-const { MoleculerError } = require('moleculer').Errors;
+const require = createRequire(import.meta.url);
+
+class FallbackMoleculerError extends Error {
+  constructor(message, code = 500, type = 'MoleculerError') {
+    super(message);
+    this.code = code;
+    this.type = type;
+  }
+}
+
+class FallbackUnauthorizedError extends Error {
+  constructor(type, _data, message = 'Unauthorized') {
+    super(message);
+    this.code = 401;
+    this.type = type || 'ERR_INVALID_TOKEN';
+  }
+}
+
+let WebErrors = {
+  ERR_INVALID_TOKEN: 'ERR_INVALID_TOKEN',
+  UnAuthorizedError: FallbackUnauthorizedError,
+};
+let MoleculerError = FallbackMoleculerError;
+
+try {
+  const moleculerWeb = require('moleculer-web');
+  if (moleculerWeb?.Errors) {
+    WebErrors = moleculerWeb.Errors;
+  }
+} catch {
+  // Optional dependency for integration tests.
+}
+
+try {
+  const moleculer = require('moleculer');
+  if (moleculer?.Errors?.MoleculerError) {
+    MoleculerError = moleculer.Errors.MoleculerError;
+  }
+} catch {
+  // Optional dependency for integration tests.
+}
 
 const TOPIC_NOTIFICATIONS = 'notifications';
 const TOPIC_PERSONAL_FEED = 'feeds/personal';
@@ -54,7 +93,7 @@ function normalizePayload(value) {
   return value;
 }
 
-module.exports = {
+export default {
   name: 'realtime-private-emitter',
 
   dependencies: ['api'],

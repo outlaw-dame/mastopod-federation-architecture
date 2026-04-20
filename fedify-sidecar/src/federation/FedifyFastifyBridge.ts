@@ -23,6 +23,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { FedifyFederationAdapter } from "./FedifyFederationAdapter.js";
 import { injectBlockedProperty } from "./fep-c648/BlockedCollectionFastifyBridge.js";
+import { injectMutedProperty } from "./MutedCollectionFastifyBridge.js";
 import {
   buildActorStatusHistoryCollection,
   withActorStatusProperties,
@@ -118,7 +119,7 @@ async function fedifyHandler(
   // Stream or buffer the body.
   let body = await response.text();
 
-  // FEP-c648: inject `blocked` URL + context into actor document responses.
+  // FEP-c648: inject `blocked`/`blocks` URLs plus context into actor documents.
   const contentType = response.headers.get("content-type") ?? "";
   if (
     (contentType.includes("application/activity+json") ||
@@ -128,6 +129,7 @@ async function fedifyHandler(
     const baseContext = adapter.buildContext();
     if (typeof baseContext.domain === "string" && baseContext.domain.length > 0) {
       body = injectBlockedProperty(request.url, body, baseContext.domain);
+      body = injectMutedProperty(request.url, body, baseContext.domain);
     }
 
     body = await maybeInjectActorStatus(adapter, request, body);

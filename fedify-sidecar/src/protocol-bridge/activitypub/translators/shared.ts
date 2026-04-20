@@ -67,6 +67,8 @@ const deleteActivitySchema = z.object({
 });
 
 const PUBLIC_AUDIENCE = "https://www.w3.org/ns/activitystreams#Public";
+const AP_OBJECT_LINK_MEDIA_TYPE = "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"";
+const AP_OBJECT_LINK_MEDIA_TYPE_EQUIVALENT = "application/activity+json";
 const INLINE_HASHTAG_SCAN_RE =
   /[#＃]([\p{L}\p{M}\p{N}\p{Pc}\u00B7\u30FB\u200C]+)/gu;
 
@@ -794,6 +796,7 @@ export async function buildTagFacets(
 ): Promise<CanonicalFacet[]> {
   const tags = Array.isArray(rawTags) ? rawTags : rawTags ? [rawTags] : [];
   const facets: CanonicalFacet[] = [];
+  const seen = new Set<string>();
 
   for (const rawTag of tags) {
     if (!rawTag || typeof rawTag !== "object") {
@@ -804,16 +807,15 @@ export async function buildTagFacets(
     const tagType = typeof tag["type"] === "string" ? tag["type"] : "";
     const name = typeof tag["name"] === "string" ? tag["name"].trim() : "";
     const href = extractFirstUrl(tag["href"]);
-    if (!name) {
-      continue;
-    }
-
-    const [start, end] = findRange(text, name);
-    if (start === -1) {
-      continue;
-    }
 
     if (tagType === "Mention" && href) {
+      if (!name) {
+        continue;
+      }
+      const [start, end] = findRange(text, name);
+      if (start === -1) {
+        continue;
+      }
       facets.push({
         type: "mention",
         label: name,
@@ -825,6 +827,13 @@ export async function buildTagFacets(
     }
 
     if (tagType === "Hashtag") {
+      if (!name) {
+        continue;
+      }
+      const [start, end] = findRange(text, name);
+      if (start === -1) {
+        continue;
+      }
       const normalizedTag = normalizeHashtag(name);
       if (!normalizedTag) {
         continue;
@@ -836,10 +845,89 @@ export async function buildTagFacets(
         start,
         end,
       });
+      continue;
+    }
+
+    if (tagType === "Link") {
+      const normalizedHref = sanitizeApObjectLinkHref(href);
+      const mediaType = normalizeApObjectLinkMediaType(tag["mediaType"]);
+      if (!normalizedHref || !mediaType) {
+        continue;
+      }
+
+      const rangeNeedles: string[] = [];
+      if (name) {
+        rangeNeedles.push(name);
+      }
+      rangeNeedles.push(normalizedHref);
+
+      let start = -1;
+      let end = -1;
+      for (const needle of rangeNeedles) {
+        const [candidateStart, candidateEnd] = findRange(text, needle);
+        if (candidateStart !== -1) {
+          start = candidateStart;
+          end = candidateEnd;
+          break;
+        }
+      }
+
+      if (start === -1) {
+        continue;
+      }
+
+      const key = `link:${start}:${end}:${normalizedHref}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      facets.push({
+        type: "link",
+        url: normalizedHref,
+        start,
+        end,
+      });
     }
   }
 
   return facets;
+}
+
+function sanitizeApObjectLinkHref(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if ((parsed.protocol === "http:" || parsed.protocol === "https:") && !parsed.username && !parsed.password) {
+      return parsed.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function normalizeApObjectLinkMediaType(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === AP_OBJECT_LINK_MEDIA_TYPE_EQUIVALENT) {
+    return AP_OBJECT_LINK_MEDIA_TYPE;
+  }
+  if (normalized === AP_OBJECT_LINK_MEDIA_TYPE.toLowerCase()) {
+    return AP_OBJECT_LINK_MEDIA_TYPE;
+  }
+
+  return null;
 }
 
 export function buildInlineLinkAndTagFacets(text: string): CanonicalFacet[] {

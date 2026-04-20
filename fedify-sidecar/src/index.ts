@@ -49,6 +49,7 @@ import {
   OriginReconciliationWorker,
 } from "./delivery/origin-reconciliation-worker.js";
 import { logger } from "./utils/logger.js";
+import { ActivityPodsClient } from "./services/activitypods-client.js";
 import { registerAtXrpcRoutes, attachSubscribeReposWebSocket } from "./at-adapter/xrpc/AtXrpcFastifyBridge.js";
 import { registerOAuthRoutes } from "./at-adapter/oauth/OAuthFastifyBridge.js";
 import { OAuthParStore, OAuthAuthorizationCodeStore, OAuthRefreshTokenStore, OAuthGrantStore, OAuthDpopNonceStore, OAuthConsentChallengeStore, OAuthRateLimitStore } from "./at-adapter/oauth/OAuthRedisStores.js";
@@ -181,6 +182,7 @@ import { registerFedifyRoutes } from "./federation/FedifyFastifyBridge.js";
 import { FollowersSyncService } from "./federation/fep8fcf/FollowersSyncService.js";
 import { registerFollowersSyncRoutes } from "./federation/fep8fcf/FollowersSyncFastifyBridge.js";
 import { registerBlockedCollectionRoutes } from "./federation/fep-c648/BlockedCollectionFastifyBridge.js";
+import { registerMutedCollectionRoutes } from "./federation/MutedCollectionFastifyBridge.js";
 import { registerHashtagRoutes } from "./federation/HashtagFastifyBridge.js";
 import { RepliesBackfillService } from "./federation/replies-backfill/RepliesBackfillService.js";
 import { OriginReconciliationService } from "./federation/origin-reconciliation/OriginReconciliationService.js";
@@ -1623,11 +1625,14 @@ async function main() {
       return { allowed: result.allowed, effectiveLimit: result.effectiveLimit };
     };
 
+    const activityPodsClient = new ActivityPodsClient(config.activitypods.url);
+
     registerFeedFastifyRoutes(app, {
       sidecarToken: config.sidecarToken,
       feedRegistry,
       feedService,
       hydrationService,
+      viewershipHistoryClient: config.activitypods.internalApiKey ? activityPodsClient : undefined,
       streamSubscriptionService,
       capabilityGate,
       checkStreamEntitlement,
@@ -2120,6 +2125,15 @@ async function main() {
       requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
     });
     logger.info("FEP-c648 blocked collection endpoint registered");
+
+    registerMutedCollectionRoutes(app, {
+      activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://activitypods:3000",
+      activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+      domain: config.domain,
+      userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+      requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    });
+    logger.info("Muted collection endpoint registered");
 
     if (fedifyAdapter) {
       registerFedifyRoutes(app, fedifyAdapter);

@@ -141,8 +141,7 @@ export class DefaultPodFeedService {
         if (attempt >= this.maxAttempts || !isRetryableError(error)) {
           throw error;
         }
-        const jitter = 1 + (Math.random() * 0.4 - 0.2);
-        await sleep(Math.min(delayMs * jitter, this.maxDelayMs));
+        await sleep(Math.min(delayMs, this.maxDelayMs));
         delayMs = Math.min(delayMs * 2, this.maxDelayMs);
       }
     }

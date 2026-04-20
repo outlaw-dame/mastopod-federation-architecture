@@ -28,6 +28,53 @@ import {
   resolveOptionalApObjectId,
 } from "./post-shared.js";
 
+const AP_OBJECT_LINK_MEDIA_TYPE = "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"";
+
+function sanitizeObjectLinkHref(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if ((parsed.protocol === "http:" || parsed.protocol === "https:") && !parsed.username && !parsed.password) {
+      return parsed.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+export function buildApObjectLinkTag(
+  href: string,
+  options?: { name?: string | null; rel?: string | null },
+): Record<string, unknown> | null {
+  const sanitizedHref = sanitizeObjectLinkHref(href);
+  if (!sanitizedHref) {
+    return null;
+  }
+
+  const tag: Record<string, unknown> = {
+    type: "Link",
+    mediaType: AP_OBJECT_LINK_MEDIA_TYPE,
+    href: sanitizedHref,
+  };
+
+  const name = options?.name?.trim();
+  if (name) {
+    tag["name"] = name;
+  }
+
+  const rel = options?.rel?.trim();
+  if (rel) {
+    tag["rel"] = rel;
+  }
+
+  return tag;
+}
+
 export class PostCreateToApProjector implements CanonicalProjector<ActivityPubProjectionCommand> {
   public constructor(
     private readonly policy: ActivityPubProjectionPolicy = DEFAULT_ACTIVITYPUB_PROJECTION_POLICY,
@@ -133,12 +180,8 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
     object["interactionPolicy"] = buildApInteractionPolicy(intent.interactionPolicy, actorId);
     // Misskey FEP-e232 compatibility: include quote ref as a Link tag so tag-array consumers also find the quote ref
     const quoteLinkTags: Array<Record<string, unknown>> = quoteId
-      ? [{
-          type: "Link",
-          mediaType: "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"",
-          rel: "https://misskey-hub.net/ns#_misskey_quote",
-          href: quoteId,
-        }]
+      ? [buildApObjectLinkTag(quoteId, { rel: "https://misskey-hub.net/ns#_misskey_quote" })]
+          .filter((tag): tag is Record<string, unknown> => Boolean(tag))
       : [];
     const allTags = [...tag, ...quoteLinkTags];
     if (allTags.length > 0) {
@@ -204,8 +247,10 @@ export function canonicalFacetsToApTags(
         }
         return [entry];
       }
-      case "link":
-        return [];
+      case "link": {
+        const linkTag = buildApObjectLinkTag(facet.url);
+        return linkTag ? [linkTag] : [];
+      }
     }
   });
 

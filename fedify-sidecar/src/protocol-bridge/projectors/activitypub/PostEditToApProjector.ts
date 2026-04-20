@@ -16,6 +16,7 @@ import {
 } from "./ActivityPubProjectionPolicy.js";
 import {
   buildAudience,
+  buildApObjectLinkTag,
   canonicalAttachmentsToApAttachments,
   canonicalFacetsToApTags,
   canonicalMentionRecipients,
@@ -139,12 +140,8 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     object["interactionPolicy"] = buildApInteractionPolicy(intent.interactionPolicy, actorId);
     // Misskey FEP-e232 compatibility: include quote ref as a Link tag so tag-array consumers also find the quote ref
     const quoteLinkTags: Array<Record<string, unknown>> = quoteId
-      ? [{
-          type: "Link",
-          mediaType: "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"",
-          rel: "https://misskey-hub.net/ns#_misskey_quote",
-          href: quoteId,
-        }]
+      ? [buildApObjectLinkTag(quoteId, { rel: "https://misskey-hub.net/ns#_misskey_quote" })]
+          .filter((tag): tag is Record<string, unknown> => Boolean(tag))
       : [];
     const allTags = [...tag, ...quoteLinkTags];
     if (allTags.length > 0) {

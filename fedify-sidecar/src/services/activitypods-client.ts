@@ -49,6 +49,12 @@ export interface KeyPair {
   privateKey: CryptoKey;
 }
 
+export interface ViewershipResolveResult {
+  actorId: string;
+  viewedObjectIds: string[];
+  count: number;
+}
+
 export class ActivityPodsClient {
   private baseUrl: string;
   private actorCache = new Map<string, { data: ActorData; expiry: number }>();
@@ -321,5 +327,105 @@ export class ActivityPodsClient {
    */
   clearCache(): void {
     this.actorCache.clear();
+  }
+
+  async resolveViewedObjectIds(input: {
+    actorId: string;
+    objectIds: string[];
+  }): Promise<ViewershipResolveResult> {
+    const payload = {
+      actorId: input.actorId,
+      objectIds: input.objectIds,
+    };
+
+    const data = await this.fetchJsonWithRetry<Record<string, unknown>>(
+      `${this.baseUrl}/api/internal/viewership-history/resolve`,
+      {
+        method: "POST",
+        headers: this.getInternalHeaders(),
+        body: JSON.stringify(payload),
+      },
+    );
+
+    const viewedObjectIds = Array.isArray(data["viewedObjectIds"])
+      ? data["viewedObjectIds"].filter((value): value is string => typeof value === "string")
+      : [];
+
+    return {
+      actorId: typeof data["actorId"] === "string" ? data["actorId"] : input.actorId,
+      viewedObjectIds,
+      count: typeof data["count"] === "number" ? data["count"] : viewedObjectIds.length,
+    };
+  }
+
+  async recordView(input: {
+    actorId: string;
+    objectIds: string[];
+    viewedAt?: string;
+  }): Promise<void> {
+    const payload: Record<string, unknown> = {
+      actorId: input.actorId,
+      objectIds: input.objectIds,
+    };
+    if (typeof input.viewedAt === "string" && input.viewedAt.trim().length > 0) {
+      payload["viewedAt"] = input.viewedAt;
+    }
+
+    await this.fetchJsonWithRetry(
+      `${this.baseUrl}/api/internal/viewership-history/record`,
+      {
+        method: "POST",
+        headers: this.getInternalHeaders(),
+        body: JSON.stringify(payload),
+      },
+    );
+  }
+
+  private getInternalHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-Internal-Request": "true",
+    };
+
+    if (config.activitypods.internalApiKey) {
+      headers["Authorization"] = `Bearer ${config.activitypods.internalApiKey}`;
+      headers["X-API-Key"] = config.activitypods.internalApiKey;
+    }
+
+    return headers;
+  }
+
+  private async fetchJsonWithRetry<T>(url: string, init: RequestInit): Promise<T> {
+    let attempt = 0;
+    let delayMs = 100;
+    const maxAttempts = 3;
+
+    while (true) {
+      try {
+        const response = await fetch(url, init);
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          const error = new Error(`ActivityPods request failed: ${response.status} ${body}`);
+          const retryable = [408, 429, 500, 502, 503, 504].includes(response.status);
+          (error as Error & { retryable?: boolean }).retryable = retryable;
+          throw error;
+        }
+        if (response.status === 204) {
+          return {} as T;
+        }
+        return (await response.json()) as T;
+      } catch (error) {
+        attempt += 1;
+        const retryable =
+          typeof error === "object" && error !== null && "retryable" in error
+            ? Boolean((error as { retryable?: boolean }).retryable)
+            : true;
+        if (attempt >= maxAttempts || !retryable) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        delayMs = Math.min(delayMs * 2, 1000);
+      }
+    }
   }
 }

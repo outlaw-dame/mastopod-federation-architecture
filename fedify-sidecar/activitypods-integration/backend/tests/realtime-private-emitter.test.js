@@ -1,4 +1,5 @@
-const serviceDefinition = require('../services/realtime-private-emitter.service');
+import { describe, expect, test, vi } from 'vitest';
+import serviceDefinition from '../services/realtime-private-emitter.service.js';
 
 function createService(overrides = {}) {
   return {
@@ -6,12 +7,12 @@ function createService(overrides = {}) {
       channel: 'fep3ab2:private-events'
     },
     redis: {
-      publish: jest.fn().mockResolvedValue(1)
+      publish: vi.fn().mockResolvedValue(1)
     },
     logger: {
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn()
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn()
     },
     ...overrides
   };

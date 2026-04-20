@@ -41,6 +41,10 @@ async function createApp(overrides?: {
   listFeeds?: ReturnType<typeof vi.fn>;
   getFeed?: ReturnType<typeof vi.fn>;
   hydrate?: ReturnType<typeof vi.fn>;
+  viewershipHistoryClient?: {
+    resolveViewedObjectIds: ReturnType<typeof vi.fn>;
+    recordView: ReturnType<typeof vi.fn>;
+  };
 }) {
   const app = Fastify();
 
@@ -82,6 +86,7 @@ async function createApp(overrides?: {
     feedRegistry: createRegistry(),
     feedService: feedService as any,
     hydrationService: hydrationService as any,
+    viewershipHistoryClient: overrides?.viewershipHistoryClient as any,
   });
 
   await app.ready();
@@ -177,6 +182,62 @@ describe("feed fastify routes", () => {
       error: "authentication_required",
       message: "Feed requires authentication",
       retryable: false,
+    });
+    await app.close();
+  });
+
+  it("filters viewed objects when excludeViewed is enabled", async () => {
+    const viewershipHistoryClient = {
+      resolveViewedObjectIds: vi.fn().mockResolvedValue({
+        viewedObjectIds: ["https://example.com/objects/1"],
+      }),
+      recordView: vi.fn(),
+    };
+
+    const { app } = await createApp({ viewershipHistoryClient });
+    const response = await app.inject({
+      method: "POST",
+      url: "/internal/feed/query",
+      headers: authHeaders,
+      payload: {
+        feedId: "urn:activitypods:feed:public-discovery:v1",
+        viewerId: "https://pods.example/alice",
+        limit: 10,
+        excludeViewed: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(viewershipHistoryClient.resolveViewedObjectIds).toHaveBeenCalledTimes(1);
+    expect(response.json().items).toHaveLength(0);
+    await app.close();
+  });
+
+  it("records viewed objects through the internal viewed endpoint", async () => {
+    const viewershipHistoryClient = {
+      resolveViewedObjectIds: vi.fn(),
+      recordView: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const { app } = await createApp({ viewershipHistoryClient });
+    const response = await app.inject({
+      method: "POST",
+      url: "/internal/feed/viewed",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-provider-permissions": "provider:read,provider:write",
+      },
+      payload: {
+        viewerId: "https://pods.example/alice",
+        objectIds: ["https://example.com/objects/1", "https://example.com/objects/1"],
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(viewershipHistoryClient.recordView).toHaveBeenCalledWith({
+      actorId: "https://pods.example/alice",
+      objectIds: ["https://example.com/objects/1"],
+      viewedAt: undefined,
     });
     await app.close();
   });

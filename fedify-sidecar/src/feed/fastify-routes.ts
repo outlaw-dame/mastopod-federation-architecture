@@ -40,6 +40,10 @@ export interface FeedFastifyRouteDeps {
   feedRegistry: FeedRegistry;
   feedService: DefaultPodFeedService;
   hydrationService: DefaultPodHydrationService;
+  viewershipHistoryClient?: {
+    resolveViewedObjectIds(input: { actorId: string; objectIds: string[] }): Promise<{ viewedObjectIds: string[] }>;
+    recordView(input: { actorId: string; objectIds: string[]; viewedAt?: string }): Promise<void>;
+  };
   streamSubscriptionService?: DurableStreamSubscriptionService;
   /**
    * Optional hook to enforce capability gate checks on feed routes.
@@ -56,6 +60,22 @@ export interface FeedFastifyRouteDeps {
     currentCount: number,
   ) => StreamEntitlementResult;
 }
+
+const viewershipRecordBodySchema = z.object({
+  viewerId: z.string().trim().min(1).max(2048),
+  objectId: z.string().trim().min(1).max(2048).optional(),
+  objectIds: z.array(z.string().trim().min(1).max(2048)).min(1).max(100).optional(),
+  viewedAt: z.string().trim().min(1).max(64).optional(),
+}).superRefine((value, ctx) => {
+  const count = (value.objectId ? 1 : 0) + (value.objectIds?.length ?? 0);
+  if (count < 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "objectId or objectIds is required",
+      path: ["objectId"],
+    });
+  }
+});
 
 export function registerFeedFastifyRoutes(app: FastifyInstance, deps: FeedFastifyRouteDeps): void {
   app.get("/internal/feed/definitions", async (req, reply) => {
@@ -120,7 +140,32 @@ export function registerFeedFastifyRoutes(app: FastifyInstance, deps: FeedFastif
 
     try {
       const result = await deps.feedService.getFeed(parsed.data);
-      reply.send(result);
+      let filteredItems = result.items;
+
+      if (parsed.data.excludeViewed && parsed.data.viewerId && deps.viewershipHistoryClient && result.items.length > 0) {
+        const candidates = collectFilterableObjectIds(result.items);
+        if (candidates.length > 0) {
+          try {
+            const resolution = await deps.viewershipHistoryClient.resolveViewedObjectIds({
+              actorId: parsed.data.viewerId,
+              objectIds: candidates,
+            });
+            const viewed = new Set(resolution.viewedObjectIds);
+            filteredItems = result.items.filter((item) => {
+              const objectId = getFilterObjectId(item);
+              return !objectId || !viewed.has(objectId);
+            });
+          } catch {
+            // Fallback to unfiltered results when viewership lookup is unavailable.
+            filteredItems = result.items;
+          }
+        }
+      }
+
+      reply.send({
+        ...result,
+        items: filteredItems,
+      });
       promMetrics.feedRequestsTotal.inc({ endpoint: "query", status: "success" });
       promMetrics.feedRequestLatency.observe({ endpoint: "query" }, (Date.now() - start) / 1000);
     } catch (error) {
@@ -138,6 +183,56 @@ export function registerFeedFastifyRoutes(app: FastifyInstance, deps: FeedFastif
       promMetrics.feedRequestsTotal.inc({ endpoint: "query", status: "error" });
       promMetrics.feedRequestLatency.observe({ endpoint: "query" }, (Date.now() - start) / 1000);
       reply.code(500).send({ error: "internal_error" });
+    }
+  });
+
+  app.post("/internal/feed/viewed", async (req, reply) => {
+    const start = Date.now();
+    applyInternalResponseHeaders(reply);
+    if (!isAuthorized(req, deps.sidecarToken)) {
+      promMetrics.feedRequestsTotal.inc({ endpoint: "viewed", status: "unauthorized" });
+      promMetrics.feedRequestLatency.observe({ endpoint: "viewed" }, (Date.now() - start) / 1000);
+      reply.code(401).send({ error: "unauthorized" });
+      return;
+    }
+
+    if (!hasPermission(req, "provider:write")) {
+      promMetrics.feedRequestsTotal.inc({ endpoint: "viewed", status: "forbidden" });
+      promMetrics.feedRequestLatency.observe({ endpoint: "viewed" }, (Date.now() - start) / 1000);
+      reply.code(403).send({ error: "forbidden", message: "Missing required permission: provider:write" });
+      return;
+    }
+
+    if (!deps.viewershipHistoryClient) {
+      promMetrics.feedRequestsTotal.inc({ endpoint: "viewed", status: "not_configured" });
+      promMetrics.feedRequestLatency.observe({ endpoint: "viewed" }, (Date.now() - start) / 1000);
+      reply.code(501).send({ error: "not_implemented" });
+      return;
+    }
+
+    const parsed = viewershipRecordBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      promMetrics.feedRequestsTotal.inc({ endpoint: "viewed", status: "invalid" });
+      promMetrics.feedRequestLatency.observe({ endpoint: "viewed" }, (Date.now() - start) / 1000);
+      reply.code(400).send({ error: "invalid_request" });
+      return;
+    }
+
+    const objectIds = dedupeObjectIds(parsed.data.objectId, parsed.data.objectIds);
+
+    try {
+      await deps.viewershipHistoryClient.recordView({
+        actorId: parsed.data.viewerId,
+        objectIds,
+        viewedAt: parsed.data.viewedAt,
+      });
+      reply.code(202).send({ ok: true, recorded: objectIds.length });
+      promMetrics.feedRequestsTotal.inc({ endpoint: "viewed", status: "success" });
+      promMetrics.feedRequestLatency.observe({ endpoint: "viewed" }, (Date.now() - start) / 1000);
+    } catch {
+      promMetrics.feedRequestsTotal.inc({ endpoint: "viewed", status: "error" });
+      promMetrics.feedRequestLatency.observe({ endpoint: "viewed" }, (Date.now() - start) / 1000);
+      reply.code(502).send({ error: "upstream_error" });
     }
   });
 
@@ -507,10 +602,47 @@ function isAuthorized(req: FastifyRequest, token: string): boolean {
 }
 
 function hasReadPermission(req: FastifyRequest): boolean {
+  return hasPermission(req, "provider:read");
+}
+
+function hasPermission(req: FastifyRequest, permission: string): boolean {
   const raw = typeof req.headers["x-provider-permissions"] === "string"
     ? req.headers["x-provider-permissions"]
     : "";
-  return raw.split(",").map((value) => value.trim()).includes("provider:read");
+  return raw.split(",").map((value) => value.trim()).includes(permission);
+}
+
+function dedupeObjectIds(objectId?: string, objectIds?: string[]): string[] {
+  const set = new Set<string>();
+  if (typeof objectId === "string" && objectId.trim().length > 0) {
+    set.add(objectId.trim());
+  }
+  for (const id of objectIds ?? []) {
+    const trimmed = id.trim();
+    if (trimmed.length > 0) {
+      set.add(trimmed);
+    }
+  }
+  return [...set];
+}
+
+function getFilterObjectId(item: { activityPubObjectId?: string; canonicalUri?: string }): string | undefined {
+  if (typeof item.activityPubObjectId === "string" && item.activityPubObjectId.length > 0) {
+    return item.activityPubObjectId;
+  }
+  if (typeof item.canonicalUri === "string" && item.canonicalUri.startsWith("http")) {
+    return item.canonicalUri;
+  }
+  return undefined;
+}
+
+function collectFilterableObjectIds(items: Array<{ activityPubObjectId?: string; canonicalUri?: string }>): string[] {
+  const set = new Set<string>();
+  for (const item of items) {
+    const id = getFilterObjectId(item);
+    if (id) set.add(id);
+  }
+  return [...set];
 }
 
 function safeEqual(left: string, right: string): boolean {

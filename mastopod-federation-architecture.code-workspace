@@ -89,7 +89,41 @@
 				"approve": true,
 				"matchCommandLine": true
 			},
-			"npm run build": true
+			"npm run build": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node proof-fep-dd4b-quote-posts\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npm run -s test": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node -e \"try \\{ require\\('\\./services/viewership-history-api\\.service\\.js'\\); console\\.log\\('viewership service syntax ok'\\) \\} catch \\(e\\) \\{ console\\.error\\(e\\.message\\); process\\.exit\\(1\\) \\}\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods && node tests/node_modules/\\.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests pod-provider/backend/tests/viewership-history-api\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node pod-provider/backend/tests/viewership-history-api\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests pod-provider/backend/tests/viewership-history-api\\.test\\.js 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests viewership-history-api\\.test\\.js 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node --roots pod-provider/backend/tests viewership-history-api\\.test\\.js 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node --roots pod-provider/backend/tests --testMatch '\\*\\*/viewership-history-api\\.test\\.js' 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"git submodule": true
 		}
 	}
 }
