@@ -10,7 +10,8 @@ const SAFETY_SOURCES = new Set([
   'google-vision',
   'google-video',
   'safe-browsing',
-  'cloudflare-csam'
+  'cloudflare-csam',
+  'pdq-hash',
 ] as const);
 
 const MAX_SIGNAL_COUNT = 8;
@@ -18,7 +19,7 @@ const MAX_LABEL_COUNT = 16;
 const MAX_LABEL_LENGTH = 64;
 
 export interface SafetySignal {
-  source: 'google-vision' | 'google-video' | 'safe-browsing' | 'cloudflare-csam';
+  source: 'google-vision' | 'google-video' | 'safe-browsing' | 'cloudflare-csam' | 'pdq-hash';
   labels: string[];
   confidence?: number;
   raw?: unknown;

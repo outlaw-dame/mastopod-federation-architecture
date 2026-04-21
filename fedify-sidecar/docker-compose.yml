@@ -25,6 +25,8 @@ x-media-pipeline-sidecar-base: &media_pipeline_sidecar_base
     - SAFE_BROWSING_API_KEY=${SAFE_BROWSING_API_KEY:-}
     - GOOGLE_VISION_API_KEY=${GOOGLE_VISION_API_KEY:-}
     - GOOGLE_VIDEO_ACCESS_TOKEN=${GOOGLE_VIDEO_ACCESS_TOKEN:-}
+    - PDQ_HASH_SERVICE_BASE_URL=${PDQ_HASH_SERVICE_BASE_URL:-http://pdq-hash:7050}
+    - PDQ_HASH_SERVICE_BEARER_TOKEN=${PDQ_HASH_SERVICE_BEARER_TOKEN:-}
   depends_on:
     redis:
       condition: service_healthy
@@ -171,6 +173,20 @@ services:
   media-pipeline-finalize-worker:
     <<: *media_pipeline_sidecar_base
     command: ["npm", "run", "worker:finalize"]
+
+  pdq-hash:
+    build:
+      context: ./docker/pdqhash
+    container_name: pdq-hash
+    restart: unless-stopped
+    ports:
+      - "7070:7050"
+    environment:
+      - REDIS_URI=${PDQ_HASH_REDIS_URI:-redis://redis:6379}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - activitypods-network
 
   # ==========================================================================
   # RedPanda - Kafka-compatible streaming platform

@@ -15,7 +15,7 @@
  */
 
 import { request } from "undici";
-import { createVerify, createHash } from "node:crypto";
+import { createVerify, createHash, randomUUID } from "node:crypto";
 import {
   RedisStreamsQueue,
   InboundEnvelope,
@@ -35,6 +35,9 @@ import type { FollowersSyncService } from "../federation/fep8fcf/FollowersSyncSe
 import { COLLECTION_SYNC_HEADER } from "../federation/fep8fcf/CollectionSyncHeader.js";
 import type { RepliesBackfillService } from "../federation/replies-backfill/RepliesBackfillService.js";
 import type { OriginReconciliationService } from "../federation/origin-reconciliation/OriginReconciliationService.js";
+import type { MRFAdminStore } from "../admin/mrf/store.js";
+import type { ModerationBridgeStore } from "../admin/moderation/types.js";
+import { evaluateActivityPubSubjectPolicy } from "../mrf/ActivityPubSubjectPolicy.js";
 import {
   resolvePublicSearchConsent,
   isPublicSearchIndexable,
@@ -129,6 +132,23 @@ export interface InboundWorkerConfig {
    * reconciliation window so the origin can correct later mutations.
    */
   originReconciliationService?: OriginReconciliationService;
+  /**
+   * Optional getter for the live MRF admin store. A getter is used instead of a
+   * captured store reference because the worker is created before admin
+   * integration finishes bootstrapping.
+   */
+  getMrfAdminStore?: () => MRFAdminStore | null;
+  /**
+   * Optional getter for the moderation bridge store so verified inbound Flag
+   * activities can be captured as moderation cases without depending on the
+   * ActivityPods bridge path.
+   */
+  getModerationBridgeStore?: () => ModerationBridgeStore | null;
+  /**
+   * Optional resolver that maps a verified AP actor URI to a bound WebID.
+   * Local ActivityPods identities can use this for exact WebID subject rules.
+   */
+  resolveWebIdForActorUri?(actorUri: string): Promise<string | null>;
 }
 
 export interface VerificationResult {
@@ -267,6 +287,101 @@ function extractNoteObject(activity: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function looksLikeActorUriString(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    const pathname = parsed.pathname.toLowerCase();
+    if (/\/(users|profile|u|channel)\/[^/?#]+$/.test(pathname)) {
+      return true;
+    }
+    if (/\/@[^/?#]+$/.test(pathname)) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function coerceStringArray(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+  return values
+    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    .map((entry) => entry.trim());
+}
+
+function normaliseTextSnippet(value: unknown, maxLen = 1_000): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const stripped = value
+    .replace(/<!--(?:.|\n|\r)*?-->/g, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stripped) return undefined;
+  return stripped.slice(0, maxLen);
+}
+
+function extractReasonFromFlagActivity(activity: Record<string, unknown>): string | undefined {
+  for (const candidate of [activity["summary"], activity["content"], activity["name"]]) {
+    const normalized = normaliseTextSnippet(candidate);
+    if (normalized) return normalized;
+  }
+  return undefined;
+}
+
+function collectReportedItems(value: unknown): Array<string | Record<string, unknown>> {
+  const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+  return values.filter(
+    (entry): entry is string | Record<string, unknown> =>
+      (typeof entry === "string" && entry.trim().length > 0) || isRecord(entry),
+  );
+}
+
+function collectPossibleActorUris(value: unknown, depth = 0): string[] {
+  if (!isRecord(value) || depth > 2) return [];
+
+  const out = new Set<string>();
+  const id = typeof value["id"] === "string" ? value["id"].trim() : "";
+  if (id && looksLikeActorType(value["type"])) {
+    out.add(id);
+  }
+
+  for (const key of ["actor", "attributedTo"]) {
+    for (const candidate of coerceStringArray(value[key])) {
+      out.add(candidate);
+    }
+    const nestedValues = Array.isArray(value[key]) ? value[key] : [value[key]];
+    for (const nested of nestedValues) {
+      if (isRecord(nested) && typeof nested["id"] === "string") {
+        out.add(String(nested["id"]).trim());
+      }
+    }
+  }
+
+  if (value["object"] !== undefined) {
+    for (const nested of collectReportedItems(value["object"])) {
+      if (typeof nested === "string") {
+        if (looksLikeActorUriString(nested)) out.add(nested);
+      } else {
+        for (const nestedUri of collectPossibleActorUris(nested, depth + 1)) {
+          out.add(nestedUri);
+        }
+      }
+    }
+  }
+
+  return [...out].filter((entry) => {
+    try {
+      const parsed = new URL(entry);
+      return parsed.protocol === "http:" || parsed.protocol === "https:";
+    } catch {
+      return false;
+    }
+  });
+}
+
 
 export class InboundWorker {
   private queue: RedisStreamsQueue;
@@ -342,6 +457,122 @@ export class InboundWorker {
         error: err.message,
       });
     }
+  }
+
+  private isFlagActivity(activity: unknown): activity is Record<string, unknown> {
+    return this.normalizeActivityType((activity as Record<string, unknown> | null)?.["type"]) === "Flag";
+  }
+
+  private buildFlagModerationCaseDedupeKey(
+    activity: Record<string, unknown>,
+    actorUri: string,
+    inboxPath: string,
+    reportedUris: string[],
+    reason?: string,
+  ): string {
+    const activityId = typeof activity["id"] === "string" ? activity["id"].trim() : "";
+    const seed = JSON.stringify({
+      type: "Flag",
+      actorUri,
+      inboxPath,
+      activityId,
+      reason: reason ?? "",
+      reportedUris: [...reportedUris].sort(),
+    });
+    return createHash("sha256").update(seed).digest("hex");
+  }
+
+  private async captureFlagModerationCase(
+    activity: Record<string, unknown>,
+    envelope: InboundEnvelope,
+    actorUri: string,
+  ): Promise<{ caseId: string; deduped: boolean } | null> {
+    const store = this.config.getModerationBridgeStore?.() ?? null;
+    if (!store) {
+      logger.warn("Inbound ActivityPub Flag received without moderation bridge store; report dropped", {
+        envelopeId: envelope.envelopeId,
+        actorUri,
+      });
+      return null;
+    }
+
+    const reason = extractReasonFromFlagActivity(activity);
+    const reportedItems = collectReportedItems(activity["object"]);
+    const reportedUris = new Set<string>();
+    const reportedActorUris = new Set<string>();
+
+    for (const item of reportedItems) {
+      if (typeof item === "string") {
+        reportedUris.add(item);
+        if (looksLikeActorUriString(item)) {
+          reportedActorUris.add(item);
+        }
+        continue;
+      }
+
+      if (typeof item["id"] === "string" && item["id"].trim().length > 0) {
+        reportedUris.add(item["id"].trim());
+      }
+
+      for (const candidate of collectPossibleActorUris(item)) {
+        reportedActorUris.add(candidate);
+      }
+    }
+
+    const dedupeKey = this.buildFlagModerationCaseDedupeKey(
+      activity,
+      actorUri,
+      envelope.path,
+      [...reportedUris],
+      reason,
+    );
+    const existing = await store.findCaseByDedupeKey(dedupeKey);
+    if (existing) {
+      return { caseId: existing.id, deduped: true };
+    }
+
+    const recipientActorUri = this.deriveLocalActorUriFromInboxPath(envelope.path) ?? undefined;
+    const sourceActorWebId = this.config.resolveWebIdForActorUri
+      ? await this.config.resolveWebIdForActorUri(actorUri).catch(() => null)
+      : null;
+    const recipientWebId = recipientActorUri && this.config.resolveWebIdForActorUri
+      ? await this.config.resolveWebIdForActorUri(recipientActorUri).catch(() => null)
+      : null;
+    const createdAtRaw =
+      typeof activity["published"] === "string"
+        ? activity["published"].trim()
+        : typeof activity["updated"] === "string"
+          ? activity["updated"].trim()
+          : "";
+    const createdAt =
+      createdAtRaw && !Number.isNaN(Date.parse(createdAtRaw))
+        ? new Date(createdAtRaw).toISOString()
+        : undefined;
+
+    const moderationCase = {
+      id: randomUUID(),
+      source: "activitypub-flag" as const,
+      protocol: "ap" as const,
+      ...(typeof activity["id"] === "string" && activity["id"].trim().length > 0
+        ? { activityId: activity["id"].trim() }
+        : {}),
+      dedupeKey,
+      sourceActorUri: actorUri,
+      ...(sourceActorWebId ? { sourceActorWebId } : {}),
+      inboxPath: envelope.path,
+      ...(recipientActorUri ? { recipientActorUri } : {}),
+      ...(recipientWebId ? { recipientWebId } : {}),
+      ...(reason ? { reason } : {}),
+      reportedUris: [...reportedUris],
+      reportedActorUris: [...reportedActorUris],
+      ...(createdAt ? { createdAt } : {}),
+      receivedAt: new Date(envelope.receivedAt || Date.now()).toISOString(),
+      status: "open" as const,
+      relatedDecisionIds: [],
+    };
+
+    await store.addCase(moderationCase);
+    return { caseId: moderationCase.id, deduped: false };
   }
 
   /**
@@ -513,8 +744,67 @@ export class InboundWorker {
         }
       }
 
+      // Step 3.6: Subject-specific ActivityPub policy check. This is the real
+      // inbound enforcement path for provider-managed AP moderation rules.
+      {
+        const actorWebId = this.config.resolveWebIdForActorUri
+          ? await this.config.resolveWebIdForActorUri(verifiedActorUri).catch(() => null)
+          : null;
+        const subjectPolicyDecision = await evaluateActivityPubSubjectPolicy(
+          this.config.getMrfAdminStore?.() ?? null,
+          {
+            activityId: typeof activity.id === "string" ? activity.id : envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            actorWebId: actorWebId ?? undefined,
+            originHost: extractDomain(verifiedActorUri) ?? undefined,
+            visibility: this.determineVisibility(activity),
+          },
+          { requestId: envelope.envelopeId },
+        );
+
+        if (
+          subjectPolicyDecision &&
+          (subjectPolicyDecision.appliedAction === "filter" || subjectPolicyDecision.appliedAction === "reject")
+        ) {
+          metrics.inboundActivityPubActivities.inc({
+            stage: subjectPolicyDecision.appliedAction === "reject"
+              ? "subject_policy_reject"
+              : "subject_policy_filter",
+            activity_type: activityType,
+          });
+          await this.queue.ack("inbound", messageId);
+          logger.info("Inbound activity discarded by ActivityPub subject policy", {
+            envelopeId: envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            action: subjectPolicyDecision.appliedAction,
+            matchedOn: subjectPolicyDecision.matchedOn,
+            matchedValue: subjectPolicyDecision.matchedValue,
+            traceId: subjectPolicyDecision.traceId,
+          });
+          return;
+        }
+      }
+
       // Step 3.75: In-process idempotency gate (primarily for testing; production
       // idempotency is handled at the Redis queue level).
+      if (this.isFlagActivity(activity)) {
+        const moderationCase = await this.captureFlagModerationCase(activity, envelope, verifiedActorUri);
+        const stage = moderationCase
+          ? moderationCase.deduped
+            ? "flag_case_deduped"
+            : "flag_case_stored"
+          : "flag_case_dropped";
+        metrics.inboundActivityPubActivities.inc({ stage, activity_type: activityType });
+        await this.queue.ack("inbound", messageId);
+        logger.info("Inbound ActivityPub Flag stored as moderation case", {
+          envelopeId: envelope.envelopeId,
+          actorUri: verifiedActorUri,
+          caseId: moderationCase?.caseId ?? null,
+          deduped: moderationCase?.deduped ?? false,
+        });
+        return;
+      }
+
       if (this.config.seenActivityIds && activity.id) {
         const activityId = String(activity.id);
         if (this.config.seenActivityIds.has(activityId)) {

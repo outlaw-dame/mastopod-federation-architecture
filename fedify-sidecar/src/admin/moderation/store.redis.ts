@@ -1,9 +1,13 @@
 import type { Redis } from "ioredis";
+import { createHash } from "node:crypto";
 import type {
   AtLabel,
   AtLabelPage,
   AtLabelQuery,
   ModerationBridgeStore,
+  ModerationCase,
+  ModerationCasePage,
+  ModerationCaseQuery,
   ModerationDecision,
   ModerationDecisionPage,
   ModerationDecisionQuery,
@@ -14,6 +18,9 @@ import type {
 //
 //   {prefix}:decision:{id}          → JSON(ModerationDecision)
 //   {prefix}:decision:index         → Sorted Set (score = epoch ms, member = id)
+//   {prefix}:case:{id}              → JSON(ModerationCase)
+//   {prefix}:case:index             → Sorted Set (score = epoch ms, member = id)
+//   {prefix}:case:dedupe:{sha256}   → id
 //   {prefix}:label:{seq}            → JSON(AtLabel)   (seq = auto-increment int)
 //   {prefix}:label:seq              → integer counter (INCR)
 //   {prefix}:label:index            → Sorted Set (score = epoch ms, member = seq)
@@ -48,6 +55,19 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
 
   private decisionIndexKey(): string {
     return `${this.prefix}:decision:index`;
+  }
+
+  private caseKey(id: string): string {
+    return `${this.prefix}:case:${id}`;
+  }
+
+  private caseIndexKey(): string {
+    return `${this.prefix}:case:index`;
+  }
+
+  private caseDedupeKey(dedupeKey: string): string {
+    const digest = createHash("sha256").update(dedupeKey).digest("hex");
+    return `${this.prefix}:case:dedupe:${digest}`;
   }
 
   private labelKey(seq: number): string {
@@ -88,7 +108,7 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
   }
 
   async listDecisions(query: ModerationDecisionQuery = {}): Promise<ModerationDecisionPage> {
-    const { limit = 50, cursor, action, targetAtDid, targetWebId, includeRevoked = true } = query;
+    const { limit = 50, cursor, action, targetAtDid, targetWebId, targetActorUri, includeRevoked = true } = query;
 
     // Walk the index from newest to oldest (rev-range by score)
     let maxScore = "+inf";
@@ -122,6 +142,7 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
       if (action && decision.action !== action) continue;
       if (targetAtDid && decision.targetAtDid !== targetAtDid) continue;
       if (targetWebId && decision.targetWebId !== targetWebId) continue;
+      if (targetActorUri && decision.targetActorUri !== targetActorUri) continue;
 
       decisions.push(decision);
       if (decisions.length === limit) {
@@ -142,6 +163,95 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
 
     const updated: ModerationDecision = { ...decision, ...patch };
     await this.redis.set(key, JSON.stringify(updated));
+    return updated;
+  }
+
+  // ── Moderation case store ─────────────────────────────────────────────────
+
+  async addCase(entry: ModerationCase): Promise<void> {
+    const key = this.caseKey(entry.id);
+    const existing = await this.redis.get(key);
+    if (existing) {
+      throw new Error(`Case ${entry.id} already exists`);
+    }
+
+    const score = new Date(entry.receivedAt).getTime();
+    const pipeline = this.redis.pipeline();
+    pipeline.set(key, JSON.stringify(entry));
+    pipeline.zadd(this.caseIndexKey(), score, entry.id);
+    pipeline.set(this.caseDedupeKey(entry.dedupeKey), entry.id);
+    await pipeline.exec();
+  }
+
+  async getCase(id: string): Promise<ModerationCase | null> {
+    const raw = await this.redis.get(this.caseKey(id));
+    return safeParse<ModerationCase>(raw);
+  }
+
+  async findCaseByDedupeKey(dedupeKey: string): Promise<ModerationCase | null> {
+    const id = await this.redis.get(this.caseDedupeKey(dedupeKey));
+    if (!id) return null;
+    return this.getCase(id);
+  }
+
+  async listCases(query: ModerationCaseQuery = {}): Promise<ModerationCasePage> {
+    const { limit = 50, cursor, status, sourceActorUri, recipientWebId, reportedActorUri } = query;
+
+    let maxScore = "+inf";
+    if (cursor) {
+      const cursorScore = Number(cursor);
+      if (!Number.isNaN(cursorScore)) {
+        maxScore = `(${cursorScore}`;
+      }
+    }
+
+    const candidates = await this.redis.zrevrangebyscore(
+      this.caseIndexKey(),
+      maxScore,
+      "-inf",
+      "LIMIT",
+      0,
+      limit * 3,
+    );
+
+    const cases: ModerationCase[] = [];
+    let nextCursor: string | undefined;
+
+    for (const id of candidates) {
+      const raw = await this.redis.get(this.caseKey(id));
+      const entry = safeParse<ModerationCase>(raw);
+      if (!entry) continue;
+
+      if (status && entry.status !== status) continue;
+      if (sourceActorUri && entry.sourceActorUri !== sourceActorUri) continue;
+      if (recipientWebId && entry.recipientWebId !== recipientWebId) continue;
+      if (reportedActorUri && !entry.reportedActorUris.includes(reportedActorUri)) continue;
+
+      cases.push(entry);
+      if (cases.length === limit) {
+        const score = await this.redis.zscore(this.caseIndexKey(), id);
+        if (score !== null) nextCursor = score;
+        break;
+      }
+    }
+
+    return { cases, cursor: nextCursor ?? undefined };
+  }
+
+  async patchCase(id: string, patch: Partial<ModerationCase>): Promise<ModerationCase | null> {
+    const key = this.caseKey(id);
+    const existing = await this.redis.get(key);
+    const entry = safeParse<ModerationCase>(existing);
+    if (!entry) return null;
+
+    const updated: ModerationCase = { ...entry, ...patch };
+    const pipeline = this.redis.pipeline();
+    pipeline.set(key, JSON.stringify(updated));
+    if (updated.dedupeKey !== entry.dedupeKey) {
+      pipeline.del(this.caseDedupeKey(entry.dedupeKey));
+      pipeline.set(this.caseDedupeKey(updated.dedupeKey), id);
+    }
+    await pipeline.exec();
     return updated;
   }
 
@@ -167,15 +277,8 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
     const { limit = 100, cursor = 0, subject } = query;
 
     const indexKey = subject ? this.labelSubjectKey(subject) : this.labelIndexKey();
-
-    const seqStrings = await this.redis.zrangebyscore(
-      indexKey,
-      cursor,
-      "+inf",
-      "LIMIT",
-      0,
-      limit,
-    );
+    const start = Math.max(0, Number.isFinite(cursor) ? Math.trunc(cursor) : 0);
+    const seqStrings = await this.redis.zrange(indexKey, start, start + limit - 1);
 
     const labels: AtLabel[] = [];
     for (const seqStr of seqStrings) {
@@ -189,7 +292,7 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
 
     const nextCursor =
       seqStrings.length === limit
-        ? Number(seqStrings[seqStrings.length - 1]) + 1
+        ? start + limit
         : 0;
 
     return { labels, cursor: nextCursor };

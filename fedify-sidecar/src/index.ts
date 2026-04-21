@@ -195,6 +195,7 @@ import {
 } from "./delivery/outbound-webhook.js";
 import { registerMrfAdminIntegration } from "./admin/mrf/integration.js";
 import { registerModerationBridgeIntegration } from "./admin/moderation/integration.js";
+import type { ModerationBridgeStore } from "./admin/moderation/types.js";
 import {
   ApRelaySubscriptionService,
   parseRelayActorUrls,
@@ -236,7 +237,10 @@ import type { MRFAdminStore } from "./admin/mrf/store.js";
 import { applyLocaleHeaders, resolveLocale, t as translateLocale } from "./http/locale.js";
 
 function normalizeMrfAdminStoreMode(raw: string | undefined): "memory" | "redis" {
-  return raw === "redis" ? "redis" : "memory";
+  if (raw === "memory" || raw === "redis") {
+    return raw;
+  }
+  return "redis";
 }
 
 type StartupMode = "blocking" | "background";
@@ -608,6 +612,8 @@ let searchIndexerRedis: Redis | null = null;
 let mrfAdminRedisClient: Redis | null = null;
 let mrfAdminStore: MRFAdminStore | null = null;
 let moderationBridgeRedisClient: Redis | null = null;
+let moderationBridgeStore: ModerationBridgeStore | null = null;
+let identityRepo: RedisIdentityBindingRepository | null = null;
 let fedifyAdapter: FedifyFederationAdapter | null = null;
 let apRelaySubscriptionService: ApRelaySubscriptionService | null = null;
 let atJetstreamService: AtJetstreamService | null = null;
@@ -1138,6 +1144,13 @@ async function main() {
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
         ...(sidecarActorPaths.size > 0 ? { sidecarActorPaths } : {}),
+        getMrfAdminStore: () => mrfAdminStore,
+        getModerationBridgeStore: () => moderationBridgeStore,
+        resolveWebIdForActorUri: async (actorUri: string) => {
+          if (!identityRepo) return null;
+          const binding = await identityRepo.getByActivityPubActorUri(actorUri);
+          return binding?.webId ?? null;
+        },
         ...(followersSyncService ? {
           followersSyncService,
           followersSyncSigningClient: signingClient,
@@ -2163,7 +2176,7 @@ async function main() {
         );
 
         // ---- Identity binding repository ----
-        const identityRepo = new RedisIdentityBindingRepository(atRedis);
+        identityRepo = new RedisIdentityBindingRepository(atRedis);
         const observedAtIdentityStore = new RedisObservedAtIdentityStore(atRedis);
         const observedAtIdentityResolver = new HttpAtIdentityResolver({
           timeoutMs: config.externalPdsTimeoutMs,
@@ -2724,6 +2737,11 @@ async function main() {
             return;
           }
 
+          if (!identityRepo) {
+            reply.status(503).send({ error: 'Identity repository unavailable' });
+            return;
+          }
+
           const binding = await identityRepo.getByCanonicalAccountId(canonicalAccountId);
           if (!binding || !binding.atprotoDid || !binding.atprotoHandle) {
             reply.status(404).send({ error: 'ATProto identity binding not found' });
@@ -2799,6 +2817,7 @@ async function main() {
               : 5_000,
           });
           moderationBridgeRedisClient = moderationRegistration.redisClient;
+          moderationBridgeStore = moderationRegistration.store;
         }
 
         if (!config.atLocalFixture) {

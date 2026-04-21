@@ -140,6 +140,8 @@ function loadConfigFromEnv() {
     safeBrowsingApiKey: process.env.SAFE_BROWSING_API_KEY || '',
     googleVisionApiKey: process.env.GOOGLE_VISION_API_KEY || '',
     googleVideoAccessToken: process.env.GOOGLE_VIDEO_ACCESS_TOKEN || '',
+    pdqHashServiceBaseUrl: process.env.PDQ_HASH_SERVICE_BASE_URL || '',
+    pdqHashServiceBearerToken: process.env.PDQ_HASH_SERVICE_BEARER_TOKEN || '',
     s3: {
       endpoint: process.env.S3_ENDPOINT || 'https://s3.filebase.com',
       region: process.env.S3_REGION || 'us-east-1',

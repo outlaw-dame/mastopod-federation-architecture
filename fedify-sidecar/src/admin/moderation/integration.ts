@@ -8,7 +8,7 @@ import { registerModerationBridgeFastifyRoutes } from "./fastify-routes.js";
 import { createAtLabelEmitter } from "./label-emitter.js";
 import { InMemoryModerationBridgeStore } from "./store.memory.js";
 import { RedisModerationBridgeStore } from "./store.redis.js";
-import type { ModerationBridgeDeps } from "./types.js";
+import type { ModerationBridgeDeps, ModerationBridgeStore } from "./types.js";
 
 interface RegisterOptions {
   app: any;
@@ -44,10 +44,13 @@ function sanitizeActor(raw: string | null): string {
   return trimmed.slice(0, 256);
 }
 
-export async function registerModerationBridgeIntegration(options: RegisterOptions): Promise<{ redisClient: Redis | null }> {
+export async function registerModerationBridgeIntegration(options: RegisterOptions): Promise<{
+  redisClient: Redis | null;
+  store: ModerationBridgeStore;
+}> {
   if (!options.enabled) {
     options.logger.info("Moderation bridge integration disabled");
-    return { redisClient: null };
+    return { redisClient: null, store: new InMemoryModerationBridgeStore() };
   }
 
   if (!options.adminToken) {
@@ -95,6 +98,14 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
     },
     resolveWebId: async (atDid: string): Promise<string | null> => {
       const binding = await options.identityBindingRepository.getByAtprotoDid(atDid);
+      return binding?.webId ?? null;
+    },
+    resolveActivityPubActorUri: async (webId: string): Promise<string | null> => {
+      const binding = await options.identityBindingRepository.getByWebId(webId);
+      return binding?.activityPubActorUri ?? null;
+    },
+    resolveWebIdForActorUri: async (actorUri: string): Promise<string | null> => {
+      const binding = await options.identityBindingRepository.getByActivityPubActorUri(actorUri);
       return binding?.webId ?? null;
     },
     mrfInternalFetch: async ({
@@ -200,5 +211,5 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
     "Moderation bridge routes registered",
   );
 
-  return { redisClient };
+  return { redisClient, store };
 }

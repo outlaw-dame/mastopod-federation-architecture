@@ -7,6 +7,18 @@
 		{
 			"name": "activity-pods",
 			"path": "../activity-pods"
+		},
+		{
+			"name": "fedify-sidecar",
+			"path": "./fedify-sidecar"
+		},
+		{
+			"name": "media-pipeline-sidecar",
+			"path": "./media-pipeline-sidecar"
+		},
+		{
+			"name": "memory",
+			"path": "./memory"
 		}
 	],
 	"settings": {
@@ -123,7 +135,8 @@
 				"approve": true,
 				"matchCommandLine": true
 			},
-			"git submodule": true
+			"git submodule": true,
+			"docker compose": true
 		}
 	}
 }

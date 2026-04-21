@@ -1,8 +1,10 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   handleApplyDecision,
+  handleGetCase,
   handleGetDecision,
   handleListAtLabels,
+  handleListCases,
   handleListDecisions,
   handleListKnownAtLabels,
   handleRevokeDecision,
@@ -131,6 +133,33 @@ export function registerModerationBridgeFastifyRoutes(
     try {
       applyRateLimit(req, "moderation-get", readRule, limiter);
       await sendResponse(reply, await handleGetDecision(request, deps, params.id));
+    } catch (err) {
+      await sendResponse(
+        reply,
+        errorToResponse(err, request.headers.get("x-request-id") || undefined),
+      );
+    }
+  });
+
+  app.get("/internal/admin/moderation/cases", async (req, reply) => {
+    const request = toRequest(req);
+    try {
+      applyRateLimit(req, "moderation-cases", readRule, limiter);
+      await sendResponse(reply, await handleListCases(request, deps));
+    } catch (err) {
+      await sendResponse(
+        reply,
+        errorToResponse(err, request.headers.get("x-request-id") || undefined),
+      );
+    }
+  });
+
+  app.get("/internal/admin/moderation/cases/:id", async (req, reply) => {
+    const request = toRequest(req);
+    const params = req.params as { id: string };
+    try {
+      applyRateLimit(req, "moderation-case-get", readRule, limiter);
+      await sendResponse(reply, await handleGetCase(request, deps, params.id));
     } catch (err) {
       await sendResponse(
         reply,

@@ -1,0 +1,245 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "infra:activitypods:up",
+      "type": "shell",
+      "command": "cd ${workspaceFolder:activity-pods}/pod-provider && docker compose up -d",
+      "problemMatcher": []
+    },
+    {
+      "label": "infra:activitypods:down",
+      "type": "shell",
+      "command": "cd ${workspaceFolder:activity-pods}/pod-provider && docker compose down",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:activitypods:up",
+      "type": "shell",
+      "command": "sh ./scripts/bootstrap-local-dev.sh",
+      "options": {
+        "cwd": "${workspaceFolder:activity-pods}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:activitypods:down",
+      "type": "shell",
+      "command": "sh ./scripts/shutdown-local-dev.sh",
+      "options": {
+        "cwd": "${workspaceFolder:activity-pods}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:activitypods:status",
+      "type": "shell",
+      "command": "sh ./scripts/status-local-dev.sh",
+      "options": {
+        "cwd": "${workspaceFolder:activity-pods}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:memory:up",
+      "type": "shell",
+      "command": "docker compose -f docker-compose.local.yml up -d --build",
+      "options": {
+        "cwd": "${workspaceFolder:memory}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:memory:down",
+      "type": "shell",
+      "command": "docker compose -f docker-compose.local.yml down",
+      "options": {
+        "cwd": "${workspaceFolder:memory}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:memory:status",
+      "type": "shell",
+      "command": "docker compose -f docker-compose.local.yml ps",
+      "options": {
+        "cwd": "${workspaceFolder:memory}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "debug:activitypods:backend",
+      "type": "shell",
+      "command": "NODE_OPTIONS=--inspect=9229 npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder:activity-pods}/pod-provider/backend"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "debug:fedify:sidecar",
+      "type": "shell",
+      "command": "NODE_OPTIONS=--inspect=9230 npm run server:dev",
+      "options": {
+        "cwd": "${workspaceFolder:fedify-sidecar}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "debug:media:sidecar",
+      "type": "shell",
+      "command": "NODE_OPTIONS=--inspect=9231 npm run server:dev",
+      "options": {
+        "cwd": "${workspaceFolder:media-pipeline-sidecar}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "debug:memory:api",
+      "type": "shell",
+      "command": "bun --inspect=9240 run dev",
+      "options": {
+        "cwd": "${workspaceFolder:memory}/api"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "debug:memory:frontend:public",
+      "type": "shell",
+      "command": "npm run dev:public",
+      "options": {
+        "cwd": "${workspaceFolder:memory}/frontend"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "tunnel:memory:frontend",
+      "type": "shell",
+      "command": "ngrok http 5173 --log stdout",
+      "options": {
+        "cwd": "${workspaceFolder:memory}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "tunnel:memory:frontend:public",
+      "type": "shell",
+      "command": "ngrok http 5174 --log stdout",
+      "options": {
+        "cwd": "${workspaceFolder:memory}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "tunnel:memory:api",
+      "type": "shell",
+      "command": "ngrok http 8794 --log stdout",
+      "options": {
+        "cwd": "${workspaceFolder:memory}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:federation:up",
+      "dependsOn": [
+        "slice:activitypods:up"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:federation:debug",
+      "dependsOn": [
+        "infra:activitypods:up",
+        "debug:activitypods:backend",
+        "debug:fedify:sidecar"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:memory-app:up",
+      "dependsOn": [
+        "slice:memory:up"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:memory-app:debug",
+      "dependsOn": [
+        "slice:memory:up",
+        "debug:memory:api"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:memory-app:live",
+      "dependsOn": [
+        "slice:memory:up",
+        "tunnel:memory:frontend"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:memory:public",
+      "dependsOn": [
+        "slice:memory:up",
+        "debug:memory:frontend:public",
+        "tunnel:memory:frontend:public"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:activitypods:debug",
+      "dependsOn": [
+        "infra:activitypods:up",
+        "debug:activitypods:backend",
+        "debug:fedify:sidecar",
+        "debug:media:sidecar"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:all:up",
+      "dependsOn": [
+        "slice:activitypods:up",
+        "slice:memory:up"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:all:debug",
+      "dependsOn": [
+        "slice:activitypods:debug",
+        "slice:memory-app:debug"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:all:down",
+      "dependsOn": [
+        "slice:memory:down",
+        "slice:activitypods:down"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    }
+  ]
+}

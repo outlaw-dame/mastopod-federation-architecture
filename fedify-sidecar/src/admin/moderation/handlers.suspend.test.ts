@@ -19,17 +19,25 @@ function makeRequest(body: unknown): Request {
 }
 
 function makeDeps(
-  overrides: Partial<Pick<ModerationBridgeDeps, "updateAtSubjectStatus" | "resolveAtDid" | "resolveWebId">> = {},
+  overrides: Partial<Pick<
+    ModerationBridgeDeps,
+    "updateAtSubjectStatus" | "resolveAtDid" | "resolveWebId" | "resolveActivityPubActorUri"
+  >> = {},
 ): ModerationBridgeDeps {
   return {
     adminToken: "admin-token",
     store: {
       addDecision: vi.fn().mockResolvedValue(undefined),
-      listDecisions: vi.fn().mockResolvedValue({ items: [], nextCursor: undefined }),
+      listDecisions: vi.fn().mockResolvedValue({ decisions: [], cursor: undefined }),
       getDecision: vi.fn().mockResolvedValue(null),
       patchDecision: vi.fn().mockResolvedValue(null),
+      addCase: vi.fn().mockResolvedValue(undefined),
+      getCase: vi.fn().mockResolvedValue(null),
+      findCaseByDedupeKey: vi.fn().mockResolvedValue(null),
+      listCases: vi.fn().mockResolvedValue({ cases: [], cursor: undefined }),
+      patchCase: vi.fn().mockResolvedValue(null),
       addAtLabel: vi.fn().mockResolvedValue(undefined),
-      listAtLabels: vi.fn().mockResolvedValue({ items: [], nextCursor: undefined }),
+      listAtLabels: vi.fn().mockResolvedValue({ labels: [], cursor: 0 }),
     },
     labelEmitter: {
       emit: vi.fn().mockResolvedValue({ src: "did:web:test", uri: "did:example:alice", val: "!hide", cts: "2026-01-01T00:00:00.000Z" }),
@@ -41,8 +49,22 @@ function makeDeps(
     authorize: () => undefined,
     resolveAtDid: overrides.resolveAtDid ?? vi.fn().mockResolvedValue(null),
     resolveWebId: overrides.resolveWebId ?? vi.fn().mockResolvedValue(null),
+    resolveActivityPubActorUri: overrides.resolveActivityPubActorUri ?? vi.fn().mockResolvedValue(null),
+    resolveWebIdForActorUri: vi.fn().mockResolvedValue(null),
     mrfInternalFetch: vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ data: { config: { config: { blockedLabels: [], warnLabels: [] } } } }), {
+      new Response(JSON.stringify({
+        data: {
+          config: {
+            enabled: true,
+            mode: "enforce",
+            revision: 0,
+            config: {
+              rules: [],
+              traceReasons: true,
+            },
+          },
+        },
+      }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
@@ -76,6 +98,8 @@ describe("suspend action", () => {
     const payload = (await response.json()) as { decision: ModerationDecision };
     expect(payload.decision.atStatusUpdated).toBe(true);
     expect(payload.decision.atLabelEmitted).toBe(true);
+    expect(payload.decision.mrfPatched).toBe(false);
+    expect(payload.decision.protocols).toBe("at");
     expect(payload.decision.action).toBe("suspend");
     expect(updateAtSubjectStatus).toHaveBeenCalledTimes(1);
     expect(updateAtSubjectStatus).toHaveBeenCalledWith({
@@ -179,5 +203,27 @@ describe("suspend action", () => {
       did: "did:plc:resolvedfrompod",
       reason: "Resolved via WebID binding",
     });
+  });
+
+  it("records no AP propagation when the target cannot be resolved to an AT DID", async () => {
+    const deps = makeDeps({
+      resolveAtDid: vi.fn().mockResolvedValue(null),
+    });
+
+    const response = await handleApplyDecision(
+      makeRequest({
+        targetWebId: "https://pods.example.com/users/alice",
+        action: "warn",
+      }),
+      deps,
+    );
+
+    expect(response.status).toBe(201);
+    const payload = (await response.json()) as { decision: ModerationDecision };
+    expect(payload.decision.targetWebId).toBe("https://pods.example.com/users/alice");
+    expect(payload.decision.targetAtDid).toBeUndefined();
+    expect(payload.decision.atLabelEmitted).toBe(false);
+    expect(payload.decision.mrfPatched).toBe(false);
+    expect(payload.decision.protocols).toBe("none");
   });
 });

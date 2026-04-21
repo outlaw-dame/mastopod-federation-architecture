@@ -5,9 +5,12 @@ import { clampNumber, dedupeStrings, rejectUnknownKeys } from "../common.js";
 export interface MediaPolicyConfig {
   sensitiveLabels: string[];
   blockedLabels: string[];
+  blockedPdqHashes: string[];
   trustedSources: string[];
   minSensitiveConfidence: number;
   minBlockedConfidence: number;
+  minPdqQuality: number;
+  pdqHammingThreshold: number;
   blockedAction: "filter" | "reject";
   applySensitiveFlag: boolean;
   setContentWarning: boolean;
@@ -19,9 +22,12 @@ const fullSchema = z
   .object({
     sensitiveLabels: z.array(z.string()).max(200),
     blockedLabels: z.array(z.string()).max(200),
+    blockedPdqHashes: z.array(z.string()).max(200),
     trustedSources: z.array(z.string()).max(50),
     minSensitiveConfidence: z.number().min(0).max(1),
     minBlockedConfidence: z.number().min(0).max(1),
+    minPdqQuality: z.number().int().min(0).max(100),
+    pdqHammingThreshold: z.number().int().min(0).max(256),
     blockedAction: z.enum(["filter", "reject"]),
     applySensitiveFlag: z.boolean(),
     setContentWarning: z.boolean(),
@@ -35,9 +41,12 @@ const patchSchema = fullSchema.partial().strict();
 const defaultConfig: MediaPolicyConfig = {
   sensitiveLabels: ["nsfw", "sexual", "nudity", "graphic-violence", "violence"],
   blockedLabels: ["csam", "csem"],
+  blockedPdqHashes: [],
   trustedSources: [],
   minSensitiveConfidence: 0.65,
   minBlockedConfidence: 0.98,
+  minPdqQuality: 70,
+  pdqHammingThreshold: 15,
   blockedAction: "reject",
   applySensitiveFlag: true,
   setContentWarning: true,
@@ -49,6 +58,22 @@ function normalizeLabel(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function normalizePdqHash(value: string): string {
+  const normalized = value.trim().replace(/\s+/g, "").toLowerCase();
+  if (/^[01]{256}$/.test(normalized)) {
+    return normalized;
+  }
+
+  if (/^[a-f0-9]{64}$/.test(normalized)) {
+    return normalized
+      .split("")
+      .map((char) => Number.parseInt(char, 16).toString(2).padStart(4, "0"))
+      .join("");
+  }
+
+  throw new Error("blockedPdqHashes entries must be 256-bit binary strings or 64-character hexadecimal values");
+}
+
 function normalizeConfig(raw: Partial<MediaPolicyConfig>, existing?: MediaPolicyConfig): MediaPolicyConfig {
   const baseline = existing ?? defaultConfig;
   const merged: MediaPolicyConfig = {
@@ -56,9 +81,15 @@ function normalizeConfig(raw: Partial<MediaPolicyConfig>, existing?: MediaPolicy
     ...raw,
     sensitiveLabels: dedupeStrings((raw.sensitiveLabels ?? baseline.sensitiveLabels).map(normalizeLabel)),
     blockedLabels: dedupeStrings((raw.blockedLabels ?? baseline.blockedLabels).map(normalizeLabel)),
+    blockedPdqHashes: dedupeStrings((raw.blockedPdqHashes ?? baseline.blockedPdqHashes).map(normalizePdqHash)),
     trustedSources: dedupeStrings((raw.trustedSources ?? baseline.trustedSources).map(normalizeLabel)),
     minSensitiveConfidence: clampNumber(raw.minSensitiveConfidence ?? baseline.minSensitiveConfidence, 0, 1),
     minBlockedConfidence: clampNumber(raw.minBlockedConfidence ?? baseline.minBlockedConfidence, 0, 1),
+    minPdqQuality: Math.max(0, Math.min(100, Math.trunc(raw.minPdqQuality ?? baseline.minPdqQuality))),
+    pdqHammingThreshold: Math.max(
+      0,
+      Math.min(256, Math.trunc(raw.pdqHammingThreshold ?? baseline.pdqHammingThreshold)),
+    ),
     contentWarningText: (raw.contentWarningText ?? baseline.contentWarningText).trim().slice(0, 160),
     traceReasons: raw.traceReasons ?? baseline.traceReasons,
     applySensitiveFlag: raw.applySensitiveFlag ?? baseline.applySensitiveFlag,
@@ -156,6 +187,17 @@ export const mediaPolicyRegistration: ModuleRegistration<MediaPolicyConfig> = {
         defaultValue: defaultConfig.blockedLabels,
       },
       {
+        key: "blockedPdqHashes",
+        label: "Blocked image PDQ hashes",
+        description:
+          "Perceptual image hashes to block even when the file has been resized or lightly edited. Accepts 256-bit binary or 64-character hex values.",
+        type: "string-array",
+        required: true,
+        maxLength: 200,
+        defaultValue: [],
+        placeholder: "011010... or 31ab07638e54b8fc...",
+      },
+      {
         key: "trustedSources",
         label: "Trusted sources",
         description: "Optional allow-list of scanner sources. Empty means all known sources are accepted.",
@@ -185,6 +227,28 @@ export const mediaPolicyRegistration: ModuleRegistration<MediaPolicyConfig> = {
         max: 1,
         step: 0.01,
         defaultValue: defaultConfig.minBlockedConfidence,
+      },
+      {
+        key: "minPdqQuality",
+        label: "PDQ minimum quality",
+        description: "Only PDQ hashes with quality at or above this score are accepted for image-hash matching.",
+        type: "integer",
+        required: true,
+        min: 0,
+        max: 100,
+        step: 1,
+        defaultValue: defaultConfig.minPdqQuality,
+      },
+      {
+        key: "pdqHammingThreshold",
+        label: "PDQ Hamming threshold",
+        description: "PDQ hashes are treated as matches only when their differing-bit distance is below this threshold.",
+        type: "integer",
+        required: true,
+        min: 0,
+        max: 256,
+        step: 1,
+        defaultValue: defaultConfig.pdqHammingThreshold,
       },
       {
         key: "blockedAction",

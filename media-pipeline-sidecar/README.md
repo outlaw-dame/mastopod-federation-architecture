@@ -10,6 +10,7 @@ Focused media infrastructure service for the Mastopod federation architecture.
 - S3-compatible canonical storage (Filebase, AWS S3, MinIO, R2, B2 S3 API)
 - Cloudflare delivery URL generation
 - raw safety signal collection adapters
+- optional PDQ perceptual-hash collection for provider-managed blocked-image matching
 - protocol-specific media projection helpers
 - media lifecycle events and indexing payloads
 
@@ -27,6 +28,11 @@ queue ingress -> ingest worker -> fetch worker -> process:image|video -> video:r
 ```
 
 The finalize stage persists the canonical asset, emits a media lifecycle event, and writes a media indexing payload. Any safety signals are emitted as raw signals only for downstream MRF evaluation.
+
+PDQ note:
+- When `PDQ_HASH_SERVICE_BASE_URL` is configured, the image worker calls a PieFed-compatible PDQ service after canonical upload.
+- The service is expected to return `pdq_hash_binary` plus `quality`.
+- The media pipeline still does not block anything directly; it only emits the hash as a raw signal so `fedify-sidecar` can apply provider policy.
 
 Important deployment note:
 - `npm start` only runs the HTTP ingress service.
@@ -60,6 +66,8 @@ Environment controls:
 - `FFMPEG_PATH` and `FFPROBE_PATH`: optional overrides for video tooling.
 - `VIDEO_PLAYBACK_RENDITION_WIDTHS`, `VIDEO_PLAYBACK_CRF`, `VIDEO_PLAYBACK_AUDIO_BITRATE_KBPS`, `VIDEO_PLAYBACK_PRESET`: MP4 playback rendition ladder controls.
 - `VIDEO_STREAM_SEGMENT_DURATION_SECONDS`: shared segment duration for HLS and DASH delivery manifests.
+- `PDQ_HASH_SERVICE_BASE_URL`: optional PieFed-compatible PDQ hashing service base URL. When set, image jobs call `GET /pdq-hash?image_url=...` and emit raw PDQ hash signals for downstream MRF policy.
+- `PDQ_HASH_SERVICE_BEARER_TOKEN`: optional bearer token sent to the PDQ hash service.
 
 Container note:
 - The provided Alpine Docker image installs native `ffmpeg`/`ffprobe` packages and exports `FFMPEG_PATH=/usr/bin/ffmpeg` plus `FFPROBE_PATH=/usr/bin/ffprobe`.
