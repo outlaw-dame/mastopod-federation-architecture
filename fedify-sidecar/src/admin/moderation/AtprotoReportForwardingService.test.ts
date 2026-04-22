@@ -202,7 +202,24 @@ describe("AtprotoReportForwardingService", () => {
 
   it("marks forwarding as skipped when the ActivityPods plan says to skip", async () => {
     const caseStore = new InMemoryCaseStore(
-      [makeCase()],
+      [makeCase({
+        forwarding: {
+          atproto: {
+            status: "failed",
+            canonicalIntentId: "old-intent",
+            serviceDid: "did:plc:oldservice123",
+            pdsUrl: "https://old-pds.example",
+            reporterDid: "did:plc:oldalice123",
+            reporterHandle: "oldalice.test",
+            subjectDid: "did:plc:oldbob123",
+            subjectAtUri: "at://did:plc:oldbob123/app.bsky.feed.post/old",
+            reportId: 99,
+            deliveredAt: "2026-04-22T11:59:00.000Z",
+            lastError: "old failure",
+            lastStatusCode: 500,
+          },
+        },
+      })],
       new Map([["case-1", { status: "skipped", reason: "invalid_subject" }]]),
     );
     const fetchMock = vi.fn();
@@ -222,6 +239,15 @@ describe("AtprotoReportForwardingService", () => {
       status: "skipped",
       skippedReason: "invalid_subject",
     });
+    expect(updated?.forwarding?.atproto?.serviceDid).toBeUndefined();
+    expect(updated?.forwarding?.atproto?.pdsUrl).toBeUndefined();
+    expect(updated?.forwarding?.atproto?.reporterDid).toBeUndefined();
+    expect(updated?.forwarding?.atproto?.subjectDid).toBeUndefined();
+    expect(updated?.forwarding?.atproto?.subjectAtUri).toBeUndefined();
+    expect(updated?.forwarding?.atproto?.reportId).toBeUndefined();
+    expect(updated?.forwarding?.atproto?.deliveredAt).toBeUndefined();
+    expect(updated?.forwarding?.atproto?.lastError).toBeUndefined();
+    expect(updated?.forwarding?.atproto?.lastStatusCode).toBeUndefined();
   });
 
   it("leaves the case pending when the ATProto service fails retryably", async () => {

@@ -11,6 +11,8 @@ import { InMemoryModerationBridgeStore } from "./store.memory.js";
 import { RedisModerationBridgeStore } from "./store.redis.js";
 import type { ModerationBridgeDeps, ModerationBridgeStore } from "./types.js";
 import type { CanonicalIntentPublisher } from "../../protocol-bridge/canonical/CanonicalIntentPublisher.js";
+import type { ActivityPubReportForwardingService } from "./ActivityPubReportForwardingService.js";
+import type { AtprotoReportForwardingService } from "./AtprotoReportForwardingService.js";
 
 interface RegisterOptions {
   app: any;
@@ -34,6 +36,8 @@ interface RegisterOptions {
   activityPodsRetryMaxMs?: number;
   internalBridgeToken?: string;
   canonicalPublisher?: CanonicalIntentPublisher;
+  activityPubReportForwardingService?: Pick<ActivityPubReportForwardingService, "handleCanonicalEvent">;
+  atprotoReportForwardingService?: Pick<AtprotoReportForwardingService, "handleCanonicalEvent">;
 }
 
 function parsePermissions(req: Request): Set<string> {
@@ -227,6 +231,8 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
   registerModerationBridgeFastifyRoutes(options.app, deps, {
     internalBridgeToken: options.internalBridgeToken,
     canonicalPublisher: options.canonicalPublisher,
+    activityPubReportForwardingService: options.activityPubReportForwardingService,
+    atprotoReportForwardingService: options.atprotoReportForwardingService,
     now,
   });
 

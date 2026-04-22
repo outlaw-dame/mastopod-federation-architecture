@@ -171,7 +171,15 @@ export class AtprotoReportForwardingService {
       await this.patchAtprotoForwarding(caseRecord, {
         status: "pending",
         canonicalIntentId: event.canonicalIntentId,
+        serviceDid: undefined,
+        pdsUrl: undefined,
+        reporterDid: undefined,
+        reporterHandle: undefined,
+        subjectDid: undefined,
+        subjectAtUri: undefined,
+        reportId: undefined,
         lastAttemptAt: attemptAt,
+        deliveredAt: undefined,
         lastError: undefined,
         skippedReason: undefined,
         lastStatusCode: undefined,
@@ -377,11 +385,16 @@ export class AtprotoReportForwardingService {
     caseRecord: ModerationCase,
     patch: Partial<ModerationCaseAtprotoForwardingState>,
   ): Promise<void> {
-    const next = await this.caseStore.patchCase(caseRecord.id, {
+    const current = await this.caseStore.getCase(caseRecord.id);
+    if (!current) {
+      throw new Error(`Moderation case ${caseRecord.id} disappeared while updating ATProto forwarding state`);
+    }
+
+    const next = await this.caseStore.patchCase(current.id, {
       forwarding: {
-        ...(caseRecord.forwarding ?? {}),
+        ...(current.forwarding ?? {}),
         atproto: {
-          ...(caseRecord.forwarding?.atproto ?? {}),
+          ...(current.forwarding?.atproto ?? {}),
           ...patch,
         } as ModerationCaseAtprotoForwardingState,
       },
@@ -400,6 +413,8 @@ export class AtprotoReportForwardingService {
     await this.patchAtprotoForwarding(caseRecord, {
       ...patch,
       status: "skipped",
+      reportId: undefined,
+      deliveredAt: undefined,
       lastError: undefined,
     });
   }

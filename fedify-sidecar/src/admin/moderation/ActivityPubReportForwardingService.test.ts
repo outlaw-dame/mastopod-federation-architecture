@@ -128,7 +128,26 @@ function makeRequestMock(routes: Record<string, Array<Record<string, unknown>>>)
 
 describe("ActivityPubReportForwardingService", () => {
   it("queues a deterministic outbound Flag for a remote account report", async () => {
-    const caseStore = new InMemoryCaseStore([makeCase()]);
+    const caseStore = new InMemoryCaseStore([
+      makeCase({
+        forwarding: {
+          activityPub: {
+            status: "failed",
+            canonicalIntentId: "old-intent",
+            activityId: "https://local.example/users/moderation/flags/old-intent",
+            outboxIntentId: "moderation-report:old-intent",
+            targetActorUri: "https://old.example/users/old-bob",
+            targetInbox: "https://old.example/inbox",
+            targetDomain: "old.example",
+            queuedAt: "2026-04-22T11:58:00.000Z",
+            deliveredAt: "2026-04-22T11:59:00.000Z",
+            lastError: "HTTP 500",
+            skippedReason: "old_reason",
+            lastStatusCode: 500,
+          },
+        },
+      }),
+    ]);
     const queue = {
       enqueueOutboxIntent: vi.fn().mockResolvedValue("msg-1"),
     };
@@ -198,6 +217,10 @@ describe("ActivityPubReportForwardingService", () => {
       targetInbox: "https://remote.example/inbox",
       targetDomain: "remote.example",
     });
+    expect(updated?.forwarding?.activityPub?.deliveredAt).toBeUndefined();
+    expect(updated?.forwarding?.activityPub?.lastError).toBeUndefined();
+    expect(updated?.forwarding?.activityPub?.skippedReason).toBeUndefined();
+    expect(updated?.forwarding?.activityPub?.lastStatusCode).toBeUndefined();
   });
 
   it("marks ActivityPub forwarding as skipped when remote forwarding was not requested", async () => {

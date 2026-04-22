@@ -1,10 +1,15 @@
-import { assertBearerToken } from "../mrf/auth.js";
-import { badRequest, internal } from "../mrf/errors.js";
+import { createHash } from "node:crypto";
+import { assertAdminBearer, assertBearerToken } from "../mrf/auth.js";
+import { badRequest, internal, notFound } from "../mrf/errors.js";
 import { json, parseJson } from "../mrf/utils.js";
 import type { CanonicalIntentPublisher } from "../../protocol-bridge/canonical/CanonicalIntentPublisher.js";
 import type { CanonicalActorRef } from "../../protocol-bridge/canonical/CanonicalActorRef.js";
 import type { CanonicalObjectRef } from "../../protocol-bridge/canonical/CanonicalObjectRef.js";
 import type { CanonicalReportCreateIntent, CanonicalReportReasonType, CanonicalReportSubject } from "../../protocol-bridge/canonical/CanonicalIntent.js";
+import type { CanonicalV1Event } from "../../streams/v6-topology.js";
+import type { ActivityPubReportForwardingService } from "./ActivityPubReportForwardingService.js";
+import type { AtprotoReportForwardingService } from "./AtprotoReportForwardingService.js";
+import type { ModerationBridgeDeps, ModerationCase } from "./types.js";
 import { createCanonicalReportCreateIntent } from "./reporting.js";
 
 interface ReportCreateRequestBody {
@@ -26,6 +31,23 @@ interface ReportCreateRequestBody {
   createdAt?: string;
   observedAt?: string;
 }
+
+type ForwardingRetryProtocol = "activityPub" | "atproto";
+
+interface ReportForwardingRetryRequestBody {
+  protocols?: ForwardingRetryProtocol[] | ForwardingRetryProtocol;
+}
+
+type ReportForwardingRetryResult = {
+  status: "pending" | "ignored" | "skipped" | "queued" | "delivered" | "already-forwarded" | "failed";
+  canonicalIntentId?: string;
+  reason?: string;
+};
+
+type ReportForwardingRetryResponse = {
+  activityPub?: ReportForwardingRetryResult;
+  atproto?: ReportForwardingRetryResult;
+};
 
 function sanitizeString(value: unknown, field: string, maxLen: number): string | undefined {
   if (value === undefined || value === null) return undefined;
@@ -150,6 +172,226 @@ function validateReasonType(value: unknown): CanonicalReportReasonType {
   }
 }
 
+function compactActorRef(value: CanonicalActorRef | null | undefined, field: string): CanonicalActorRef {
+  const actor = validateActorRef(value, field);
+  if (!actor) {
+    throw internal(`${field} is required`);
+  }
+  return actor;
+}
+
+function compactObjectRef(value: CanonicalObjectRef | null | undefined, field: string): CanonicalObjectRef {
+  const object = validateObjectRef(value, field);
+  if (!object) {
+    throw internal(`${field} is required`);
+  }
+  return object;
+}
+
+async function parseOptionalJsonBody<T>(req: Request): Promise<T> {
+  const raw = await req.text();
+  if (raw.trim().length === 0) {
+    return {} as T;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw badRequest("Request body must be valid JSON");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw badRequest("Request body must be a JSON object");
+  }
+
+  return parsed as T;
+}
+
+function determineEligibleRetryProtocols(caseRecord: ModerationCase): ForwardingRetryProtocol[] {
+  if (caseRecord.source !== "local-user-report") {
+    return [];
+  }
+
+  switch (caseRecord.subject.authoritativeProtocol) {
+    case "ap":
+      return ["activityPub"];
+    case "at":
+      return ["atproto"];
+    default:
+      return [];
+  }
+}
+
+function normalizeRetryProtocols(
+  value: ReportForwardingRetryRequestBody["protocols"],
+  fallback: ForwardingRetryProtocol[],
+): ForwardingRetryProtocol[] {
+  if (value === undefined || value === null) {
+    return [...fallback];
+  }
+
+  const rawValues: unknown[] = Array.isArray(value) ? value : [value];
+  const normalized: ForwardingRetryProtocol[] = [];
+  for (const entry of rawValues) {
+    if (typeof entry !== "string") {
+      throw badRequest("protocols must include 'activityPub' or 'atproto'");
+    }
+
+    const protocol = entry.trim();
+    if (protocol !== "activityPub" && protocol !== "atproto") {
+      throw badRequest("protocols must include 'activityPub' or 'atproto'");
+    }
+
+    if (!normalized.includes(protocol)) {
+      normalized.push(protocol);
+    }
+  }
+
+  if (normalized.length === 0) {
+    throw badRequest("protocols must include 'activityPub' or 'atproto'");
+  }
+
+  return normalized;
+}
+
+function buildRetryCanonicalIntentId(
+  caseId: string,
+  protocol: ForwardingRetryProtocol,
+  requestId: string,
+): string {
+  return createHash("sha256")
+    .update(`manual-report-forwarding-retry:${caseId}:${protocol}:${requestId}`, "utf8")
+    .digest("hex");
+}
+
+function buildRetryCanonicalEvent(
+  caseRecord: ModerationCase,
+  canonicalIntentId: string,
+  observedAt: string,
+): CanonicalV1Event {
+  const actor = compactActorRef(caseRecord.reporter, "reporter");
+  const createdAt = caseRecord.createdAt ?? caseRecord.receivedAt;
+  const baseEvent: CanonicalV1Event = {
+    canonicalIntentId,
+    kind: "ReportCreate",
+    sourceProtocol: "activitypods",
+    sourceEventId: `activitypods:report:${caseRecord.id}`,
+    actor,
+    report: {
+      subjectKind: caseRecord.subject.kind,
+      authoritativeProtocol: caseRecord.subject.authoritativeProtocol,
+      reasonType: caseRecord.reasonType,
+      reason: caseRecord.reason ?? null,
+      evidence: caseRecord.evidenceObjectRefs ?? [],
+      requestedForwardingRemote: Boolean(caseRecord.requestedForwarding?.remote),
+      clientContext: caseRecord.clientContext ?? null,
+    },
+    createdAt,
+    observedAt,
+    timestamp: Date.parse(observedAt),
+  };
+
+  if (caseRecord.subject.kind === "account") {
+    return {
+      ...baseEvent,
+      subject: compactActorRef(caseRecord.subject.actor, "subject.actor"),
+    };
+  }
+
+  return {
+    ...baseEvent,
+    object: compactObjectRef(caseRecord.subject.object, "subject.object"),
+    ...(caseRecord.subject.owner
+      ? { subject: compactActorRef(caseRecord.subject.owner, "subject.owner") }
+      : {}),
+  };
+}
+
+async function runActivityPubRetry(
+  caseRecord: ModerationCase,
+  requestId: string,
+  observedAt: string,
+  deps: Pick<ModerationBridgeDeps, "store">,
+  service: Pick<ActivityPubReportForwardingService, "handleCanonicalEvent">,
+): Promise<ReportForwardingRetryResult> {
+  const existingState = caseRecord.forwarding?.activityPub;
+  if (existingState?.status === "pending" || existingState?.status === "queued") {
+    return {
+      status: "pending",
+      canonicalIntentId: existingState.canonicalIntentId,
+      reason: "already_in_progress",
+    };
+  }
+  if (existingState?.status === "delivered") {
+    return {
+      status: "already-forwarded",
+      canonicalIntentId: existingState.canonicalIntentId,
+      reason: "already_delivered",
+    };
+  }
+
+  const canonicalIntentId = buildRetryCanonicalIntentId(caseRecord.id, "activityPub", requestId);
+  const event = buildRetryCanonicalEvent(caseRecord, canonicalIntentId, observedAt);
+
+  try {
+    return await service.handleCanonicalEvent(event);
+  } catch (error) {
+    const updatedCase = await deps.store.getCase(caseRecord.id);
+    const pendingState = updatedCase?.forwarding?.activityPub;
+    if (pendingState?.status === "pending" && pendingState.canonicalIntentId === canonicalIntentId) {
+      return {
+        status: "pending",
+        canonicalIntentId,
+        reason: "retryable_error",
+      };
+    }
+    throw error;
+  }
+}
+
+async function runAtprotoRetry(
+  caseRecord: ModerationCase,
+  requestId: string,
+  observedAt: string,
+  deps: Pick<ModerationBridgeDeps, "store">,
+  service: Pick<AtprotoReportForwardingService, "handleCanonicalEvent">,
+): Promise<ReportForwardingRetryResult> {
+  const existingState = caseRecord.forwarding?.atproto;
+  if (existingState?.status === "pending") {
+    return {
+      status: "pending",
+      canonicalIntentId: existingState.canonicalIntentId,
+      reason: "already_in_progress",
+    };
+  }
+  if (existingState?.status === "delivered") {
+    return {
+      status: "already-forwarded",
+      canonicalIntentId: existingState.canonicalIntentId,
+      reason: "already_delivered",
+    };
+  }
+
+  const canonicalIntentId = buildRetryCanonicalIntentId(caseRecord.id, "atproto", requestId);
+  const event = buildRetryCanonicalEvent(caseRecord, canonicalIntentId, observedAt);
+
+  try {
+    return await service.handleCanonicalEvent(event);
+  } catch (error) {
+    const updatedCase = await deps.store.getCase(caseRecord.id);
+    const pendingState = updatedCase?.forwarding?.atproto;
+    if (pendingState?.status === "pending" && pendingState.canonicalIntentId === canonicalIntentId) {
+      return {
+        status: "pending",
+        canonicalIntentId,
+        reason: "retryable_error",
+      };
+    }
+    throw error;
+  }
+}
+
 export async function handleIngestReportCreate(
   req: Request,
   options: {
@@ -212,5 +454,86 @@ export async function handleIngestReportCreate(
   return json({
     ok: true,
     canonicalIntentId: intent.canonicalIntentId,
+  }, 202);
+}
+
+export async function handleRetryReportForwarding(
+  req: Request,
+  deps: ModerationBridgeDeps,
+  options: {
+    caseId: string;
+    activityPubReportForwardingService?: Pick<ActivityPubReportForwardingService, "handleCanonicalEvent">;
+    atprotoReportForwardingService?: Pick<AtprotoReportForwardingService, "handleCanonicalEvent">;
+    now?: () => string;
+  },
+): Promise<Response> {
+  assertAdminBearer(req.headers, deps.adminToken);
+  deps.authorize(req, "provider:write");
+
+  const caseId = sanitizeString(options.caseId, "caseId", 256);
+  if (!caseId) {
+    throw badRequest("caseId is required");
+  }
+
+  const caseRecord = await deps.store.getCase(caseId);
+  if (!caseRecord) {
+    throw notFound(`Case ${caseId} not found`);
+  }
+  if (caseRecord.source !== "local-user-report") {
+    throw badRequest("Only local user report cases support remote forwarding retry");
+  }
+  if (!caseRecord.requestedForwarding?.remote) {
+    throw badRequest("Remote forwarding has not been requested for this case");
+  }
+
+  const eligibleProtocols = determineEligibleRetryProtocols(caseRecord);
+  if (eligibleProtocols.length === 0) {
+    throw badRequest("This case does not have a remote authoritative protocol to forward");
+  }
+
+  const body = await parseOptionalJsonBody<ReportForwardingRetryRequestBody>(req);
+  const protocols = normalizeRetryProtocols(body.protocols, eligibleProtocols);
+  const unsupported = protocols.filter((protocol) => !eligibleProtocols.includes(protocol));
+  if (unsupported.length > 0) {
+    throw badRequest(`Protocol ${unsupported[0]} is not valid for this case`);
+  }
+
+  const requestId =
+    sanitizeString(req.headers.get("x-request-id"), "x-request-id", 256)
+    ?? `manual-forwarding-retry:${caseId}:${Date.now()}`;
+  const observedAt = options.now ? options.now() : new Date().toISOString();
+  const results: ReportForwardingRetryResponse = {};
+
+  for (const protocol of protocols) {
+    if (protocol === "activityPub") {
+      if (!options.activityPubReportForwardingService) {
+        throw internal("ActivityPub report forwarding service is not configured");
+      }
+      results.activityPub = await runActivityPubRetry(
+        caseRecord,
+        requestId,
+        observedAt,
+        deps,
+        options.activityPubReportForwardingService,
+      );
+      continue;
+    }
+
+    if (!options.atprotoReportForwardingService) {
+      throw internal("ATProto report forwarding service is not configured");
+    }
+    results.atproto = await runAtprotoRetry(
+      caseRecord,
+      requestId,
+      observedAt,
+      deps,
+      options.atprotoReportForwardingService,
+    );
+  }
+
+  return json({
+    ok: true,
+    caseId,
+    results,
   }, 202);
 }

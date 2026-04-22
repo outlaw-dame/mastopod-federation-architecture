@@ -202,7 +202,14 @@ export class ActivityPubReportForwardingService {
         status: "pending",
         canonicalIntentId: event.canonicalIntentId,
         moderationActorUri,
+        activityId: undefined,
+        outboxIntentId: undefined,
+        targetActorUri: undefined,
+        targetInbox: undefined,
+        targetDomain: undefined,
         lastAttemptAt: attemptAt,
+        queuedAt: undefined,
+        deliveredAt: undefined,
         lastError: undefined,
         skippedReason: undefined,
         lastStatusCode: undefined,
@@ -601,22 +608,27 @@ export class ActivityPubReportForwardingService {
       status: ModerationCaseActivityPubForwardingState["status"];
     },
   ): Promise<void> {
+    const current = await this.caseStore.getCase(caseRecord.id);
+    if (!current) {
+      throw new Error(`Moderation case ${caseRecord.id} disappeared while updating forwarding state`);
+    }
+
     const nextState = compactActivityPubForwardingState({
-      ...(caseRecord.forwarding?.activityPub ?? {}),
+      ...(current.forwarding?.activityPub ?? {}),
       ...patch,
       status: patch.status,
     });
 
-    const updated = await this.caseStore.patchCase(caseRecord.id, {
+    const updated = await this.caseStore.patchCase(current.id, {
       forwarding: {
-        ...(caseRecord.forwarding ?? {}),
+        ...(current.forwarding ?? {}),
         activityPub: nextState,
       },
       updatedAt:
         nextState.deliveredAt
         ?? nextState.lastAttemptAt
-        ?? caseRecord.updatedAt
-        ?? caseRecord.receivedAt,
+        ?? current.updatedAt
+        ?? current.receivedAt,
     });
 
     if (!updated) {
@@ -641,6 +653,10 @@ export class ActivityPubReportForwardingService {
       targetDomain: patch.targetDomain,
       skippedReason: patch.skippedReason,
       lastAttemptAt: patch.lastAttemptAt,
+      activityId: undefined,
+      outboxIntentId: undefined,
+      queuedAt: undefined,
+      deliveredAt: undefined,
       lastError: undefined,
       lastStatusCode: undefined,
     });

@@ -3045,6 +3045,8 @@ async function main() {
             activityPodsRetryMaxMs: 2_000,
             internalBridgeToken: process.env["ACTIVITYPODS_TOKEN"] || undefined,
             canonicalPublisher,
+            activityPubReportForwardingService: activityPubReportForwardingService || undefined,
+            atprotoReportForwardingService: atprotoReportForwardingService || undefined,
           });
           moderationBridgeRedisClient = moderationRegistration.redisClient;
           moderationBridgeStore = moderationRegistration.store;

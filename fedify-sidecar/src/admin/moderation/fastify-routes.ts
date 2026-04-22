@@ -10,7 +10,9 @@ import {
   handleRevokeDecision,
   handleXrpcQueryLabels,
 } from "./handlers.js";
-import { handleIngestReportCreate } from "./report-handlers.js";
+import type { ActivityPubReportForwardingService } from "./ActivityPubReportForwardingService.js";
+import type { AtprotoReportForwardingService } from "./AtprotoReportForwardingService.js";
+import { handleIngestReportCreate, handleRetryReportForwarding } from "./report-handlers.js";
 import { errorToResponse } from "../mrf/utils.js";
 import { assertRateLimit, InMemoryRateLimiter, type RateLimitRule } from "../mrf/rate-limit.js";
 import { internal } from "../mrf/errors.js";
@@ -93,6 +95,8 @@ export function registerModerationBridgeFastifyRoutes(
   options: {
     internalBridgeToken?: string;
     canonicalPublisher?: CanonicalIntentPublisher;
+    activityPubReportForwardingService?: Pick<ActivityPubReportForwardingService, "handleCanonicalEvent">;
+    atprotoReportForwardingService?: Pick<AtprotoReportForwardingService, "handleCanonicalEvent">;
     now?: () => string;
   } = {},
 ): void {
@@ -168,6 +172,28 @@ export function registerModerationBridgeFastifyRoutes(
     try {
       applyRateLimit(req, "moderation-case-get", readRule, limiter);
       await sendResponse(reply, await handleGetCase(request, deps, params.id));
+    } catch (err) {
+      await sendResponse(
+        reply,
+        errorToResponse(err, request.headers.get("x-request-id") || undefined),
+      );
+    }
+  });
+
+  app.post("/internal/admin/moderation/cases/:id/forwarding/retry", async (req, reply) => {
+    const request = toRequest(req);
+    const params = req.params as { id: string };
+    try {
+      applyRateLimit(req, "moderation-case-forwarding-retry", applyRule, limiter);
+      await sendResponse(
+        reply,
+        await handleRetryReportForwarding(request, deps, {
+          caseId: params.id,
+          activityPubReportForwardingService: options.activityPubReportForwardingService,
+          atprotoReportForwardingService: options.atprotoReportForwardingService,
+          now: options.now,
+        }),
+      );
     } catch (err) {
       await sendResponse(
         reply,
