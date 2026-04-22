@@ -210,6 +210,45 @@ export interface ModerationCaseCanonicalEventState {
   lastError?: string;
 }
 
+export interface ModerationCaseActivityPubForwardingState {
+  status: "pending" | "queued" | "delivered" | "failed" | "skipped";
+  canonicalIntentId?: string;
+  moderationActorUri?: string;
+  activityId?: string;
+  outboxIntentId?: string;
+  targetActorUri?: string;
+  targetInbox?: string;
+  targetDomain?: string;
+  lastAttemptAt?: string;
+  queuedAt?: string;
+  deliveredAt?: string;
+  lastError?: string;
+  skippedReason?: string;
+  lastStatusCode?: number;
+}
+
+export interface ModerationCaseAtprotoForwardingState {
+  status: "pending" | "delivered" | "failed" | "skipped";
+  canonicalIntentId?: string;
+  serviceDid?: string;
+  pdsUrl?: string;
+  reporterDid?: string;
+  reporterHandle?: string;
+  subjectDid?: string;
+  subjectAtUri?: string;
+  reportId?: number;
+  lastAttemptAt?: string;
+  deliveredAt?: string;
+  lastError?: string;
+  skippedReason?: string;
+  lastStatusCode?: number;
+}
+
+export interface ModerationCaseForwardingState {
+  activityPub?: ModerationCaseActivityPubForwardingState | null;
+  atproto?: ModerationCaseAtprotoForwardingState | null;
+}
+
 /**
  * A stored moderation case, owned by ActivityPods and shared by local user
  * reports plus inbound federated reports.
@@ -282,6 +321,9 @@ export interface ModerationCase {
    * Forwarding to remote moderation systems is tracked separately later.
    */
   canonicalEvent: ModerationCaseCanonicalEventState;
+
+  /** Remote moderation forwarding state by protocol. */
+  forwarding?: ModerationCaseForwardingState | null;
 
   /** Last time the case was updated by a decision or workflow action */
   updatedAt?: string;

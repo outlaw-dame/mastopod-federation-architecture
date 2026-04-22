@@ -69,6 +69,20 @@ http:
       tls:
         certResolver: letsencrypt
 
+    # FEP-3ab2 streaming control and SSE stream — always handled by the sidecar.
+    # Must have higher priority than the ActivityPods catch-all so that
+    # /streaming/* is not forwarded to ActivityPods.
+    streaming:
+      rule: "PathPrefix(`/streaming`)"
+      service: fedify-sidecar
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      priority: 50
+      middlewares:
+        - streaming-headers
+
     # Everything else - goes to ActivityPods
     activitypods:
       rule: "PathPrefix(`/`)"
@@ -106,6 +120,15 @@ http:
         contentTypeNosniff: true
         browserXssFilter: true
         referrerPolicy: "strict-origin-when-cross-origin"
+
+    # SSE-specific headers required for streaming connections.
+    # Disables response buffering and marks the response as no-cache so that
+    # proxies and CDNs do not buffer or cache the event stream.
+    streaming-headers:
+      headers:
+        customResponseHeaders:
+          X-Accel-Buffering: "no"
+          Cache-Control: "no-store, private"
 
     # Rate limiting for federation endpoints
     federation-ratelimit:

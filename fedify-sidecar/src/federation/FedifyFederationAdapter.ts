@@ -62,8 +62,10 @@ import type { SidecarLocalSigningService } from "../signing/SidecarLocalSigningS
 import { isIP } from "node:net";
 import { request } from "undici";
 import type {
+  OutboundDeliveryMeta,
   FederationRuntimeAdapter,
   OutboundDeliveryInput,
+  OutboundDeliveryModerationReportMeta,
   OutboundDeliveryResult,
 } from "../core-domain/contracts/SigningContracts.js";
 
@@ -110,6 +112,20 @@ export interface FedifyAdapterConfig {
    * proxied from ActivityPods.
    */
   sidecarServiceActors?: string[];
+  onModerationReportDelivered?: (input: {
+    meta: OutboundDeliveryModerationReportMeta;
+    targetDomain: string;
+    statusCode?: number;
+  }) => Promise<void> | void;
+  onModerationReportFailed?: (input: {
+    meta: OutboundDeliveryModerationReportMeta;
+    targetDomain: string;
+    targetInbox: string;
+    statusCode?: number;
+    error: string;
+    responseBody?: string;
+    attempt: number;
+  }) => Promise<void> | void;
 }
 
 export interface FedifyAdapterLogger {
@@ -457,6 +473,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     activityId: string;
     targetDomain: string;
     statusCode?: number;
+    meta?: OutboundDeliveryMeta;
   }): Promise<void> {
     try {
       this.logger.info("[fedify] outbound delivered", {
@@ -465,6 +482,13 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         targetDomain: input.targetDomain,
         statusCode: input.statusCode,
       });
+      if (input.meta?.moderationReport && this.config.onModerationReportDelivered) {
+        await this.config.onModerationReportDelivered({
+          meta: input.meta.moderationReport,
+          targetDomain: input.targetDomain,
+          statusCode: input.statusCode,
+        });
+      }
       // TODO: when Fedify handles delivery, report permanent failures here
       //   via federation's permanentFailureStatusCodes integration.
     } catch (err) {
@@ -483,6 +507,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     error: string;
     responseBody?: string;
     attempt: number;
+    meta?: OutboundDeliveryMeta;
   }): Promise<void> {
     try {
       this.logger.warn("[fedify] outbound permanent failure", {
@@ -495,6 +520,17 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         responseBody: input.responseBody,
         attempt: input.attempt,
       });
+      if (input.meta?.moderationReport && this.config.onModerationReportFailed) {
+        await this.config.onModerationReportFailed({
+          meta: input.meta.moderationReport,
+          targetDomain: input.targetDomain,
+          targetInbox: input.targetInbox,
+          statusCode: input.statusCode,
+          error: input.error,
+          responseBody: input.responseBody,
+          attempt: input.attempt,
+        });
+      }
     } catch (err) {
       this.logger.error("[fedify] onOutboundPermanentFailure error (swallowed)", {
         err: String(err),

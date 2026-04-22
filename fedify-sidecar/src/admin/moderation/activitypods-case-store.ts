@@ -4,6 +4,7 @@ import type {
   ModerationCasePage,
   ModerationCaseQuery,
 } from "./types.js";
+import { withRetry } from "../mrf/utils.js";
 
 interface CaseStoreClientOptions {
   baseUrl: string;
@@ -20,6 +21,28 @@ type CaseStoreHttpResponse<T> = {
   cursor?: string;
 };
 
+export interface AtprotoForwardingPlanRequest {
+  canonicalIntentId: string;
+}
+
+export interface AtprotoForwardingPlan {
+  status: "ready" | "skipped";
+  reason?: string;
+  serviceDid?: string;
+  pdsUrl?: string;
+  accessJwt?: string;
+  reporterDid?: string;
+  reporterHandle?: string;
+  subjectDid?: string;
+  subjectAtUri?: string;
+  request?: Record<string, unknown>;
+}
+
+type AtprotoForwardingPlanResponse = {
+  plan?: AtprotoForwardingPlan | null;
+  case?: ModerationCase;
+};
+
 function buildUrl(baseUrl: string, path: string, query?: Record<string, string | undefined>): string {
   const url = new URL(path, `${baseUrl.replace(/\/$/, "")}/`);
   if (query) {
@@ -34,36 +57,6 @@ function buildUrl(baseUrl: string, path: string, query?: Record<string, string |
 
 function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function retryWithJitter<T>(
-  operation: () => Promise<T>,
-  options: { retries: number; baseMs: number; maxMs: number },
-): Promise<T> {
-  let attempt = 0;
-  let lastError: unknown;
-
-  while (attempt <= options.retries) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error;
-      const retryable = (error as { retryable?: boolean } | null | undefined)?.retryable !== false;
-      if (!retryable || attempt === options.retries) {
-        break;
-      }
-      const backoff = Math.min(options.maxMs, options.baseMs * 2 ** attempt);
-      const jitter = Math.floor(Math.random() * Math.max(25, Math.floor(backoff / 2)));
-      await sleep(backoff + jitter);
-      attempt += 1;
-    }
-  }
-
-  throw lastError;
 }
 
 export class ActivityPodsModerationCaseStore {
@@ -145,6 +138,20 @@ export class ActivityPodsModerationCaseStore {
     return payload?.case ?? null;
   }
 
+  async prepareAtprotoForwardingPlan(
+    id: string,
+    requestBody: AtprotoForwardingPlanRequest,
+  ): Promise<AtprotoForwardingPlan | null> {
+    const payload = await this.requestJson<AtprotoForwardingPlanResponse>(
+      `/api/internal/moderation/cases/${encodeURIComponent(id)}/forwarding/atproto/prepare`,
+      {
+        method: "POST",
+        body: requestBody,
+      },
+    );
+    return payload?.plan ?? null;
+  }
+
   private async requestJson<T>(
     path: string,
     options: { method: "GET" | "POST" | "PATCH"; body?: unknown },
@@ -186,10 +193,12 @@ export class ActivityPodsModerationCaseStore {
       return payload;
     };
 
-    return retryWithJitter(execute, {
+    return withRetry(execute, {
       retries: this.retries,
       baseMs: this.retryBaseMs,
       maxMs: this.retryMaxMs,
+      retryIf: (error) =>
+        (error as { retryable?: boolean } | null | undefined)?.retryable !== false,
     });
   }
 }

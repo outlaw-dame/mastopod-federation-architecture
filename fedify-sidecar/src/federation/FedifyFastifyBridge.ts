@@ -152,6 +152,19 @@ async function fedifyHandler(
           );
         }
       }
+
+      // FEP-3ab2: expose the streaming control endpoint on actor documents.
+      try {
+        body = withActorStreamingControlEndpoint(body, resolveExternalOrigin(adapter, request));
+      } catch (err: unknown) {
+        logger.warn(
+          {
+            url: request.url,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          "Failed to inject FEP-3ab2 streamingControl endpoint",
+        );
+      }
     }
   }
 
@@ -289,6 +302,74 @@ function withActorRelativeStorageService(
     ...record,
     service: [...currentServices, serviceEntry],
   });
+}
+
+const FEP_3AB2_CONTEXT_URL = "https://w3id.org/fep/3ab2";
+
+/**
+ * Injects `endpoints.streamingControl` and the FEP-3ab2 context URL into an
+ * AP actor document body string.
+ *
+ * Idempotent: skips injection if `endpoints.streamingControl` is already set.
+ * Merges into any existing `endpoints` object so other fields (e.g. sharedInbox)
+ * are preserved.
+ */
+function withActorStreamingControlEndpoint(body: string, externalOrigin: string): string {
+  let doc: Record<string, unknown>;
+  try {
+    doc = JSON.parse(body) as Record<string, unknown>;
+  } catch {
+    return body;
+  }
+
+  if (!doc || typeof doc !== "object") {
+    return body;
+  }
+
+  const existingEndpoints = doc["endpoints"];
+  const isEndpointsObject =
+    existingEndpoints !== null &&
+    existingEndpoints !== undefined &&
+    typeof existingEndpoints === "object" &&
+    !Array.isArray(existingEndpoints);
+
+  if (isEndpointsObject) {
+    const ep = existingEndpoints as Record<string, unknown>;
+    if (typeof ep["streamingControl"] === "string") {
+      return body;
+    }
+  }
+
+  const streamingControlUrl = `${externalOrigin.replace(/\/+$/, "")}/streaming/control`;
+  const currentEndpoints = isEndpointsObject
+    ? (existingEndpoints as Record<string, unknown>)
+    : {};
+
+  const nextDoc: Record<string, unknown> = {
+    ...doc,
+    endpoints: {
+      ...currentEndpoints,
+      streamingControl: streamingControlUrl,
+    },
+  };
+
+  const existingContext = nextDoc["@context"];
+  const nextContext: unknown[] = Array.isArray(existingContext)
+    ? [...existingContext]
+    : existingContext != null
+      ? [existingContext]
+      : [];
+
+  if (!nextContext.some((entry) => entry === FEP_3AB2_CONTEXT_URL)) {
+    nextContext.push(FEP_3AB2_CONTEXT_URL);
+  }
+  nextDoc["@context"] = nextContext;
+
+  try {
+    return JSON.stringify(nextDoc);
+  } catch {
+    return body;
+  }
 }
 
 function concatServiceEndpoint(endpoint: string, relativeRef: string): string {
@@ -872,4 +953,9 @@ export function registerFedifyRoutes(
   // pairs for authenticated document loading, while ActivityPods is the sole
   // signing authority and private keys never leave it.
   app.post("/inbox", handler);
+
+  // /sharedInbox is an alias that actor documents may advertise as their
+  // sharedInbox URL. Route it through the same Fedify-verified handler so
+  // that signature verification and recipient routing are identical to /inbox.
+  app.post("/sharedInbox", handler);
 }

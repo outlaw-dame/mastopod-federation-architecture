@@ -11,6 +11,7 @@
  * - ap.tombstones.v1 - Delete activities (compacted)
  */
 
+import { createHash } from "node:crypto";
 import { Kafka, Producer, CompressionTypes, logLevel } from "kafkajs";
 import { logger } from "../utils/logger.js";
 import type { PublicSearchConsentSignal } from "../utils/searchConsent.js";
@@ -47,6 +48,23 @@ export interface ActivityEventMeta {
   hashtags?: string[];
 }
 
+/**
+ * Delivery-forwarding metadata attached to Stream2 (remote-public) events.
+ *
+ * Consumers use this to distinguish activities that were forwarded to local
+ * ActivityPods inboxes ("attempted") from those that bypassed inbox delivery
+ * because they target a sidecar-owned service actor ("bypassed"). "skipped"
+ * is reserved for future use (e.g. rate-limited or policy-filtered paths).
+ *
+ * recipientCount    — total unique addressees in to/cc/bto/bcc (excl. Public).
+ * localRecipientCount — subset whose hostname matches config.domain.
+ */
+export interface DeliveryMeta {
+  forwarding: "attempted" | "skipped" | "bypassed";
+  recipientCount: number;
+  localRecipientCount: number;
+}
+
 export interface ActivityEvent {
   activity: any;
   actorUri: string;
@@ -59,6 +77,8 @@ export interface ActivityEvent {
   /** Durable local outbox intent identifier for downstream dedupe/replay diagnostics. */
   outboxIntentId?: string;
   streamTimestamp?: number;
+  /** Delivery forwarding metadata (Stream2 only). Absent on Stream1 events. */
+  delivery?: DeliveryMeta;
 }
 
 export interface TombstoneEvent {
@@ -199,6 +219,9 @@ export class RedPandaProducer {
         "actor-uri": event.actorUri,
         "origin": "remote",
         "search-consent": event.meta?.searchConsent?.isPublic ? "public" : "restricted",
+        // Allow consumers to filter by forwarding disposition before
+        // deserialising the full JSON body.
+        "delivery-forwarding": event.delivery?.forwarding ?? "attempted",
         ...(event.outboxIntentId ? { "outbox-intent-id": event.outboxIntentId } : {}),
       },
     };
@@ -286,20 +309,49 @@ export class RedPandaProducer {
   }
 
   /**
-   * Extract a partition key from an activity
-   * Uses actor URI for locality (activities from same actor go to same partition)
+   * Extract a partition key from an activity.
+   *
+   * For Announce (boost) activities the key is sha256(actorUri + "::" + objectId).
+   * This routes all boosts of the same object by the same actor to the same
+   * partition so that stream consumers can aggregate and deduplicate by key
+   * without deserialising the full message body (stream-as-aggregator pattern).
+   *
+   * For all other types the key is the actor URI, which preserves per-actor
+   * partition locality and ordering guarantees.
    */
   private extractKey(activity: any): string {
-    // Prefer actor URI for partitioning
+    if (activity.type === "Announce") {
+      const objectUri =
+        typeof activity.object === "string"
+          ? activity.object
+          : typeof activity.object?.id === "string"
+            ? activity.object.id
+            : null;
+      if (objectUri) {
+        const actorUri =
+          typeof activity.actor === "string"
+            ? activity.actor
+            : typeof activity.actor?.id === "string"
+              ? activity.actor.id
+              : null;
+        if (actorUri) {
+          return createHash("sha256")
+            .update(actorUri)
+            .update("::")
+            .update(objectUri)
+            .digest("hex");
+        }
+      }
+    }
+
+    // Default: key by actor URI for per-actor partition locality.
     if (activity.actor) {
-      const actor = typeof activity.actor === "string" ? activity.actor : activity.actor.id;
+      const actor = typeof activity.actor === "string" ? activity.actor : activity.actor?.id;
       if (actor) return actor;
     }
-    
-    // Fall back to activity ID
+
     if (activity.id) return activity.id;
-    
-    // Last resort: random key
+
     return `unknown-${Date.now()}`;
   }
 }

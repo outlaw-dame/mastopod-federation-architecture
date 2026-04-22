@@ -157,6 +157,30 @@ export interface InboundWorkerConfig {
   apRemoteWebhookUrl?: string;
   /** Shared secret sent as X-Bridge-Secret header on AP webhook calls. */
   apRemoteWebhookSecret?: string;
+  /**
+   * Durable Redis-based idempotency guard.
+   * When present, each inbound activity ID is claimed atomically in Redis
+   * (SETNX + TTL) so duplicates are suppressed globally across restarts.
+   * Supersedes the in-process seenActivityIds for production deployments.
+   */
+  inboundIdempotencyGuard?: {
+    claimIfNew(activityId: string): Promise<boolean>;
+  };
+  /**
+   * Optional provider-level Announce (boost) aggregator.
+   *
+   * When present, Announce activities are deduplicated by (actorUri, objectId)
+   * within a 24-hour window.  This is a semantic-level guard on top of the
+   * activity-ID idempotency guard: it suppresses re-deliveries with new IDs
+   * that represent the same logical boost, collapsing N inbound paths to one
+   * provider-level forward to ActivityPods.
+   *
+   * Absent: Announce activities pass through normally (idempotency guard still
+   * deduplicates by activity ID).
+   */
+  announceAggregator?: {
+    claimIfNew(actorUri: string, objectId: string): Promise<boolean>;
+  };
 }
 
 export interface VerificationResult {
@@ -311,11 +335,72 @@ function looksLikeActorUriString(value: string): boolean {
   }
 }
 
+/**
+ * Extract the boosted object's URI from an Announce activity.
+ *
+ * Handles both the compact form (object is a string URI) and the expanded form
+ * (object is an embedded document with an `id` field).  Returns null when the
+ * object field is absent or malformed — callers should skip aggregation in that
+ * case and let the activity pass through normally.
+ */
+function extractAnnounceObjectId(activity: Record<string, unknown>): string | null {
+  const obj = activity["object"];
+  if (typeof obj === "string" && obj.trim().length > 0) return obj.trim();
+  if (isRecord(obj)) {
+    const id = obj["id"];
+    if (typeof id === "string" && id.trim().length > 0) return id.trim();
+  }
+  return null;
+}
+
 function coerceStringArray(value: unknown): string[] {
   const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
   return values
     .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
     .map((entry) => entry.trim());
+}
+
+/**
+ * Count unique addressees in an ActivityPub activity's addressing fields.
+ *
+ * Well-known public-collection URIs are excluded because they are not real
+ * recipients — they signal public visibility, not a deliverable inbox.
+ *
+ * Returns:
+ *   total — all unique, non-public addressee URIs across to/cc/bto/bcc.
+ *   local — subset whose hostname exactly matches localDomain.
+ */
+function countActivityRecipients(
+  activity: unknown,
+  localDomain: string,
+): { total: number; local: number } {
+  if (!isRecord(activity)) return { total: 0, local: 0 };
+
+  const uris = new Set<string>();
+  for (const field of ["to", "cc", "bto", "bcc"]) {
+    const val = activity[field];
+    if (typeof val === "string") {
+      uris.add(val);
+    } else if (Array.isArray(val)) {
+      for (const v of val) {
+        if (typeof v === "string") uris.add(v);
+      }
+    }
+  }
+
+  // Public collection URI and its short-form alias are not real recipients.
+  uris.delete("https://www.w3.org/ns/activitystreams#Public");
+  uris.delete("Public");
+
+  let local = 0;
+  for (const uri of uris) {
+    try {
+      if (new URL(uri).hostname === localDomain) local++;
+    } catch {
+      // skip non-URI strings (e.g. relative paths, malformed values)
+    }
+  }
+  return { total: uris.size, local };
 }
 
 function normaliseTextSnippet(value: unknown, maxLen = 1_000): string | undefined {
@@ -910,8 +995,8 @@ export class InboundWorker {
         }
       }
 
-      // Step 3.75: In-process idempotency gate (primarily for testing; production
-      // idempotency is handled at the Redis queue level).
+      // Step 3.75: Flag activities → moderation store (own dedup); all others →
+      // durable Redis idempotency guard, then in-process Set (tests only).
       if (this.isFlagActivity(activity)) {
         const moderationCase = await this.captureFlagModerationCase(activity, envelope, verifiedActorUri);
         const stage = moderationCase
@@ -930,16 +1015,61 @@ export class InboundWorker {
         return;
       }
 
-      if (this.config.seenActivityIds && activity.id) {
+      if (activity.id) {
         const activityId = String(activity.id);
-        if (this.config.seenActivityIds.has(activityId)) {
-          await this.queue.ack("inbound", messageId);
-          logger.debug("Duplicate activity suppressed by in-process idempotency gate", {
-            activityId,
-          });
-          return;
+
+        // Durable Redis idempotency guard (production path — survives restarts).
+        if (this.config.inboundIdempotencyGuard) {
+          const isNew = await this.config.inboundIdempotencyGuard.claimIfNew(activityId);
+          if (!isNew) {
+            metrics.inboundActivityPubActivities.inc({ stage: "duplicate", activity_type: activityType });
+            await this.queue.ack("inbound", messageId);
+            logger.debug("Duplicate inbound activity suppressed (Redis idempotency)", {
+              envelopeId: envelope.envelopeId,
+              activityId,
+            });
+            return;
+          }
         }
-        this.config.seenActivityIds.add(activityId);
+
+        // In-process dedup (lightweight secondary guard, primarily for tests).
+        if (this.config.seenActivityIds) {
+          if (this.config.seenActivityIds.has(activityId)) {
+            await this.queue.ack("inbound", messageId);
+            logger.debug("Duplicate activity suppressed by in-process idempotency gate", {
+              activityId,
+            });
+            return;
+          }
+          this.config.seenActivityIds.add(activityId);
+        }
+      }
+
+      // Step 3.8: Provider-level Announce aggregation.
+      // Deduplicates Announce (boost) activities at the (actor, boosted-object)
+      // level within a 24-hour window.  This is separate from the activity-ID
+      // idempotency guard — it suppresses re-deliveries that carry a new
+      // activity ID for the same semantic boost, preventing duplicate forwards
+      // to ActivityPods across sharedInbox paths, per-pod inbox retries, and
+      // relay re-announcements.
+      //
+      // Activities with no resolvable object URI fall through unchanged: the
+      // idempotency guard above already handles them by activity ID.
+      if (activityType === "Announce" && this.config.announceAggregator) {
+        const objectId = extractAnnounceObjectId(activity);
+        if (objectId) {
+          const isNew = await this.config.announceAggregator.claimIfNew(verifiedActorUri, objectId);
+          if (!isNew) {
+            metrics.inboundActivityPubActivities.inc({ stage: "announce_aggregated", activity_type: activityType });
+            await this.queue.ack("inbound", messageId);
+            logger.debug("Provider-level Announce aggregated (duplicate suppressed)", {
+              envelopeId: envelope.envelopeId,
+              actorUri: verifiedActorUri,
+              objectId,
+            });
+            return;
+          }
+        }
       }
 
       // Step 4: Check if activity is public
@@ -947,6 +1077,12 @@ export class InboundWorker {
       const searchEventMeta = isPublic
         ? await this.buildPublicSearchEventMeta(activity, verifiedActorUri)
         : undefined;
+
+      // Pre-compute recipient counts once for delivery metadata on Stream2 events.
+      // Only meaningful for public activities; zero-fill otherwise.
+      const recipientCounts = (isPublic && typeof this.config.domain === "string" && this.config.domain.length > 0)
+        ? countActivityRecipients(activity, this.config.domain)
+        : { total: 0, local: 0 };
 
       // Step 4.1: Detect sidecar-managed actors by actor URI path.
       // Sidecar actors (e.g. /users/relay) take the Stream2 fast-path regardless
@@ -972,6 +1108,11 @@ export class InboundWorker {
               receivedAt: envelope.receivedAt,
               path: envelope.path,
               meta: searchEventMeta,
+              delivery: {
+                forwarding: "bypassed",
+                recipientCount: recipientCounts.total,
+                localRecipientCount: recipientCounts.local,
+              },
             });
           } catch (err: any) {
             logger.error("Failed to publish sidecar-actor activity to Stream2", {
@@ -1060,6 +1201,11 @@ export class InboundWorker {
                 receivedAt: envelope.receivedAt,
                 path: envelope.path,
                 meta: searchEventMeta,
+                delivery: {
+                  forwarding: "bypassed",
+                  recipientCount: recipientCounts.total,
+                  localRecipientCount: recipientCounts.local,
+                },
               });
             } catch (err: any) {
               logger.error("Failed to publish sidecar-actor activity to Stream2", {
@@ -1167,6 +1313,11 @@ export class InboundWorker {
             receivedAt: envelope.receivedAt,
             path: envelope.path,
             meta: searchEventMeta,
+            delivery: {
+              forwarding: "attempted",
+              recipientCount: recipientCounts.total,
+              localRecipientCount: recipientCounts.local,
+            },
           });
           logger.debug("Published to Stream2", {
             activityId: activity.id,

@@ -20,7 +20,7 @@
 
 import { createClient, RedisClientType } from "redis";
 import { logger } from "../utils/logger.js";
-import type { PublicSearchConsentSignal } from "../utils/searchConsent.js";
+import type { OutboundDeliveryMeta } from "../core-domain/contracts/SigningContracts.js";
 
 // ============================================================================
 // Configuration
@@ -88,13 +88,7 @@ export interface OutboundJob {
   deferCount?: number;
   /** Error message from the last delivery attempt, carried forward for DLQ diagnostics. */
   lastError?: string;
-  meta?: {
-    isPublicActivity?: boolean;
-    isPublicIndexable?: boolean;
-    isDeleteOrTombstone?: boolean;
-    visibility?: "public" | "unlisted" | "followers" | "direct";
-    searchConsent?: PublicSearchConsentSignal;
-  };
+  meta?: OutboundDeliveryMeta;
 }
 
 export interface OutboxIntentTarget {
@@ -1339,6 +1333,7 @@ export function createVerifiedInboundEnvelope(params: {
 }
 
 export function createOutboxIntent(params: {
+  intentId?: string;
   activityId: string;
   actorUri: string;
   activity: string;
@@ -1347,7 +1342,7 @@ export function createOutboxIntent(params: {
   bridgeHints?: Record<string, unknown>;
 }): OutboxIntent {
   return {
-    intentId: crypto.randomUUID(),
+    intentId: params.intentId ?? crypto.randomUUID(),
     activityId: params.activityId,
     actorUri: params.actorUri,
     activity: params.activity,

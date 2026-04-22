@@ -373,6 +373,7 @@ export class OutboundWorker {
             activityId: job.activityId,
             targetDomain: job.targetDomain,
             statusCode: result.statusCode,
+            meta: job.meta,
           });
           logger.info("Delivery successful", { 
             jobId: job.jobId, 
@@ -399,6 +400,7 @@ export class OutboundWorker {
             error: result.error || "Permanent failure",
             responseBody: result.responseBody,
             attempt: job.attempt + 1,
+            meta: job.meta,
           });
           logger.warn("Permanent delivery failure", { 
             jobId: job.jobId, 
@@ -420,6 +422,17 @@ export class OutboundWorker {
             // Max attempts reached - DLQ
             await this.queue.moveToDlq("outbound", { ...job, lastError: result.error }, "Max attempts exceeded");
             metrics.deliveryDlq.inc({ domain: job.targetDomain });
+            await this.callAdapter("onOutboundPermanentFailure", {
+              actorUri: job.actorUri,
+              activityId: job.activityId,
+              targetDomain: job.targetDomain,
+              targetInbox: job.targetInbox,
+              statusCode: result.statusCode,
+              error: result.error || "Max attempts exceeded",
+              responseBody: result.responseBody,
+              attempt: nextAttempt,
+              meta: job.meta,
+            });
             logger.warn("Max delivery attempts exceeded", { 
               jobId: job.jobId, 
               attempts: nextAttempt,

@@ -40,6 +40,9 @@ import {
 } from "./streams/redpanda-topic-governance.js";
 import { createOutboundWorker, OutboundWorker } from "./delivery/outbound-worker.js";
 import { createInboundWorker, InboundWorker } from "./delivery/inbound-worker.js";
+import { InboundIdempotencyGuard } from "./delivery/InboundIdempotencyGuard.js";
+import { ProviderAnnounceGuard } from "./delivery/ProviderAnnounceGuard.js";
+import { RemoteSharedInboxCache } from "./delivery/RemoteSharedInboxCache.js";
 import {
   createOutboxIntentWorker,
   OutboxIntentWorker,
@@ -196,6 +199,15 @@ import {
 import { registerMrfAdminIntegration } from "./admin/mrf/integration.js";
 import { registerModerationBridgeIntegration } from "./admin/moderation/integration.js";
 import type { ModerationBridgeStore } from "./admin/moderation/types.js";
+import { ActivityPodsModerationCaseStore } from "./admin/moderation/activitypods-case-store.js";
+import {
+  ActivityPubReportForwardingService,
+  DEFAULT_MODERATION_ACTOR_IDENTIFIER,
+  buildModerationActorUri,
+} from "./admin/moderation/ActivityPubReportForwardingService.js";
+import { CanonicalActivityPubReportForwarder } from "./admin/moderation/CanonicalActivityPubReportForwarder.js";
+import { AtprotoReportForwardingService } from "./admin/moderation/AtprotoReportForwardingService.js";
+import { CanonicalAtprotoReportForwarder } from "./admin/moderation/CanonicalAtprotoReportForwarder.js";
 import {
   ApRelaySubscriptionService,
   parseRelayActorUrls,
@@ -340,6 +352,14 @@ const config = {
   enableModerationBridgeApi:
     process.env["ENABLE_MODERATION_BRIDGE_API"] === "true" ||
     process.env["ENABLE_MRF_ADMIN_API"] === "true",
+  enableActivityPubReportForwarder:
+    process.env["ENABLE_ACTIVITYPUB_REPORT_FORWARDER"] !== "false" &&
+    (process.env["ENABLE_MODERATION_BRIDGE_API"] === "true"
+      || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
+  enableAtprotoReportForwarder:
+    process.env["ENABLE_ATPROTO_REPORT_FORWARDER"] !== "false" &&
+    (process.env["ENABLE_MODERATION_BRIDGE_API"] === "true"
+      || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
   moderationBridgeRedisPrefix:
     process.env["MODERATION_BRIDGE_REDIS_PREFIX"] || "moderation:bridge",
   moderationLabelerDid:
@@ -432,7 +452,11 @@ const config = {
     process.env["ENABLE_CANONICAL_EVENT_LOG"] !== "false" &&
     (process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true" ||
       process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true" ||
-      process.env["ENABLE_AT_JETSTREAM"] === "true"),
+      process.env["ENABLE_AT_JETSTREAM"] === "true" ||
+      process.env["ENABLE_MODERATION_BRIDGE_API"] === "true" ||
+      process.env["ENABLE_MRF_ADMIN_API"] === "true" ||
+      process.env["ENABLE_ACTIVITYPUB_REPORT_FORWARDER"] === "true" ||
+      process.env["ENABLE_ATPROTO_REPORT_FORWARDER"] === "true"),
   enableCanonicalNotifications:
     process.env["ENABLE_CANONICAL_NOTIFICATIONS"] !== "false" &&
     (process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true" ||
@@ -616,6 +640,10 @@ let moderationBridgeRedisClient: Redis | null = null;
 let moderationBridgeStore: ModerationBridgeStore | null = null;
 let identityRepo: RedisIdentityBindingRepository | null = null;
 let fedifyAdapter: FedifyFederationAdapter | null = null;
+let activityPubReportForwardingService: ActivityPubReportForwardingService | null = null;
+let canonicalActivityPubReportForwarder: CanonicalActivityPubReportForwarder | null = null;
+let atprotoReportForwardingService: AtprotoReportForwardingService | null = null;
+let canonicalAtprotoReportForwarder: CanonicalAtprotoReportForwarder | null = null;
 let apRelaySubscriptionService: ApRelaySubscriptionService | null = null;
 let atJetstreamService: AtJetstreamService | null = null;
 let streamSubscriptionService: DurableStreamSubscriptionService | null = null;
@@ -924,6 +952,114 @@ async function main() {
       logger.info("Origin reconciliation service enabled");
     }
 
+    const moderationActorUri = config.enableActivityPubReportForwarder
+      ? buildModerationActorUri(config.domain, DEFAULT_MODERATION_ACTOR_IDENTIFIER)
+      : null;
+    const moderationActorPath = moderationActorUri ? new URL(moderationActorUri).pathname : null;
+    const moderationReportCaseStore =
+      (config.enableActivityPubReportForwarder || config.enableAtprotoReportForwarder)
+      && process.env["ACTIVITYPODS_URL"]
+      && process.env["ACTIVITYPODS_TOKEN"]
+        ? new ActivityPodsModerationCaseStore({
+            baseUrl: process.env["ACTIVITYPODS_URL"],
+            bearerToken: process.env["ACTIVITYPODS_TOKEN"],
+            timeoutMs: 5_000,
+            retries: 3,
+            retryBaseMs: 100,
+            retryMaxMs: 2_000,
+          })
+        : null;
+
+    if (
+      config.enableActivityPubReportForwarder
+      && moderationReportCaseStore
+      && config.enableOutboxIntentWorker
+      && config.enableCanonicalEventLog
+      && config.enableFedifyRuntimeIntegration
+    ) {
+      activityPubReportForwardingService = new ActivityPubReportForwardingService(
+        queue,
+        moderationReportCaseStore,
+        {
+          domain: config.domain,
+          moderationActorIdentifier: DEFAULT_MODERATION_ACTOR_IDENTIFIER,
+          userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+          fetchTimeoutMs: Number.parseInt(
+            process.env["ACTIVITYPUB_REPORT_FETCH_TIMEOUT_MS"] || "10000",
+            10,
+          ),
+          fetchRetries: Number.parseInt(
+            process.env["ACTIVITYPUB_REPORT_FETCH_RETRIES"] || "2",
+            10,
+          ),
+          fetchRetryBaseMs: Number.parseInt(
+            process.env["ACTIVITYPUB_REPORT_FETCH_RETRY_BASE_MS"] || "250",
+            10,
+          ),
+          fetchRetryMaxMs: Number.parseInt(
+            process.env["ACTIVITYPUB_REPORT_FETCH_RETRY_MAX_MS"] || "2500",
+            10,
+          ),
+        },
+        {
+          info: (message, meta) => logger.info(meta || {}, message),
+          warn: (message, meta) => logger.warn(meta || {}, message),
+          error: (message, meta) => logger.error(meta || {}, message),
+        },
+      );
+      logger.info("ActivityPub report forwarding service initialized", {
+        moderationActorUri,
+      });
+    } else if (config.enableActivityPubReportForwarder) {
+      logger.warn("ActivityPub report forwarding requested but prerequisites were not met", {
+        hasActivityPodsUrl: Boolean(process.env["ACTIVITYPODS_URL"]),
+        hasActivityPodsToken: Boolean(process.env["ACTIVITYPODS_TOKEN"]),
+        enableOutboxIntentWorker: config.enableOutboxIntentWorker,
+        enableCanonicalEventLog: config.enableCanonicalEventLog,
+        enableFedifyRuntimeIntegration: config.enableFedifyRuntimeIntegration,
+      });
+    }
+
+    if (
+      config.enableAtprotoReportForwarder
+      && moderationReportCaseStore
+      && config.enableCanonicalEventLog
+    ) {
+      atprotoReportForwardingService = new AtprotoReportForwardingService(
+        moderationReportCaseStore,
+        {
+          requestTimeoutMs: Number.parseInt(
+            process.env["ATPROTO_REPORT_REQUEST_TIMEOUT_MS"] || "10000",
+            10,
+          ),
+          requestRetries: Number.parseInt(
+            process.env["ATPROTO_REPORT_REQUEST_RETRIES"] || "2",
+            10,
+          ),
+          requestRetryBaseMs: Number.parseInt(
+            process.env["ATPROTO_REPORT_REQUEST_RETRY_BASE_MS"] || "250",
+            10,
+          ),
+          requestRetryMaxMs: Number.parseInt(
+            process.env["ATPROTO_REPORT_REQUEST_RETRY_MAX_MS"] || "2500",
+            10,
+          ),
+        },
+        {
+          info: (message, meta) => logger.info(meta || {}, message),
+          warn: (message, meta) => logger.warn(meta || {}, message),
+          error: (message, meta) => logger.error(meta || {}, message),
+        },
+      );
+      logger.info("ATProto report forwarding service initialized");
+    } else if (config.enableAtprotoReportForwarder) {
+      logger.warn("ATProto report forwarding requested but prerequisites were not met", {
+        hasActivityPodsUrl: Boolean(process.env["ACTIVITYPODS_URL"]),
+        hasActivityPodsToken: Boolean(process.env["ACTIVITYPODS_TOKEN"]),
+        enableCanonicalEventLog: config.enableCanonicalEventLog,
+      });
+    }
+
     // Initialize RedPanda producer only when worker/indexer features need it.
     let redpanda: any = null;
     if (redpandaProducerRequired) {
@@ -954,6 +1090,10 @@ async function main() {
         logger.error("Local signing Redis error", { error: err.message }),
       );
       const localSigningService = new SidecarLocalSigningService(localSigningRedis);
+      const sidecarServiceActors = ["relay"];
+      if (activityPubReportForwardingService && moderationActorUri) {
+        sidecarServiceActors.push(DEFAULT_MODERATION_ACTOR_IDENTIFIER);
+      }
 
       fedifyAdapter = createFedifyAdapter(
         kv,
@@ -964,6 +1104,36 @@ async function main() {
           requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
           userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
           localSigningService,
+          sidecarServiceActors,
+          ...(activityPubReportForwardingService
+            ? {
+                onModerationReportDelivered: async ({ meta, targetDomain, statusCode }) => {
+                  await activityPubReportForwardingService!.markDelivered(meta, {
+                    targetDomain,
+                    statusCode,
+                  });
+                },
+                onModerationReportFailed: async ({
+                  meta,
+                  targetDomain,
+                  targetInbox,
+                  statusCode,
+                  error,
+                  responseBody,
+                  attempt,
+                }) => {
+                  await activityPubReportForwardingService!.markFailed(meta.caseId, meta, {
+                    error,
+                    targetDomain,
+                    targetInbox,
+                    statusCode,
+                    responseBody,
+                    attempt,
+                    moderationActorUri: moderationActorUri ?? undefined,
+                  });
+                },
+              }
+            : {}),
           enqueueVerifiedInbox: async (delivery) => {
             if (!queue) {
               throw new Error("Redis queue not initialized");
@@ -1105,8 +1275,21 @@ async function main() {
     }
 
     if (config.enableOutboxIntentWorker) {
+      // Dedicated Redis connection for the sharedInbox cache so its error
+      // handler never pollutes the queue or idempotency Redis clients.
+      const sharedInboxCacheRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      sharedInboxCacheRedis.on("error", (err: Error) =>
+        logger.error("SharedInbox cache Redis error", { error: err.message }),
+      );
+      const sharedInboxCache = new RemoteSharedInboxCache(
+        sharedInboxCacheRedis,
+        process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+      );
+      logger.info("Remote sharedInbox cache initialized");
+
       outboxIntentWorker = createOutboxIntentWorker(queue, redpanda, {
         activityPubOutboundDeliveryPolicy,
+        sharedInboxCache,
       });
       startupTasks.push({
         name: "start outbox intent worker",
@@ -1140,11 +1323,35 @@ async function main() {
       if (relayLocalActorPath) {
         sidecarActorPaths.add(relayLocalActorPath);
       }
+      if (moderationActorPath) {
+        sidecarActorPaths.add(moderationActorPath);
+      }
+
+      // Durable Redis idempotency guard — one dedicated connection so its
+      // error handler never pollutes other Redis clients.
+      const idempotencyRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      idempotencyRedis.on("error", (err: Error) =>
+        logger.error("Inbound idempotency Redis error", { error: err.message }),
+      );
+      const inboundIdempotencyGuard = new InboundIdempotencyGuard(idempotencyRedis);
+      logger.info("Inbound idempotency guard initialized");
+
+      // Provider-level Announce aggregator — deduplicates boosts by (actor, object)
+      // within a 24-hour window, on top of the activity-ID idempotency guard.
+      const announceAggregatorRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      announceAggregatorRedis.on("error", (err: Error) =>
+        logger.error("Announce aggregator Redis error", { error: err.message }),
+      );
+      const announceAggregator = new ProviderAnnounceGuard(announceAggregatorRedis);
+      logger.info("Provider-level Announce aggregator initialized");
+
       inboundWorker = createInboundWorker(queue, redpanda, {
         capabilityGate,
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
         ...(sidecarActorPaths.size > 0 ? { sidecarActorPaths } : {}),
+        inboundIdempotencyGuard,
+        announceAggregator,
         ...(process.env["MEMORY_AP_WEBHOOK_URL"] ? {
           apRemoteWebhookUrl: process.env["MEMORY_AP_WEBHOOK_URL"],
           apRemoteWebhookSecret: process.env["AP_BRIDGE_SECRET"] ?? "",
@@ -1905,6 +2112,16 @@ async function main() {
         await enqueueRawInboundRequest(request, reply, "/inbox");
       });
     }
+
+    // /sharedInbox is an explicit per-pod shared inbox URL that actor documents
+    // may advertise.  It normalises to "/inbox" before queuing so ActivityPods
+    // always receives the canonical shared-inbox path for recipient resolution.
+    // This route is unconditional — when Fedify is active it handles "/inbox"
+    // directly; "/sharedInbox" goes through the sidecar-native raw path whose
+    // inbound worker performs its own signature verification (fail-closed).
+    app.post("/sharedInbox", async (request, reply) => {
+      await enqueueRawInboundRequest(request, reply, "/inbox");
+    });
 
     app.post("/users/:username/inbox", async (request, reply) => {
       const { username } = request.params as { username: string };
@@ -2833,6 +3050,65 @@ async function main() {
           moderationBridgeStore = moderationRegistration.store;
         }
 
+        if (activityPubReportForwardingService && config.enableActivityPubReportForwarder) {
+          canonicalActivityPubReportForwarder = new CanonicalActivityPubReportForwarder(
+            {
+              brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+                .split(",")
+                .map((broker) => broker.trim())
+                .filter(Boolean),
+              clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+              consumerGroupId: `${config.protocolBridgeConsumerGroupId}-canonical-ap-report-forwarder`,
+              canonicalTopic: config.canonicalTopic,
+            },
+            activityPubReportForwardingService,
+            {
+              info: (message, meta) => logger.info(meta || {}, message),
+              warn: (message, meta) => logger.warn(meta || {}, message),
+              error: (message, meta) => logger.error(meta || {}, message),
+            },
+          );
+          startupTasks.push({
+            name: "start canonical ActivityPub report forwarder",
+            start: async () => {
+              await canonicalActivityPubReportForwarder!.start();
+              logger.info("Canonical ActivityPub report forwarder started", {
+                moderationActorUri,
+                canonicalTopic: config.canonicalTopic,
+              });
+            },
+          });
+        }
+
+        if (atprotoReportForwardingService && config.enableAtprotoReportForwarder) {
+          canonicalAtprotoReportForwarder = new CanonicalAtprotoReportForwarder(
+            {
+              brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+                .split(",")
+                .map((broker) => broker.trim())
+                .filter(Boolean),
+              clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+              consumerGroupId: `${config.protocolBridgeConsumerGroupId}-canonical-atproto-report-forwarder`,
+              canonicalTopic: config.canonicalTopic,
+            },
+            atprotoReportForwardingService,
+            {
+              info: (message, meta) => logger.info(meta || {}, message),
+              warn: (message, meta) => logger.warn(meta || {}, message),
+              error: (message, meta) => logger.error(meta || {}, message),
+            },
+          );
+          startupTasks.push({
+            name: "start canonical ATProto report forwarder",
+            start: async () => {
+              await canonicalAtprotoReportForwarder!.start();
+              logger.info("Canonical ATProto report forwarder started", {
+                canonicalTopic: config.canonicalTopic,
+              });
+            },
+          });
+        }
+
         if (!config.atLocalFixture) {
           identityWarmupService = new IdentityWarmupService({
             backendBaseUrl: process.env["ACTIVITYPODS_URL"]!,
@@ -3148,6 +3424,18 @@ async function shutdown(signal: string): Promise<void> {
     if (atJetstreamService) {
       atJetstreamService.shutdown();
       logger.info("AT Jetstream service stopped");
+    }
+
+    if (canonicalActivityPubReportForwarder) {
+      await canonicalActivityPubReportForwarder.stop();
+      canonicalActivityPubReportForwarder = null;
+      logger.info("Canonical ActivityPub report forwarder stopped");
+    }
+
+    if (canonicalAtprotoReportForwarder) {
+      await canonicalAtprotoReportForwarder.stop();
+      canonicalAtprotoReportForwarder = null;
+      logger.info("Canonical ATProto report forwarder stopped");
     }
 
     // Stop workers first

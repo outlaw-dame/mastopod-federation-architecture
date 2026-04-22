@@ -101,6 +101,12 @@ Suggested URI shape:
 
 - `https://<provider-domain>/actors/moderation`
 
+Current implementation note:
+
+- the live sidecar currently serves the moderation actor at `https://<provider-domain>/users/moderation`
+- this follows the existing Fedify sidecar service-actor dispatcher without adding a second actor namespace
+- if we later add a dedicated `/actors/moderation` surface, it should remain an alias to the same logical actor, not a second moderation identity
+
 Display naming may vary by deployment:
 
 - "Moderation"
@@ -372,7 +378,7 @@ High-level shape:
 ```json
 {
   "type": "Flag",
-  "actor": "https://provider.example/actors/moderation",
+  "actor": "https://provider.example/users/moderation",
   "object": [
     "https://remote.example/users/bob",
     "https://remote.example/users/bob/statuses/123"

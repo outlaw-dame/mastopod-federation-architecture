@@ -84,6 +84,8 @@ export function buildProviderCapabilities(
       maxWsConnections: 25,
       maxStreamsPerConnection: 4,
       transports: "sse,websocket",
+      streamingControlDiscovery: "actor.endpoints.streamingControl",
+      browserAuthMode: "session+ticket-cookie",
     }));
 
     if (input.enableOpenSearchIndexer) {

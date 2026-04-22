@@ -8,6 +8,8 @@
  * - Public key retrieval and management
  */
 
+import type { PublicSearchConsentSignal } from "../../utils/searchConsent.js";
+
 /**
  * Phase 1 scaffolding for Fedify runtime integration.
  *
@@ -30,6 +32,7 @@ export interface FederationRuntimeAdapter {
     activityId: string;
     targetDomain: string;
     statusCode?: number;
+    meta?: OutboundDeliveryMeta;
   }): Promise<void> | void;
   onOutboundPermanentFailure?(input: {
     actorUri: string;
@@ -40,6 +43,7 @@ export interface FederationRuntimeAdapter {
     error: string;
     responseBody?: string;
     attempt: number;
+    meta?: OutboundDeliveryMeta;
   }): Promise<void> | void;
 }
 
@@ -52,6 +56,22 @@ export interface OutboundDeliverySignatureHeaders {
   date: string;
   digest?: string;
   signature: string;
+}
+
+export interface OutboundDeliveryModerationReportMeta {
+  protocol: "activitypub";
+  caseId: string;
+  canonicalIntentId: string;
+  targetActorUri?: string;
+}
+
+export interface OutboundDeliveryMeta {
+  isPublicActivity?: boolean;
+  isPublicIndexable?: boolean;
+  isDeleteOrTombstone?: boolean;
+  visibility?: "public" | "unlisted" | "followers" | "direct";
+  searchConsent?: PublicSearchConsentSignal;
+  moderationReport?: OutboundDeliveryModerationReportMeta;
 }
 
 export type OutboundDeliverySignResult =
