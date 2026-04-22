@@ -195,7 +195,7 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
   }
 
   async listCases(query: ModerationCaseQuery = {}): Promise<ModerationCasePage> {
-    const { limit = 50, cursor, status, sourceActorUri, recipientWebId, reportedActorUri } = query;
+    const { limit = 50, cursor, status, source, sourceActorUri, recipientWebId, reportedActorUri } = query;
 
     let maxScore = "+inf";
     if (cursor) {
@@ -223,9 +223,10 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
       if (!entry) continue;
 
       if (status && entry.status !== status) continue;
-      if (sourceActorUri && entry.sourceActorUri !== sourceActorUri) continue;
-      if (recipientWebId && entry.recipientWebId !== recipientWebId) continue;
-      if (reportedActorUri && !entry.reportedActorUris.includes(reportedActorUri)) continue;
+      if (source && entry.source !== source) continue;
+      if (sourceActorUri && entry.reporter?.activityPubActorUri !== sourceActorUri) continue;
+      if (recipientWebId && entry.recipient?.webId !== recipientWebId) continue;
+      if (reportedActorUri && !caseMatchesReportedActor(entry, reportedActorUri)) continue;
 
       cases.push(entry);
       if (cases.length === limit) {
@@ -297,4 +298,16 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
 
     return { labels, cursor: nextCursor };
   }
+}
+
+function caseMatchesReportedActor(entry: ModerationCase, actorUri: string): boolean {
+  if (entry.subject.kind === "account" && entry.subject.actor.activityPubActorUri === actorUri) {
+    return true;
+  }
+
+  if (entry.subject.kind === "object" && entry.subject.owner?.activityPubActorUri === actorUri) {
+    return true;
+  }
+
+  return false;
 }

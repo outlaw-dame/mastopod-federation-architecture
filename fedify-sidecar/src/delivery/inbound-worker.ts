@@ -37,6 +37,7 @@ import type { RepliesBackfillService } from "../federation/replies-backfill/Repl
 import type { OriginReconciliationService } from "../federation/origin-reconciliation/OriginReconciliationService.js";
 import type { MRFAdminStore } from "../admin/mrf/store.js";
 import type { ModerationBridgeStore } from "../admin/moderation/types.js";
+import { createCanonicalReportCreateIntent } from "../admin/moderation/reporting.js";
 import { evaluateActivityPubSubjectPolicy } from "../mrf/ActivityPubSubjectPolicy.js";
 import {
   resolvePublicSearchConsent,
@@ -149,6 +150,13 @@ export interface InboundWorkerConfig {
    * Local ActivityPods identities can use this for exact WebID subject rules.
    */
   resolveWebIdForActorUri?(actorUri: string): Promise<string | null>;
+  /**
+   * URL of the memory API AP ingress webhook for relay-delivered content.
+   * When set, sidecar-actor relay activities are forwarded here after Stream2 publish.
+   */
+  apRemoteWebhookUrl?: string;
+  /** Shared secret sent as X-Bridge-Secret header on AP webhook calls. */
+  apRemoteWebhookSecret?: string;
 }
 
 export interface VerificationResult {
@@ -331,6 +339,42 @@ function extractReasonFromFlagActivity(activity: Record<string, unknown>): strin
   return undefined;
 }
 
+function inferReportReasonType(reason: string | undefined): "spam" | "harassment" | "other" {
+  const normalized = String(reason || "").toLowerCase();
+  if (!normalized) return "other";
+  if (/\b(spam|scam|bot|phishing)\b/.test(normalized)) {
+    return "spam";
+  }
+  if (/\b(harass|abuse|threat|stalk|bully)\b/.test(normalized)) {
+    return "harassment";
+  }
+  return "other";
+}
+
+function buildActorRef(params: {
+  canonicalAccountId?: string | null;
+  did?: string | null;
+  webId?: string | null;
+  activityPubActorUri?: string | null;
+  handle?: string | null;
+}) {
+  return {
+    canonicalAccountId: params.canonicalAccountId ?? null,
+    did: params.did ?? null,
+    webId: params.webId ?? null,
+    activityPubActorUri: params.activityPubActorUri ?? null,
+    handle: params.handle ?? null,
+  };
+}
+
+function buildObjectRefFromUri(uri: string) {
+  return {
+    canonicalObjectId: uri,
+    activityPubObjectId: uri,
+    canonicalUrl: uri,
+  };
+}
+
 function collectReportedItems(value: unknown): Array<string | Record<string, unknown>> {
   const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
   return values.filter(
@@ -447,15 +491,17 @@ export class InboundWorker {
   private async invokeCanonicalPublisher(
     event: unknown,
     envelopeId: string,
-  ): Promise<void> {
-    if (!this.config.canonicalPublisher) return;
+  ): Promise<boolean> {
+    if (!this.config.canonicalPublisher) return false;
     try {
       await this.config.canonicalPublisher.publish(event);
+      return true;
     } catch (err: any) {
       logger.warn("Canonical publisher failed (swallowed)", {
         envelopeId,
         error: err.message,
       });
+      return false;
     }
   }
 
@@ -549,6 +595,28 @@ export class InboundWorker {
         ? new Date(createdAtRaw).toISOString()
         : undefined;
 
+    const normalizedReportedUris = [...reportedUris];
+    const normalizedReportedActorUris = [...reportedActorUris];
+    const subject =
+      normalizedReportedActorUris.length > 0
+        ? {
+            kind: "account" as const,
+            actor: buildActorRef({
+              activityPubActorUri: normalizedReportedActorUris[0],
+            }),
+            authoritativeProtocol: "ap" as const,
+          }
+        : {
+            kind: "object" as const,
+            object: buildObjectRefFromUri(normalizedReportedUris[0] || `urn:activitypub:flag:${dedupeKey}`),
+            owner: null,
+            authoritativeProtocol: "ap" as const,
+          };
+    const evidenceObjectRefs = normalizedReportedUris
+      .filter((uri) => !(subject.kind === "account" && subject.actor.activityPubActorUri === uri))
+      .map((uri) => buildObjectRefFromUri(uri));
+    const receivedAt = new Date(envelope.receivedAt || Date.now()).toISOString();
+
     const moderationCase = {
       id: randomUUID(),
       source: "activitypub-flag" as const,
@@ -557,21 +625,72 @@ export class InboundWorker {
         ? { activityId: activity["id"].trim() }
         : {}),
       dedupeKey,
-      sourceActorUri: actorUri,
-      ...(sourceActorWebId ? { sourceActorWebId } : {}),
+      reporter: buildActorRef({
+        canonicalAccountId: sourceActorWebId,
+        webId: sourceActorWebId,
+        activityPubActorUri: actorUri,
+      }),
       inboxPath: envelope.path,
-      ...(recipientActorUri ? { recipientActorUri } : {}),
-      ...(recipientWebId ? { recipientWebId } : {}),
+      recipient: {
+        webId: recipientWebId,
+        activityPubActorUri: recipientActorUri ?? null,
+      },
+      reasonType: inferReportReasonType(reason),
       ...(reason ? { reason } : {}),
-      reportedUris: [...reportedUris],
-      reportedActorUris: [...reportedActorUris],
+      subject,
+      evidenceObjectRefs,
       ...(createdAt ? { createdAt } : {}),
-      receivedAt: new Date(envelope.receivedAt || Date.now()).toISOString(),
+      receivedAt,
       status: "open" as const,
       relatedDecisionIds: [],
+      canonicalEvent: {
+        status: "pending" as const,
+      },
     };
 
     await store.addCase(moderationCase);
+    const sourceEventId =
+      typeof activity["id"] === "string" && activity["id"].trim().length > 0
+        ? activity["id"].trim()
+        : `activitypub:flag:${dedupeKey}`;
+    const reportIntent = createCanonicalReportCreateIntent({
+      sourceProtocol: "activitypub",
+      sourceEventId,
+      sourceAccountRef: buildActorRef({
+        canonicalAccountId: sourceActorWebId,
+        webId: sourceActorWebId,
+        activityPubActorUri: actorUri,
+      }),
+      reporterWebId: sourceActorWebId,
+      subject,
+      reasonType: moderationCase.reasonType,
+      reason: moderationCase.reason,
+      evidenceObjectRefs,
+      createdAt: createdAt ?? receivedAt,
+      observedAt: receivedAt,
+    });
+
+    const published = await this.invokeCanonicalPublisher(reportIntent, envelope.envelopeId);
+    if (published) {
+      await store.patchCase(moderationCase.id, {
+        canonicalEvent: {
+          status: "published",
+          canonicalIntentId: reportIntent.canonicalIntentId,
+          lastAttemptAt: receivedAt,
+          publishedAt: receivedAt,
+        },
+      });
+    } else {
+      await store.patchCase(moderationCase.id, {
+        canonicalEvent: {
+          status: "failed",
+          canonicalIntentId: reportIntent.canonicalIntentId,
+          lastAttemptAt: receivedAt,
+          lastError: "canonical_publish_failed",
+        },
+      }).catch(() => undefined);
+    }
+
     return { caseId: moderationCase.id, deduped: false };
   }
 
@@ -600,6 +719,12 @@ export class InboundWorker {
           error: err.message 
         });
       });
+    }
+
+    // Drain any in-flight jobs before returning so callers (and tests) can
+    // safely assert on side-effects produced by processEnvelope.
+    while (this.activeJobs > 0) {
+      await this.sleep(10);
     }
   }
 
@@ -948,6 +1073,26 @@ export class InboundWorker {
             path: envelope.path,
             activityType,
           });
+          if (this.config.apRemoteWebhookUrl && isPublic) {
+            try {
+              await request(this.config.apRemoteWebhookUrl, {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  "x-bridge-secret": this.config.apRemoteWebhookSecret ?? "",
+                  "x-source-relay": verifiedActorUri,
+                },
+                body: JSON.stringify(activity),
+                bodyTimeout: 5000,
+                headersTimeout: 5000,
+              });
+            } catch (err: any) {
+              logger.warn("Failed to forward relay activity to memory AP webhook", {
+                envelopeId: envelope.envelopeId,
+                error: err.message,
+              });
+            }
+          }
           return;
         }
       }

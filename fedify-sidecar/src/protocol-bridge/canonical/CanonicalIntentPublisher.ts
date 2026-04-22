@@ -70,6 +70,7 @@ function serializeIntent(intent: CanonicalIntent): CanonicalV1Event {
   const actor: CanonicalV1ActorRef = {
     canonicalAccountId: intent.sourceAccountRef.canonicalAccountId ?? null,
     did: intent.sourceAccountRef.did ?? null,
+    webId: intent.sourceAccountRef.webId ?? null,
     activityPubActorUri: intent.sourceAccountRef.activityPubActorUri ?? null,
     handle: intent.sourceAccountRef.handle ?? null,
   };
@@ -99,18 +100,26 @@ function serializeIntent(intent: CanonicalIntent): CanonicalV1Event {
     intent.kind === "ReactionRemove" ||
     intent.kind === "ShareAdd" ||
     intent.kind === "ShareRemove" ||
+    intent.kind === "ReportCreate" ||
     ((intent.kind === "FollowAdd" || intent.kind === "FollowRemove") && Boolean(intent.targetObject))
   ) {
-    const obj = intent.kind === "FollowAdd" || intent.kind === "FollowRemove"
-      ? intent.targetObject!
-      : intent.object;
-    const objectRef: CanonicalV1ObjectRef = {
-      canonicalObjectId: obj.canonicalObjectId,
-      atUri: obj.atUri ?? null,
-      activityPubObjectId: obj.activityPubObjectId ?? null,
-      canonicalUrl: obj.canonicalUrl ?? null,
-    };
-    base.object = objectRef;
+    const obj =
+      intent.kind === "FollowAdd" || intent.kind === "FollowRemove"
+        ? intent.targetObject!
+        : intent.kind === "ReportCreate"
+          ? intent.subject.kind === "object"
+            ? intent.subject.object
+            : null
+          : intent.object;
+    if (obj) {
+      const objectRef: CanonicalV1ObjectRef = {
+        canonicalObjectId: obj.canonicalObjectId,
+        atUri: obj.atUri ?? null,
+        activityPubObjectId: obj.activityPubObjectId ?? null,
+        canonicalUrl: obj.canonicalUrl ?? null,
+      };
+      base.object = objectRef;
+    }
   }
 
   // Attach subject ref for follow actions
@@ -123,6 +132,41 @@ function serializeIntent(intent: CanonicalIntent): CanonicalV1Event {
         handle: intent.subject.handle ?? null,
       };
     }
+  }
+
+  if (intent.kind === "ReportCreate") {
+    if (intent.subject.kind === "account") {
+      base.subject = {
+        canonicalAccountId: intent.subject.actor.canonicalAccountId ?? null,
+        did: intent.subject.actor.did ?? null,
+        webId: intent.subject.actor.webId ?? null,
+        activityPubActorUri: intent.subject.actor.activityPubActorUri ?? null,
+        handle: intent.subject.actor.handle ?? null,
+      };
+    } else if (intent.subject.owner) {
+      base.subject = {
+        canonicalAccountId: intent.subject.owner.canonicalAccountId ?? null,
+        did: intent.subject.owner.did ?? null,
+        webId: intent.subject.owner.webId ?? null,
+        activityPubActorUri: intent.subject.owner.activityPubActorUri ?? null,
+        handle: intent.subject.owner.handle ?? null,
+      };
+    }
+
+    base.report = {
+      subjectKind: intent.subject.kind,
+      authoritativeProtocol: intent.subject.authoritativeProtocol,
+      reasonType: intent.reasonType,
+      reason: intent.reason ?? null,
+      evidence: (intent.evidenceObjectRefs ?? []).map((ref) => ({
+        canonicalObjectId: ref.canonicalObjectId,
+        atUri: ref.atUri ?? null,
+        activityPubObjectId: ref.activityPubObjectId ?? null,
+        canonicalUrl: ref.canonicalUrl ?? null,
+      })),
+      requestedForwardingRemote: intent.requestedForwarding?.remote ?? null,
+      clientContext: intent.clientContext ?? null,
+    };
   }
 
   // Extract mention targets for notification fan-out

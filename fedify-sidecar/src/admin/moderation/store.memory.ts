@@ -122,6 +122,7 @@ export class InMemoryModerationBridgeStore implements ModerationBridgeStore {
       limit = 50,
       cursor,
       status,
+      source,
       sourceActorUri,
       recipientWebId,
       reportedActorUri,
@@ -143,9 +144,10 @@ export class InMemoryModerationBridgeStore implements ModerationBridgeStore {
       if (!entry) continue;
 
       if (status && entry.status !== status) continue;
-      if (sourceActorUri && entry.sourceActorUri !== sourceActorUri) continue;
-      if (recipientWebId && entry.recipientWebId !== recipientWebId) continue;
-      if (reportedActorUri && !entry.reportedActorUris.includes(reportedActorUri)) continue;
+      if (source && entry.source !== source) continue;
+      if (sourceActorUri && entry.reporter?.activityPubActorUri !== sourceActorUri) continue;
+      if (recipientWebId && entry.recipient?.webId !== recipientWebId) continue;
+      if (reportedActorUri && !caseMatchesReportedActor(entry, reportedActorUri)) continue;
 
       out.push(entry);
       if (out.length >= limit) {
@@ -184,4 +186,16 @@ export class InMemoryModerationBridgeStore implements ModerationBridgeStore {
     const next = start + limit < filtered.length ? start + limit : 0;
     return { labels, cursor: next };
   }
+}
+
+function caseMatchesReportedActor(entry: ModerationCase, actorUri: string): boolean {
+  if (entry.subject.kind === "account" && entry.subject.actor.activityPubActorUri === actorUri) {
+    return true;
+  }
+
+  if (entry.subject.kind === "object" && entry.subject.owner?.activityPubActorUri === actorUri) {
+    return true;
+  }
+
+  return false;
 }

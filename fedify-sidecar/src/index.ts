@@ -604,6 +604,7 @@ let atRedisClient: Redis | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
 let identityWarmupService: IdentityWarmupService | null = null;
 let atEventPublisher: RedpandaEventPublisher | null = null;
+let canonicalPublisher: CanonicalIntentPublisher | undefined;
 let atFirehoseRuntime: AtFirehoseRuntime | null = null;
 let atExternalFirehoseRuntime: AtIngressRuntime | null = null;
 let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
@@ -1144,6 +1145,10 @@ async function main() {
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
         ...(sidecarActorPaths.size > 0 ? { sidecarActorPaths } : {}),
+        ...(process.env["MEMORY_AP_WEBHOOK_URL"] ? {
+          apRemoteWebhookUrl: process.env["MEMORY_AP_WEBHOOK_URL"],
+          apRemoteWebhookSecret: process.env["AP_BRIDGE_SECRET"] ?? "",
+        } : {}),
         getMrfAdminStore: () => mrfAdminStore,
         getModerationBridgeStore: () => moderationBridgeStore,
         resolveWebIdForActorUri: async (actorUri: string) => {
@@ -1638,14 +1643,14 @@ async function main() {
       return { allowed: result.allowed, effectiveLimit: result.effectiveLimit };
     };
 
-    const activityPodsClient = new ActivityPodsClient(config.activitypods.url);
+    const activityPodsClient = new ActivityPodsClient(process.env["ACTIVITYPODS_URL"] ?? "http://localhost:3000");
 
     registerFeedFastifyRoutes(app, {
       sidecarToken: config.sidecarToken,
       feedRegistry,
       feedService,
       hydrationService,
-      viewershipHistoryClient: config.activitypods.internalApiKey ? activityPodsClient : undefined,
+      viewershipHistoryClient: process.env["ACTIVITYPODS_INTERNAL_API_KEY"] ? activityPodsClient : undefined,
       streamSubscriptionService,
       capabilityGate,
       checkStreamEntitlement,
@@ -2538,7 +2543,7 @@ async function main() {
               })
             : undefined;
 
-          const canonicalPublisher = config.enableCanonicalEventLog && atEventPublisher
+          canonicalPublisher = config.enableCanonicalEventLog && atEventPublisher
             ? new CanonicalIntentPublisher(atEventPublisher, config.canonicalTopic)
             : undefined;
 
@@ -2815,6 +2820,14 @@ async function main() {
             atAdminTimeoutMs: Number.isFinite(config.moderationAtAdminTimeoutMs)
               ? Math.max(1_000, config.moderationAtAdminTimeoutMs)
               : 5_000,
+            activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || undefined,
+            activityPodsBearerToken: process.env["ACTIVITYPODS_TOKEN"] || undefined,
+            activityPodsTimeoutMs: 5_000,
+            activityPodsRetries: 3,
+            activityPodsRetryBaseMs: 100,
+            activityPodsRetryMaxMs: 2_000,
+            internalBridgeToken: process.env["ACTIVITYPODS_TOKEN"] || undefined,
+            canonicalPublisher,
           });
           moderationBridgeRedisClient = moderationRegistration.redisClient;
           moderationBridgeStore = moderationRegistration.store;

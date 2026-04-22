@@ -28,6 +28,10 @@ export function buildCanonicalIntentId(intent: CanonicalIntentDraft | CanonicalI
 
 function normalizedTarget(intent: CanonicalIntentDraft | CanonicalIntent): string {
   switch (intent.kind) {
+    case "ReportCreate":
+      return intent.subject.kind === "account"
+        ? canonicalActorIdentityKey(intent.subject.actor)
+        : canonicalObjectIdentityKey(intent.subject.object);
     case "PostCreate":
     case "PostEdit":
     case "PostDelete":
@@ -52,6 +56,20 @@ function normalizedTarget(intent: CanonicalIntentDraft | CanonicalIntent): strin
 
 function normalizedContentDigest(intent: CanonicalIntentDraft | CanonicalIntent): string {
   switch (intent.kind) {
+    case "ReportCreate":
+      return createHash("sha256")
+        .update(
+          stableStringify({
+            subjectKind: intent.subject.kind,
+            authoritativeProtocol: intent.subject.authoritativeProtocol ?? null,
+            reasonType: intent.reasonType,
+            reason: intent.reason ?? null,
+            evidence: (intent.evidenceObjectRefs ?? []).map((ref) => canonicalObjectIdentityKey(ref)),
+            requestedForwardingRemote: intent.requestedForwarding?.remote ?? null,
+            clientContext: intent.clientContext ?? null,
+          }),
+        )
+        .digest("hex");
     case "PostCreate":
     case "PostEdit":
       return createHash("sha256")

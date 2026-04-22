@@ -1,4 +1,7 @@
 import type { MRFPermission } from "../mrf/types.js";
+import type { CanonicalActorRef } from "../../protocol-bridge/canonical/CanonicalActorRef.js";
+import type { CanonicalObjectRef } from "../../protocol-bridge/canonical/CanonicalObjectRef.js";
+import type { CanonicalReportReasonType, CanonicalReportSubject } from "../../protocol-bridge/canonical/CanonicalIntent.js";
 
 // ---------------------------------------------------------------------------
 // Cross-Protocol Moderation Bridge — Types
@@ -186,12 +189,30 @@ export interface ModerationDecision {
 // Inbound moderation case record
 // ---------------------------------------------------------------------------
 
-export type ModerationCaseSource = "activitypub-flag";
+export type ModerationCaseSource = "activitypub-flag" | "local-user-report";
 export type ModerationCaseStatus = "open" | "resolved" | "dismissed";
+export type ModerationCaseProtocol = "ap" | "activitypods";
+
+export interface ModerationCaseReporter extends CanonicalActorRef {
+  webId?: string | null;
+}
+
+export interface ModerationCaseRecipient {
+  webId?: string | null;
+  activityPubActorUri?: string | null;
+}
+
+export interface ModerationCaseCanonicalEventState {
+  status: "pending" | "published" | "failed";
+  canonicalIntentId?: string;
+  lastAttemptAt?: string;
+  publishedAt?: string;
+  lastError?: string;
+}
 
 /**
- * A stored inbound moderation case. The first implementation is backed by
- * verified ActivityPub Flag deliveries captured before bridge forwarding.
+ * A stored moderation case, owned by ActivityPods and shared by local user
+ * reports plus inbound federated reports.
  */
 export interface ModerationCase {
   /** Opaque local identifier (UUID/ULID) */
@@ -200,8 +221,8 @@ export interface ModerationCase {
   /** Source of the case */
   source: ModerationCaseSource;
 
-  /** Protocol the case originated from */
-  protocol: "ap";
+  /** Protocol or local surface where the case originated */
+  protocol: ModerationCaseProtocol;
 
   /** Remote activity identifier when present */
   activityId?: string;
@@ -212,29 +233,37 @@ export interface ModerationCase {
    */
   dedupeKey: string;
 
-  /** Verified remote actor who sent the moderation report */
-  sourceActorUri: string;
+  /** Reporter identity retained for local moderation only. */
+  reporter?: ModerationCaseReporter | null;
 
-  /** Bound local WebID for the source actor when available */
-  sourceActorWebId?: string;
+  /** Local inbox path the report was delivered to (ActivityPub only). */
+  inboxPath?: string;
 
-  /** Local inbox path the report was delivered to */
-  inboxPath: string;
+  /** Recipient/local target that received the report (when applicable). */
+  recipient?: ModerationCaseRecipient | null;
 
-  /** Canonical local actor URI for the recipient inbox when derivable */
-  recipientActorUri?: string;
-
-  /** Bound local WebID for the recipient actor when derivable */
-  recipientWebId?: string;
+  /** Structured reason category */
+  reasonType: CanonicalReportReasonType;
 
   /** Free-form reason/content extracted from the report */
   reason?: string;
 
-  /** All reported URIs mentioned by the Flag object */
-  reportedUris: string[];
+  /** Whether the reporter requested remote forwarding. */
+  requestedForwarding?: {
+    remote: boolean;
+  } | null;
 
-  /** Reported actor URIs inferred from the Flag object */
-  reportedActorUris: string[];
+  /** Client surface metadata for local reports when available. */
+  clientContext?: {
+    app?: string | null;
+    surface?: string | null;
+  } | null;
+
+  /** Normalized report subject. */
+  subject: CanonicalReportSubject;
+
+  /** Evidence objects attached to the report. */
+  evidenceObjectRefs: CanonicalObjectRef[];
 
   /** Timestamp on the original remote report when present */
   createdAt?: string;
@@ -247,6 +276,12 @@ export interface ModerationCase {
 
   /** Related manual or automated decision ids */
   relatedDecisionIds: string[];
+
+  /**
+   * Canonical event publication status for this case.
+   * Forwarding to remote moderation systems is tracked separately later.
+   */
+  canonicalEvent: ModerationCaseCanonicalEventState;
 
   /** Last time the case was updated by a decision or workflow action */
   updatedAt?: string;
@@ -281,6 +316,7 @@ export interface ModerationCaseQuery {
   limit?: number;
   cursor?: string;
   status?: ModerationCaseStatus;
+  source?: ModerationCaseSource;
   sourceActorUri?: string;
   recipientWebId?: string;
   reportedActorUri?: string;

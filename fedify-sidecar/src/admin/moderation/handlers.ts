@@ -596,6 +596,7 @@ export async function handleListCases(
   const limit = Math.min(Number(params["limit"]) || 50, 200);
   const cursor = params["cursor"] || undefined;
   const status = validateCaseStatus(params["status"]);
+  const source = validateCaseSource(params["source"]);
   const sourceActorUri = params["sourceActorUri"] || undefined;
   const recipientWebId = params["recipientWebId"] || undefined;
   const reportedActorUri = params["reportedActorUri"] || undefined;
@@ -604,6 +605,7 @@ export async function handleListCases(
     limit,
     cursor,
     status,
+    source,
     sourceActorUri,
     recipientWebId,
     reportedActorUri,
@@ -744,6 +746,14 @@ function validateCaseStatus(value: string | undefined): ModerationCaseStatus | u
     return value;
   }
   throw badRequest("Invalid case status");
+}
+
+function validateCaseSource(value: string | undefined): "activitypub-flag" | "local-user-report" | undefined {
+  if (!value) return undefined;
+  if (value === "activitypub-flag" || value === "local-user-report") {
+    return value;
+  }
+  throw badRequest("Invalid case source");
 }
 
 function extractHandleFromTarget(

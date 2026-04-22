@@ -73,6 +73,9 @@ describe("InboundWorker ActivityPub Flag moderation cases", () => {
   it("captures a verified Flag as an inbound moderation case and skips forwarding", async () => {
     const queue = makeQueue();
     const store = new InMemoryModerationBridgeStore();
+    const canonicalPublisher = {
+      publish: vi.fn().mockResolvedValue(undefined),
+    };
     const redpanda = {
       publishToStream1: vi.fn().mockResolvedValue(undefined),
       publishToStream2: vi.fn().mockResolvedValue(undefined),
@@ -90,6 +93,7 @@ describe("InboundWorker ActivityPub Flag moderation cases", () => {
       domain: "local.example",
       fedifyRuntimeIntegrationEnabled: false,
       activityPodsBridge: bridge,
+      canonicalPublisher,
       getModerationBridgeStore: () => store,
       resolveWebIdForActorUri: vi.fn().mockImplementation(async (actorUri: string) =>
         actorUri === "https://local.example/users/alice" ? "https://local.example/alice#me" : null,
@@ -104,15 +108,36 @@ describe("InboundWorker ActivityPub Flag moderation cases", () => {
     expect(page.cases).toHaveLength(1);
     expect(page.cases[0]).toEqual(
       expect.objectContaining({
-        sourceActorUri: "https://remote.example/users/reporter",
-        recipientWebId: "https://local.example/alice#me",
-        reportedActorUris: expect.arrayContaining(["https://remote.example/users/spammer"]),
+        source: "activitypub-flag",
+        protocol: "ap",
         reason: "spam, harassment",
         status: "open",
+        reporter: expect.objectContaining({
+          activityPubActorUri: "https://remote.example/users/reporter",
+        }),
+        recipient: expect.objectContaining({
+          webId: "https://local.example/alice#me",
+        }),
+        subject: {
+          kind: "account",
+          actor: expect.objectContaining({
+            activityPubActorUri: "https://remote.example/users/spammer",
+          }),
+          authoritativeProtocol: "ap",
+        },
+        evidenceObjectRefs: expect.arrayContaining([
+          expect.objectContaining({
+            activityPubObjectId: "https://remote.example/activities/10",
+          }),
+        ]),
+        canonicalEvent: expect.objectContaining({
+          status: "published",
+        }),
       }),
     );
     expect(queue.ack).toHaveBeenCalledTimes(2);
     expect(bridge.forwardInboundActivity).not.toHaveBeenCalled();
+    expect(canonicalPublisher.publish).toHaveBeenCalledTimes(1);
     expect(redpanda.publishToStream1).not.toHaveBeenCalled();
     expect(redpanda.publishToStream2).not.toHaveBeenCalled();
   });

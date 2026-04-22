@@ -4,19 +4,58 @@
     {
       "label": "infra:activitypods:up",
       "type": "shell",
-      "command": "cd ${workspaceFolder:activity-pods}/pod-provider && docker compose up -d",
+      "command": "sh ./scripts/infra-core-up.sh",
+      "options": {
+        "cwd": "${workspaceFolder:activity-pods}"
+      },
       "problemMatcher": []
     },
     {
       "label": "infra:activitypods:down",
       "type": "shell",
-      "command": "cd ${workspaceFolder:activity-pods}/pod-provider && docker compose down",
+      "command": "sh ./scripts/infra-core-down.sh",
+      "options": {
+        "cwd": "${workspaceFolder:activity-pods}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "infra:activitypods:status",
+      "type": "shell",
+      "command": "sh ./scripts/infra-core-status.sh",
+      "options": {
+        "cwd": "${workspaceFolder:activity-pods}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "infra:core:up",
+      "dependsOn": [
+        "infra:activitypods:up"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "infra:core:down",
+      "dependsOn": [
+        "infra:activitypods:down"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "infra:core:status",
+      "dependsOn": [
+        "infra:activitypods:status"
+      ],
+      "dependsOrder": "sequence",
       "problemMatcher": []
     },
     {
       "label": "slice:activitypods:up",
       "type": "shell",
-      "command": "sh ./scripts/bootstrap-local-dev.sh",
+      "command": "sh ./scripts/start-local-services.sh",
       "options": {
         "cwd": "${workspaceFolder:activity-pods}"
       },
@@ -26,7 +65,7 @@
     {
       "label": "slice:activitypods:down",
       "type": "shell",
-      "command": "sh ./scripts/shutdown-local-dev.sh",
+      "command": "sh ./scripts/stop-local-services.sh",
       "options": {
         "cwd": "${workspaceFolder:activity-pods}"
       },
@@ -80,9 +119,19 @@
       "problemMatcher": []
     },
     {
+      "label": "debug:activitypods:frontend",
+      "type": "shell",
+      "command": "BROWSER=none npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder:activity-pods}/pod-provider/frontend"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
       "label": "debug:fedify:sidecar",
       "type": "shell",
-      "command": "NODE_OPTIONS=--inspect=9230 npm run server:dev",
+      "command": "sh ./scripts/debug-local.sh 9230",
       "options": {
         "cwd": "${workspaceFolder:fedify-sidecar}"
       },
@@ -105,6 +154,16 @@
       "command": "bun --inspect=9240 run dev",
       "options": {
         "cwd": "${workspaceFolder:memory}/api"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "debug:memory:frontend",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder:memory}/frontend"
       },
       "isBackground": true,
       "problemMatcher": []
@@ -152,7 +211,10 @@
     {
       "label": "slice:federation:up",
       "dependsOn": [
-        "slice:activitypods:up"
+        "infra:core:up",
+        "debug:activitypods:backend",
+        "debug:activitypods:frontend",
+        "debug:fedify:sidecar"
       ],
       "dependsOrder": "sequence",
       "problemMatcher": []
@@ -160,8 +222,9 @@
     {
       "label": "slice:federation:debug",
       "dependsOn": [
-        "infra:activitypods:up",
+        "infra:core:up",
         "debug:activitypods:backend",
+        "debug:activitypods:frontend",
         "debug:fedify:sidecar"
       ],
       "dependsOrder": "sequence",
@@ -179,7 +242,8 @@
       "label": "slice:memory-app:debug",
       "dependsOn": [
         "slice:memory:up",
-        "debug:memory:api"
+        "debug:memory:api",
+        "debug:memory:frontend"
       ],
       "dependsOrder": "sequence",
       "problemMatcher": []
@@ -206,8 +270,9 @@
     {
       "label": "slice:activitypods:debug",
       "dependsOn": [
-        "infra:activitypods:up",
+        "infra:core:up",
         "debug:activitypods:backend",
+        "debug:activitypods:frontend",
         "debug:fedify:sidecar",
         "debug:media:sidecar"
       ],
@@ -215,8 +280,22 @@
       "problemMatcher": []
     },
     {
+      "label": "slice:backend:all",
+      "dependsOn": [
+        "infra:core:up",
+        "debug:activitypods:backend",
+        "debug:fedify:sidecar",
+        "debug:media:sidecar",
+        "slice:memory:up",
+        "debug:memory:api"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
       "label": "slice:all:up",
       "dependsOn": [
+        "infra:core:up",
         "slice:activitypods:up",
         "slice:memory:up"
       ],
@@ -236,7 +315,8 @@
       "label": "slice:all:down",
       "dependsOn": [
         "slice:memory:down",
-        "slice:activitypods:down"
+        "slice:activitypods:down",
+        "infra:core:down"
       ],
       "dependsOrder": "sequence",
       "problemMatcher": []

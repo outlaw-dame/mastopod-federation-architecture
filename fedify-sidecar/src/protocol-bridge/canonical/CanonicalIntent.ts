@@ -58,7 +58,8 @@ export type CanonicalIntentKind =
   | "FollowAdd"
   | "FollowRemove"
   | "ProfileUpdate"
-  | "AccountState";
+  | "AccountState"
+  | "ReportCreate";
 
 export interface CanonicalPostCreateIntent extends CanonicalIntentBase {
   kind: "PostCreate";
@@ -270,6 +271,45 @@ export interface CanonicalAccountStateIntent extends CanonicalIntentBase {
   state: "active" | "suspended" | "deactivated";
 }
 
+export type CanonicalReportReasonType =
+  | "spam"
+  | "harassment"
+  | "abuse"
+  | "impersonation"
+  | "copyright"
+  | "illegal"
+  | "safety"
+  | "other";
+
+export type CanonicalReportSubject =
+  | {
+      kind: "account";
+      actor: CanonicalActorRef;
+      authoritativeProtocol?: "local" | "ap" | "at";
+    }
+  | {
+      kind: "object";
+      object: CanonicalObjectRef;
+      owner?: CanonicalActorRef | null;
+      authoritativeProtocol?: "local" | "ap" | "at";
+    };
+
+export interface CanonicalReportCreateIntent extends CanonicalIntentBase {
+  kind: "ReportCreate";
+  reporterWebId?: string | null;
+  subject: CanonicalReportSubject;
+  reasonType: CanonicalReportReasonType;
+  reason?: string | null;
+  evidenceObjectRefs?: CanonicalObjectRef[];
+  requestedForwarding?: {
+    remote: boolean;
+  } | null;
+  clientContext?: {
+    app?: string | null;
+    surface?: string | null;
+  } | null;
+}
+
 export type CanonicalIntent =
   | CanonicalPostCreateIntent
   | CanonicalPostEditIntent
@@ -286,7 +326,8 @@ export type CanonicalIntent =
   | CanonicalFollowAddIntent
   | CanonicalFollowRemoveIntent
   | CanonicalProfileUpdateIntent
-  | CanonicalAccountStateIntent;
+  | CanonicalAccountStateIntent
+  | CanonicalReportCreateIntent;
 
 export function isCanonicalPostCreateIntent(intent: CanonicalIntent): intent is CanonicalPostCreateIntent {
   return intent.kind === "PostCreate";

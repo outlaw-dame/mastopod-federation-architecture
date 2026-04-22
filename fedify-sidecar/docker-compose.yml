@@ -89,9 +89,9 @@ services:
       # RedPanda - event logs ONLY (not work queues)
       - REDPANDA_BROKERS=redpanda:9092
       - REDPANDA_CLIENT_ID=fedify-sidecar
-      - TOPIC_STREAM1=ap.public.local.v1
-      - TOPIC_STREAM2=ap.public.remote.v1
-      - TOPIC_FIREHOSE=ap.public.firehose.v1
+      - STREAM1_TOPIC=ap.stream1.local-public.v1
+      - STREAM2_TOPIC=ap.stream2.remote-public.v1
+      - FIREHOSE_TOPIC=ap.firehose.v1
       - CONSUMER_GROUP_INDEXER=sidecar-indexer
       
       # ActivityPods - signing API (keys never leave)
@@ -114,6 +114,25 @@ services:
       - ENABLE_OUTBOUND_WORKER=true
       - ENABLE_INBOUND_WORKER=true
       - ENABLE_OPENSEARCH_INDEXER=true
+      - ENABLE_OUTBOX_INTENT_WORKER=true
+      # Required for AP relay subscriptions, Fedify runtime adapter, and origin reconciliation
+      - ENABLE_FEDIFY_RUNTIME_INTEGRATION=true
+
+      # AP relay subscription
+      # AP_RELAY_ACTOR_URLS: override the default relay list (comma-separated actor URLs).
+      # Omit to use the built-in fedi.buzz list.
+      - AP_RELAY_ACTOR_URLS=${AP_RELAY_ACTOR_URLS:-}
+      # The local AP actor that sends Follow activities to relay servers.
+      # Must be an actor whose private key is held by ActivityPods.
+      - AP_RELAY_LOCAL_ACTOR_URI=https://${DOMAIN:-localhost}/users/relay
+      - AP_RELAY_RESUBSCRIBE_INTERVAL_MS=${AP_RELAY_RESUBSCRIBE_INTERVAL_MS:-86400000}
+
+      # Memory API AP ingress webhook (relay content forwarding).
+      # Default targets the 'api' service in memory/docker-compose.local.yml on
+      # the shared activitypods-network.  Override in .env for prod deployments
+      # (e.g. MEMORY_AP_WEBHOOK_URL=http://memory-api:8794/ap/webhook/ingress).
+      - MEMORY_AP_WEBHOOK_URL=${MEMORY_AP_WEBHOOK_URL:-http://api:8794/ap/webhook/ingress}
+      - AP_BRIDGE_SECRET=${AP_BRIDGE_SECRET:-change-me-ap-secret}
       
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-info}

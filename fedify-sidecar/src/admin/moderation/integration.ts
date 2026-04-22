@@ -5,10 +5,12 @@ import type { IdentityBindingRepository } from "../../core-domain/identity/Ident
 import { forbidden } from "../mrf/errors.js";
 import type { MRFPermission } from "../mrf/types.js";
 import { registerModerationBridgeFastifyRoutes } from "./fastify-routes.js";
+import { ActivityPodsModerationCaseStore, CompositeModerationBridgeStore } from "./activitypods-case-store.js";
 import { createAtLabelEmitter } from "./label-emitter.js";
 import { InMemoryModerationBridgeStore } from "./store.memory.js";
 import { RedisModerationBridgeStore } from "./store.redis.js";
 import type { ModerationBridgeDeps, ModerationBridgeStore } from "./types.js";
+import type { CanonicalIntentPublisher } from "../../protocol-bridge/canonical/CanonicalIntentPublisher.js";
 
 interface RegisterOptions {
   app: any;
@@ -24,6 +26,14 @@ interface RegisterOptions {
   atAdminXrpcBaseUrl?: string;
   atAdminBearerToken?: string;
   atAdminTimeoutMs?: number;
+  activityPodsBaseUrl?: string;
+  activityPodsBearerToken?: string;
+  activityPodsTimeoutMs?: number;
+  activityPodsRetries?: number;
+  activityPodsRetryBaseMs?: number;
+  activityPodsRetryMaxMs?: number;
+  internalBridgeToken?: string;
+  canonicalPublisher?: CanonicalIntentPublisher;
 }
 
 function parsePermissions(req: Request): Set<string> {
@@ -71,6 +81,20 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
   const store = redisClient
     ? new RedisModerationBridgeStore(redisClient, { prefix: options.redisPrefix, now })
     : new InMemoryModerationBridgeStore();
+  const remoteCaseStore =
+    options.activityPodsBaseUrl && options.activityPodsBearerToken
+      ? new ActivityPodsModerationCaseStore({
+          baseUrl: options.activityPodsBaseUrl,
+          bearerToken: options.activityPodsBearerToken,
+          timeoutMs: options.activityPodsTimeoutMs,
+          retries: options.activityPodsRetries,
+          retryBaseMs: options.activityPodsRetryBaseMs,
+          retryMaxMs: options.activityPodsRetryMaxMs,
+        })
+      : null;
+  const compositeStore = remoteCaseStore
+    ? new CompositeModerationBridgeStore(store, remoteCaseStore)
+    : store;
 
   const labelEmitter = createAtLabelEmitter(store, {
     labelerDid: options.labelerDid,
@@ -81,7 +105,7 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
   const deps = {} as ModerationBridgeDeps;
   Object.assign(deps, {
     adminToken: options.adminToken,
-    store,
+    store: compositeStore,
     labelEmitter,
     now,
     uuid: () => ulid(),
@@ -200,7 +224,11 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
       : undefined,
   });
 
-  registerModerationBridgeFastifyRoutes(options.app, deps);
+  registerModerationBridgeFastifyRoutes(options.app, deps, {
+    internalBridgeToken: options.internalBridgeToken,
+    canonicalPublisher: options.canonicalPublisher,
+    now,
+  });
 
   options.logger.info(
     {
@@ -211,5 +239,5 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
     "Moderation bridge routes registered",
   );
 
-  return { redisClient, store };
+  return { redisClient, store: compositeStore };
 }

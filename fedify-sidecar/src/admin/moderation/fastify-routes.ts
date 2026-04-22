@@ -10,9 +10,12 @@ import {
   handleRevokeDecision,
   handleXrpcQueryLabels,
 } from "./handlers.js";
+import { handleIngestReportCreate } from "./report-handlers.js";
 import { errorToResponse } from "../mrf/utils.js";
 import { assertRateLimit, InMemoryRateLimiter, type RateLimitRule } from "../mrf/rate-limit.js";
+import { internal } from "../mrf/errors.js";
 import type { ModerationBridgeDeps } from "./types.js";
+import type { CanonicalIntentPublisher } from "../../protocol-bridge/canonical/CanonicalIntentPublisher.js";
 
 // ---------------------------------------------------------------------------
 // Shared toRequest / sendResponse helpers
@@ -87,6 +90,11 @@ function applyRateLimit(
 export function registerModerationBridgeFastifyRoutes(
   app: FastifyInstance,
   deps: ModerationBridgeDeps,
+  options: {
+    internalBridgeToken?: string;
+    canonicalPublisher?: CanonicalIntentPublisher;
+    now?: () => string;
+  } = {},
 ): void {
   const limiter = new InMemoryRateLimiter();
 
@@ -200,6 +208,29 @@ export function registerModerationBridgeFastifyRoutes(
     try {
       applyRateLimit(req, "moderation-known-labels", readRule, limiter);
       await sendResponse(reply, await handleListKnownAtLabels(request, deps));
+    } catch (err) {
+      await sendResponse(
+        reply,
+        errorToResponse(err, request.headers.get("x-request-id") || undefined),
+      );
+    }
+  });
+
+  app.post("/internal/bridge/moderation/reports", async (req, reply) => {
+    const request = toRequest(req);
+    try {
+      applyRateLimit(req, "moderation-report-bridge", applyRule, limiter);
+      if (!options.internalBridgeToken) {
+        throw internal("Internal moderation bridge token is not configured");
+      }
+      await sendResponse(
+        reply,
+        await handleIngestReportCreate(request, {
+          internalBridgeToken: options.internalBridgeToken,
+          canonicalPublisher: options.canonicalPublisher,
+          now: options.now,
+        }),
+      );
     } catch (err) {
       await sendResponse(
         reply,
