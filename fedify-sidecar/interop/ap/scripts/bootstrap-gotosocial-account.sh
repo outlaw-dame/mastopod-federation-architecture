@@ -40,6 +40,14 @@ escape_sql_string() {
   printf "%s" "$1" | sed "s/'/''/g"
 }
 
+normalize_runtime_permissions() {
+  if [ ! -d "${RUNTIME_DIR}" ]; then
+    return 0
+  fi
+
+  chmod -R u+rwX,go+rwX "${RUNTIME_DIR}" >/dev/null 2>&1 || true
+}
+
 wait_for_gotosocial() {
   attempt=1
   delay="${BOOTSTRAP_INITIAL_DELAY_SECONDS}"
@@ -178,8 +186,10 @@ ensure_webfinger_ready() {
 require_command docker
 require_command sqlite3
 wait_for_gotosocial
+normalize_runtime_permissions
 ensure_account_created
 docker compose -f "${COMPOSE_FILE}" stop gotosocial-app >/dev/null
+normalize_runtime_permissions
 ensure_account_state
 docker compose -f "${COMPOSE_FILE}" up -d gotosocial-app >/dev/null
 wait_for_gotosocial
