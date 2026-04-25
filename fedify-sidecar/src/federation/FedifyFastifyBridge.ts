@@ -953,9 +953,4 @@ export function registerFedifyRoutes(
   // pairs for authenticated document loading, while ActivityPods is the sole
   // signing authority and private keys never leave it.
   app.post("/inbox", handler);
-
-  // /sharedInbox is an alias that actor documents may advertise as their
-  // sharedInbox URL. Route it through the same Fedify-verified handler so
-  // that signature verification and recipient routing are identical to /inbox.
-  app.post("/sharedInbox", handler);
 }

@@ -40,7 +40,7 @@ describe("FedifyFastifyBridge", () => {
     vi.unstubAllGlobals();
   });
 
-  it("registers the shared inbox POST route through Fedify", async () => {
+  it("registers the verified inbox POST route through Fedify", async () => {
     const fetchSpy = vi.fn<
       (request: Request, options?: { contextData?: { remoteIp?: string } }) => Promise<Response>
     >(async (request: Request) => {
@@ -76,6 +76,51 @@ describe("FedifyFastifyBridge", () => {
     expect(request?.url).toContain("/inbox");
     expect(options?.contextData?.remoteIp).toBeTypeOf("string");
     expect((adapter as any).buildContext).toHaveBeenCalledTimes(1);
+
+    await app.close();
+  });
+
+  it("does not re-register the shared inbox alias route", async () => {
+    const fetchSpy = vi.fn<
+      (request: Request, options?: { contextData?: { remoteIp?: string } }) => Promise<Response>
+    >(async (_request: Request) =>
+      new Response(null, { status: 202 }),
+    );
+
+    const app = Fastify({ logger: false, trustProxy: true });
+    app.addContentTypeParser(
+      ["application/activity+json", "application/ld+json", "application/json"],
+      { parseAs: "string" },
+      (_req, body, done) => done(null, body),
+    );
+    app.post("/sharedInbox", async (_request, reply) => {
+      reply.status(202).send();
+    });
+
+    const adapter = {
+      buildContext: vi.fn((request?: { ip?: string }) => ({
+        domain: "fed.example.com",
+        activityPodsUrl: "http://localhost:3000",
+        activityPodsToken: "token",
+        remoteIp: request?.ip ?? "unknown",
+        enqueueVerifiedInbox: undefined,
+      })),
+      getFederation: () => ({
+        fetch: fetchSpy,
+      }),
+    } as unknown as FedifyFederationAdapter;
+
+    expect(() => registerFedifyRoutes(app, adapter)).not.toThrow();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/sharedInbox",
+      headers: { "content-type": "application/activity+json" },
+      payload: JSON.stringify({ type: "Create" }),
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     await app.close();
   });
