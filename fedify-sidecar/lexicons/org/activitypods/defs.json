@@ -1,0 +1,83 @@
+{
+  "lexicon": 1,
+  "id": "org.activitypods.defs",
+  "description": "Shared ActivityPods ATProto definitions for custom emoji interoperability.",
+  "defs": {
+    "emojiIcon": {
+      "type": "object",
+      "description": "A fetchable custom emoji image descriptor.",
+      "required": [
+        "uri"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "mediaType": {
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "emoji": {
+      "type": "object",
+      "description": "A custom emoji definition suitable for bridging ActivityPub emoji tags.",
+      "required": [
+        "shortcode"
+      ],
+      "properties": {
+        "shortcode": {
+          "type": "string",
+          "maxLength": 66
+        },
+        "emojiId": {
+          "type": "string",
+          "format": "uri"
+        },
+        "icon": {
+          "type": "ref",
+          "ref": "#emojiIcon"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "alternateName": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "domain": {
+          "type": "string",
+          "maxLength": 255
+        }
+      }
+    },
+    "recordRef": {
+      "type": "object",
+      "description": "A lightweight subject reference for custom records. The CID is optional so sidecar extension records can reference sibling writes created in the same commit batch.",
+      "required": [
+        "uri"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "at-uri"
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid"
+        }
+      }
+    },
+    "emojiList": {
+      "type": "array",
+      "description": "Custom emoji definitions embedded on core records via the activitypodsCustomEmojis extension field.",
+      "items": {
+        "type": "ref",
+        "ref": "#emoji"
+      },
+      "maxLength": 128
+    }
+  }
+}

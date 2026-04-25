@@ -1,0 +1,92 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach ActivityPods Backend",
+      "type": "node",
+      "request": "attach",
+      "port": 9229,
+      "restart": true,
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Attach Fedify Sidecar",
+      "type": "node",
+      "request": "attach",
+      "port": 9230,
+      "restart": true,
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Attach Media Pipeline Sidecar",
+      "type": "node",
+      "request": "attach",
+      "port": 9231,
+      "restart": true,
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Attach Memory API",
+      "type": "node",
+      "request": "attach",
+      "port": 9240,
+      "restart": true,
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Open ActivityPods Frontend",
+      "type": "pwa-chrome",
+      "request": "launch",
+      "url": "http://localhost:5000",
+      "webRoot": "${workspaceFolder:activity-pods}/pod-provider/frontend"
+    },
+    {
+      "name": "Debug Memory Frontend",
+      "type": "pwa-chrome",
+      "request": "launch",
+      "url": "http://localhost:5173",
+      "webRoot": "${workspaceFolder:memory}/frontend"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Attach ActivityPods Slice",
+      "configurations": [
+        "Attach ActivityPods Backend",
+        "Open ActivityPods Frontend"
+      ]
+    },
+    {
+      "name": "Attach Federation Slice",
+      "configurations": [
+        "Attach ActivityPods Backend",
+        "Attach Fedify Sidecar"
+      ]
+    },
+    {
+      "name": "Attach Memory Slice",
+      "configurations": [
+        "Attach Memory API",
+        "Debug Memory Frontend"
+      ]
+    },
+    {
+      "name": "Attach ActivityPods + Media Slice",
+      "configurations": [
+        "Attach ActivityPods Backend",
+        "Attach Fedify Sidecar",
+        "Attach Media Pipeline Sidecar"
+      ]
+    },
+    {
+      "name": "Attach Full Workspace",
+      "configurations": [
+        "Attach ActivityPods Backend",
+        "Attach Fedify Sidecar",
+        "Attach Media Pipeline Sidecar",
+        "Attach Memory API",
+        "Debug Memory Frontend"
+      ]
+    }
+  ]
+}

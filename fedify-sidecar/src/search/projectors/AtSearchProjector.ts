@@ -6,11 +6,13 @@
  * Outputs: search.public.upsert.v1, search.public.delete.v1
  */
 
-import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents';
-import { IdentityAliasResolver } from '../identity/IdentityAliasResolver';
-import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy';
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
-import { AtCommitV1 } from '../../at-adapter/events/AtRepoEvents';
+import { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents.js';
+import { IdentityAliasResolver } from '../identity/IdentityAliasResolver.js';
+import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy.js';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
+import { AtCommitV1 } from '../../at-adapter/events/AtRepoEvents.js';
+import { extractAtprotoTagsFromFacets, extractAtprotoTagsFromRecordTags } from '../../utils/hashtags.js';
+import { extractEmojisFromText } from '../../utils/emojis.js';
 
 export class AtSearchProjector {
   constructor(
@@ -41,6 +43,7 @@ export class AtSearchProjector {
         const del: SearchPublicDeleteV1 = {
           stableDocId,
           reason: 'at_delete',
+          deleteMode: 'soft',
           deletedAt: event.emittedAt || new Date().toISOString()
         };
 
@@ -75,20 +78,26 @@ export class AtSearchProjector {
         }
       }
 
-      // Extract tags from facets
-      const tags: string[] = [];
-      if (record.facets) {
-        for (const facet of record.facets) {
-          for (const feature of facet.features) {
-            if (feature.$type === 'app.bsky.richtext.facet#tag') {
-              tags.push(feature.tag);
-            }
+      // ATProto hashtags can come from facets and post.tags.
+      const tagsFromFacets = extractAtprotoTagsFromFacets(record.facets);
+      const tagsFromRecord = extractAtprotoTagsFromRecordTags(record.tags);
+      const tags = Array.from(new Set([...tagsFromFacets, ...tagsFromRecord]));
+      const emojis = extractEmojisFromText(record.text || '');
+      const replyToStableId = typeof record.reply?.parent?.uri === 'string'
+        ? SearchDocIdStrategy.forRemoteAt(record.reply.parent.uri)
+        : undefined;
+      const quoteUri = extractQuotedAtUri(record.embed);
+      const quoteOfStableId = quoteUri ? SearchDocIdStrategy.forRemoteAt(quoteUri) : undefined;
+      const relations = replyToStableId || quoteOfStableId
+        ? {
+            ...(replyToStableId ? { replyToStableId } : {}),
+            ...(quoteOfStableId ? { quoteOfStableId } : {}),
           }
-        }
-      }
+        : undefined;
 
       const upsert: SearchPublicUpsertV1 = {
         stableDocId,
+        upsertKind: 'full',
         canonicalContentId: sourceKind === 'local' ? ((op as any).canonicalRefId || op.rkey) : undefined,
         protocolSource: 'at',
         sourceKind,
@@ -107,12 +116,10 @@ export class AtSearchProjector {
           text: record.text || '',
           createdAt: record.createdAt || event.emittedAt || new Date().toISOString(),
           langs: record.langs,
-          tags: tags.length > 0 ? tags : undefined
+          tags: tags.length > 0 ? tags : undefined,
+          emojis: emojis.length > 0 ? emojis : undefined
         },
-        relations: record.reply ? {
-          replyToStableId: SearchDocIdStrategy.forRemoteAt(record.reply.parent.uri),
-          quoteOfStableId: record.embed?.$type === 'app.bsky.embed.record' ? SearchDocIdStrategy.forRemoteAt(record.embed.record.uri) : undefined
-        } : undefined,
+        relations,
         media: {
           hasMedia: mediaCount > 0,
           mediaCount
@@ -123,4 +130,20 @@ export class AtSearchProjector {
       await this.eventPublisher.publish('search.public.upsert.v1', upsert as any);
     }
   }
+}
+
+function extractQuotedAtUri(embed: any): string | undefined {
+  if (!embed || typeof embed !== 'object') {
+    return undefined;
+  }
+
+  if (embed.$type === 'app.bsky.embed.record' && typeof embed.record?.uri === 'string') {
+    return embed.record.uri;
+  }
+
+  if (embed.$type === 'app.bsky.embed.recordWithMedia' && typeof embed.record?.uri === 'string') {
+    return embed.record.uri;
+  }
+
+  return undefined;
 }

@@ -16,11 +16,14 @@
  */
 
 import { XrpcErrors } from '../middleware/XrpcErrorMapper.js';
+import type { IdentityBindingRepository } from '../../../core-domain/identity/IdentityBindingRepository.js';
 import type {
   AtDeleteRecordInput,
   AtWriteGateway,
 } from '../../writes/AtWriteTypes.js';
 import type { AtSessionContext } from '../../auth/AtSessionTypes.js';
+import type { ExternalWriteGateway } from '../../external/ExternalWriteGateway.js';
+import { isExternalAtprotoBinding } from '../../external/ExternalAccountMode.js';
 
 /** Lexicon NSID: segments of [a-zA-Z0-9-], joined by dots, 2+ segments. */
 const NSID_RE = /^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9-]*){1,}$/;
@@ -29,7 +32,11 @@ const NSID_RE = /^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9-]*){1,}$/;
 const RKEY_RE = /^[a-zA-Z0-9_-]{1,512}$/;
 
 export class RepoDeleteRecordRoute {
-  constructor(private readonly writeGateway: AtWriteGateway) {}
+  constructor(
+    private readonly writeGateway: AtWriteGateway,
+    private readonly identityRepo?: IdentityBindingRepository,
+    private readonly externalWriteGateway?: ExternalWriteGateway
+  ) {}
 
   async handle(
     body: Record<string, unknown> | undefined,
@@ -37,6 +44,22 @@ export class RepoDeleteRecordRoute {
   ): Promise<{ headers: Record<string, string>; body: unknown }> {
     const input = this._parseInput(body);
     this._assertRepoOwnership(input.repo, auth);
+
+    const binding = this.identityRepo
+      ? await this.identityRepo.getByCanonicalAccountId(auth.canonicalAccountId)
+      : null;
+
+    if (isExternalAtprotoBinding(binding)) {
+      if (!this.externalWriteGateway || !auth.tokenId) {
+        throw XrpcErrors.authRequired('External AT session is not available');
+      }
+
+      const result = await this.externalWriteGateway.deleteRecord(auth.tokenId, input);
+      return {
+        headers: { 'Content-Type': 'application/json' },
+        body: result ?? {},
+      };
+    }
 
     const result = await this.writeGateway.deleteRecord(input, auth);
 

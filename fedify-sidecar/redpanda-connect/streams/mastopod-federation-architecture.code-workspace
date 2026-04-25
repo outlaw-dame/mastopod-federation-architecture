@@ -1,0 +1,84 @@
+{
+	"folders": [
+		{
+			"path": "../../.."
+		},
+		{
+			"path": "../../../../activity-pods"
+		}
+	],
+	"settings": {
+		"chat.tools.terminal.autoApprove": {
+			"npm --prefix fedify-sidecar": true,
+			"lsof": true,
+			"true": true,
+			"brew": true,
+			"git rev-parse": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node scripts/proof-hashtag-normalization\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node scripts/proof-hashtag-ap-actions-e2e\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"cp": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node scripts/proof-emoji-reactions-ap-actions-e2e\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"shasum": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node scripts/proof-emoji-reactions-ap-actions-e2e\\.js && node scripts/proof-hashtag-ap-actions-e2e\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npm run typecheck": true,
+			"diff": true,
+			"/^ls /Users/damonoutlaw/activitypods-work/mastopod-federation-architecture/fedify-sidecar/src/at-adapter/ && cat /Users/damonoutlaw/activitypods-work/mastopod-federation-architecture/fedify-sidecar/package\\.json \\| python3 -c \"import sys,json; d=json\\.load\\(sys\\.stdin\\); print\\(json\\.dumps\\(d\\.get\\('dependencies',\\{\\}\\), indent=2\\)\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npm install": true,
+			"npx tsc": true,
+			"npx tsx": true,
+			"/^cat /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend/package\\.json \\| python3 -c \"import sys,json; d=json\\.load\\(sys\\.stdin\\); print\\(json\\.dumps\\(d\\.get\\('dependencies',\\{\\}\\), indent=2\\)\\)\" 2>/dev/null \\|\\| node -e \"const d=require\\('\\./package\\.json'\\); console\\.log\\(JSON\\.stringify\\(d\\.dependencies, null, 2\\)\\)\" 2>/dev/null \\| head -50$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node --experimental-vm-modules scripts/proof-ap-link-preview-og\\.js 2>&1 \\|\\| node scripts/proof-ap-link-preview-og\\.js 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node scripts/proof-ap-link-preview-og\\.js 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node proof-fep-1311-media-attachments\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node proof-ap-link-preview-og\\.js 2>&1 \\| tail -5$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node proof-ap-link-preview-og\\.js 2>&1 \\| head -20$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node scripts/proof-fep-b2b8-long-form\\.js 2>&1 \\| tail -5 && node scripts/proof-fep-268d-search-consent\\.js 2>&1 \\| tail -5 && node scripts/proof-hashtag-normalization\\.js 2>&1 \\| tail -5$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npx vitest": true,
+			"/^cat /Users/damonoutlaw/mastopod-federation-architecture/fedify-sidecar/package\\.json \\| python3 -c \"import sys,json; d=json\\.load\\(sys\\.stdin\\); deps=d\\.get\\('dependencies',\\{\\}\\); devdeps=d\\.get\\('devDependencies',\\{\\}\\); all_deps=\\{\\*\\*deps,\\*\\*devdeps\\}; fedify_keys=\\[k for k in all_deps if 'fedify' in k\\.lower\\(\\)\\]; print\\('Fedify in deps:', fedify_keys\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^# Check what @fedify/fedify actually exports / what version is installed\ncat /Users/damonoutlaw/mastopod-federation-architecture/fedify-sidecar/package\\.json \\| python3 -c \"import sys,json; d=json\\.load\\(sys\\.stdin\\); print\\('@fedify/fedify:', d\\.get\\('dependencies',\\{\\}\\)\\.get\\('@fedify/fedify','not in deps'\\)\\)\"\n\n# Any node_modules directory for it\\?\nls /Users/damonoutlaw/mastopod-federation-architecture/fedify-sidecar/node_modules/@fedify 2>/dev/null \\|\\| echo \"NOT installed in node_modules\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"git add": true
+		}
+	}
+}

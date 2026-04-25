@@ -1,0 +1,141 @@
+name: AP Interop Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: Space-delimited AP interop targets to run
+        required: false
+        default: "gotosocial mastodon akkoma"
+        type: string
+  pull_request:
+    paths:
+      - "fedify-sidecar/**"
+      - "Dockerfile.interop"
+      - ".github/workflows/ap-interop-smoke.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "fedify-sidecar/**"
+      - "Dockerfile.interop"
+      - ".github/workflows/ap-interop-smoke.yml"
+
+concurrency:
+  group: ap-interop-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    outputs:
+      interop_relevant: ${{ steps.filter.outputs.interop_relevant }}
+      akkoma_relevant: ${{ steps.filter.outputs.akkoma_relevant }}
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Detect Interop-Relevant Changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            interop_relevant:
+              - ".github/workflows/ap-interop-smoke.yml"
+              - "Dockerfile.interop"
+              - "fedify-sidecar/interop/ap/**"
+              - "fedify-sidecar/package.json"
+              - "fedify-sidecar/package-lock.json"
+              - "fedify-sidecar/tsconfig.json"
+              - "fedify-sidecar/src/index.ts"
+              - "fedify-sidecar/src/delivery/**"
+              - "fedify-sidecar/src/federation/**"
+              - "fedify-sidecar/src/interop/ap/**"
+              - "fedify-sidecar/src/queue/**"
+              - "fedify-sidecar/src/signing/**"
+              - "fedify-sidecar/src/streams/**"
+            akkoma_relevant:
+              - ".github/workflows/ap-interop-smoke.yml"
+              - "Dockerfile.interop"
+              - "fedify-sidecar/interop/ap/akkoma/**"
+              - "fedify-sidecar/interop/ap/runtime/akkoma/**"
+              - "fedify-sidecar/interop/ap/scripts/*akkoma*"
+              - "fedify-sidecar/src/interop/ap/**"
+
+  ap-interop-smoke:
+    needs: classify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMPOSE_DOCKER_CLI_BUILD: "1"
+      DOCKER_BUILDKIT: "1"
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Smoke Scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INTEROP_RELEVANT: ${{ needs.classify.outputs.interop_relevant }}
+          AKKOMA_RELEVANT: ${{ needs.classify.outputs.akkoma_relevant }}
+          MANUAL_TARGETS: ${{ github.event.inputs.targets }}
+        run: |
+          should_run="true"
+          targets="gotosocial mastodon"
+
+          if [[ "${EVENT_NAME}" == "pull_request" && "${INTEROP_RELEVANT}" != "true" ]]; then
+            should_run="false"
+          fi
+
+          if [[ -n "${MANUAL_TARGETS}" ]]; then
+            targets="${MANUAL_TARGETS}"
+          elif [[ "${AKKOMA_RELEVANT}" == "true" ]]; then
+            targets="gotosocial mastodon akkoma"
+          fi
+
+          echo "SHOULD_RUN_SMOKE=${should_run}" >> "${GITHUB_ENV}"
+          echo "AP_INTEROP_TARGETS=${targets}" >> "${GITHUB_ENV}"
+
+      - name: Skip Non-Interop PR Changes
+        if: env.SHOULD_RUN_SMOKE != 'true'
+        run: echo "Skipping dockerized AP smoke because this PR does not touch federation/interop-critical paths."
+
+      - name: Set Up Docker Buildx
+        if: env.SHOULD_RUN_SMOKE == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set Up Node.js
+        if: env.SHOULD_RUN_SMOKE == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install Sidecar Dependencies
+        if: env.SHOULD_RUN_SMOKE == 'true'
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Run AP Interop Smoke Lane
+        if: env.SHOULD_RUN_SMOKE == 'true'
+        run: npm --prefix fedify-sidecar run smoke:interop:ap
+
+      - name: Collect Interop Logs On Failure
+        if: failure() && env.SHOULD_RUN_SMOKE == 'true'
+        run: |
+          mkdir -p /tmp/ap-interop-logs
+          docker compose -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml ps > /tmp/ap-interop-logs/compose-ps.txt || true
+          docker compose -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml logs --no-color > /tmp/ap-interop-logs/compose.log || true
+
+      - name: Upload Interop Logs
+        if: failure() && env.SHOULD_RUN_SMOKE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ap-interop-logs
+          path: /tmp/ap-interop-logs

@@ -5,8 +5,8 @@
  * Exposes three query modes: lexical, semantic, and hybrid.
  */
 
-import { HybridQueryBuilder } from './HybridQueryBuilder';
-import { EmbeddingService } from '../embeddings/EmbeddingIngestWorker';
+import { HybridQueryBuilder } from './HybridQueryBuilder.js';
+import { EmbeddingService, type EmbeddingResult } from '../embeddings/EmbeddingIngestWorker.js';
 
 export interface PublicSearchInput {
   query: string;
@@ -52,11 +52,11 @@ export class DefaultPublicSearchService implements PublicSearchService {
     if (mode === 'lexical') {
       body = this.queryBuilder.buildLexicalQuery(input.query, filters);
     } else if (mode === 'semantic') {
-      const vector = await this.embeddingService.embedText(input.query);
+      const vector = extractDenseEmbedding(await this.embeddingService.embedText(input.query));
       body = this.queryBuilder.buildSemanticQuery(vector, input.limit * 2, filters);
     } else {
       // Hybrid
-      const vector = await this.embeddingService.embedText(input.query);
+      const vector = extractDenseEmbedding(await this.embeddingService.embedText(input.query));
       body = this.queryBuilder.buildHybridQuery(input.query, vector, input.limit * 2, filters);
       usePipeline = true;
     }
@@ -130,4 +130,8 @@ export class DefaultPublicSearchService implements PublicSearchService {
     
     return filters;
   }
+}
+
+function extractDenseEmbedding(value: number[] | EmbeddingResult): number[] {
+  return Array.isArray(value) ? value : value.dense;
 }

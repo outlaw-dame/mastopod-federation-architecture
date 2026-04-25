@@ -1,1 +1,191 @@
-/**\n * V6.5 PLC State Machine - did:plc Update Lifecycle Management\n *\n * Manages the state transitions for did:plc operations:\n * - PENDING_SUBMISSION: Ready to submit to PLC directory\n * - SUBMITTED: Submitted, awaiting confirmation\n * - CONFIRMED: Confirmed by PLC directory\n * - FAILED: Permanent failure\n * - STALE: Timed out, needs resubmission\n *\n * This state machine ensures reliable DID updates with proper retry logic.\n */\n\nimport { IdentityBinding } from '../../core-domain/identity/IdentityBinding.js';\n\n/**\n * PLC operation types\n */\nexport type PlcOperationType =\n  | 'create'        // Initial DID creation\n  | 'rotate_key'    // Key rotation\n  | 'update_handle' // Handle update\n  | 'update_service' // Service endpoint update\n  | 'recover';      // Account recovery\n\n/**\n * PLC operation request\n */\nexport interface PlcOperationRequest {\n  /**\n   * Operation type\n   */\n  type: PlcOperationType;\n\n  /**\n   * DID being updated\n   */\n  did: string;\n\n  /**\n   * Operation-specific data\n   */\n  data: Record<string, any>;\n\n  /**\n   * Rotation key reference for signing\n   */\n  rotationKeyRef: string;\n\n  /**\n   * Previous operation CID (for chaining)\n   */\n  prevOpCid?: string;\n}\n\n/**\n * PLC operation response\n */\nexport interface PlcOperationResponse {\n  /**\n   * Operation CID\n   */\n  opCid: string;\n\n  /**\n   * DID\n   */\n  did: string;\n\n  /**\n   * Confirmed state from PLC directory\n   */\n  confirmed: boolean;\n\n  /**\n   * Current operation CID from directory\n   */\n  currentOpCid: string;\n\n  /**\n   * Timestamp of operation\n   */\n  timestamp: string;\n}\n\n/**\n * PLC State Machine\n *\n * Manages state transitions for did:plc operations.\n */\nexport class PlcStateMachine {\n  /**\n   * Submission timeout (milliseconds)\n   * After this time, a SUBMITTED operation is marked STALE\n   */\n  private readonly SUBMISSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes\n\n  /**\n   * Maximum retry attempts\n   */\n  private readonly MAX_RETRIES = 3;\n\n  /**\n   * Transition to PENDING_SUBMISSION\n   *\n   * @param binding - The identity binding\n   * @param operation - The operation to submit\n   * @returns Updated binding\n   */\n  transitionToPendingSubmission(\n    binding: IdentityBinding,\n    operation: PlcOperationRequest\n  ): IdentityBinding {\n    if (!binding.plc) {\n      throw new Error('PLC state not initialized');\n    }\n\n    const updated = { ...binding };\n    updated.plc = {\n      ...binding.plc,\n      plcUpdateState: 'PENDING_SUBMISSION',\n      lastError: null,\n    };\n    updated.updatedAt = new Date().toISOString();\n\n    return updated;\n  }\n\n  /**\n   * Transition to SUBMITTED\n   *\n   * @param binding - The identity binding\n   * @param opCid - The operation CID\n   * @returns Updated binding\n   */\n  transitionToSubmitted(binding: IdentityBinding, opCid: string): IdentityBinding {\n    if (!binding.plc) {\n      throw new Error('PLC state not initialized');\n    }\n\n    const updated = { ...binding };\n    updated.plc = {\n      ...binding.plc,\n      opCid,\n      plcUpdateState: 'SUBMITTED',\n      lastSubmittedAt: new Date().toISOString(),\n      lastError: null,\n    };\n    updated.updatedAt = new Date().toISOString();\n\n    return updated;\n  }\n\n  /**\n   * Transition to CONFIRMED\n   *\n   * @param binding - The identity binding\n   * @param opCid - The confirmed operation CID\n   * @returns Updated binding\n   */\n  transitionToConfirmed(binding: IdentityBinding, opCid: string): IdentityBinding {\n    if (!binding.plc) {\n      throw new Error('PLC state not initialized');\n    }\n\n    const updated = { ...binding };\n    updated.plc = {\n      ...binding.plc,\n      opCid,\n      plcUpdateState: 'CONFIRMED',\n      lastConfirmedAt: new Date().toISOString(),\n      lastError: null,\n    };\n    updated.updatedAt = new Date().toISOString();\n\n    return updated;\n  }\n\n  /**\n   * Transition to FAILED\n   *\n   * @param binding - The identity binding\n   * @param error - Error message\n   * @returns Updated binding\n   */\n  transitionToFailed(binding: IdentityBinding, error: string): IdentityBinding {\n    if (!binding.plc) {\n      throw new Error('PLC state not initialized');\n    }\n\n    const updated = { ...binding };\n    updated.plc = {\n      ...binding.plc,\n      plcUpdateState: 'FAILED',\n      lastError: error,\n    };\n    updated.updatedAt = new Date().toISOString();\n\n    return updated;\n  }\n\n  /**\n   * Transition to STALE\n   *\n   * @param binding - The identity binding\n   * @returns Updated binding\n   */\n  transitionToStale(binding: IdentityBinding): IdentityBinding {\n    if (!binding.plc) {\n      throw new Error('PLC state not initialized');\n    }\n\n    const updated = { ...binding };\n    updated.plc = {\n      ...binding.plc,\n      plcUpdateState: 'STALE',\n      lastError: 'Operation timed out',\n    };\n    updated.updatedAt = new Date().toISOString();\n\n    return updated;\n  }\n\n  /**\n   * Check if operation is stale\n   *\n   * @param binding - The identity binding\n   * @returns true if stale\n   */\n  isOperationStale(binding: IdentityBinding): boolean {\n    if (!binding.plc || !binding.plc.lastSubmittedAt) {\n      return false;\n    }\n\n    const submittedTime = new Date(binding.plc.lastSubmittedAt).getTime();\n    const now = Date.now();\n    const elapsed = now - submittedTime;\n\n    return elapsed > this.SUBMISSION_TIMEOUT_MS;\n  }\n\n  /**\n   * Check if operation can be retried\n   *\n   * @param binding - The identity binding\n   * @returns true if can retry\n   */\n  canRetry(binding: IdentityBinding): boolean {\n    if (!binding.plc) {\n      return false;\n    }\n\n    const state = binding.plc.plcUpdateState;\n\n    // Can retry from FAILED or STALE states\n    if (state === 'FAILED' || state === 'STALE') {\n      return true;\n    }\n\n    // Can retry SUBMITTED if stale\n    if (state === 'SUBMITTED' && this.isOperationStale(binding)) {\n      return true;\n    }\n\n    return false;\n  }\n\n  /**\n   * Get state transition path\n   *\n   * @param binding - The identity binding\n   * @returns Array of states from current to target\n   */\n  getTransitionPath(binding: IdentityBinding): string[] {\n    if (!binding.plc) {\n      return [];\n    }\n\n    const current = binding.plc.plcUpdateState;\n\n    switch (current) {\n      case 'PENDING_SUBMISSION':\n        return ['PENDING_SUBMISSION', 'SUBMITTED', 'CONFIRMED'];\n      case 'SUBMITTED':\n        return ['SUBMITTED', 'CONFIRMED'];\n      case 'CONFIRMED':\n        return ['CONFIRMED']; // Terminal state\n      case 'FAILED':\n        return ['FAILED', 'PENDING_SUBMISSION', 'SUBMITTED', 'CONFIRMED'];\n      case 'STALE':\n        return ['STALE', 'PENDING_SUBMISSION', 'SUBMITTED', 'CONFIRMED'];\n      default:\n        return [];\n    }\n  }\n\n  /**\n   * Validate state transition\n   *\n   * @param from - Current state\n   * @param to - Target state\n   * @returns true if valid transition\n   */\n  isValidTransition(\n    from: string | null | undefined,\n    to: string\n  ): boolean {\n    const validTransitions: Record<string, string[]> = {\n      null: ['PENDING_SUBMISSION'],\n      PENDING_SUBMISSION: ['SUBMITTED', 'FAILED'],\n      SUBMITTED: ['CONFIRMED', 'FAILED', 'STALE'],\n      CONFIRMED: [], // Terminal\n      FAILED: ['PENDING_SUBMISSION'],\n      STALE: ['PENDING_SUBMISSION'],\n    };\n\n    const current = from || 'null';\n    const allowed = validTransitions[current] || [];\n\n    return allowed.includes(to);\n  }\n\n  /**\n   * Get retry delay (exponential backoff)\n   *\n   * @param attemptNumber - Attempt number (1-based)\n   * @returns Delay in milliseconds\n   */\n  getRetryDelay(attemptNumber: number): number {\n    // Exponential backoff: 1s, 2s, 4s\n    const baseDelay = 1000;\n    const delay = baseDelay * Math.pow(2, attemptNumber - 1);\n    const maxDelay = 30000; // 30 seconds\n\n    return Math.min(delay, maxDelay);\n  }\n\n  /**\n   * Format state for logging\n   *\n   * @param binding - The identity binding\n   * @returns Human-readable state description\n   */\n  formatState(binding: IdentityBinding): string {\n    if (!binding.plc) {\n      return 'NOT_INITIALIZED';\n    }\n\n    const state = binding.plc.plcUpdateState;\n    const details: string[] = [state || 'UNKNOWN'];\n\n    if (binding.plc.opCid) {\n      details.push(`opCid=${binding.plc.opCid.substring(0, 8)}...`);\n    }\n\n    if (binding.plc.lastSubmittedAt) {\n      details.push(`submitted=${new Date(binding.plc.lastSubmittedAt).toISOString()}`);\n    }\n\n    if (binding.plc.lastConfirmedAt) {\n      details.push(`confirmed=${new Date(binding.plc.lastConfirmedAt).toISOString()}`);\n    }\n\n    if (binding.plc.lastError) {\n      details.push(`error=${binding.plc.lastError}`);\n    }\n\n    return details.join(' | ');\n  }\n}\n
+/**
+ * V6.5 PLC State Machine - did:plc Update Lifecycle Management
+ *
+ * Manages the state transitions for did:plc operations:
+ * - PENDING_SUBMISSION: Ready to submit to PLC directory
+ * - SUBMITTED: Submitted, awaiting confirmation
+ * - CONFIRMED: Confirmed by PLC directory
+ * - FAILED: Permanent failure
+ * - STALE: Timed out, needs resubmission
+ */
+
+import type {
+  IdentityBinding,
+  PlcUpdateState,
+} from "../../core-domain/identity/IdentityBinding.js";
+
+export type PlcOperationType =
+  | "create"
+  | "rotate_key"
+  | "update_handle"
+  | "update_service"
+  | "recover";
+
+export interface PlcOperationRequest {
+  type: PlcOperationType;
+  did: string;
+  data: Record<string, unknown>;
+  rotationKeyRef: string;
+  prevOpCid?: string;
+}
+
+export interface PlcOperationResponse {
+  opCid: string;
+  did: string;
+  confirmed: boolean;
+  currentOpCid: string;
+  timestamp: string;
+}
+
+export class PlcStateMachine {
+  private readonly submissionTimeoutMs = 5 * 60 * 1000;
+
+  transitionToPendingSubmission(
+    binding: IdentityBinding,
+    _operation: PlcOperationRequest
+  ): IdentityBinding {
+    return this.withPlcState(binding, {
+      plcUpdateState: "PENDING_SUBMISSION",
+      lastError: null,
+    });
+  }
+
+  transitionToSubmitted(binding: IdentityBinding, opCid: string): IdentityBinding {
+    return this.withPlcState(binding, {
+      opCid,
+      plcUpdateState: "SUBMITTED",
+      lastSubmittedAt: new Date().toISOString(),
+      lastError: null,
+    });
+  }
+
+  transitionToConfirmed(binding: IdentityBinding, opCid: string): IdentityBinding {
+    return this.withPlcState(binding, {
+      opCid,
+      plcUpdateState: "CONFIRMED",
+      lastConfirmedAt: new Date().toISOString(),
+      lastError: null,
+    });
+  }
+
+  transitionToFailed(binding: IdentityBinding, error: string): IdentityBinding {
+    return this.withPlcState(binding, {
+      plcUpdateState: "FAILED",
+      lastError: error,
+    });
+  }
+
+  transitionToStale(binding: IdentityBinding): IdentityBinding {
+    return this.withPlcState(binding, {
+      plcUpdateState: "STALE",
+      lastError: "Operation timed out",
+    });
+  }
+
+  isOperationStale(binding: IdentityBinding): boolean {
+    const lastSubmittedAt = binding.plc?.lastSubmittedAt;
+    if (!lastSubmittedAt) {
+      return false;
+    }
+
+    return Date.now() - new Date(lastSubmittedAt).getTime() > this.submissionTimeoutMs;
+  }
+
+  canRetry(binding: IdentityBinding): boolean {
+    const state = binding.plc?.plcUpdateState;
+    if (!state) {
+      return false;
+    }
+
+    if (state === "FAILED" || state === "STALE") {
+      return true;
+    }
+
+    return state === "SUBMITTED" && this.isOperationStale(binding);
+  }
+
+  getTransitionPath(binding: IdentityBinding): PlcUpdateState[] {
+    const current = binding.plc?.plcUpdateState;
+
+    switch (current) {
+      case "PENDING_SUBMISSION":
+        return ["PENDING_SUBMISSION", "SUBMITTED", "CONFIRMED"];
+      case "SUBMITTED":
+        return ["SUBMITTED", "CONFIRMED"];
+      case "CONFIRMED":
+        return ["CONFIRMED"];
+      case "FAILED":
+        return ["FAILED", "PENDING_SUBMISSION", "SUBMITTED", "CONFIRMED"];
+      case "STALE":
+        return ["STALE", "PENDING_SUBMISSION", "SUBMITTED", "CONFIRMED"];
+      default:
+        return [];
+    }
+  }
+
+  isValidTransition(
+    from: PlcUpdateState | null | undefined,
+    to: PlcUpdateState
+  ): boolean {
+    const validTransitions: Record<string, PlcUpdateState[]> = {
+      null: ["PENDING_SUBMISSION"],
+      PENDING_SUBMISSION: ["SUBMITTED", "FAILED"],
+      SUBMITTED: ["CONFIRMED", "FAILED", "STALE"],
+      CONFIRMED: [],
+      FAILED: ["PENDING_SUBMISSION"],
+      STALE: ["PENDING_SUBMISSION"],
+    };
+
+    const current = from ?? "null";
+    return (validTransitions[current] ?? []).includes(to);
+  }
+
+  getRetryDelay(attemptNumber: number): number {
+    const delay = 1000 * Math.pow(2, attemptNumber - 1);
+    return Math.min(delay, 30000);
+  }
+
+  formatState(binding: IdentityBinding): string {
+    if (!binding.plc) {
+      return "NOT_INITIALIZED";
+    }
+
+    const details: string[] = [binding.plc.plcUpdateState ?? "UNKNOWN"];
+
+    if (binding.plc.opCid) {
+      details.push(`opCid=${binding.plc.opCid.substring(0, 8)}...`);
+    }
+
+    if (binding.plc.lastSubmittedAt) {
+      details.push(`submitted=${new Date(binding.plc.lastSubmittedAt).toISOString()}`);
+    }
+
+    if (binding.plc.lastConfirmedAt) {
+      details.push(`confirmed=${new Date(binding.plc.lastConfirmedAt).toISOString()}`);
+    }
+
+    if (binding.plc.lastError) {
+      details.push(`error=${binding.plc.lastError}`);
+    }
+
+    return details.join(" | ");
+  }
+
+  private withPlcState(
+    binding: IdentityBinding,
+    plcPatch: Partial<NonNullable<IdentityBinding["plc"]>>
+  ): IdentityBinding {
+    if (!binding.plc) {
+      throw new Error("PLC state not initialized");
+    }
+
+    return {
+      ...binding,
+      plc: {
+        ...binding.plc,
+        ...plcPatch,
+      },
+      updatedAt: new Date().toISOString(),
+    };
+  }
+}

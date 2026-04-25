@@ -1,0 +1,142 @@
+{
+	"folders": [
+		{
+			"name": "mastopod-federation-architecture",
+			"path": "."
+		},
+		{
+			"name": "activity-pods",
+			"path": "../activity-pods"
+		},
+		{
+			"name": "fedify-sidecar",
+			"path": "./fedify-sidecar"
+		},
+		{
+			"name": "media-pipeline-sidecar",
+			"path": "./media-pipeline-sidecar"
+		},
+		{
+			"name": "memory",
+			"path": "./memory"
+		}
+	],
+	"settings": {
+		"chat.tools.terminal.autoApprove": {
+			"npm --prefix fedify-sidecar": true,
+			"lsof": true,
+			"true": true,
+			"brew": true,
+			"npm --prefix /Users/damonoutlaw/activitypods-work/mastopod-federation-architecture/fedify-sidecar": true,
+			"npm run start": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/frontend && npm run$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^pwd && ls && npm run$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && npm run$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"pkill": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/frontend && npm run 2>&1 \\| head -30$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/usr/local/bin/npm": true,
+			"npx react-scripts": true,
+			"npm install": true,
+			"docker-compose": true,
+			"colima": true,
+			"limactl": true,
+			"git rev-parse": true,
+			"git remote": true,
+			"git add": true,
+			"git reset": true,
+			"git commit": true,
+			"git push": true,
+			"pgrep": true,
+			"command": true,
+			"k6": true,
+			"npm test": true,
+			"npx vitest": true,
+			"./node_modules/.bin/vitest": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node scripts/proof-hashtag-normalization\\.js \\.$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"./node_modules/.bin/jest": true,
+			"npx jest": true,
+			"/^node scripts/proof-hashtag-normalization\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods && node tests/node_modules/\\.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests pod-provider/backend/tests/hashtag-conformance-matrix\\.test\\.js pod-provider/backend/tests/user-settings-hashtag-follows\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node pod-provider/backend/tests/hashtag-conformance-matrix\\.test\\.js pod-provider/backend/tests/user-settings-hashtag-follows\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods && node tests/node_modules/\\.bin/jest --testEnvironment=node pod-provider/backend/tests/hashtag-conformance-matrix\\.test\\.js pod-provider/backend/tests/user-settings-hashtag-follows\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npm run -s build": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && ls -R services/ \\| grep activitypub-conversation-context\\.service\\.js && node -e \"require\\('\\./services/activitypub-conversation-context\\.service\\.js'\\); console\\.log\\('loaded-service-ok'\\)\" \\|\\| node -e \"require\\('\\./services/activitypub-conversation-context\\.service'\\); console\\.log\\('loaded-service-ok'\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"yarn add": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node -e \"require\\('\\./services/passkeys-api\\.service\\.js'\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npx eslint": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node -e \"require\\('\\./services/passkeys-api\\.service\\.js'\\)\" && echo \"Backend validation successful\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npm run build": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node proof-fep-dd4b-quote-posts\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"npm run -s test": true,
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods/pod-provider/backend && node -e \"try \\{ require\\('\\./services/viewership-history-api\\.service\\.js'\\); console\\.log\\('viewership service syntax ok'\\) \\} catch \\(e\\) \\{ console\\.error\\(e\\.message\\); process\\.exit\\(1\\) \\}\"$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^cd /Users/damonoutlaw/activitypods-work/activity-pods && node tests/node_modules/\\.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests pod-provider/backend/tests/viewership-history-api\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node pod-provider/backend/tests/viewership-history-api\\.test\\.js$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests pod-provider/backend/tests/viewership-history-api\\.test\\.js 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests viewership-history-api\\.test\\.js 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node --roots pod-provider/backend/tests viewership-history-api\\.test\\.js 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^node tests/node_modules/\\.bin/jest --testEnvironment=node --roots pod-provider/backend/tests --testMatch '\\*\\*/viewership-history-api\\.test\\.js' 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"git submodule": true,
+			"docker compose": true
+		}
+	}
+}

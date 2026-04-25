@@ -10,7 +10,7 @@
  * direct the client to rebootstrap via getRepo.
  */
 
-import { AtFirehoseCursorStore, FirehoseEventEnvelope } from './AtFirehoseCursorStore';
+import { AtFirehoseCursorStore, FirehoseEventEnvelope } from './AtFirehoseCursorStore.js';
 
 export interface BackfillResult {
   events: FirehoseEventEnvelope[];

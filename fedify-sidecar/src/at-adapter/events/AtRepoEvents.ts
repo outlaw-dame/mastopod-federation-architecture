@@ -1,9 +1,30 @@
+import type { ActivityPodsEmojiDefinition } from "../lexicon/ActivityPodsEmojiLexicon.js";
+
 export type AtRepoCollection =
   | 'app.bsky.actor.profile'
   | 'app.bsky.feed.post'
+  | 'site.standard.document'
   | 'app.bsky.graph.follow'
   | 'app.bsky.feed.like'
-  | 'app.bsky.feed.repost';
+  | 'app.bsky.feed.repost'
+  | 'org.activitypods.emojiReaction';
+
+export interface AtRepoBridgeMetadata {
+  canonicalIntentId: string;
+  sourceProtocol: 'activitypub' | 'atproto';
+  provenance: {
+    originProtocol: 'activitypub' | 'atproto';
+    originEventId: string;
+    originAccountId?: string | null;
+    mirroredFromCanonicalIntentId?: string | null;
+    projectionMode: 'native' | 'mirrored';
+  };
+}
+
+export interface AtRecordLocator {
+  collection: AtRepoCollection;
+  rkey: string;
+}
 
 export interface AtRepoOpV1 {
   did: string;
@@ -14,6 +35,7 @@ export interface AtRepoOpV1 {
   rkey: string;
   canonicalRefId: string;
   record: unknown | null;
+  bridge?: AtRepoBridgeMetadata;
   emittedAt: string;
 }
 
@@ -28,8 +50,16 @@ export interface AtCommitV1 {
     action: 'create' | 'update' | 'delete';
     collection: string;
     rkey: string;
+    canonicalRefId?: string;
     uri?: string;
     cid?: string;
+    subjectDid?: string | null;
+    subjectUri?: string | null;
+    subjectCid?: string | null;
+    reactionContent?: string | null;
+    reactionEmoji?: ActivityPodsEmojiDefinition | null;
+    record?: Record<string, unknown> | null;
+    bridge?: AtRepoBridgeMetadata;
   }>;
   emittedAt: string;
 }
@@ -37,7 +67,7 @@ export interface AtCommitV1 {
 export interface AtEgressV1 {
   did: string;
   canonicalAccountId: string;
-  kind: 'profile' | 'post' | 'follow' | 'like' | 'repost';
+  kind: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction';
   canonicalRefId: string;
   atUri?: string;
   cid?: string;

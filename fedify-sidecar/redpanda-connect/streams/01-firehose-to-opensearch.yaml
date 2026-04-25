@@ -1,0 +1,72 @@
+# Pipeline: ap.firehose.v1 → OpenSearch (ap-activities index)
+#
+# Indexes all public ActivityPub activities for full-text and faceted search.
+# On OpenSearch write failure (after internal retries), messages are routed to
+# the DLQ topic ap.firehose.dlq.v1 for operator inspection and manual replay.
+#
+# Consumer group: rpconnect-firehose-indexer-v1
+# Throughput target: ~500 docs/batch, flush every 10 s
+#
+# Required env vars:
+#   REDPANDA_BROKER       — single broker endpoint (default: redpanda:9092)
+#   OPENSEARCH_URL        — OpenSearch base URL  (default: http://opensearch:9200)
+#   OPENSEARCH_AUTH_ENABLED — "true" to enable basic auth (default: false)
+#   OPENSEARCH_USER       — basic auth username (default: admin)
+#   OPENSEARCH_PASSWORD   — basic auth password (default: admin)
+
+input:
+  kafka_franz:
+    seed_brokers:
+      - "${REDPANDA_BROKER:redpanda:9092}"
+    topics:
+      - ap.firehose.v1
+    consumer_group: rpconnect-firehose-indexer-v1
+    start_offset: latest
+    auto_replay_nacks: false
+    commit_period: 5s
+    tls:
+      enabled: false
+
+pipeline:
+  processors:
+    # Stamp indexing wall-clock time so we can detect indexing lag in dashboards.
+    - bloblang: |
+        root = this
+        root._connect_indexed_at = now().format("2006-01-02T15:04:05Z07:00")
+
+output:
+  fallback:
+    # Primary sink: OpenSearch (Elasticsearch-compatible API).
+    - label: os_activities
+      opensearch:
+        urls:
+          - "${OPENSEARCH_URL:http://opensearch:9200}"
+        index: ap-activities
+        # Use activityId as the document ID so redeliveries are idempotent.
+        id: "${!this.activityId | uuid_v4()}"
+        action: index
+        basic_auth:
+          enabled: ${OPENSEARCH_AUTH_ENABLED:false}
+          username: "${OPENSEARCH_USER:admin}"
+          password: "${OPENSEARCH_PASSWORD:admin}"
+        tls:
+          enabled: false
+        max_in_flight: 64
+        batching:
+          count: 500
+          period: 10s
+
+    # Fallback DLQ: produced to when OpenSearch is unreachable or rejects a batch.
+    # Preserves original kafka metadata for debugging and replay tooling.
+    - label: firehose_dlq
+      kafka_franz:
+        seed_brokers:
+          - "${REDPANDA_BROKER:redpanda:9092}"
+        topic: ap.firehose.dlq.v1
+        compression: zstd
+        metadata:
+          include_patterns:
+            - kafka_topic
+            - kafka_partition
+            - kafka_offset
+            - kafka_timestamp

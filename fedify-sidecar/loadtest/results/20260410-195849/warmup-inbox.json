@@ -1,0 +1,249 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: loadtest/sidecar-loadtest.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 20 max VUs, 1m25s max duration (incl. graceful stop):
+              * inbox: Up to 20 looping VUs for 55s over 3 stages (gracefulRampDown: 30s, exec: runInbox, gracefulStop: 30s)
+
+
+running (0m01.0s), 01/20 VUs, 19 complete and 0 interrupted iterations
+inbox   [   2% ] 01/20 VUs  01.0s/55.0s
+
+running (0m02.0s), 01/20 VUs, 38 complete and 0 interrupted iterations
+inbox   [   4% ] 01/20 VUs  02.0s/55.0s
+
+running (0m03.0s), 02/20 VUs, 72 complete and 0 interrupted iterations
+inbox   [   5% ] 02/20 VUs  03.0s/55.0s
+
+running (0m04.0s), 02/20 VUs, 112 complete and 0 interrupted iterations
+inbox   [   7% ] 02/20 VUs  04.0s/55.0s
+
+running (0m05.0s), 03/20 VUs, 161 complete and 0 interrupted iterations
+inbox   [   9% ] 03/20 VUs  05.0s/55.0s
+
+running (0m06.0s), 03/20 VUs, 221 complete and 0 interrupted iterations
+inbox   [  11% ] 03/20 VUs  06.0s/55.0s
+
+running (0m07.0s), 04/20 VUs, 285 complete and 0 interrupted iterations
+inbox   [  13% ] 04/20 VUs  07.0s/55.0s
+
+running (0m08.0s), 04/20 VUs, 365 complete and 0 interrupted iterations
+inbox   [  15% ] 04/20 VUs  08.0s/55.0s
+
+running (0m09.0s), 05/20 VUs, 444 complete and 0 interrupted iterations
+inbox   [  16% ] 05/20 VUs  09.0s/55.0s
+
+running (0m10.0s), 05/20 VUs, 543 complete and 0 interrupted iterations
+inbox   [  18% ] 05/20 VUs  10.0s/55.0s
+
+running (0m11.0s), 05/20 VUs, 640 complete and 0 interrupted iterations
+inbox   [  20% ] 05/20 VUs  11.0s/55.0s
+
+running (0m12.0s), 06/20 VUs, 757 complete and 0 interrupted iterations
+inbox   [  22% ] 06/20 VUs  12.0s/55.0s
+
+running (0m13.0s), 06/20 VUs, 877 complete and 0 interrupted iterations
+inbox   [  24% ] 06/20 VUs  13.0s/55.0s
+
+running (0m14.0s), 07/20 VUs, 1005 complete and 0 interrupted iterations
+inbox   [  25% ] 07/20 VUs  14.0s/55.0s
+
+running (0m15.0s), 07/20 VUs, 1143 complete and 0 interrupted iterations
+inbox   [  27% ] 07/20 VUs  15.0s/55.0s
+
+running (0m16.0s), 08/20 VUs, 1291 complete and 0 interrupted iterations
+inbox   [  29% ] 08/20 VUs  16.0s/55.0s
+
+running (0m17.0s), 08/20 VUs, 1447 complete and 0 interrupted iterations
+inbox   [  31% ] 08/20 VUs  17.0s/55.0s
+
+running (0m18.0s), 09/20 VUs, 1607 complete and 0 interrupted iterations
+inbox   [  33% ] 09/20 VUs  18.0s/55.0s
+
+running (0m19.0s), 09/20 VUs, 1786 complete and 0 interrupted iterations
+inbox   [  35% ] 09/20 VUs  19.0s/55.0s
+
+running (0m20.0s), 09/20 VUs, 1962 complete and 0 interrupted iterations
+inbox   [  36% ] 09/20 VUs  20.0s/55.0s
+
+running (0m21.0s), 10/20 VUs, 2157 complete and 0 interrupted iterations
+inbox   [  38% ] 10/20 VUs  21.0s/55.0s
+
+running (0m22.0s), 11/20 VUs, 2366 complete and 0 interrupted iterations
+inbox   [  40% ] 11/20 VUs  22.0s/55.0s
+
+running (0m23.0s), 11/20 VUs, 2584 complete and 0 interrupted iterations
+inbox   [  42% ] 11/20 VUs  23.0s/55.0s
+
+running (0m24.0s), 12/20 VUs, 2815 complete and 0 interrupted iterations
+inbox   [  44% ] 12/20 VUs  24.0s/55.0s
+
+running (0m25.0s), 13/20 VUs, 3063 complete and 0 interrupted iterations
+inbox   [  45% ] 13/20 VUs  25.0s/55.0s
+
+running (0m26.0s), 13/20 VUs, 3322 complete and 0 interrupted iterations
+inbox   [  47% ] 13/20 VUs  26.0s/55.0s
+
+running (0m27.0s), 14/20 VUs, 3591 complete and 0 interrupted iterations
+inbox   [  49% ] 14/20 VUs  27.0s/55.0s
+
+running (0m28.0s), 15/20 VUs, 3878 complete and 0 interrupted iterations
+inbox   [  51% ] 15/20 VUs  28.0s/55.0s
+
+running (0m29.0s), 15/20 VUs, 4176 complete and 0 interrupted iterations
+inbox   [  53% ] 15/20 VUs  29.0s/55.0s
+
+running (0m30.0s), 16/20 VUs, 4485 complete and 0 interrupted iterations
+inbox   [  55% ] 16/20 VUs  30.0s/55.0s
+
+running (0m31.0s), 17/20 VUs, 4811 complete and 0 interrupted iterations
+inbox   [  56% ] 17/20 VUs  31.0s/55.0s
+
+running (0m32.0s), 17/20 VUs, 5136 complete and 0 interrupted iterations
+inbox   [  58% ] 17/20 VUs  32.0s/55.0s
+
+running (0m33.0s), 18/20 VUs, 5495 complete and 0 interrupted iterations
+inbox   [  60% ] 18/20 VUs  33.0s/55.0s
+
+running (0m34.0s), 19/20 VUs, 5862 complete and 0 interrupted iterations
+inbox   [  62% ] 19/20 VUs  34.0s/55.0s
+
+running (0m35.0s), 19/20 VUs, 6226 complete and 0 interrupted iterations
+inbox   [  64% ] 19/20 VUs  35.0s/55.0s
+
+running (0m36.0s), 20/20 VUs, 6625 complete and 0 interrupted iterations
+inbox   [  65% ] 20/20 VUs  36.0s/55.0s
+
+running (0m37.0s), 19/20 VUs, 7003 complete and 0 interrupted iterations
+inbox   [  67% ] 19/20 VUs  37.0s/55.0s
+
+running (0m38.0s), 18/20 VUs, 7349 complete and 0 interrupted iterations
+inbox   [  69% ] 18/20 VUs  38.0s/55.0s
+
+running (0m39.0s), 17/20 VUs, 7690 complete and 0 interrupted iterations
+inbox   [  71% ] 17/20 VUs  39.0s/55.0s
+
+running (0m40.0s), 16/20 VUs, 8009 complete and 0 interrupted iterations
+inbox   [  73% ] 16/20 VUs  40.0s/55.0s
+
+running (0m41.0s), 15/20 VUs, 8297 complete and 0 interrupted iterations
+inbox   [  75% ] 15/20 VUs  41.0s/55.0s
+
+running (0m42.0s), 14/20 VUs, 8578 complete and 0 interrupted iterations
+inbox   [  76% ] 14/20 VUs  42.0s/55.0s
+
+running (0m43.0s), 13/20 VUs, 8826 complete and 0 interrupted iterations
+inbox   [  78% ] 13/20 VUs  43.0s/55.0s
+
+running (0m44.0s), 12/20 VUs, 9067 complete and 0 interrupted iterations
+inbox   [  80% ] 12/20 VUs  44.0s/55.0s
+
+running (0m45.0s), 11/20 VUs, 9277 complete and 0 interrupted iterations
+inbox   [  82% ] 11/20 VUs  45.0s/55.0s
+
+running (0m46.0s), 10/20 VUs, 9479 complete and 0 interrupted iterations
+inbox   [  84% ] 10/20 VUs  46.0s/55.0s
+
+running (0m47.0s), 09/20 VUs, 9660 complete and 0 interrupted iterations
+inbox   [  85% ] 09/20 VUs  47.0s/55.0s
+
+running (0m48.0s), 08/20 VUs, 9813 complete and 0 interrupted iterations
+inbox   [  87% ] 08/20 VUs  48.0s/55.0s
+
+running (0m49.0s), 07/20 VUs, 9955 complete and 0 interrupted iterations
+inbox   [  89% ] 07/20 VUs  49.0s/55.0s
+
+running (0m50.0s), 06/20 VUs, 10076 complete and 0 interrupted iterations
+inbox   [  91% ] 06/20 VUs  50.0s/55.0s
+
+running (0m51.0s), 05/20 VUs, 10172 complete and 0 interrupted iterations
+inbox   [  93% ] 05/20 VUs  51.0s/55.0s
+
+running (0m52.0s), 04/20 VUs, 10253 complete and 0 interrupted iterations
+inbox   [  95% ] 04/20 VUs  52.0s/55.0s
+
+running (0m53.0s), 03/20 VUs, 10314 complete and 0 interrupted iterations
+inbox   [  96% ] 03/20 VUs  53.0s/55.0s
+
+running (0m54.0s), 02/20 VUs, 10353 complete and 0 interrupted iterations
+inbox   [  98% ] 02/20 VUs  54.0s/55.0s
+
+running (0m55.0s), 01/20 VUs, 10375 complete and 0 interrupted iterations
+inbox   [ 100% ] 01/20 VUs  55.0s/55.0s
+{
+  "scenario": "inbox",
+  "checks": [
+    {
+      "path": "::inbox status is 202",
+      "id": "438c30637e205270ed0c89ce37d64a5d",
+      "passes": 10376,
+      "fails": 0,
+      "name": "inbox status is 202"
+    }
+  ],
+  "metrics": {
+    "http_req_failed": {
+      "values": {
+        "rate": 0,
+        "passes": 0,
+        "fails": 10378
+      },
+      "type": "rate",
+      "contains": "default"
+    },
+    "http_req_duration": {
+      "contains": "time",
+      "values": {
+        "avg": 0.472094623241473,
+        "min": 0.101,
+        "med": 0.396,
+        "max": 41.936,
+        "p(90)": 0.665,
+        "p(95)": 0.7981499999999996,
+        "p(99)": 1.70346
+      },
+      "type": "trend"
+    },
+    "fedify_loadtest_expected_status_rate": {
+      "values": {
+        "fails": 0,
+        "rate": 1,
+        "passes": 10376
+      },
+      "type": "rate",
+      "contains": "default"
+    },
+    "fedify_loadtest_app_latency_ms": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "p(95)": 0.798,
+        "p(99)": 1.7034999999999998,
+        "avg": 0.47202978026214404,
+        "min": 0.101,
+        "med": 0.396,
+        "max": 41.936,
+        "p(90)": 0.665
+      }
+    },
+    "fedify_loadtest_accepted_total": {
+      "type": "counter",
+      "contains": "default",
+      "values": {
+        "count": 10376,
+        "rate": 188.58980428918574
+      }
+    }
+  }
+}
+
+running (0m55.0s), 00/20 VUs, 10376 complete and 0 interrupted iterations
+inbox ✓ [ 100% ] 00/20 VUs  55s

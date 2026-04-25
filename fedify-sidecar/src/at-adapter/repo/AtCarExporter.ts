@@ -17,8 +17,8 @@
  * Ref: https://atproto.com/specs/repository#car-file-serialization
  */
 
-import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry';
-import { isValidDid } from '../identity/HandleResolutionReader';
+import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
+import { isValidDid } from '../identity/HandleResolutionReader.js';
 
 export interface AtCarExporter {
   exportRepo(did: string, since?: string): Promise<Uint8Array>;

@@ -6,7 +6,7 @@
 
 ## 1. Introduction
 
-This document proposes a new architecture for the Mastopod application, a fork of ActivityPods, to address existing backend issues, performance bottlenecks, and missing features. The core of this proposal is the introduction of a **Fedify sidecar** to handle all federation-related tasks, with the goal of minimizing changes to the core ActivityPods codebase while significantly improving performance, scalability, and compatibility with the broader Fediverse.
+This document proposes a new architecture for the Mastopod application, a fork of ActivityPods, to address existing backend issues, performance bottlenecks, and missing features. The core of this proposal is the introduction of a **Fedify sidecar** to handle all federation-related tasks, providing native, high-performance support for both **ActivityPub** and **ATProto**. The goal is to minimize changes to the core ActivityPods codebase while enabling seamless cross-protocol federation.
 
 ### 1.1. The Problem
 
@@ -42,9 +42,11 @@ graph TD
     end
 
     subgraph "Federation Layer"
-        C -->|3. Consume from Stream| D
-        D -->|4. Sign & Deliver| G[Remote Inboxes]
-        H[Remote Servers] -->|5. Receive & Verify| D
+        C -->|3. Consume| D
+        D -->|4a. ActivityPub| G[Fediverse Inboxes]
+        D -->|4b. ATProto| I[ATProto Relays/PDS]
+        H[Remote AP Servers] -->|5a. Inbound| D
+        J[ATProto Firehose] -->|5b. Inbound| D
     end
 
     style A fill:#cde4ff

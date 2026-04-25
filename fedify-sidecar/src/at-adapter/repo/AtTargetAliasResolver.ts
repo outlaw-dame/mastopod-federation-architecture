@@ -5,7 +5,7 @@
  * reposts, and reply threading.
  */
 
-import { AtAliasStore } from './AtAliasStore';
+import type { AtAliasStore } from './AtAliasStore.js';
 
 export interface StrongRef {
   uri: string;

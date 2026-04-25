@@ -1,0 +1,37 @@
+{
+  "lexicon": 1,
+  "id": "org.activitypods.emojiReaction",
+  "description": "An ActivityPods custom reaction record that preserves unicode and custom emoji reaction semantics across protocol bridges.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "subject",
+          "reaction",
+          "createdAt"
+        ],
+        "properties": {
+          "subject": {
+            "type": "ref",
+            "ref": "org.activitypods.defs#recordRef"
+          },
+          "reaction": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "emoji": {
+            "type": "ref",
+            "ref": "org.activitypods.defs#emoji"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

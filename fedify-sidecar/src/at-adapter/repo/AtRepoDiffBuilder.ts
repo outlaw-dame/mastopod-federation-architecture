@@ -16,7 +16,7 @@
  * Ref: https://atproto.com/specs/event-stream#commit
  */
 
-import { AtCommitV1 } from '../events/AtRepoEvents';
+import { AtCommitV1 } from '../events/AtRepoEvents.js';
 
 export interface RepoDiffOp {
   action: 'create' | 'update' | 'delete';

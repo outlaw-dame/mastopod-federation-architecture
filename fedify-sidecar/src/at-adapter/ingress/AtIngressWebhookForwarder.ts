@@ -22,7 +22,7 @@
  * Ref: Phase 5.5 spec — downstream integration
  */
 
-import { AtIngressEvent } from './AtIngressEvents';
+import { AtIngressEvent } from './AtIngressEvents.js';
 
 // ---------------------------------------------------------------------------
 // Constants

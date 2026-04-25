@@ -274,6 +274,253 @@ export const inboundLatency = new Histogram({
   registers: [registry],
 });
 
+export const inboundActivityPubActivities = new Counter({
+  name: "fedify_inbound_activitypub_activities_total",
+  help: "Total ActivityPub inbound activities by stage and activity type",
+  labelNames: ["stage", "activity_type"] as const,
+  registers: [registry],
+});
+
+// ============================================================================
+// Outbound Webhook Metrics
+// ============================================================================
+
+export const outboundWebhookRequestsTotal = new Counter({
+  name: "fedify_outbound_webhook_requests_total",
+  help: "Total outbound webhook requests by terminal status",
+  labelNames: ["status"] as const,
+  registers: [registry],
+});
+
+export const outboundWebhookTargetCount = new Histogram({
+  name: "fedify_outbound_webhook_target_count",
+  help: "Number of delivery targets submitted per outbound webhook request",
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+  registers: [registry],
+});
+
+export const outboundWebhookQueueingLatency = new Histogram({
+  name: "fedify_outbound_webhook_queueing_latency_seconds",
+  help: "Time spent validating and enqueueing outbound delivery jobs per webhook request",
+  buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
+
+export const outboundWebhookTargetsDedupedTotal = new Counter({
+  name: "fedify_outbound_webhook_targets_deduped_total",
+  help: "Number of duplicate or invalid outbound webhook targets skipped before enqueue",
+  labelNames: ["reason"] as const,
+  registers: [registry],
+});
+
+export const outboundWebhookBackpressureRejectionsTotal = new Counter({
+  name: "fedify_outbound_webhook_backpressure_rejections_total",
+  help: "Number of outbound webhook requests rejected due to queue backpressure",
+  labelNames: ["reason"] as const,
+  registers: [registry],
+});
+
+// ============================================================================
+// Protocol Bridge Metrics
+// ============================================================================
+
+export const protocolBridgeProjectionOutcomes = new Counter({
+  name: "fedify_protocol_bridge_projection_outcomes_total",
+  help: "Protocol bridge projection outcomes by direction, outcome, and reason",
+  labelNames: ["direction", "outcome", "reason"] as const,
+  registers: [registry],
+});
+
+export const apRelaySubscriptionAttempts = new Counter({
+  name: "fedify_ap_relay_subscription_attempts_total",
+  help: "AP relay subscription outcomes by relay and status",
+  labelNames: ["relay", "status"] as const,
+  registers: [registry],
+});
+
+export const originReconciliationJobsTotal = new Counter({
+  name: "fedify_origin_reconciliation_jobs_total",
+  help: "Origin reconciliation job outcomes by result and scheduling reason",
+  labelNames: ["result", "reason"] as const,
+  registers: [registry],
+});
+
+export const originReconciliationFetchesTotal = new Counter({
+  name: "fedify_origin_reconciliation_fetches_total",
+  help: "Origin reconciliation fetch attempts by host and result",
+  labelNames: ["origin_host", "result"] as const,
+  registers: [registry],
+});
+
+export const originReconciliationFetchLatency = new Histogram({
+  name: "fedify_origin_reconciliation_fetch_latency_seconds",
+  help: "Origin reconciliation fetch latency by host",
+  labelNames: ["origin_host"] as const,
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+  registers: [registry],
+});
+
+export const originReconciliationNoopTotal = new Counter({
+  name: "fedify_origin_reconciliation_noop_total",
+  help: "Origin reconciliation polls that observed no meaningful change",
+  labelNames: ["origin_host"] as const,
+  registers: [registry],
+});
+
+export const originReconciliationChangedTotal = new Counter({
+  name: "fedify_origin_reconciliation_changed_total",
+  help: "Origin reconciliation polls that observed meaningful change",
+  labelNames: ["origin_host"] as const,
+  registers: [registry],
+});
+
+export const originReconciliationHostBackoffTotal = new Counter({
+  name: "fedify_origin_reconciliation_host_backoff_total",
+  help: "Origin reconciliation host-level deferrals and permanent stops",
+  labelNames: ["origin_host", "reason"] as const,
+  registers: [registry],
+});
+
+// ============================================================================
+// Feed Metrics
+// ============================================================================
+
+export const feedRequestsTotal = new Counter({
+  name: "fedify_feed_requests_total",
+  help: "Feed API requests grouped by endpoint and terminal status",
+  labelNames: ["endpoint", "status"] as const,
+  registers: [registry],
+});
+
+export const feedRequestLatency = new Histogram({
+  name: "fedify_feed_request_latency_seconds",
+  help: "Feed API request latency in seconds by endpoint",
+  labelNames: ["endpoint"] as const,
+  buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
+
+export const feedHydrationOmissionsTotal = new Counter({
+  name: "fedify_feed_hydration_omissions_total",
+  help: "Hydration omissions grouped by omission reason",
+  labelNames: ["reason"] as const,
+  registers: [registry],
+});
+
+export const feedOpenSearchRetriesTotal = new Counter({
+  name: "fedify_feed_opensearch_retries_total",
+  help: "OpenSearch retry attempts made by feed components",
+  labelNames: ["component", "reason"] as const,
+  registers: [registry],
+});
+
+export const feedSearchReadRetriesTotal = new Counter({
+  name: "fedify_feed_search_read_retries_total",
+  help: "Retry attempts made by feed search read components grouped by backend",
+  labelNames: ["backend", "component", "reason"] as const,
+  registers: [registry],
+});
+
+export const feedStreamConnectionsTotal = new Counter({
+  name: "fedify_feed_stream_connections_total",
+  help: "Total durable stream connection attempts by transport and outcome",
+  labelNames: ["transport", "outcome"] as const,
+  registers: [registry],
+});
+
+export const feedStreamActiveConnections = new Gauge({
+  name: "fedify_feed_stream_active_connections",
+  help: "Current number of active durable stream connections by transport",
+  labelNames: ["transport"] as const,
+  registers: [registry],
+});
+
+export const feedStreamEnvelopesPublished = new Counter({
+  name: "fedify_feed_stream_envelopes_published_total",
+  help: "Total stream envelopes published to connections",
+  labelNames: ["stream"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingControlRequestsTotal = new Counter({
+  name: "fedify_fep_streaming_control_requests_total",
+  help: "Public FEP-3ab2 control-plane request outcomes by endpoint and outcome",
+  labelNames: ["endpoint", "outcome"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingSessionsTotal = new Counter({
+  name: "fedify_fep_streaming_sessions_total",
+  help: "Public FEP-3ab2 streaming session lifecycle actions",
+  labelNames: ["action"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingConnectionsTotal = new Counter({
+  name: "fedify_fep_streaming_connections_total",
+  help: "Public FEP-3ab2 stream connection attempts grouped by outcome",
+  labelNames: ["outcome"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingActiveConnections = new Gauge({
+  name: "fedify_fep_streaming_active_connections",
+  help: "Current number of active public FEP-3ab2 SSE connections",
+  registers: [registry],
+});
+
+export const fepStreamingReplayRequestsTotal = new Counter({
+  name: "fedify_fep_streaming_replay_requests_total",
+  help: "Public FEP-3ab2 replay request outcomes during SSE reconnect handling",
+  labelNames: ["outcome"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingReplayEventsTotal = new Counter({
+  name: "fedify_fep_streaming_replay_events_total",
+  help: "Public FEP-3ab2 replay event lifecycle actions",
+  labelNames: ["action"] as const,
+  registers: [registry],
+});
+
+export const fepStreamingEventsPublished = new Counter({
+  name: "fedify_fep_streaming_events_published_total",
+  help: "Public FEP-3ab2 events published to active SSE subscribers",
+  labelNames: ["topic_group", "event"] as const,
+  registers: [registry],
+});
+
+// ============================================================================
+// Capability Metrics
+// ============================================================================
+
+/**
+ * Per-capability gate decisions.  `outcome` is one of:
+ *   "allowed"          — gate check passed
+ *   "denied_feature_disabled"   — capability is disabled
+ *   "denied_limit_exceeded"     — plan limit was exceeded
+ *   "denied_protocol_disabled"  — required protocol is inactive
+ */
+export const capabilityGateTotal = new Counter({
+  name: "fedify_capability_gate_total",
+  help: "Total capability gate decisions by capability and outcome",
+  labelNames: ["capability", "outcome"] as const,
+  registers: [registry],
+});
+
+/**
+ * Per-capability readiness gauge.
+ *   1  = enabled
+ *   0  = disabled
+ *  -1  = degraded (enabled but dependency unavailable)
+ */
+export const capabilityHealthGauge = new Gauge({
+  name: "fedify_capability_health",
+  help: "Current health status of each declared capability (1=enabled, 0=disabled, -1=degraded)",
+  labelNames: ["capability"] as const,
+  registers: [registry],
+});
+
 // ============================================================================
 // Aggregated Metrics Object
 // ============================================================================
@@ -329,6 +576,49 @@ export const metrics = {
   inboundErrors,
   inboundSignatureFailures,
   inboundLatency,
+  inboundActivityPubActivities,
+
+  // Outbound webhook
+  outboundWebhookRequestsTotal,
+  outboundWebhookTargetCount,
+  outboundWebhookQueueingLatency,
+  outboundWebhookTargetsDedupedTotal,
+  outboundWebhookBackpressureRejectionsTotal,
+
+  // Protocol bridge
+  protocolBridgeProjectionOutcomes,
+
+  // AP relay
+  apRelaySubscriptionAttempts,
+
+  // Origin reconciliation
+  originReconciliationJobsTotal,
+  originReconciliationFetchesTotal,
+  originReconciliationFetchLatency,
+  originReconciliationNoopTotal,
+  originReconciliationChangedTotal,
+  originReconciliationHostBackoffTotal,
+
+  // Feed
+  feedRequestsTotal,
+  feedRequestLatency,
+  feedHydrationOmissionsTotal,
+  feedOpenSearchRetriesTotal,
+  feedSearchReadRetriesTotal,
+  feedStreamConnectionsTotal,
+  feedStreamActiveConnections,
+  feedStreamEnvelopesPublished,
+  fepStreamingControlRequestsTotal,
+  fepStreamingSessionsTotal,
+  fepStreamingConnectionsTotal,
+  fepStreamingActiveConnections,
+  fepStreamingReplayRequestsTotal,
+  fepStreamingReplayEventsTotal,
+  fepStreamingEventsPublished,
+
+  // Capability
+  capabilityGateTotal,
+  capabilityHealthGauge,
 };
 
 /**

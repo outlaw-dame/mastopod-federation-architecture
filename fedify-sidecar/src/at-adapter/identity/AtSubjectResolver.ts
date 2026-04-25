@@ -4,8 +4,7 @@
  * Resolves canonical identities to ATProto DIDs for follow targets.
  */
 
-import { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository';
-import { IdentityBinding } from '../../core-domain/identity/IdentityBinding';
+import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
 
 export interface AtSubjectResolver {
   resolveDidForCanonicalAccount(canonicalAccountId: string): Promise<string | null>;

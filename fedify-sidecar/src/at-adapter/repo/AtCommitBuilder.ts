@@ -1,6 +1,6 @@
-import { AtRepoOpV1 } from '../events/AtRepoEvents';
-import { RepositoryState } from '../../atproto/repo/AtprotoRepoState';
-import { SigningService } from '../../core-domain/contracts/SigningContracts';
+import type { AtRepoOpV1 } from '../events/AtRepoEvents.js';
+import type { RepositoryState } from '../../atproto/repo/AtprotoRepoState.js';
+import type { SigningService } from '../../core-domain/contracts/SigningContracts.js';
 
 export interface BuildCommitResult {
   did: string;

@@ -1,0 +1,14 @@
+{
+  "client_id": "https://app.example.com/oauth/memory-ios.client.json",
+  "application_type": "native",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "scope": "atproto transition:generic",
+  "response_types": ["code"],
+  "redirect_uris": ["memory://oauth/callback"],
+  "dpop_bound_access_tokens": true,
+  "token_endpoint_auth_method": "none",
+  "client_name": "Memory iOS",
+  "client_uri": "https://app.example.com",
+  "policy_uri": "https://app.example.com/privacy",
+  "tos_uri": "https://app.example.com/terms"
+}

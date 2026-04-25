@@ -1,0 +1,174 @@
+# Pipeline: multi-topic → S3 archival
+#
+# Archives activity and commit events to S3-compatible object storage as
+# gzip-compressed JSONL objects partitioned by topic and calendar date:
+#
+#   s3://{bucket}/ap/firehose/2026/04/03/part-<uuid>.jsonl.gz
+#   s3://{bucket}/ap/mrf-rejected/2026/04/03/part-<uuid>.jsonl.gz
+#   s3://{bucket}/ap/tombstones/2026/04/03/part-<uuid>.jsonl.gz
+#   s3://{bucket}/at/commits/2026/04/03/part-<uuid>.jsonl.gz
+#   s3://{bucket}/at/firehose-raw/2026/04/03/part-<uuid>.jsonl.gz
+#
+# Each switch case maintains its own independent batch buffer (1 000 msgs or
+# 30 s, whichever comes first), so low-volume topics (e.g. tombstones) still
+# flush on schedule without waiting for higher-volume topics to fill a batch.
+#
+# For local development, point S3_ENDPOINT at LocalStack (http://localstack:4566)
+# and set AWS_ACCESS_KEY_ID=test / AWS_SECRET_ACCESS_KEY=test.
+#
+# Consumer group: rpconnect-archive-v1
+#
+# Required env vars:
+#   REDPANDA_BROKER     — single broker endpoint  (default: redpanda:9092)
+#   S3_ARCHIVE_BUCKET   — destination bucket name (default: fedify-archive)
+#   AWS_REGION          — AWS region              (default: us-east-1)
+#   S3_ENDPOINT         — custom endpoint URL     (empty = real AWS)
+#   AWS_ACCESS_KEY_ID   — AWS/LocalStack key id   (default: empty)
+#   AWS_SECRET_ACCESS_KEY — AWS/LocalStack secret (default: empty)
+#   AWS_SESSION_TOKEN   — AWS session token       (default: empty)
+
+input:
+  kafka_franz:
+    seed_brokers:
+      - "${REDPANDA_BROKER:redpanda:9092}"
+    topics:
+      - ap.firehose.v1
+      - ap.mrf.rejected.v1
+      - ap.tombstones.v1
+      - at.commit.v1
+      - at.firehose.raw.v1
+    consumer_group: rpconnect-archive-v1
+    # Archive from the beginning so we can back-fill a fresh bucket.
+    # After the first successful run the consumer group offset is committed, so
+    # subsequent runs only pick up new messages.
+    start_from_oldest: true
+    auto_replay_nacks: true
+    commit_period: 10s
+    tls:
+      enabled: false
+
+output:
+  switch:
+    # Do not silently discard unmatched messages — surface them as errors.
+    strict_mode: true
+
+    cases:
+      # ── ap.firehose.v1 ────────────────────────────────────────────────────
+      - check: 'meta("kafka_topic") == "ap.firehose.v1"'
+        output:
+          aws_s3:
+            bucket: "${S3_ARCHIVE_BUCKET:fedify-archive}"
+            path: 'ap/firehose/${!now().format("2006/01/02")}/part-${!uuid_v4()}.jsonl.gz'
+            region: "${AWS_REGION:us-east-1}"
+            endpoint: "${S3_ENDPOINT:}"
+            force_path_style_urls: true
+            credentials:
+              id: "${AWS_ACCESS_KEY_ID:}"
+              secret: "${AWS_SECRET_ACCESS_KEY:}"
+              token: "${AWS_SESSION_TOKEN:}"
+            content_encoding: gzip
+            content_type: application/x-ndjson
+            batching:
+              count: 1000
+              period: 30s
+              processors:
+                - archive:
+                    format: lines
+                - compress:
+                    algorithm: gzip
+
+      # ── ap.mrf.rejected.v1 ────────────────────────────────────────────────
+      - check: 'meta("kafka_topic") == "ap.mrf.rejected.v1"'
+        output:
+          aws_s3:
+            bucket: "${S3_ARCHIVE_BUCKET:fedify-archive}"
+            path: 'ap/mrf-rejected/${!now().format("2006/01/02")}/part-${!uuid_v4()}.jsonl.gz'
+            region: "${AWS_REGION:us-east-1}"
+            endpoint: "${S3_ENDPOINT:}"
+            force_path_style_urls: true
+            credentials:
+              id: "${AWS_ACCESS_KEY_ID:}"
+              secret: "${AWS_SECRET_ACCESS_KEY:}"
+              token: "${AWS_SESSION_TOKEN:}"
+            content_encoding: gzip
+            content_type: application/x-ndjson
+            batching:
+              count: 500
+              period: 30s
+              processors:
+                - archive:
+                    format: lines
+                - compress:
+                    algorithm: gzip
+
+      # ── ap.tombstones.v1 ──────────────────────────────────────────────────
+      - check: 'meta("kafka_topic") == "ap.tombstones.v1"'
+        output:
+          aws_s3:
+            bucket: "${S3_ARCHIVE_BUCKET:fedify-archive}"
+            path: 'ap/tombstones/${!now().format("2006/01/02")}/part-${!uuid_v4()}.jsonl.gz'
+            region: "${AWS_REGION:us-east-1}"
+            endpoint: "${S3_ENDPOINT:}"
+            force_path_style_urls: true
+            credentials:
+              id: "${AWS_ACCESS_KEY_ID:}"
+              secret: "${AWS_SECRET_ACCESS_KEY:}"
+              token: "${AWS_SESSION_TOKEN:}"
+            content_encoding: gzip
+            content_type: application/x-ndjson
+            batching:
+              count: 200
+              period: 30s
+              processors:
+                - archive:
+                    format: lines
+                - compress:
+                    algorithm: gzip
+
+      # ── at.commit.v1 ──────────────────────────────────────────────────────
+      - check: 'meta("kafka_topic") == "at.commit.v1"'
+        output:
+          aws_s3:
+            bucket: "${S3_ARCHIVE_BUCKET:fedify-archive}"
+            path: 'at/commits/${!now().format("2006/01/02")}/part-${!uuid_v4()}.jsonl.gz'
+            region: "${AWS_REGION:us-east-1}"
+            endpoint: "${S3_ENDPOINT:}"
+            force_path_style_urls: true
+            credentials:
+              id: "${AWS_ACCESS_KEY_ID:}"
+              secret: "${AWS_SECRET_ACCESS_KEY:}"
+              token: "${AWS_SESSION_TOKEN:}"
+            content_encoding: gzip
+            content_type: application/x-ndjson
+            batching:
+              count: 1000
+              period: 30s
+              processors:
+                - archive:
+                    format: lines
+                - compress:
+                    algorithm: gzip
+
+      # ── at.firehose.raw.v1 ────────────────────────────────────────────────
+      - check: 'meta("kafka_topic") == "at.firehose.raw.v1"'
+        output:
+          aws_s3:
+            bucket: "${S3_ARCHIVE_BUCKET:fedify-archive}"
+            path: 'at/firehose-raw/${!now().format("2006/01/02")}/part-${!uuid_v4()}.jsonl.gz'
+            region: "${AWS_REGION:us-east-1}"
+            endpoint: "${S3_ENDPOINT:}"
+            force_path_style_urls: true
+            credentials:
+              id: "${AWS_ACCESS_KEY_ID:}"
+              secret: "${AWS_SECRET_ACCESS_KEY:}"
+              token: "${AWS_SESSION_TOKEN:}"
+            content_encoding: gzip
+            content_type: application/x-ndjson
+            batching:
+              count: 1000
+              period: 30s
+              processors:
+                - archive:
+                    format: lines
+                - compress:
+                    algorithm: gzip

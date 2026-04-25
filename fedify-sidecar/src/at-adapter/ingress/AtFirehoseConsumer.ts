@@ -23,10 +23,10 @@
  */
 
 import { WebSocket } from 'ws';
-import { AtFirehoseDecoder, FirehoseDecodeError } from './AtFirehoseDecoder';
-import { AtFirehoseCursorManager } from './AtFirehoseCursorManager';
-import { AtFirehoseRawEnvelope } from './AtIngressEvents';
-import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents';
+import { AtFirehoseDecoder, FirehoseDecodeError } from './AtFirehoseDecoder.js';
+import { AtFirehoseCursorManager } from './AtFirehoseCursorManager.js';
+import { AtFirehoseRawEnvelope } from './AtIngressEvents.js';
+import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 
 // ---------------------------------------------------------------------------
 // Constants & Configuration
@@ -101,6 +101,10 @@ export class DefaultAtFirehoseConsumer implements AtFirehoseConsumer {
     // Fire and forget the connection loop
     connection.startLoop().catch((err) => {
       console.error(`[AtFirehoseConsumer] Fatal error in connection loop for ${source.id}:`, err);
+    }).finally(() => {
+      if (this.activeConnections.get(source.id) === connection) {
+        this.activeConnections.delete(source.id);
+      }
     });
   }
 
@@ -143,26 +147,30 @@ class FirehoseConnection {
       this.commitCursorSafely();
     }, CURSOR_COMMIT_INTERVAL_MS);
 
-    while (this.isRunning) {
-      try {
-        await this.connectAndWait();
-        // If connectAndWait returns normally, it means the socket closed cleanly.
-        // We reset reconnect attempts and loop around to reconnect.
-        this.reconnectAttempts = 0;
-      } catch (err) {
-        if (!this.isRunning) break;
+    try {
+      while (this.isRunning) {
+        try {
+          await this.connectAndWait();
+          // If connectAndWait returns normally, it means the socket closed cleanly.
+          // We reset reconnect attempts and loop around to reconnect.
+          this.reconnectAttempts = 0;
+        } catch (err) {
+          if (!this.isRunning) break;
 
-        this.reconnectAttempts++;
-        const delay = this.calculateBackoff();
-        
-        console.error(
-          `[FirehoseConnection] Connection to ${this.source.id} failed. ` +
-          `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}). Error:`,
-          err instanceof Error ? err.message : String(err),
-        );
+          this.reconnectAttempts++;
+          const delay = this.calculateBackoff();
+          
+          console.error(
+            `[FirehoseConnection] Connection to ${this.source.id} failed. ` +
+            `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}). Error:`,
+            err instanceof Error ? err.message : String(err),
+          );
 
-        await new Promise((resolve) => setTimeout(resolve, delay));
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
       }
+    } finally {
+      this.cleanupTimers();
     }
   }
 
@@ -240,7 +248,7 @@ class FirehoseConnection {
       // 2. Build raw envelope
       const envelope: AtFirehoseRawEnvelope = {
         seq: header.seq,
-        source: this.source.id,
+        source: this.source.url,
         receivedAt: new Date().toISOString(),
         eventType: header.eventType,
         did: header.did,
@@ -259,8 +267,10 @@ class FirehoseConnection {
 
     } catch (err) {
       if (err instanceof FirehoseDecodeError) {
-        // Log and drop unparseable frames; do not crash the connection.
-        console.error(`[FirehoseConnection] Dropped unparseable frame from ${this.source.id}:`, err.message);
+        // Invalid firehose framing is a connection-level error per spec.
+        // Tear down the socket so we replay from the last acked cursor.
+        console.error(`[FirehoseConnection] Invalid frame from ${this.source.id}; reconnecting:`, err.message);
+        this.ws?.terminate();
       } else {
         // Publish failures or Redis failures.
         // We throw here to force a reconnect and replay from the last acked cursor.
@@ -299,8 +309,10 @@ class FirehoseConnection {
   private cleanupTimers(): void {
     if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.pongTimeout) clearTimeout(this.pongTimeout);
+    if (this.commitInterval) clearInterval(this.commitInterval);
     this.pingInterval = null;
     this.pongTimeout = null;
+    this.commitInterval = null;
   }
 
   private async commitCursorSafely(): Promise<void> {

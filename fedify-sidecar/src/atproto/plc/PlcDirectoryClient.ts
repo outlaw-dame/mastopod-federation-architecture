@@ -1,1 +1,232 @@
-/**\n * V6.5 PLC Directory Client - did:plc Operations\n *\n * Communicates with the PLC (Personal LDentifier Cryptosystem) directory\n * to create and update did:plc identifiers.\n *\n * The PLC directory is the authoritative registry for did:plc DIDs.\n * All operations are signed with the rotation key.\n */\n\nimport { SigningService, SignPlcOperationRequest } from '../../core-domain/contracts/SigningContracts.js';\n\n/**\n * PLC directory configuration\n */\nexport interface PlcDirectoryConfig {\n  /**\n   * PLC directory URL\n   * Default: https://plc.directory\n   */\n  directoryUrl: string;\n\n  /**\n   * Request timeout (milliseconds)\n   */\n  timeoutMs: number;\n\n  /**\n   * Retry attempts for transient errors\n   */\n  maxRetries: number;\n}\n\n/**\n * PLC operation\n */\nexport interface PlcOperation {\n  /**\n   * Operation type\n   */\n  type: string;\n\n  /**\n   * Rotation keys (priority-ordered)\n   */\n  rotationKeys: string[];\n\n  /**\n   * Verification methods\n   */\n  verificationMethods: Record<string, string>;\n\n  /**\n   * Also known as (aliases)\n   */\n  alsoKnownAs: string[];\n\n  /**\n   * Services\n   */\n  services: Record<string, { type: string; endpoint: string }>;\n\n  /**\n   * Previous operation CID\n   */\n  prev?: string;\n\n  /**\n   * Signature\n   */\n  sig?: string;\n}\n\n/**\n * PLC directory entry\n */\nexport interface PlcDirectoryEntry {\n  /**\n   * DID\n   */\n  did: string;\n\n  /**\n   * Current operation CID\n   */\n  opCid: string;\n\n  /**\n   * Operation data\n   */\n  operation: PlcOperation;\n\n  /**\n   * Timestamp of last update\n   */\n  timestamp: string;\n}\n\n/**\n * PLC Directory Client\n *\n * Manages communication with the PLC directory.\n */\nexport class PlcDirectoryClient {\n  private config: PlcDirectoryConfig;\n\n  constructor(\n    private signingService: SigningService,\n    config?: Partial<PlcDirectoryConfig>\n  ) {\n    this.config = {\n      directoryUrl: 'https://plc.directory',\n      timeoutMs: 30000,\n      maxRetries: 3,\n      ...config,\n    };\n  }\n\n  /**\n   * Create a new DID\n   *\n   * @param operation - The PLC operation\n   * @param canonicalAccountId - Account ID for signing\n   * @param rotationKeyRef - Rotation key reference\n   * @returns Created DID entry\n   * @throws Error on failure\n   */\n  async createDid(\n    operation: PlcOperation,\n    canonicalAccountId: string,\n    rotationKeyRef: string\n  ): Promise<PlcDirectoryEntry> {\n    // Sign the operation\n    const operationBytes = this.serializeOperation(operation);\n    const operationBase64 = Buffer.from(operationBytes).toString('base64');\n\n    const signResponse = await this.signingService.signPlcOperation({\n      canonicalAccountId,\n      did: '', // Not yet known\n      operationBytesBase64: operationBase64,\n    });\n\n    // Add signature to operation\n    const signedOperation = {\n      ...operation,\n      sig: signResponse.signatureBase64Url,\n    };\n\n    // Submit to PLC directory\n    return this.submitOperation(signedOperation, canonicalAccountId);\n  }\n\n  /**\n   * Update an existing DID\n   *\n   * @param did - The DID to update\n   * @param operation - The PLC operation\n   * @param canonicalAccountId - Account ID for signing\n   * @param rotationKeyRef - Rotation key reference\n   * @returns Updated DID entry\n   * @throws Error on failure\n   */\n  async updateDid(\n    did: string,\n    operation: PlcOperation,\n    canonicalAccountId: string,\n    rotationKeyRef: string\n  ): Promise<PlcDirectoryEntry> {\n    // Get current entry to chain operations\n    const current = await this.getEntry(did);\n    operation.prev = current.opCid;\n\n    // Sign the operation\n    const operationBytes = this.serializeOperation(operation);\n    const operationBase64 = Buffer.from(operationBytes).toString('base64');\n\n    const signResponse = await this.signingService.signPlcOperation({\n      canonicalAccountId,\n      did,\n      operationBytesBase64: operationBase64,\n    });\n\n    // Add signature to operation\n    const signedOperation = {\n      ...operation,\n      sig: signResponse.signatureBase64Url,\n    };\n\n    // Submit to PLC directory\n    return this.submitOperation(signedOperation, canonicalAccountId, did);\n  }\n\n  /**\n   * Get DID entry from directory\n   *\n   * @param did - The DID to look up\n   * @returns DID entry\n   * @throws Error if not found or network error\n   */\n  async getEntry(did: string): Promise<PlcDirectoryEntry> {\n    const url = `${this.config.directoryUrl}/${did}`;\n\n    for (let attempt = 0; attempt < this.config.maxRetries; attempt++) {\n      try {\n        const response = await fetch(url, {\n          method: 'GET',\n          headers: {\n            'Accept': 'application/json',\n          },\n          signal: AbortSignal.timeout(this.config.timeoutMs),\n        });\n\n        if (!response.ok) {\n          if (response.status === 404) {\n            throw new Error(`DID not found: ${did}`);\n          }\n          if (response.status >= 500) {\n            // Transient error, retry\n            if (attempt < this.config.maxRetries - 1) {\n              await this.delay(1000 * (attempt + 1));\n              continue;\n            }\n          }\n          throw new Error(`PLC directory error: ${response.status}`);\n        }\n\n        const data = await response.json();\n        return {\n          did: data.did,\n          opCid: data.opCid,\n          operation: data.operation,\n          timestamp: new Date().toISOString(),\n        };\n      } catch (error) {\n        if (attempt === this.config.maxRetries - 1) {\n          throw error;\n        }\n        await this.delay(1000 * (attempt + 1));\n      }\n    }\n\n    throw new Error('Max retries exceeded');\n  }\n\n  /**\n   * Resolve handle to DID\n   *\n   * @param handle - The handle to resolve\n   * @returns DID\n   * @throws Error if not found or network error\n   */\n  async resolveHandle(handle: string): Promise<string> {\n    const url = `${this.config.directoryUrl}/resolve/${handle}`;\n\n    try {\n      const response = await fetch(url, {\n        method: 'GET',\n        headers: {\n          'Accept': 'application/json',\n        },\n        signal: AbortSignal.timeout(this.config.timeoutMs),\n      });\n\n      if (!response.ok) {\n        throw new Error(`Failed to resolve handle: ${response.status}`);\n      }\n\n      const data = await response.json();\n      return data.did;\n    } catch (error) {\n      throw new Error(\n        `Failed to resolve handle ${handle}: ${error instanceof Error ? error.message : String(error)}`\n      );\n    }\n  }\n\n  /**\n   * Submit operation to PLC directory\n   *\n   * @param operation - The signed operation\n   * @param canonicalAccountId - Account ID\n   * @param did - Optional existing DID\n   * @returns Updated entry\n   * @throws Error on failure\n   */\n  private async submitOperation(\n    operation: PlcOperation,\n    canonicalAccountId: string,\n    did?: string\n  ): Promise<PlcDirectoryEntry> {\n    const url = did ? `${this.config.directoryUrl}/${did}` : this.config.directoryUrl;\n    const method = did ? 'PUT' : 'POST';\n\n    for (let attempt = 0; attempt < this.config.maxRetries; attempt++) {\n      try {\n        const response = await fetch(url, {\n          method,\n          headers: {\n            'Content-Type': 'application/json',\n            'Accept': 'application/json',\n          },\n          body: JSON.stringify(operation),\n          signal: AbortSignal.timeout(this.config.timeoutMs),\n        });\n\n        if (!response.ok) {\n          if (response.status >= 500) {\n            // Transient error, retry\n            if (attempt < this.config.maxRetries - 1) {\n              await this.delay(1000 * (attempt + 1));\n              continue;\n            }\n          }\n          throw new Error(`PLC directory error: ${response.status}`);\n        }\n\n        const data = await response.json();\n        return {\n          did: data.did,\n          opCid: data.opCid,\n          operation: data.operation,\n          timestamp: new Date().toISOString(),\n        };\n      } catch (error) {\n        if (attempt === this.config.maxRetries - 1) {\n          throw error;\n        }\n        await this.delay(1000 * (attempt + 1));\n      }\n    }\n\n    throw new Error('Max retries exceeded');\n  }\n\n  /**\n   * Serialize operation for signing\n   *\n   * @param operation - The operation\n   * @returns Serialized bytes\n   */\n  private serializeOperation(operation: PlcOperation): Uint8Array {\n    // Use CBOR encoding for PLC operations\n    const json = JSON.stringify(operation);\n    return new TextEncoder().encode(json);\n  }\n\n  /**\n   * Delay helper\n   *\n   * @param ms - Milliseconds to delay\n   */\n  private delay(ms: number): Promise<void> {\n    return new Promise((resolve) => setTimeout(resolve, ms));\n  }\n}\n
+/**
+ * V6.5 PLC Directory Client - did:plc Operations
+ *
+ * Communicates with the PLC directory to create and update did:plc identifiers.
+ * The PLC directory is the authoritative registry for did:plc DIDs.
+ */
+
+import type { SigningService } from "../../core-domain/contracts/SigningContracts.js";
+
+export interface PlcDirectoryConfig {
+  directoryUrl: string;
+  timeoutMs: number;
+  maxRetries: number;
+}
+
+export interface PlcOperation {
+  type: string;
+  rotationKeys: string[];
+  verificationMethods: Record<string, string>;
+  alsoKnownAs: string[];
+  services: Record<string, { type: string; endpoint: string }>;
+  prev?: string;
+  sig?: string;
+}
+
+export interface PlcDirectoryEntry {
+  did: string;
+  opCid: string;
+  operation: PlcOperation;
+  timestamp: string;
+}
+
+interface PlcDirectoryResponse {
+  did?: string;
+  opCid?: string;
+  operation?: PlcOperation;
+}
+
+export class PlcDirectoryClient {
+  private readonly config: PlcDirectoryConfig;
+
+  constructor(
+    private readonly signingService: SigningService,
+    config?: Partial<PlcDirectoryConfig>
+  ) {
+    this.config = {
+      directoryUrl: "https://plc.directory",
+      timeoutMs: 30000,
+      maxRetries: 3,
+      ...config,
+    };
+  }
+
+  async createDid(
+    operation: PlcOperation,
+    canonicalAccountId: string,
+    _rotationKeyRef: string
+  ): Promise<PlcDirectoryEntry> {
+    const signedOperation = await this.signOperation(
+      operation,
+      canonicalAccountId,
+      ""
+    );
+    return this.submitOperation(signedOperation);
+  }
+
+  async updateDid(
+    did: string,
+    operation: PlcOperation,
+    canonicalAccountId: string,
+    _rotationKeyRef: string
+  ): Promise<PlcDirectoryEntry> {
+    const current = await this.getEntry(did);
+    const nextOperation: PlcOperation = {
+      ...operation,
+      prev: current.opCid,
+    };
+
+    const signedOperation = await this.signOperation(
+      nextOperation,
+      canonicalAccountId,
+      did
+    );
+    return this.submitOperation(signedOperation, did);
+  }
+
+  async getEntry(did: string): Promise<PlcDirectoryEntry> {
+    const data = await this.fetchWithRetries<PlcDirectoryResponse>(
+      `${this.config.directoryUrl}/${did}`,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+      },
+      `DID not found: ${did}`
+    );
+
+    return this.toDirectoryEntry(data, did);
+  }
+
+  async resolveHandle(handle: string): Promise<string> {
+    const data = await this.fetchWithRetries<{ did?: string }>(
+      `${this.config.directoryUrl}/resolve/${handle}`,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (!data.did) {
+      throw new Error(`PLC directory returned no DID for handle ${handle}`);
+    }
+
+    return data.did;
+  }
+
+  private async signOperation(
+    operation: PlcOperation,
+    canonicalAccountId: string,
+    did: string
+  ): Promise<PlcOperation> {
+    const operationBytesBase64 = Buffer.from(
+      this.serializeOperation(operation)
+    ).toString("base64");
+
+    const signResponse = await this.signingService.signPlcOperation({
+      canonicalAccountId,
+      did,
+      operationBytesBase64,
+    });
+
+    return {
+      ...operation,
+      sig: signResponse.signatureBase64Url,
+    };
+  }
+
+  private async submitOperation(
+    operation: PlcOperation,
+    did?: string
+  ): Promise<PlcDirectoryEntry> {
+    const url = did ? `${this.config.directoryUrl}/${did}` : this.config.directoryUrl;
+    const method = did ? "PUT" : "POST";
+
+    const data = await this.fetchWithRetries<PlcDirectoryResponse>(url, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(operation),
+    });
+
+    return this.toDirectoryEntry(data, did);
+  }
+
+  private async fetchWithRetries<T>(
+    url: string,
+    init: RequestInit,
+    notFoundMessage?: string
+  ): Promise<T> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < this.config.maxRetries; attempt += 1) {
+      try {
+        const response = await fetch(url, {
+          ...init,
+          signal: AbortSignal.timeout(this.config.timeoutMs),
+        });
+
+        if (!response.ok) {
+          if (response.status === 404 && notFoundMessage) {
+            throw new Error(notFoundMessage);
+          }
+
+          if (response.status >= 500 && attempt < this.config.maxRetries - 1) {
+            await this.delay(1000 * (attempt + 1));
+            continue;
+          }
+
+          throw new Error(`PLC directory error: ${response.status}`);
+        }
+
+        return (await response.json()) as T;
+      } catch (error) {
+        lastError = error;
+        if (attempt === this.config.maxRetries - 1) {
+          break;
+        }
+        await this.delay(1000 * (attempt + 1));
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Max retries exceeded");
+  }
+
+  private toDirectoryEntry(
+    data: PlcDirectoryResponse,
+    fallbackDid?: string
+  ): PlcDirectoryEntry {
+    const did = data.did ?? fallbackDid;
+    if (!did) {
+      throw new Error("PLC directory response missing DID");
+    }
+    if (!data.opCid) {
+      throw new Error(`PLC directory response missing opCid for ${did}`);
+    }
+    if (!data.operation) {
+      throw new Error(`PLC directory response missing operation for ${did}`);
+    }
+
+    return {
+      did,
+      opCid: data.opCid,
+      operation: data.operation,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  private serializeOperation(operation: PlcOperation): Uint8Array {
+    return new TextEncoder().encode(JSON.stringify(operation));
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+}

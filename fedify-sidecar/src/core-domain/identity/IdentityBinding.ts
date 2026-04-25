@@ -98,6 +98,21 @@ export interface IdentityBinding {
   atprotoPdsEndpoint: string | null;
 
   /**
+   * ATProto hosting source.
+   * - local: this sidecar/backend pair manages the AT identity and repo
+   * - external: identity is linked to an external PDS and must not be
+   *   treated as locally hosted unless an explicit import/migration occurs
+   */
+  atprotoSource?: 'local' | 'external';
+
+  /**
+   * Whether this deployment manages the ATProto signing and repo lifecycle.
+   * External linked accounts must set this to false and fail closed in
+   * local-only code paths.
+   */
+  atprotoManaged?: boolean;
+
+  /**
    * ActivityPub signing key reference
    * Points to the key used for HTTP signatures
    * Always present after provisioning
@@ -212,6 +227,12 @@ export interface IdentityBinding {
      * Account references in RDF
      */
     webIdAccounts: string[];
+
+    /**
+     * Optional cached verification records for account-link checks.
+     * Runtime code must tolerate this being absent.
+     */
+    verificationRecords?: AccountLinkVerificationRecord[];
   };
 
   /**

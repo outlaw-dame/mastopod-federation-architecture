@@ -213,3 +213,97 @@ Both scripts live in `pod-provider/backend/scripts/`.
 Environment defaults: `ATPROTO_SMOKE_BASE_URL=http://localhost:3004`,
 `ACTIVITYPODS_TOKEN=test-atproto-signing-token-local`,
 `ATPROTO_SMOKE_CANONICAL_ACCOUNT_ID=http://localhost:3000/atproto365133`.
+
+---
+
+## ActivityPub Bridge Internal Media Resolver Contracts
+
+These internal endpoints are consumed by the fedify-sidecar protocol bridge
+clients for ActivityPub -> AT media projection.
+
+Base route:
+
+```
+/api/internal/activitypub-bridge
+```
+
+Auth model is identical to the AT internal routes above.
+
+### POST /api/internal/activitypub-bridge/resolve-media
+
+Fetches and validates remote media bytes for generic bridge attachments.
+
+Request body:
+
+| Field      | Type   | Required | Notes |
+|------------|--------|----------|-------|
+| `mediaUrl` | string | yes      | Absolute http(s) URL (https required unless localhost) |
+| `maxBytes` | number | no       | Per-request upper bound; defaults to service setting |
+
+Response 200:
+
+```json
+{
+  "mediaUrl": "https://cdn.example/media/video.mp4",
+  "mimeType": "video/mp4",
+  "bytesBase64": "...",
+  "size": 12345,
+  "resolvedAt": "2026-04-10T00:00:00.000Z"
+}
+```
+
+Error cases:
+
+| HTTP | code                     | Cause |
+|------|--------------------------|-------|
+| 400  | `INVALID_INPUT`          | Missing/invalid `mediaUrl` or `maxBytes` |
+| 404  | `MEDIA_NOT_FOUND`        | Upstream returned 404 |
+| 415  | `UNSUPPORTED_MEDIA_TYPE` | MIME type not image/video/audio |
+| 422  | `MEDIA_TOO_LARGE`        | Payload exceeds max bytes |
+| 422  | `MEDIA_EMPTY`            | Zero-length payload |
+| 502  | `MEDIA_FETCH_FAILED`     | Upstream/network/read failure |
+| 504  | `MEDIA_FETCH_TIMEOUT`    | Timed out while fetching |
+
+### POST /api/internal/activitypub-bridge/resolve-profile-media
+
+Fetches and validates avatar/banner candidate bytes for profile projection.
+
+Request body:
+
+| Field      | Type   | Required | Notes |
+|------------|--------|----------|-------|
+| `mediaUrl` | string | yes      | Absolute http(s) URL (https required unless localhost) |
+| `maxBytes` | number | no       | Per-request upper bound; defaults to profile-media setting |
+
+Response 200 shape is identical to resolve-media.
+
+Additional rule:
+- Only image MIME types are accepted.
+
+Error cases differ only by stricter MIME requirement:
+
+| HTTP | code                     | Cause |
+|------|--------------------------|-------|
+| 415  | `UNSUPPORTED_MEDIA_TYPE` | Non-image profile media |
+
+### Operational Settings
+
+Backend service settings (environment variables):
+
+| Variable                                   | Default |
+|--------------------------------------------|---------|
+| `AP_BRIDGE_RESOLVE_MEDIA_TIMEOUT_MS`       | `20000` |
+| `AP_BRIDGE_RESOLVE_MEDIA_MAX_BYTES`        | `52428800` (50 MiB) |
+| `AP_BRIDGE_RESOLVE_PROFILE_MEDIA_MAX_BYTES`| `5242880` (5 MiB) |
+| `AP_BRIDGE_RESOLVE_MEDIA_RETRY_ATTEMPTS`   | `3` |
+| `AP_BRIDGE_RESOLVE_MEDIA_RETRY_BASE_DELAY_MS` | `300` |
+| `AP_BRIDGE_RESOLVE_MEDIA_MAX_REDIRECTS`    | `4` |
+| `AP_BRIDGE_ALLOW_PRIVATE_MEDIA_URLS`       | `false` |
+
+### Sidecar Client Endpoint Defaults
+
+Sidecar runtime defaults (override via client config):
+
+- Generic attachments: `/api/internal/activitypub-bridge/resolve-media`
+- Profile avatar/banner: `/api/internal/activitypub-bridge/resolve-profile-media`
+- Outbound fanout resolution: `/api/internal/activitypub-bridge/resolve-outbound`

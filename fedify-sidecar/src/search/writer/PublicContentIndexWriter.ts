@@ -6,21 +6,34 @@
  * Writes: OpenSearch public-content-v1 index
  */
 
-import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchPublicPartialUpdateV1 } from '../events/SearchEvents';
-import { PublicContentDocument } from '../models/PublicContentDocument';
-import { SearchDocAliasCache } from './SearchDocAliasCache';
-import { SearchDedupService } from '../aliases/SearchDedupService';
+import {
+  SearchPublicUpsertV1,
+  SearchPublicDeleteV1,
+  SearchPublicDeleteByAuthorV1,
+  SearchPublicPartialUpdateV1,
+} from '../events/SearchEvents.js';
+import { PublicContentDocument } from '../models/PublicContentDocument.js';
+import { SearchDocAliasCache } from './SearchDocAliasCache.js';
+import { SearchDedupService } from '../aliases/SearchDedupService.js';
 
-export interface OpenSearchClient {
+export interface PublicContentStore {
   get(id: string): Promise<PublicContentDocument | null>;
   upsert(id: string, doc: Partial<PublicContentDocument>): Promise<void>;
   updateScripted(id: string, script: string, params: Record<string, any>): Promise<void>;
   delete(id: string): Promise<void>;
+  deleteByAuthor(author: {
+    canonicalId?: string;
+    apUri?: string;
+    did?: string;
+    handle?: string;
+  }): Promise<void>;
 }
+
+export type OpenSearchClient = PublicContentStore;
 
 export class PublicContentIndexWriter {
   constructor(
-    private readonly osClient: OpenSearchClient,
+    private readonly osClient: PublicContentStore,
     private readonly aliasCache: SearchDocAliasCache,
     private readonly dedupService: SearchDedupService
   ) {}
@@ -62,10 +75,12 @@ export class PublicContentIndexWriter {
       createdAt: event.content.createdAt,
       langs: event.content.langs,
       tags: event.content.tags,
+      emojis: event.content.emojis,
       replyToStableId: event.relations?.replyToStableId,
       quoteOfStableId: event.relations?.quoteOfStableId,
       hasMedia: event.media?.hasMedia || false,
       mediaCount: event.media?.mediaCount || 0,
+      embeddingStatus: 'pending',
       isDeleted: false,
       indexedAt: new Date().toISOString()
     };
@@ -135,16 +150,42 @@ export class PublicContentIndexWriter {
   }
 
   async onDelete(event: SearchPublicDeleteV1): Promise<void> {
+    // Tombstones from the AP projector are emitted with ap:objectUri as the
+    // stableDocId, but local content was indexed under its canonicalContentId
+    // (the raw objectUri, without the ap: prefix).  Resolve via alias cache so
+    // deletes always hit the right document.
+    const resolvedId = await this.resolveDeleteStableDocId(event.stableDocId);
+
     if (event.deleteMode === 'hard') {
-      await this.osClient.delete(event.stableDocId);
+      await this.osClient.delete(resolvedId);
     } else {
-      const existingDoc = await this.osClient.get(event.stableDocId);
+      const existingDoc = await this.osClient.get(resolvedId);
       if (existingDoc) {
-        await this.osClient.upsert(event.stableDocId, {
+        await this.osClient.upsert(resolvedId, {
           isDeleted: true,
           indexedAt: new Date().toISOString()
         });
       }
     }
+  }
+
+  async onDeleteByAuthor(event: SearchPublicDeleteByAuthorV1): Promise<void> {
+    await this.osClient.deleteByAuthor(event.author);
+  }
+
+  /**
+   * Resolve the actual stableDocId to use for a delete operation.
+   * Tombstones may arrive with ap: or at: prefixed IDs; if the alias cache
+   * has a mapping for the underlying URI, use that instead.
+   */
+  private async resolveDeleteStableDocId(stableDocId: string): Promise<string> {
+    if (stableDocId.startsWith('ap:')) {
+      const resolved = await this.aliasCache.getByApUri(stableDocId.slice(3));
+      if (resolved) return resolved;
+    } else if (stableDocId.startsWith('at:')) {
+      const resolved = await this.aliasCache.getByAtUri(stableDocId.slice(3));
+      if (resolved) return resolved;
+    }
+    return stableDocId;
   }
 }

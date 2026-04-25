@@ -120,9 +120,18 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
 
   async upsert(binding: IdentityBinding): Promise<void> {
     const existing = await this.getByCanonicalAccountId(binding.canonicalAccountId);
+    const atprotoSource = binding.atprotoSource ?? existing?.atprotoSource ?? 'local';
+    const atprotoManaged =
+      typeof binding.atprotoManaged === 'boolean'
+        ? binding.atprotoManaged
+        : existing?.atprotoManaged ?? atprotoSource !== 'external';
 
     const normalized: IdentityBinding = {
       ...binding,
+      atprotoSource,
+      atprotoManaged,
+      atprotoPdsEndpoint:
+        binding.atprotoPdsEndpoint ?? existing?.atprotoPdsEndpoint ?? null,
       createdAt: binding.createdAt ?? existing?.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };

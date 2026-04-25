@@ -98,7 +98,7 @@ export function mapToXrpcError(err: unknown): XrpcErrorResponse {
 
   // Log the real error internally (in production this would go to a structured
   // logger, never to the response body).
-  if (process.env.NODE_ENV !== 'test') {
+  if (process.env['NODE_ENV'] !== 'test') {
     console.error('[XrpcErrorMapper] Unhandled internal error:', err);
   }
 

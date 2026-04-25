@@ -20,17 +20,21 @@ import type { AtSessionContext } from '../auth/AtSessionTypes.js';
 
 export type SupportedAtCollection =
   | 'app.bsky.feed.post'
+  | 'site.standard.document'
   | 'app.bsky.actor.profile'
   | 'app.bsky.graph.follow'
   | 'app.bsky.feed.like'
-  | 'app.bsky.feed.repost';
+  | 'app.bsky.feed.repost'
+  | 'org.activitypods.emojiReaction';
 
 export const SUPPORTED_COLLECTIONS: ReadonlySet<string> = new Set([
   'app.bsky.feed.post',
+  'site.standard.document',
   'app.bsky.actor.profile',
   'app.bsky.graph.follow',
   'app.bsky.feed.like',
   'app.bsky.feed.repost',
+  'org.activitypods.emojiReaction',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -61,7 +65,7 @@ export interface AtPutRecordInput {
   repo: string;
   /** Collection NSID */
   collection: SupportedAtCollection | string;
-  /** Record key — required for PUT (must match an existing record for updates) */
+  /** Record key — required for PUT upsert semantics */
   rkey: string;
   /** Whether to validate the record */
   validate?: boolean;
@@ -84,6 +88,10 @@ export interface AtDeleteRecordInput {
   swapRecord?: string;
   /** CID of the current repo commit (optimistic concurrency) */
   swapCommit?: string;
+  /** Internal bridge hint for stable canonical delete correlation */
+  bridgeCanonicalRefId?: string;
+  /** Internal bridge provenance for mirrored deletes */
+  bridgeMetadata?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +149,8 @@ export interface CanonicalMutationEnvelope {
     | 'follow_delete'
     | 'like_create'
     | 'like_delete'
+    | 'emoji_reaction_create'
+    | 'emoji_reaction_delete'
     | 'repost_create'
     | 'repost_delete';
 
@@ -170,7 +180,7 @@ export interface AtWriteGateway {
 
   /**
    * Process a com.atproto.repo.putRecord request.
-   * For singleton records (profiles) this is always an upsert.
+   * PUT uses native upsert semantics at the target rkey.
    */
   putRecord(
     input: AtPutRecordInput,
@@ -277,6 +287,6 @@ export interface AtWriteAliasResolver {
     rkey: string
   ): Promise<{
     canonicalRefId: string;
-    canonicalType: 'profile' | 'post' | 'follow' | 'like' | 'repost';
+    canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction';
   } | null>;
 }

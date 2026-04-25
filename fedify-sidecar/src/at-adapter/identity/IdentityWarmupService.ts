@@ -1,87 +1,85 @@
 import { request } from 'undici';
 import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
 import {
-  backendIdentityProjectionToBinding,
+  applyIdentityProjectionLocally,
+  type BackendIdentityChangesResponse,
   type BackendIdentityProjection,
-  type RepoRegistryBootstrapAdapter,
-  warmRepoRegistryFromProjection,
+  type RepoRegistryWarmTarget,
 } from './IdentityBindingSyncService.js';
 import { buildInternalIdentityChangesPath } from './InternalIdentityApi.js';
 import { traceIdentitySync, type IdentitySyncLogger } from './IdentitySyncTrace.js';
 
 export interface IdentityWarmCursorStore {
   getCursor(): Promise<string | null>;
-  setCursor(cursor: string | null): Promise<void>;
+  setCursor(cursor: string): Promise<void>;
 }
 
-export interface BackendIdentityChangesPayload {
-  items?: BackendIdentityProjection[];
-  nextCursor?: string | null;
-}
-
-export interface PollingIdentityWarmupServiceConfig {
+export interface IdentityWarmupServiceConfig {
   backendBaseUrl: string;
   bearerToken: string;
   identityBindingRepository: IdentityBindingRepository;
   cursorStore: IdentityWarmCursorStore;
-  repoRegistry?: RepoRegistryBootstrapAdapter;
+  repoRegistry?: RepoRegistryWarmTarget;
   logger?: IdentitySyncLogger;
   intervalMs?: number;
   batchLimit?: number;
   timeoutMs?: number;
+  retryAttempts?: number;
+  initialRetryDelayMs?: number;
+  replayOverlapMs?: number;
 }
 
-export interface IdentityWarmupRunReport {
-  cursorBefore: string | null;
-  fetched: number;
-  upserted: number;
-  nextCursor: string | null;
-}
-
-export class PollingIdentityWarmupService {
+export class IdentityWarmupService {
   private readonly backendBaseUrl: string;
   private readonly bearerToken: string;
   private readonly identityBindingRepository: IdentityBindingRepository;
   private readonly cursorStore: IdentityWarmCursorStore;
-  private readonly repoRegistry?: RepoRegistryBootstrapAdapter;
+  private readonly repoRegistry?: RepoRegistryWarmTarget;
   private readonly logger?: IdentitySyncLogger;
   private readonly intervalMs: number;
   private readonly batchLimit: number;
   private readonly timeoutMs: number;
+  private readonly retryAttempts: number;
+  private readonly initialRetryDelayMs: number;
+  private readonly replayOverlapMs: number;
 
-  private timer: NodeJS.Timeout | null = null;
-  private inFlight: Promise<IdentityWarmupRunReport> | null = null;
   private started = false;
-  private stopped = false;
+  private timer: NodeJS.Timeout | null = null;
+  private inFlight: Promise<{ items: number; nextCursor: string | null }> | null = null;
 
-  constructor(config: PollingIdentityWarmupServiceConfig) {
+  constructor(config: IdentityWarmupServiceConfig) {
     this.backendBaseUrl = config.backendBaseUrl.replace(/\/$/, '');
     this.bearerToken = config.bearerToken;
     this.identityBindingRepository = config.identityBindingRepository;
     this.cursorStore = config.cursorStore;
     this.repoRegistry = config.repoRegistry;
     this.logger = config.logger;
-    this.intervalMs = config.intervalMs ?? 30_000;
-    this.batchLimit = config.batchLimit ?? 100;
-    this.timeoutMs = config.timeoutMs ?? 10_000;
+    this.intervalMs = clampNumber(config.intervalMs ?? 30_000, 1_000, 300_000);
+    this.batchLimit = clampNumber(config.batchLimit ?? 100, 1, 500);
+    this.timeoutMs = clampNumber(config.timeoutMs ?? 10_000, 1_000, 60_000);
+    this.retryAttempts = clampNumber(config.retryAttempts ?? 3, 1, 6);
+    this.initialRetryDelayMs = clampNumber(config.initialRetryDelayMs ?? 500, 100, 10_000);
+    this.replayOverlapMs = clampNumber(
+      config.replayOverlapMs ?? Math.max((config.intervalMs ?? 30_000) * 2, 15_000),
+      0,
+      300_000
+    );
   }
 
   start(): void {
     if (this.started) return;
 
     this.started = true;
-    this.stopped = false;
+    this.scheduleNextPoll(0);
 
-    traceIdentitySync(this.logger, 'info', 'warmup:start', {
+    traceIdentitySync(this.logger, 'info', 'warmup:started', {
       intervalMs: this.intervalMs,
       batchLimit: this.batchLimit,
+      replayOverlapMs: this.replayOverlapMs,
     });
-
-    this.schedule(0);
   }
 
   async stop(): Promise<void> {
-    this.stopped = true;
     this.started = false;
 
     if (this.timer) {
@@ -93,76 +91,128 @@ export class PollingIdentityWarmupService {
       try {
         await this.inFlight;
       } catch {
-        // Shutdown should not fail because the last poll attempt failed.
+        // The failure was already logged during the scheduled poll.
+      } finally {
+        this.inFlight = null;
       }
     }
 
-    traceIdentitySync(this.logger, 'info', 'warmup:stop');
+    traceIdentitySync(this.logger, 'info', 'warmup:stopped');
   }
 
-  async runOnce(): Promise<IdentityWarmupRunReport> {
-    if (this.inFlight) {
-      return this.inFlight;
-    }
-
-    return this.runPollCycle();
-  }
-
-  private schedule(delayMs: number): void {
-    if (this.stopped) return;
-
-    if (this.timer) {
-      clearTimeout(this.timer);
-    }
+  private scheduleNextPoll(delayMs: number): void {
+    if (!this.started) return;
 
     this.timer = setTimeout(() => {
-      void this.pollInBackground();
+      void this.runScheduledPoll();
     }, delayMs);
+
+    this.timer.unref?.();
   }
 
-  private async pollInBackground(): Promise<void> {
-    if (this.stopped || this.inFlight) return;
-
-    this.inFlight = this.runPollCycle()
-      .then((report) => {
-        traceIdentitySync(this.logger, 'debug', 'warmup:cycle-complete', {
-          ...report,
-        });
-        const caughtUp = report.fetched < this.batchLimit;
-        this.schedule(caughtUp ? this.intervalMs : 0);
-        return report;
-      })
-      .catch((error) => {
-        traceIdentitySync(this.logger, 'warn', 'warmup:cycle-failed', {
-          error: error instanceof Error ? error.message : String(error),
-        });
-        this.schedule(this.intervalMs);
-        throw error;
-      })
-      .finally(() => {
-        this.inFlight = null;
-      });
+  private async runScheduledPoll(): Promise<void> {
+    this.inFlight = this.pollOnce();
 
     try {
       await this.inFlight;
-    } catch {
-      // The caller is the background loop; errors are already traced above.
+    } catch (error) {
+      traceIdentitySync(this.logger, 'warn', 'warmup:poll-failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.inFlight = null;
+      this.scheduleNextPoll(this.intervalMs);
     }
   }
 
-  private async runPollCycle(): Promise<IdentityWarmupRunReport> {
-    const cursorBefore = await this.cursorStore.getCursor();
-    const path = buildInternalIdentityChangesPath({
-      since: cursorBefore,
+  async pollOnce(): Promise<{ items: number; nextCursor: string | null }> {
+    const storedCursor = sanitizeCursor(await this.cursorStore.getCursor());
+    const replayCursor = rewindCursor(storedCursor, this.replayOverlapMs);
+
+    traceIdentitySync(this.logger, 'debug', 'warmup:poll-start', {
+      since: storedCursor,
+      replayCursor,
       limit: this.batchLimit,
     });
 
-    traceIdentitySync(this.logger, 'debug', 'warmup:fetch-start', {
-      cursorBefore,
-      path,
-      batchLimit: this.batchLimit,
+    const response = await this.fetchChangesWithRetry(replayCursor);
+
+    for (const item of response.items) {
+      await applyIdentityProjectionLocally(
+        item,
+        {
+          identityBindingRepository: this.identityBindingRepository,
+          repoRegistry: this.repoRegistry,
+          logger: this.logger,
+        },
+        {
+          syncType: 'warmup',
+          canonicalAccountId: item.canonicalAccountId,
+          did: item.atprotoDid,
+          handle: item.atprotoHandle,
+        }
+      );
+    }
+
+    const nextCursor = sanitizeCursor(
+      response.nextCursor ??
+        response.items[response.items.length - 1]?.updatedAt ??
+        storedCursor
+    );
+
+    const cursorToPersist = selectNewestCursor(storedCursor, nextCursor);
+
+    if (cursorToPersist && cursorToPersist !== storedCursor) {
+      await this.cursorStore.setCursor(cursorToPersist);
+    }
+
+    traceIdentitySync(this.logger, 'info', 'warmup:poll-success', {
+      since: storedCursor,
+      replayCursor,
+      nextCursor: cursorToPersist,
+      items: response.items.length,
     });
 
+    return {
+      items: response.items.length,
+      nextCursor: cursorToPersist,
+    };
+  }
+
+  private async fetchChangesWithRetry(
+    since: string | null
+  ): Promise<BackendIdentityChangesResponse> {
+    let lastError: unknown;
+    let delayMs = this.initialRetryDelayMs;
+
+    for (let attempt = 1; attempt <= this.retryAttempts; attempt += 1) {
+      try {
+        return await this.fetchChanges(since);
+      } catch (error) {
+        lastError = error;
+        if (!isRetryableFetchError(error) || attempt === this.retryAttempts) {
+          throw error;
+        }
+
+        const backoffMs = withJitter(delayMs);
+        traceIdentitySync(this.logger, 'warn', 'warmup:retrying', {
+          attempt,
+          backoffMs,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await sleep(backoffMs);
+        delayMs = Math.min(delayMs * 2, this.intervalMs);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error('Identity warmup failed');
+  }
+
+  private async fetchChanges(since: string | null): Promise<BackendIdentityChangesResponse> {
+    const path = buildInternalIdentityChangesPath({
+      since,
+      limit: this.batchLimit,
+    });
     const res = await request(`${this.backendBaseUrl}${path}`, {
       method: 'GET',
       headers: {
@@ -172,72 +222,158 @@ export class PollingIdentityWarmupService {
       headersTimeout: this.timeoutMs,
     });
 
-    if (res.statusCode === 404) {
-      traceIdentitySync(this.logger, 'warn', 'warmup:changes-feed-not-found', {
-        path,
-        status: res.statusCode,
-      });
-
-      return {
-        cursorBefore,
-        fetched: 0,
-        upserted: 0,
-        nextCursor: cursorBefore,
-      };
-    }
-
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      const body = await res.body.text();
-      traceIdentitySync(this.logger, 'warn', 'warmup:fetch-failed', {
-        path,
-        status: res.statusCode,
-        body,
-      });
-      throw new Error(`Identity warmup failed (${res.statusCode}): ${body}`);
+      const body = truncateForError(await res.body.text());
+      throw createFetchError(res.statusCode, body);
     }
 
-    const payload = (await res.body.json()) as BackendIdentityChangesPayload | null;
-    const items = Array.isArray(payload?.items) ? payload.items : [];
-    const nextCursor =
-      typeof payload?.nextCursor === 'string' || payload?.nextCursor === null
-        ? payload.nextCursor
-        : cursorBefore;
+    const payload = (await res.body.json()) as Partial<BackendIdentityChangesResponse>;
+    const items = Array.isArray(payload.items) ? payload.items : [];
 
-    let upserted = 0;
-
-    for (const projection of items) {
-      await this.identityBindingRepository.upsert(
-        backendIdentityProjectionToBinding(projection)
-      );
-      await warmRepoRegistryFromProjection({
-        projection,
-        repoRegistry: this.repoRegistry,
-        logger: this.logger,
-        meta: {
-          syncType: 'warmup',
-          canonicalAccountId: projection.canonicalAccountId,
-          did: projection.atprotoDid,
-          handle: projection.atprotoHandle,
-        },
-      });
-      upserted += 1;
+    for (const item of items) {
+      if (!isBackendIdentityProjection(item as BackendIdentityProjection)) {
+        throw new Error('Identity warmup received invalid projection payload');
+      }
     }
-
-    if (typeof nextCursor !== 'undefined') {
-      await this.cursorStore.setCursor(nextCursor);
-    }
-
-    traceIdentitySync(this.logger, 'info', 'warmup:upsert-success', {
-      fetched: items.length,
-      upserted,
-      nextCursor,
-    });
 
     return {
-      cursorBefore,
-      fetched: items.length,
-      upserted,
-      nextCursor: nextCursor ?? null,
+      items: items as BackendIdentityProjection[],
+      nextCursor: sanitizeCursor(payload.nextCursor ?? null),
     };
   }
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+function sanitizeCursor(cursor: string | null | undefined): string | null {
+  if (!cursor) return null;
+  const value = cursor.trim();
+  if (!value) return null;
+  return value.slice(0, 256);
+}
+
+function rewindCursor(cursor: string | null, overlapMs: number): string | null {
+  if (!cursor || overlapMs <= 0) return cursor;
+
+  const parsed = parseCursor(cursor);
+  if (!parsed) return cursor;
+
+  const updatedAtMs = Date.parse(parsed.updatedAt);
+  if (!Number.isFinite(updatedAtMs)) return cursor;
+
+  const rewoundUpdatedAt = new Date(Math.max(0, updatedAtMs - overlapMs)).toISOString();
+  return encodeCursor({
+    updatedAt: rewoundUpdatedAt,
+    canonicalAccountId: '\u0000',
+  });
+}
+
+function selectNewestCursor(current: string | null, candidate: string | null): string | null {
+  if (!candidate) return current;
+  if (!current) return candidate;
+
+  const currentParsed = parseCursor(current);
+  const candidateParsed = parseCursor(candidate);
+
+  if (!currentParsed || !candidateParsed) {
+    return candidate;
+  }
+
+  const updatedAtCompare = candidateParsed.updatedAt.localeCompare(currentParsed.updatedAt);
+  if (updatedAtCompare > 0) return candidate;
+  if (updatedAtCompare < 0) return current;
+
+  return candidateParsed.canonicalAccountId.localeCompare(currentParsed.canonicalAccountId) > 0
+    ? candidate
+    : current;
+}
+
+function parseCursor(
+  cursor: string
+): { updatedAt: string; canonicalAccountId: string } | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+      updatedAt?: unknown;
+      canonicalAccountId?: unknown;
+    };
+
+    if (
+      typeof parsed.updatedAt !== 'string' ||
+      parsed.updatedAt.length === 0 ||
+      typeof parsed.canonicalAccountId !== 'string' ||
+      parsed.canonicalAccountId.length === 0
+    ) {
+      return null;
+    }
+
+    return {
+      updatedAt: parsed.updatedAt,
+      canonicalAccountId: parsed.canonicalAccountId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function encodeCursor(cursor: { updatedAt: string; canonicalAccountId: string }): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function createFetchError(statusCode: number, body: string) {
+  const error = new Error(`Identity warmup failed (${statusCode}): ${body}`);
+  return Object.assign(error, { statusCode });
+}
+
+function isBackendIdentityProjection(
+  payload: BackendIdentityProjection | null | undefined
+): payload is BackendIdentityProjection {
+  const isExternal =
+    payload?.atprotoSource === 'external' || payload?.atprotoManaged === false;
+  const hasLocalKeyRefs = Boolean(payload?.atSigningKeyRef && payload?.atRotationKeyRef);
+
+  return !!(
+    payload &&
+    payload.canonicalAccountId &&
+    payload.webId &&
+    payload.atprotoDid &&
+    payload.atprotoHandle &&
+    payload.status &&
+    ((isExternal && payload.atprotoPdsUrl) || hasLocalKeyRefs)
+  );
+}
+
+function isRetryableFetchError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+
+  const candidate = error as { statusCode?: number; code?: string; name?: string };
+  const statusCode = candidate.statusCode ?? 0;
+
+  return (
+    statusCode === 408 ||
+    statusCode === 425 ||
+    statusCode === 429 ||
+    statusCode >= 500 ||
+    candidate.code === 'UND_ERR_CONNECT_TIMEOUT' ||
+    candidate.code === 'UND_ERR_HEADERS_TIMEOUT' ||
+    candidate.code === 'UND_ERR_BODY_TIMEOUT' ||
+    candidate.name === 'AbortError'
+  );
+}
+
+function truncateForError(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 400) return trimmed;
+  return `${trimmed.slice(0, 397)}...`;
+}
+
+function withJitter(delayMs: number): number {
+  const jitter = Math.round(delayMs * 0.2 * Math.random());
+  return delayMs + jitter;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

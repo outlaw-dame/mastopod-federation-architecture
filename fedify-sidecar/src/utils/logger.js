@@ -1,29 +1,31 @@
-import winston from 'winston';
-import config from '../config/index.js';
+import { pino } from 'pino';
 
-const { combine, timestamp, printf, colorize, errors } = winston.format;
+const level = process.env.LOG_LEVEL ?? 'info';
+const format = process.env.LOG_FORMAT ?? 'json';
 
-const logFormat = printf(({ level, message, timestamp, stack }) => {
-  return `${timestamp} [${level}]: ${stack || message}`;
-});
+const pinoOptions = {
+  level,
+  base: {
+    service: 'fedify-sidecar',
+    version: process.env.VERSION ?? '1.0.0',
+  },
+  timestamp: pino.stdTimeFunctions.isoTime,
+};
 
-export const logger = winston.createLogger({
-  level: config.logLevel,
-  format: combine(
-    timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-    errors({ stack: true }),
-    logFormat
-  ),
-  transports: [
-    new winston.transports.Console({
-      format: combine(
-        colorize(),
-        timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-        errors({ stack: true }),
-        logFormat
-      ),
-    }),
-  ],
-});
+export const logger = pino(
+  format === 'pretty'
+    ? {
+        ...pinoOptions,
+        transport: {
+          target: 'pino-pretty',
+          options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname',
+          },
+        },
+      }
+    : pinoOptions,
+);
 
 export default logger;

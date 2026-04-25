@@ -9,6 +9,7 @@
 
 import { logger } from "../utils/logger.js";
 import { config } from "../config/index.js";
+import { getAttributionDomains } from "../utils/authorAttribution.js";
 
 export interface ActorData {
   id: string;
@@ -36,11 +37,22 @@ export interface ActorData {
     url: string;
     mediaType?: string;
   };
+  indexable?: boolean;
+  searchableBy?: string | string[];
+  attributionDomains?: string[];
+  status?: Record<string, unknown>;
+  statusHistory?: unknown;
 }
 
 export interface KeyPair {
   publicKey: CryptoKey;
   privateKey: CryptoKey;
+}
+
+export interface ViewershipResolveResult {
+  actorId: string;
+  viewedObjectIds: string[];
+  count: number;
 }
 
 export class ActivityPodsClient {
@@ -83,7 +95,7 @@ export class ActivityPodsClient {
         throw new Error(`Failed to fetch actor: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as Record<string, unknown>;
       const actorData = this.mapToActorData(data);
 
       // Cache the result
@@ -117,7 +129,7 @@ export class ActivityPodsClient {
         throw new Error(`Failed to fetch actor: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as Record<string, unknown>;
       return this.mapToActorData(data);
     } catch (error) {
       logger.error("Failed to fetch actor by URI", { uri, error });
@@ -149,12 +161,17 @@ export class ActivityPodsClient {
         throw new Error(`Failed to fetch key pair: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as Record<string, unknown>;
+      const publicKeyPem = data["publicKeyPem"];
+      const privateKeyPem = data["privateKeyPem"];
+      if (typeof publicKeyPem !== "string" || typeof privateKeyPem !== "string") {
+        throw new Error("ActivityPods key response missing PEM material");
+      }
 
       // Import the keys
       const publicKey = await crypto.subtle.importKey(
         "spki",
-        this.pemToArrayBuffer(data.publicKeyPem),
+        this.pemToArrayBuffer(publicKeyPem),
         { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
         true,
         ["verify"]
@@ -162,7 +179,7 @@ export class ActivityPodsClient {
 
       const privateKey = await crypto.subtle.importKey(
         "pkcs8",
-        this.pemToArrayBuffer(data.privateKeyPem),
+        this.pemToArrayBuffer(privateKeyPem),
         { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
         true,
         ["sign"]
@@ -204,8 +221,8 @@ export class ActivityPodsClient {
       }
 
       logger.debug("Activity forwarded to ActivityPods", {
-        id: act.id ?? act["@id"],
-        type: act.type ?? act["@type"],
+        id: act["id"] ?? act["@id"],
+        type: act["type"] ?? act["@type"],
       });
     } catch (error) {
       logger.error("Failed to forward inbox activity", { error });
@@ -243,8 +260,12 @@ export class ActivityPodsClient {
         throw new Error(`Failed to request signature: ${response.status}`);
       }
 
-      const data = await response.json();
-      return data.signature;
+      const data = (await response.json()) as Record<string, unknown>;
+      const signature = data["signature"];
+      if (typeof signature !== "string") {
+        throw new Error("ActivityPods signing response missing signature");
+      }
+      return signature;
     } catch (error) {
       logger.error("Failed to request signature from ActivityPods", { actorId, error });
       throw error;
@@ -256,19 +277,29 @@ export class ActivityPodsClient {
    */
   private mapToActorData(data: Record<string, unknown>): ActorData {
     return {
-      id: (data.id ?? data["@id"]) as string,
-      type: (data.type ?? data["@type"] ?? "Person") as string,
-      preferredUsername: data.preferredUsername as string,
-      name: data.name as string | undefined,
-      summary: data.summary as string | undefined,
-      url: data.url as string | undefined,
-      inbox: data.inbox as string,
-      outbox: data.outbox as string,
-      followers: data.followers as string | undefined,
-      following: data.following as string | undefined,
-      publicKey: data.publicKey as ActorData["publicKey"],
-      icon: data.icon as ActorData["icon"],
-      image: data.image as ActorData["image"],
+      id: (data["id"] ?? data["@id"]) as string,
+      type: (data["type"] ?? data["@type"] ?? "Person") as string,
+      preferredUsername: data["preferredUsername"] as string,
+      name: data["name"] as string | undefined,
+      summary: data["summary"] as string | undefined,
+      url: data["url"] as string | undefined,
+      inbox: data["inbox"] as string,
+      outbox: data["outbox"] as string,
+      followers: data["followers"] as string | undefined,
+      following: data["following"] as string | undefined,
+      publicKey: data["publicKey"] as ActorData["publicKey"],
+      icon: data["icon"] as ActorData["icon"],
+      image: data["image"] as ActorData["image"],
+      indexable: typeof data["indexable"] === "boolean" ? (data["indexable"] as boolean) : undefined,
+      searchableBy:
+        typeof data["searchableBy"] === "string" || Array.isArray(data["searchableBy"])
+          ? (data["searchableBy"] as string | string[])
+          : undefined,
+      attributionDomains: getAttributionDomains(data),
+      status: (data["status"] && typeof data["status"] === "object" && !Array.isArray(data["status"]))
+        ? (data["status"] as Record<string, unknown>)
+        : undefined,
+      statusHistory: data["statusHistory"],
     };
   }
 
@@ -296,5 +327,105 @@ export class ActivityPodsClient {
    */
   clearCache(): void {
     this.actorCache.clear();
+  }
+
+  async resolveViewedObjectIds(input: {
+    actorId: string;
+    objectIds: string[];
+  }): Promise<ViewershipResolveResult> {
+    const payload = {
+      actorId: input.actorId,
+      objectIds: input.objectIds,
+    };
+
+    const data = await this.fetchJsonWithRetry<Record<string, unknown>>(
+      `${this.baseUrl}/api/internal/viewership-history/resolve`,
+      {
+        method: "POST",
+        headers: this.getInternalHeaders(),
+        body: JSON.stringify(payload),
+      },
+    );
+
+    const viewedObjectIds = Array.isArray(data["viewedObjectIds"])
+      ? data["viewedObjectIds"].filter((value): value is string => typeof value === "string")
+      : [];
+
+    return {
+      actorId: typeof data["actorId"] === "string" ? data["actorId"] : input.actorId,
+      viewedObjectIds,
+      count: typeof data["count"] === "number" ? data["count"] : viewedObjectIds.length,
+    };
+  }
+
+  async recordView(input: {
+    actorId: string;
+    objectIds: string[];
+    viewedAt?: string;
+  }): Promise<void> {
+    const payload: Record<string, unknown> = {
+      actorId: input.actorId,
+      objectIds: input.objectIds,
+    };
+    if (typeof input.viewedAt === "string" && input.viewedAt.trim().length > 0) {
+      payload["viewedAt"] = input.viewedAt;
+    }
+
+    await this.fetchJsonWithRetry(
+      `${this.baseUrl}/api/internal/viewership-history/record`,
+      {
+        method: "POST",
+        headers: this.getInternalHeaders(),
+        body: JSON.stringify(payload),
+      },
+    );
+  }
+
+  private getInternalHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-Internal-Request": "true",
+    };
+
+    if (config.activitypods.internalApiKey) {
+      headers["Authorization"] = `Bearer ${config.activitypods.internalApiKey}`;
+      headers["X-API-Key"] = config.activitypods.internalApiKey;
+    }
+
+    return headers;
+  }
+
+  private async fetchJsonWithRetry<T>(url: string, init: RequestInit): Promise<T> {
+    let attempt = 0;
+    let delayMs = 100;
+    const maxAttempts = 3;
+
+    while (true) {
+      try {
+        const response = await fetch(url, init);
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          const error = new Error(`ActivityPods request failed: ${response.status} ${body}`);
+          const retryable = [408, 429, 500, 502, 503, 504].includes(response.status);
+          (error as Error & { retryable?: boolean }).retryable = retryable;
+          throw error;
+        }
+        if (response.status === 204) {
+          return {} as T;
+        }
+        return (await response.json()) as T;
+      } catch (error) {
+        attempt += 1;
+        const retryable =
+          typeof error === "object" && error !== null && "retryable" in error
+            ? Boolean((error as { retryable?: boolean }).retryable)
+            : true;
+        if (attempt >= maxAttempts || !retryable) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        delayMs = Math.min(delayMs * 2, 1000);
+      }
+    }
   }
 }

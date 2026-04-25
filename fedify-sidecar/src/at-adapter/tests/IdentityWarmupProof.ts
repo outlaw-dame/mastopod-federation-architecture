@@ -1,7 +1,8 @@
 import { Redis } from 'ioredis';
-import { buildInternalIdentityProjectionPathsByCanonicalAccountId } from '../identity/InternalIdentityApi.js';
 
 type Json = Record<string, unknown>;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_ACCOUNT_CREATE_TIMEOUT_MS = 420_000;
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -13,64 +14,44 @@ function env(name: string, fallback?: string): string {
   return value;
 }
 
+function truncateForError(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 400) return trimmed;
+  return `${trimmed.slice(0, 397)}...`;
+}
+
 async function asJson(res: Response): Promise<unknown> {
   const text = await res.text();
   try {
     return JSON.parse(text);
   } catch {
-    return { raw: text };
+    return { raw: truncateForError(text) };
   }
 }
 
 async function requestJson(
   url: string,
-  init?: RequestInit
+  init?: RequestInit,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
 ): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(url, init);
-  return {
-    status: res.status,
-    body: await asJson(res),
-  };
-}
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-async function waitForBackendIdentityReady(
-  backendBase: string,
-  canonicalAccountId: string,
-  token: string,
-  maxAttempts = 20,
-  delayMs = 1000
-): Promise<{ ready: boolean; attempts: number; status: number; authUnavailable?: boolean }> {
-  let status = 0;
-  const paths = buildInternalIdentityProjectionPathsByCanonicalAccountId(canonicalAccountId);
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    let sawNotFound = false;
-
-    for (const path of paths) {
-      const res = await requestJson(`${backendBase.replace(/\/$/, '')}${path}`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      status = res.status;
-      if (res.status === 200) return { ready: true, attempts: attempt, status };
-      if (res.status === 401) return { ready: false, attempts: attempt, status, authUnavailable: true };
-      if (res.status === 404) {
-        sawNotFound = true;
-        continue;
-      }
-
-      break;
-    }
-
-    if (sawNotFound && attempt < maxAttempts) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
-    }
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+    return {
+      status: res.status,
+      body: await asJson(res),
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Request failed for ${url}: ${detail}`);
+  } finally {
+    clearTimeout(timeout);
   }
-
-  return { ready: false, attempts: maxAttempts, status };
 }
 
 async function deleteLocalIdentity(redis: Redis, canonicalAccountId: string, did: string, handle: string) {
@@ -79,6 +60,7 @@ async function deleteLocalIdentity(redis: Redis, canonicalAccountId: string, did
     `identity:binding:${canonicalAccountId}`,
     `identity:idx:did:${did}`,
     `identity:idx:handle:${handle.toLowerCase()}`,
+    `atproto:repo:${did}`,
   ];
 
   try {
@@ -92,10 +74,11 @@ async function deleteLocalIdentity(redis: Redis, canonicalAccountId: string, did
       }
     }
   } catch {
-    // Primary identity keys are enough for the proof if the binding is malformed.
+    // Primary keys are enough if the cached binding is malformed.
   }
 
   await redis.del(...keys);
+  await redis.srem('atproto:repos', did);
 }
 
 async function readLocalIdentity(redis: Redis, canonicalAccountId: string) {
@@ -104,36 +87,63 @@ async function readLocalIdentity(redis: Redis, canonicalAccountId: string) {
   return JSON.parse(raw);
 }
 
-async function waitForLocalIdentity(
+async function readLocalRepo(redis: Redis, did: string) {
+  const raw = await redis.get(`atproto:repo:${did}`);
+  if (!raw) return null;
+  return JSON.parse(raw);
+}
+
+async function waitForWarmup(
   redis: Redis,
   canonicalAccountId: string,
-  timeoutMs: number,
-  pollMs = 500
-) {
+  did: string,
+  timeoutMs: number
+): Promise<{ binding: unknown | null; repoState: unknown | null; elapsedMs: number }> {
   const startedAt = Date.now();
-  let binding = await readLocalIdentity(redis, canonicalAccountId);
+  let delayMs = 250;
 
-  while (!binding && Date.now() - startedAt < timeoutMs) {
-    await new Promise(resolve => setTimeout(resolve, pollMs));
-    binding = await readLocalIdentity(redis, canonicalAccountId);
+  while (Date.now() - startedAt < timeoutMs) {
+    const [binding, repoState] = await Promise.all([
+      readLocalIdentity(redis, canonicalAccountId),
+      readLocalRepo(redis, did),
+    ]);
+
+    if (binding && repoState) {
+      return {
+        binding,
+        repoState,
+        elapsedMs: Date.now() - startedAt,
+      };
+    }
+
+    await sleep(withJitter(delayMs));
+    delayMs = Math.min(Math.round(delayMs * 1.5), 2_000);
   }
 
   return {
-    binding,
-    waitedMs: Date.now() - startedAt,
+    binding: await readLocalIdentity(redis, canonicalAccountId),
+    repoState: await readLocalRepo(redis, did),
+    elapsedMs: Date.now() - startedAt,
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function withJitter(delayMs: number): number {
+  return delayMs + Math.round(delayMs * 0.2 * Math.random());
 }
 
 async function main() {
   const backendBase = env('UNIFIED_BACKEND_BASE', 'http://localhost:3000');
-  const sidecarBase = env('UNIFIED_SIDECAR_BASE', 'http://localhost:8085');
   const redisUrl = env('REDIS_URL', 'redis://localhost:6379');
-  const internalToken =
-    process.env['INTERNAL_IDENTITY_BEARER_TOKEN'] ??
-    process.env['ACTIVITYPODS_TOKEN'] ??
-    'test-atproto-signing-token-local';
   const warmIntervalMs = Number.parseInt(process.env['IDENTITY_WARM_INTERVAL_MS'] ?? '5000', 10);
-  const waitBudgetMs = warmIntervalMs + 3000;
+  const waitBudgetMs = warmIntervalMs + 8_000;
+  const accountCreateTimeoutMs = Number.parseInt(
+    process.env['UNIFIED_ACCOUNT_CREATE_TIMEOUT_MS'] ?? String(DEFAULT_ACCOUNT_CREATE_TIMEOUT_MS),
+    10
+  );
 
   const username = process.env['UNIFIED_TEST_USERNAME'] ?? `warmup-${Date.now()}`;
   const password = process.env['UNIFIED_TEST_PASSWORD'] ?? 'Phase7LivePass123';
@@ -142,11 +152,9 @@ async function main() {
   const redis = new Redis(redisUrl);
   const report: Record<string, unknown> = {
     backendBase,
-    sidecarBase,
     redisUrl,
     username,
     warmIntervalMs,
-    waitBudgetMs,
     steps: {},
   };
 
@@ -160,15 +168,16 @@ async function main() {
         password,
         profile: {
           displayName: 'Identity Warmup Proof',
-          summary: 'Background warmup should recreate local identity state',
+          summary: 'Background warming should restore local identity state',
         },
         solid: { enabled: true },
         activitypub: { enabled: true },
         atproto: { enabled: true, didMethod: 'plc' },
       }),
-    });
+    }, accountCreateTimeoutMs);
 
     (report['steps'] as Json)['createAccount'] = createAccount;
+
     assert(
       createAccount.status === 200 || createAccount.status === 201,
       `createAccount failed: ${createAccount.status}`
@@ -179,55 +188,50 @@ async function main() {
     const atproto = createAccountBody['atproto'] as Json | undefined;
     const did = atproto?.['did'] as string | undefined;
     const handle = atproto?.['handle'] as string | undefined;
+    const repoInitialized = atproto?.['repoInitialized'] as boolean | undefined;
 
     assert(canonicalAccountId, 'missing canonicalAccountId');
     assert(did, 'missing atproto.did');
     assert(handle, 'missing atproto.handle');
-
-    const backendIdentityReady = await waitForBackendIdentityReady(
-      backendBase,
-      canonicalAccountId,
-      internalToken
-    );
-    (report['steps'] as Json)['backendIdentityReady'] = backendIdentityReady;
-    if (!backendIdentityReady.authUnavailable) {
-      assert(
-        backendIdentityReady.ready,
-        `backend identity projection not ready for ${canonicalAccountId}; last status ${backendIdentityReady.status}`
-      );
-    }
+    assert(repoInitialized === true, 'expected signup response to be AT-ready');
 
     await deleteLocalIdentity(redis, canonicalAccountId, did, handle);
 
-    const localAfterDelete = await readLocalIdentity(redis, canonicalAccountId);
+    const localAfterDelete = {
+      binding: await readLocalIdentity(redis, canonicalAccountId),
+      repoState: await readLocalRepo(redis, did),
+    };
     (report['steps'] as Json)['localAfterDelete'] = {
-      exists: !!localAfterDelete,
-    };
-    assert(!localAfterDelete, 'local identity binding still exists after forced delete');
-
-    const localAfterWarmup = await waitForLocalIdentity(
-      redis,
-      canonicalAccountId,
-      waitBudgetMs
-    );
-    (report['steps'] as Json)['localAfterWarmup'] = {
-      exists: !!localAfterWarmup.binding,
-      waitedMs: localAfterWarmup.waitedMs,
-      binding: localAfterWarmup.binding
-        ? {
-            canonicalAccountId: localAfterWarmup.binding.canonicalAccountId,
-            webId: localAfterWarmup.binding.webId,
-            atprotoDid: localAfterWarmup.binding.atprotoDid,
-            atprotoHandle: localAfterWarmup.binding.atprotoHandle,
-            status: localAfterWarmup.binding.status,
-          }
-        : null,
+      bindingExists: !!localAfterDelete.binding,
+      repoExists: !!localAfterDelete.repoState,
     };
 
-    assert(localAfterWarmup.binding, 'local identity binding was not recreated by warmup');
+    assert(!localAfterDelete.binding, 'local identity binding still exists after forced delete');
+    assert(!localAfterDelete.repoState, 'local repo state still exists after forced delete');
+
+    const warmed = await waitForWarmup(redis, canonicalAccountId, did, waitBudgetMs);
+
+    (report['steps'] as Json)['warmupResult'] = {
+      elapsedMs: warmed.elapsedMs,
+      bindingExists: !!warmed.binding,
+      repoExists: !!warmed.repoState,
+      binding: warmed.binding,
+      repoState: warmed.repoState,
+    };
+
+    assert(warmed.binding, 'local identity binding was not recreated by background warmup');
+    assert(warmed.repoState, 'local repo bootstrap state was not recreated by background warmup');
+
+    const binding = warmed.binding as Json;
+    const repoState = warmed.repoState as Json;
+
     assert(
-      localAfterWarmup.binding.atprotoDid === did,
-      `recreated binding DID mismatch: expected ${did}, got ${String(localAfterWarmup.binding.atprotoDid)}`
+      binding['atprotoDid'] === did,
+      `recreated binding DID mismatch: expected ${did}, got ${String(binding['atprotoDid'])}`
+    );
+    assert(
+      repoState['did'] === did,
+      `recreated repo DID mismatch: expected ${did}, got ${String(repoState['did'])}`
     );
 
     report['summary'] = {
@@ -235,7 +239,7 @@ async function main() {
       canonicalAccountId,
       did,
       handle,
-      waitedMs: localAfterWarmup.waitedMs,
+      elapsedMs: warmed.elapsedMs,
     };
 
     console.log(JSON.stringify(report, null, 2));

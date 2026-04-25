@@ -1,0 +1,9 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "npm --prefix fedify-sidecar": true
+    },
+    "python.terminal.useEnvFile": true,
+    "files.associations": {
+        "**/memory/api/drizzle/*.sql": "postgres"
+    }
+}

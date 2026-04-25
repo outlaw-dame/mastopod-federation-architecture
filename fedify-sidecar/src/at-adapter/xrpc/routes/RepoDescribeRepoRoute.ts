@@ -15,6 +15,8 @@ import type { AtprotoRepoRegistry } from '../../../atproto/repo/AtprotoRepoRegis
 import type { HandleResolutionReader } from '../../identity/HandleResolutionReader.js';
 import { SUPPORTED_COLLECTIONS } from '../../writes/AtWriteTypes.js';
 import type { IdentityBindingRepository } from '../../../core-domain/identity/IdentityBindingRepository.js';
+import type { ExternalReadGateway } from '../../external/ExternalReadGateway.js';
+import { isExternalAtprotoBinding } from '../../external/ExternalAccountMode.js';
 
 export interface RepoDescribeRepoResponse {
   /** DID of the repository */
@@ -34,6 +36,7 @@ export class RepoDescribeRepoRoute {
     private readonly repoRegistry: AtprotoRepoRegistry,
     private readonly handleResolver: HandleResolutionReader,
     private readonly identityRepo?: IdentityBindingRepository,
+    private readonly externalReadGateway?: ExternalReadGateway,
   ) {}
 
   async handle(
@@ -56,6 +59,24 @@ export class RepoDescribeRepoRoute {
     const binding = this.identityRepo
       ? await this.identityRepo.getByAtprotoDid(resolved.did)
       : null;
+
+    if (isExternalAtprotoBinding(binding)) {
+      if (!binding?.atprotoPdsEndpoint || !this.externalReadGateway) {
+        throw XrpcErrors.repoNotFound(resolved.did);
+      }
+
+      const external = await this.externalReadGateway.describeRepo(
+        binding.atprotoPdsEndpoint,
+        resolved.handle ?? resolved.did
+      );
+
+      return {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: external.body as RepoDescribeRepoResponse,
+      };
+    }
 
     const resolvedHandle = resolved.handle ?? binding?.atprotoHandle ?? '';
     const handleIsCorrect = resolvedHandle

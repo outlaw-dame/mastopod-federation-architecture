@@ -1,12 +1,12 @@
 export interface IdentitySyncLogger {
-  debug(message: string | Record<string, unknown>, meta?: string): void;
-  info(message: string | Record<string, unknown>, meta?: string): void;
-  warn(message: string | Record<string, unknown>, meta?: string): void;
-  error(message: string | Record<string, unknown>, meta?: string): void;
+  debug(metaOrMessage: Record<string, unknown> | string, message?: string): void;
+  info(metaOrMessage: Record<string, unknown> | string, message?: string): void;
+  warn(metaOrMessage: Record<string, unknown> | string, message?: string): void;
+  error(metaOrMessage: Record<string, unknown> | string, message?: string): void;
 }
 
 export function isIdentitySyncTraceEnabled(): boolean {
-  return process.env.IDENTITY_SYNC_TRACE === 'true';
+  return process.env["IDENTITY_SYNC_TRACE"] === 'true';
 }
 
 export function traceIdentitySync(

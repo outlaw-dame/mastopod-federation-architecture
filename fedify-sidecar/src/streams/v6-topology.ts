@@ -93,6 +93,15 @@ export const V6_TOPICS: Record<string, TopicSchema> = {
     retentionMs: 30 * 24 * 60 * 60 * 1000, // 30 days
     description: 'Tombstone events (delete notifications)',
   },
+
+  // Protocol-neutral canonical intent log (from both AT and AP bridge)
+  'canonical.v1': {
+    name: 'canonical.v1',
+    partitions: 6,
+    replicationFactor: 3,
+    retentionMs: 30 * 24 * 60 * 60 * 1000, // 30 days
+    description: 'Durable protocol-neutral canonical intent log (AT + AP bridge, pre-projection)',
+  },
 };
 
 /**
@@ -180,6 +189,106 @@ export interface TombstoneEvent {
 }
 
 /**
+ * Canonical intent event — protocol-neutral record of every social action
+ * translated by the bridge before projection to either protocol.
+ */
+export interface CanonicalV1ActorRef {
+  canonicalAccountId?: string | null;
+  did?: string | null;
+  webId?: string | null;
+  activityPubActorUri?: string | null;
+  handle?: string | null;
+}
+
+export interface CanonicalV1ObjectRef {
+  canonicalObjectId: string;
+  atUri?: string | null;
+  activityPubObjectId?: string | null;
+  canonicalUrl?: string | null;
+}
+
+export interface CanonicalV1ReportPayload {
+  subjectKind: "account" | "object";
+  authoritativeProtocol?: "local" | "ap" | "at";
+  reasonType:
+    | "spam"
+    | "harassment"
+    | "abuse"
+    | "impersonation"
+    | "copyright"
+    | "illegal"
+    | "safety"
+    | "other";
+  reason?: string | null;
+  evidence?: CanonicalV1ObjectRef[];
+  requestedForwardingRemote?: boolean | null;
+  clientContext?: {
+    app?: string | null;
+    surface?: string | null;
+  } | null;
+}
+
+export interface CanonicalV1Event {
+  /** Unique deterministic ID for this canonical intent. */
+  canonicalIntentId: string;
+  /** Discriminant for the type of social action. */
+  kind:
+    | "PostCreate"
+    | "PostEdit"
+    | "PostDelete"
+    | "PostInteractionPolicyUpdate"
+    | "PollCreate"
+    | "PollEdit"
+    | "PollDelete"
+    | "PollVoteAdd"
+    | "ReactionAdd"
+    | "ReactionRemove"
+    | "ShareAdd"
+    | "ShareRemove"
+    | "FollowAdd"
+    | "FollowRemove"
+    | "ProfileUpdate"
+    | "AccountState"
+    | "ReportCreate";
+  /** Protocol the event originated from. */
+  sourceProtocol: "activitypub" | "atproto" | "activitypods";
+  /** Original event ID in the source protocol. */
+  sourceEventId: string;
+  /** Actor who performed the action. */
+  actor: CanonicalV1ActorRef;
+  /**
+   * Primary object of the action (posts, reactions, shares, deletes).
+   * Also present for FollowAdd/FollowRemove when the followed target is an
+   * ActivityPub object instead of an actor.
+   * Absent for actor-target follows, ProfileUpdate, and AccountState.
+   */
+  object?: CanonicalV1ObjectRef;
+  /**
+   * Target actor (for actor-target FollowAdd/FollowRemove — the person being
+   * followed). For object-target follows this may carry the owning or delivery
+   * actor when one is known.
+   */
+  subject?: CanonicalV1ActorRef;
+  /**
+   * AP actor URIs of users mentioned in the content (PostCreate/PostEdit only).
+   * Used by the notification consumer to fan-out mention notifications.
+   */
+  mentions?: string[];
+  /**
+   * Additional report metadata for ReportCreate.
+   * The reported account/object still uses the top-level `subject`/`object`
+   * fields when applicable so downstream consumers can index them normally.
+   */
+  report?: CanonicalV1ReportPayload;
+  /** ISO timestamp when the original social action occurred. */
+  createdAt: string;
+  /** ISO timestamp when the sidecar observed the event. */
+  observedAt: string;
+  /** Unix milliseconds when this canonical record was written to the topic. */
+  timestamp: number;
+}
+
+/**
  * Get topic configuration
  */
 export function getTopicConfig(topicName: string): TopicSchema | null {
@@ -213,8 +322,8 @@ export function getTopicRetention(topicName: string): number {
  */
 export function createDefaultTopologyConfig(): V6TopologyConfig {
   return {
-    brokers: (process.env.REDPANDA_BROKERS || 'localhost:9092').split(','),
-    clientId: process.env.REDPANDA_CLIENT_ID || 'fedify-sidecar-v6',
-    compression: (process.env.REDPANDA_COMPRESSION || 'zstd') as any,
+    brokers: (process.env["REDPANDA_BROKERS"] || 'localhost:9092').split(','),
+    clientId: process.env["REDPANDA_CLIENT_ID"] || 'fedify-sidecar-v6',
+    compression: (process.env["REDPANDA_COMPRESSION"] || 'zstd') as any,
   };
 }

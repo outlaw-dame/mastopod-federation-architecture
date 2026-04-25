@@ -5,10 +5,20 @@
  * Async vector enrichment pipeline.
  */
 
-import { OpenSearchClient } from '../writer/PublicContentIndexWriter';
+import { OpenSearchClient } from '../writer/PublicContentIndexWriter.js';
+
+export interface SparseEmbedding {
+  indices: number[];
+  values: number[];
+}
+
+export interface EmbeddingResult {
+  dense: number[];
+  sparse?: SparseEmbedding;
+}
 
 export interface EmbeddingService {
-  embedText(text: string): Promise<number[]>;
+  embedText(text: string): Promise<number[] | EmbeddingResult>;
 }
 
 export class EmbeddingIngestWorker {
@@ -44,11 +54,12 @@ export class EmbeddingIngestWorker {
     }
 
     try {
-      const vector = await this.embeddingService.embedText(doc.text);
+      const embedding = normalizeEmbeddingResult(await this.embeddingService.embedText(doc.text));
       
       // Upsert just the embedding and status
       await this.osClient.upsert(stableDocId, {
-        embedding: vector,
+        embedding: embedding.dense,
+        sparseEmbedding: embedding.sparse,
         embeddingStatus: 'complete',
         embeddingUpdatedAt: new Date().toISOString()
       });
@@ -86,4 +97,12 @@ export class MockEmbeddingService implements EmbeddingService {
     vector[0] = text.length / 1000;
     return vector;
   }
+}
+
+function normalizeEmbeddingResult(value: number[] | EmbeddingResult): EmbeddingResult {
+  if (Array.isArray(value)) {
+    return { dense: value };
+  }
+
+  return value;
 }

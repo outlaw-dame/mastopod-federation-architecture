@@ -4,8 +4,8 @@
  * Serializes a CanonicalRepost into an app.bsky.feed.repost record.
  */
 
-import { CanonicalRepost } from '../../events/AtSocialRepoEvents';
-import { StrongRef } from '../../repo/AtTargetAliasResolver';
+import type { CanonicalRepost } from '../../events/AtSocialRepoEvents.js';
+import type { StrongRef } from '../../repo/AtTargetAliasResolver.js';
 
 export interface AppBskyFeedRepostRecord {
   $type: 'app.bsky.feed.repost';

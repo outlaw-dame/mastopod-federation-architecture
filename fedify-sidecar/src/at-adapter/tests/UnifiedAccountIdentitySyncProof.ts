@@ -1,6 +1,8 @@
 import { buildInternalIdentityProjectionPathsByCanonicalAccountId } from '../identity/InternalIdentityApi.js';
 
 type Json = any;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_ACCOUNT_CREATE_TIMEOUT_MS = 420_000;
 
 function redact(obj: unknown): unknown {
   if (!obj || typeof obj !== 'object') return obj;
@@ -30,13 +32,27 @@ async function asJson(res: Response): Promise<unknown> {
 
 async function requestJson(
   url: string,
-  init?: RequestInit
+  init?: RequestInit,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
 ): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(url, init);
-  return {
-    status: res.status,
-    body: await asJson(res)
-  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: controller.signal
+    });
+    return {
+      status: res.status,
+      body: await asJson(res)
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Request failed for ${url}: ${detail}`);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function requestSessionWithRetry(
@@ -89,7 +105,7 @@ async function waitForBackendIdentityReady(
       const res = await requestJson(`${backendBase.replace(/\/$/, '')}${path}`, {
         method: 'GET',
         headers: {
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
         }
       });
 
@@ -160,6 +176,10 @@ async function main() {
 
   const requestedHandle = env['UNIFIED_TEST_REQUESTED_HANDLE'];
   const didMethod = (env['UNIFIED_TEST_DID_METHOD'] ?? 'plc') as 'plc' | 'web';
+  const accountCreateTimeoutMs = Number.parseInt(
+    env['UNIFIED_ACCOUNT_CREATE_TIMEOUT_MS'] ?? String(DEFAULT_ACCOUNT_CREATE_TIMEOUT_MS),
+    10
+  );
 
   const report: any = {
     backendBase,
@@ -191,7 +211,7 @@ async function main() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(createAccountPayload)
-  });
+  }, accountCreateTimeoutMs);
 
   report.steps = {
     ...(report.steps as Json),

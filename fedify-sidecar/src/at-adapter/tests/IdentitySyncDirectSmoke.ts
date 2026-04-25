@@ -1,8 +1,8 @@
 import { Redis } from 'ioredis';
 import { HttpIdentityBindingSyncService } from '../identity/IdentityBindingSyncService.js';
 import { buildInternalIdentityProjectionPathsByCanonicalAccountId } from '../identity/InternalIdentityApi.js';
-import { RedisAtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
 import { RedisIdentityBindingRepository } from '../../core-domain/identity/RedisIdentityBindingRepository.js';
+import { RedisAtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -44,34 +44,28 @@ async function main() {
 
   try {
     // 1. Prove backend identity endpoint responds with expected auth.
-    const endpoints = buildInternalIdentityProjectionPathsByCanonicalAccountId(canonicalAccountId).map(
-      (path) => `${backendBase.replace(/\/$/, '')}${path}`
-    );
-    let backendStatus = 0;
+    let backendRes: Response | null = null;
     let backendBody: unknown = null;
-    let matchedEndpoint: string | null = null;
 
-    for (const endpoint of endpoints) {
-      const backendRes = await fetch(endpoint, {
+    for (const path of buildInternalIdentityProjectionPathsByCanonicalAccountId(canonicalAccountId)) {
+      backendRes = await fetch(`${backendBase.replace(/\/$/, '')}${path}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      backendStatus = backendRes.status;
       backendBody = await asJson(backendRes);
-
-      if (backendRes.status === 200) {
-        matchedEndpoint = endpoint;
-        break;
-      }
-
       if (backendRes.status !== 404) {
         break;
       }
     }
 
+    assert(backendRes, 'backend identity endpoint did not return a response');
     assert(
-      matchedEndpoint,
-      `backend endpoint failed: ${backendStatus} ${JSON.stringify(backendBody)}`
+      backendRes.status === 200,
+      `backend endpoint failed: ${backendRes.status} ${JSON.stringify(backendBody)}`
     );
+    const backendProjection = backendBody as {
+      atprotoDid?: string;
+      repo?: { initialized?: boolean; rootCid?: string | null; rev?: string | null };
+    };
 
     // 2. Sync by canonical account id.
     const synced = await sync.syncByCanonicalAccountId(canonicalAccountId);
@@ -106,24 +100,18 @@ async function main() {
     assert(byHandle, 'local repo missing handle index');
     assert(byHandle.canonicalAccountId === canonicalAccountId, 'handle index canonicalAccountId mismatch');
 
-    const backendProjection = backendBody as {
-      repo?: { initialized?: boolean; rootCid?: string | null; rev?: string | null };
-    } | null;
-    let warmedRepoState: unknown = null;
-
-    if (backendProjection?.repo?.initialized) {
-      warmedRepoState = await repoRegistry.getRepoState(byCanonical.atprotoDid);
-      assert(warmedRepoState, 'local repo registry missing bootstrapped state');
+    let repoState: unknown = null;
+    if (backendProjection.repo?.initialized) {
+      repoState = await repoRegistry.getRepoState(byCanonical.atprotoDid);
+      assert(repoState, 'local repo registry missing warmed bootstrap state');
     }
 
     const report = {
       ok: true,
       backendBase,
-      matchedEndpoint,
       canonicalAccountId,
       synced,
-      repoProjectionPresent: !!backendProjection?.repo?.initialized,
-      warmedRepoState,
+      repoProjectionPresent: !!backendProjection.repo?.initialized,
       binding: {
         canonicalAccountId: byCanonical.canonicalAccountId,
         webId: byCanonical.webId,
@@ -131,6 +119,7 @@ async function main() {
         atprotoHandle: byCanonical.atprotoHandle,
         status: byCanonical.status,
       },
+      repoState,
     };
 
     console.log(JSON.stringify(report, null, 2));

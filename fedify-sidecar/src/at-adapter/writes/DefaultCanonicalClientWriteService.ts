@@ -33,9 +33,27 @@ import type {
 } from './AtWriteTypes.js';
 import type { AtWriteResultStore } from './AtWriteResultStore.js';
 import type { AtAliasStore } from '../repo/AtAliasStore.js';
+import type {
+  AtRecordLocator,
+  AtRepoBridgeMetadata,
+  AtRepoCollection,
+} from '../events/AtRepoEvents.js';
 import type { AtProjectionWorker } from '../projection/AtProjectionWorker.js';
 import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
 import type {
+  BridgeProfileMediaDraft,
+  BridgeProfileMediaStore,
+} from '../../protocol-bridge/profile/BridgeProfileMedia.js';
+import type {
+  BridgePostMediaDescriptor,
+  BridgePostMediaStore,
+} from '../../protocol-bridge/post/BridgePostMedia.js';
+import {
+  buildPostMediaDraftsFromRecord,
+} from '../../protocol-bridge/post/BridgePostMedia.js';
+import type {
+  CoreEmojiReactionCreatedV1,
+  CoreEmojiReactionDeletedV1,
   CoreFollowCreatedV1,
   CoreFollowDeletedV1,
   CoreLikeCreatedV1,
@@ -43,8 +61,14 @@ import type {
   CoreRepostCreatedV1,
   CoreRepostDeletedV1,
 } from '../events/AtSocialRepoEvents.js';
+import {
+  ACTIVITYPODS_EMOJI_REACTION_COLLECTION,
+  type ActivityPodsEmojiDefinition,
+  parseActivityPodsEmojiReactionRecord,
+} from '../lexicon/ActivityPodsEmojiLexicon.js';
 import type {
   CorePostCreatedV1,
+  CorePostUpdatedV1,
   CorePostDeletedV1,
   CoreProfileUpsertedV1,
 } from '../projection/AtProjectionWorker.js';
@@ -58,6 +82,8 @@ export interface DefaultCanonicalClientWriteServiceDeps {
   aliasStore:       AtAliasStore;
   resultStore:      AtWriteResultStore;
   identityRepo:     IdentityBindingRepository;
+  profileMediaStore?: BridgeProfileMediaStore;
+  postMediaStore?: BridgePostMediaStore;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,12 +95,16 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
   private readonly aliasStore: AtAliasStore;
   private readonly resultStore: AtWriteResultStore;
   private readonly identityRepo: IdentityBindingRepository;
+  private readonly profileMediaStore?: BridgeProfileMediaStore;
+  private readonly postMediaStore?: BridgePostMediaStore;
 
   constructor(deps: DefaultCanonicalClientWriteServiceDeps) {
     this.worker      = deps.projectionWorker;
     this.aliasStore  = deps.aliasStore;
     this.resultStore = deps.resultStore;
     this.identityRepo = deps.identityRepo;
+    this.profileMediaStore = deps.profileMediaStore;
+    this.postMediaStore = deps.postMediaStore;
   }
 
   async applyClientMutation(
@@ -85,7 +115,7 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
 
     switch (mutation.mutationType) {
       case 'post_create':
-        canonicalRefId = await this._applyPostCreate(mutation, now);
+        canonicalRefId = await this._applyPostWrite(mutation, now);
         break;
       case 'profile_upsert':
         canonicalRefId = await this._applyProfileUpsert(mutation, now);
@@ -95,6 +125,9 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
         break;
       case 'like_create':
         canonicalRefId = await this._applyLikeCreate(mutation, now);
+        break;
+      case 'emoji_reaction_create':
+        canonicalRefId = await this._applyEmojiReactionCreate(mutation, now);
         break;
       case 'repost_create':
         canonicalRefId = await this._applyRepostCreate(mutation, now);
@@ -107,6 +140,9 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
         break;
       case 'like_delete':
         await this._applySocialDelete(mutation, now, 'like');
+        break;
+      case 'emoji_reaction_delete':
+        await this._applySocialDelete(mutation, now, 'emojiReaction');
         break;
       case 'repost_delete':
         await this._applySocialDelete(mutation, now, 'repost');
@@ -141,22 +177,77 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
   // Create / upsert mutations
   // --------------------------------------------------------------------------
 
-  private async _applyPostCreate(
+  private async _applyPostWrite(
     mutation: CanonicalMutationEnvelope,
     now: string
   ): Promise<string> {
-    const canonicalRefId = randomUUID();
     const p = mutation.payload;
+    const operation = getNormalizedWriteOperation(p);
+    const collection = _str(p['_collection']);
+    const isArticle = collection === 'site.standard.document';
+    const bridge = asBridgeMetadata(p['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(p);
+    const nativeRecord = extractNativePostRecord(p, collection);
+    const canonicalRefId = operation === 'update'
+      ? await this._resolveCanonicalRefIdForPostUpdate(mutation)
+      : _str(mutation.payload['_bridgeCanonicalRefId']) ?? randomUUID();
+    const ownerDid = await this._resolveManagedDid(mutation);
+    const postMediaDescriptors = ownerDid && nativeRecord && this.postMediaStore
+      ? buildPostMediaDescriptors(canonicalRefId, ownerDid, nativeRecord, now)
+      : [];
+
+    if (ownerDid && nativeRecord && this.postMediaStore) {
+      await this._syncStoredPostMediaDescriptors(
+        canonicalRefId,
+        ownerDid,
+        postMediaDescriptors,
+      );
+    }
+
+    const canonicalPost = {
+      id: canonicalRefId,
+      authorId: mutation.canonicalAccountId,
+      kind: isArticle ? 'article' as const : 'note' as const,
+      title: _str(p['title']),
+      summaryPlaintext: _str(p['summary']),
+      bodyPlaintext: _str(p['text']) ?? '',
+      canonicalUrl: _str(p['url']),
+      visibility: 'public' as const,
+      publishedAt: _str(p['publishedAt']) ?? _str(p['createdAt']) ?? now,
+      ...(postMediaDescriptors.length > 0
+        ? {
+            attachments: postMediaDescriptors.map((descriptor) => ({
+              kind: descriptor.kind,
+              mediaId: descriptor.mediaId,
+              altText: descriptor.alt ?? undefined,
+              width: descriptor.width ?? undefined,
+              height: descriptor.height ?? undefined,
+            })),
+          }
+        : {}),
+    };
+
+    if (operation === 'update') {
+      const event: CorePostUpdatedV1 = {
+        canonicalPost,
+        author: { id: mutation.canonicalAccountId },
+        ...(atRecord ? { atRecord } : {}),
+        ...(nativeRecord ? { nativeRecord } : {}),
+        ...(isArticle && !bridge ? { generateTeaserCompanion: true } : {}),
+        ...(bridge ? { bridge } : {}),
+        emittedAt: now,
+      };
+      await this.worker.onPostUpdated(event);
+      return canonicalRefId;
+    }
 
     const event: CorePostCreatedV1 = {
-      canonicalPost: {
-        id:             canonicalRefId,
-        authorId:       mutation.canonicalAccountId,
-        bodyPlaintext:  _str(p.text) ?? '',
-        visibility:     'public',
-        publishedAt:    _str(p.createdAt) ?? now,
-      },
+      canonicalPost,
       author: { id: mutation.canonicalAccountId },
+      ...(atRecord ? { atRecord } : {}),
+      ...(nativeRecord ? { nativeRecord } : {}),
+      ...(isArticle && !bridge ? { generateTeaserCompanion: true } : {}),
+      ...(bridge ? { bridge } : {}),
       emittedAt: now,
     };
 
@@ -171,14 +262,41 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     // Profile canonical ref ID = canonicalAccountId (singleton per account)
     const canonicalRefId = mutation.canonicalAccountId;
     const p = mutation.payload;
+    const bridge = asBridgeMetadata(p['_bridgeMetadata']);
+    const nativeRecord = extractNativeRecord(p, 'app.bsky.actor.profile');
+    const ownerDid = await this._resolveManagedDid(mutation);
+    const profileMedia = parseBridgeProfileMediaPayload(p['_bridgeProfileMedia']);
+
+    if (ownerDid && this.profileMediaStore) {
+      if (profileMedia.avatar) {
+        await this.profileMediaStore.put({
+          ...profileMedia.avatar,
+          ownerDid,
+          createdAt: now,
+        });
+      }
+      if (profileMedia.banner) {
+        await this.profileMediaStore.put({
+          ...profileMedia.banner,
+          ownerDid,
+          createdAt: now,
+        });
+      }
+    }
 
     const event: CoreProfileUpsertedV1 = {
       profile: {
         id:                  canonicalRefId,
-        displayName:         _str(p.displayName),
-        summaryPlaintext:    _str(p.description),
+        displayName:         _str(p['displayName']),
+        summaryPlaintext:    _str(p['description']),
+        avatarBlobRef:       asBlobRef(p['avatar']),
+        bannerBlobRef:       asBlobRef(p['banner']),
+        avatarMediaId:       profileMedia.avatar?.mediaId,
+        bannerMediaId:       profileMedia.banner?.mediaId,
       },
       identity: { id: mutation.canonicalAccountId },
+      ...(nativeRecord ? { nativeRecord } : {}),
+      ...(bridge ? { bridge } : {}),
       emittedAt: now,
     };
 
@@ -190,8 +308,10 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     mutation: CanonicalMutationEnvelope,
     now: string
   ): Promise<string> {
-    const canonicalRefId = randomUUID();
-    const subjectDid = _str(mutation.payload.subject);
+    const canonicalRefId = _str(mutation.payload['_bridgeCanonicalRefId']) ?? randomUUID();
+    const subjectDid = _str(mutation.payload['subject']);
+    const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(mutation.payload);
     if (!subjectDid) {
       throw new Error('follow_create: subject (DID) is required in payload');
     }
@@ -211,6 +331,8 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
       },
       follower: { id: mutation.canonicalAccountId },
       followed: followedIdentity,
+      ...(atRecord ? { atRecord } : {}),
+      ...(bridge ? { bridge } : {}),
       emittedAt: now,
     };
 
@@ -222,8 +344,10 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     mutation: CanonicalMutationEnvelope,
     now: string
   ): Promise<string> {
-    const canonicalRefId = randomUUID();
-    const subject = mutation.payload.subject as { uri?: string; cid?: string } | undefined;
+    const canonicalRefId = _str(mutation.payload['_bridgeCanonicalRefId']) ?? randomUUID();
+    const subject = mutation.payload['subject'] as { uri?: string; cid?: string } | undefined;
+    const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(mutation.payload);
     if (!subject?.uri) {
       throw new Error('like_create: subject.uri is required in payload');
     }
@@ -242,6 +366,8 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
       },
       actor:      { id: mutation.canonicalAccountId },
       targetPost,
+      ...(atRecord ? { atRecord } : {}),
+      ...(bridge ? { bridge } : {}),
       emittedAt:  now,
     };
 
@@ -249,12 +375,59 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     return canonicalRefId;
   }
 
+  private async _applyEmojiReactionCreate(
+    mutation: CanonicalMutationEnvelope,
+    now: string,
+  ): Promise<string> {
+    const canonicalRefId = _str(mutation.payload['_bridgeCanonicalRefId']) ?? randomUUID();
+    const nativeRecord = extractNativeRecord(mutation.payload, ACTIVITYPODS_EMOJI_REACTION_COLLECTION);
+    const parsedRecord = nativeRecord ? parseActivityPodsEmojiReactionRecord(nativeRecord) : null;
+    const subject = parsedRecord?.subject;
+    const reactionContent = parsedRecord?.reaction;
+    const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(mutation.payload);
+
+    if (!subject?.uri) {
+      throw new Error('emoji_reaction_create: subject.uri is required in payload');
+    }
+    if (!reactionContent) {
+      throw new Error('emoji_reaction_create: reaction is required in payload');
+    }
+
+    const targetAlias = await this._resolveAliasByUri(subject.uri);
+    const targetPost = targetAlias
+      ? { id: targetAlias.canonicalRefId, authorId: '', bodyPlaintext: '', visibility: 'public' as const, publishedAt: now }
+      : { id: subject.uri, authorId: '', bodyPlaintext: '', visibility: 'public' as const, publishedAt: now };
+
+    const event: CoreEmojiReactionCreatedV1 = {
+      reaction: {
+        id: canonicalRefId,
+        actorId: mutation.canonicalAccountId,
+        postId: targetAlias?.canonicalRefId ?? subject.uri,
+        content: reactionContent,
+        emoji: parsedRecord?.emoji ? toCanonicalCustomEmoji(parsedRecord.emoji) : null,
+        createdAt: parsedRecord?.createdAt ?? now,
+      },
+      actor: { id: mutation.canonicalAccountId },
+      targetPost,
+      ...(nativeRecord ? { nativeRecord } : {}),
+      ...(atRecord ? { atRecord } : {}),
+      ...(bridge ? { bridge } : {}),
+      emittedAt: now,
+    };
+
+    await this.worker.onEmojiReactionCreated(event);
+    return canonicalRefId;
+  }
+
   private async _applyRepostCreate(
     mutation: CanonicalMutationEnvelope,
     now: string
   ): Promise<string> {
-    const canonicalRefId = randomUUID();
-    const subject = mutation.payload.subject as { uri?: string; cid?: string } | undefined;
+    const canonicalRefId = _str(mutation.payload['_bridgeCanonicalRefId']) ?? randomUUID();
+    const subject = mutation.payload['subject'] as { uri?: string; cid?: string } | undefined;
+    const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(mutation.payload);
     if (!subject?.uri) {
       throw new Error('repost_create: subject.uri is required in payload');
     }
@@ -273,6 +446,8 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
       },
       actor:      { id: mutation.canonicalAccountId },
       targetPost,
+      ...(atRecord ? { atRecord } : {}),
+      ...(bridge ? { bridge } : {}),
       emittedAt:  now,
     };
 
@@ -288,32 +463,49 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     mutation: CanonicalMutationEnvelope,
     now: string
   ): Promise<void> {
-    const alias = await this._resolveDeleteAlias(mutation);
-    if (!alias) return; // Policy gate should have caught this; silent skip
+    const canonicalRefId = await this._resolveDeleteCanonicalRefId(mutation);
+    if (!canonicalRefId) return;
+    const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(mutation.payload);
+    const ownerDid = this.postMediaStore
+      ? await this._resolveManagedDid(mutation)
+      : null;
 
     const event: CorePostDeletedV1 = {
-      canonicalPostId:   alias.canonicalRefId,
+      canonicalPostId:   canonicalRefId,
       canonicalAuthorId: mutation.canonicalAccountId,
+      ...(atRecord ? { atRecord } : {}),
+      ...(_str(mutation.payload['_collection']) === 'site.standard.document' && !bridge
+        ? { generateTeaserCompanion: true }
+        : {}),
+      ...(bridge ? { bridge } : {}),
       deletedAt:         now,
       emittedAt:         now,
     };
     await this.worker.onPostDeleted(event);
+    if (ownerDid && this.postMediaStore) {
+      await this._deleteStoredPostMediaDescriptors(canonicalRefId, ownerDid);
+    }
   }
 
   private async _applySocialDelete(
     mutation: CanonicalMutationEnvelope,
     now: string,
-    kind: 'follow' | 'like' | 'repost'
+    kind: 'follow' | 'like' | 'emojiReaction' | 'repost'
   ): Promise<void> {
-    const alias = await this._resolveDeleteAlias(mutation);
-    if (!alias) return;
+    const canonicalRefId = await this._resolveDeleteCanonicalRefId(mutation);
+    const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(mutation.payload);
+    if (!canonicalRefId) return;
 
     switch (kind) {
       case 'follow': {
         const event: CoreFollowDeletedV1 = {
-          canonicalFollowId:    alias.canonicalRefId,
+          canonicalFollowId:    canonicalRefId,
           followerCanonicalId:  mutation.canonicalAccountId,
-          followedCanonicalId:  alias.subjectDid ?? '',
+          followedCanonicalId:  '',
+          ...(atRecord ? { atRecord } : {}),
+          ...(bridge ? { bridge } : {}),
           deletedAt:            now,
           emittedAt:            now,
         };
@@ -322,20 +514,37 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
       }
       case 'like': {
         const event: CoreLikeDeletedV1 = {
-          canonicalLikeId:   alias.canonicalRefId,
+          canonicalLikeId:   canonicalRefId,
           canonicalActorId:  mutation.canonicalAccountId,
           canonicalPostId:   '',  // not needed by projection worker for delete
+          ...(atRecord ? { atRecord } : {}),
+          ...(bridge ? { bridge } : {}),
           deletedAt:         now,
           emittedAt:         now,
         };
         await this.worker.onLikeDeleted(event);
         break;
       }
+      case 'emojiReaction': {
+        const event: CoreEmojiReactionDeletedV1 = {
+          canonicalReactionId: canonicalRefId,
+          canonicalActorId: mutation.canonicalAccountId,
+          canonicalPostId: '',
+          ...(atRecord ? { atRecord } : {}),
+          ...(bridge ? { bridge } : {}),
+          deletedAt: now,
+          emittedAt: now,
+        };
+        await this.worker.onEmojiReactionDeleted(event);
+        break;
+      }
       case 'repost': {
         const event: CoreRepostDeletedV1 = {
-          canonicalRepostId:  alias.canonicalRefId,
+          canonicalRepostId:  canonicalRefId,
           canonicalActorId:   mutation.canonicalAccountId,
           canonicalPostId:    '',
+          ...(atRecord ? { atRecord } : {}),
+          ...(bridge ? { bridge } : {}),
           deletedAt:          now,
           emittedAt:          now,
         };
@@ -357,7 +566,9 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     // at://<did>/<collection>/<rkey>
     const match = atUri.match(/^at:\/\/([^/]+)\/([^/]+)\/([^/]+)$/);
     if (!match) return null;
-    const [, did, collection, rkey] = match;
+    const did = match[1]!;
+    const collection = match[2]!;
+    const rkey = match[3]!;
     const aliases = await this.aliasStore.listByDid(did);
     return aliases.find((a) => a.collection === collection && a.rkey === rkey && !a.deletedAt) ?? null;
   }
@@ -367,11 +578,11 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
    */
   private async _resolveDeleteAlias(mutation: CanonicalMutationEnvelope) {
     const p = mutation.payload;
-    const collection = _str(p._collection);
-    const rkey       = _str(p._rkey);
+    const collection = _str(p['_collection']);
+    const rkey       = _str(p['_rkey']);
 
     // Resolve DID from repo identifier via identity binding
-    const atRepo = _str(p._atRepo);
+    const atRepo = _str(p['_atRepo']);
     if (!collection || !rkey || !atRepo) return null;
 
     // Try to get DID from identity binding (handles both DID and handle inputs)
@@ -387,6 +598,103 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     const aliases = await this.aliasStore.listByDid(repoDid);
     return aliases.find((a) => a.collection === collection && a.rkey === rkey && !a.deletedAt) ?? null;
   }
+
+  private async _resolveDeleteCanonicalRefId(
+    mutation: CanonicalMutationEnvelope,
+  ): Promise<string | null> {
+    const explicit = _str(mutation.payload['_bridgeCanonicalRefId']);
+    if (explicit) {
+      return explicit;
+    }
+
+    const alias = await this._resolveDeleteAlias(mutation);
+    return alias?.canonicalRefId ?? null;
+  }
+
+  private async _resolveCanonicalRefIdForPostUpdate(
+    mutation: CanonicalMutationEnvelope,
+  ): Promise<string> {
+    const explicit = _str(mutation.payload['_bridgeCanonicalRefId']);
+    if (explicit) {
+      return explicit;
+    }
+
+    const collection = _str(mutation.payload['_collection']);
+    const rkey = _str(mutation.payload['_rkey']);
+    if (!collection || !rkey) {
+      throw new Error('post_update: _collection and _rkey are required to resolve the canonical target');
+    }
+
+    const repoDid = await this._resolveManagedDid(mutation);
+    if (!repoDid) {
+      throw new Error('post_update: unable to resolve the local ATProto DID for the target account');
+    }
+
+    const aliases = await this.aliasStore.listByDid(repoDid);
+    const alias = aliases.find(
+      (candidate) =>
+        candidate.collection === collection &&
+        candidate.rkey === rkey &&
+        !candidate.deletedAt,
+    );
+
+    if (!alias) {
+      throw new Error(`post_update: no active alias exists for at://${repoDid}/${collection}/${rkey}`);
+    }
+
+    return alias.canonicalRefId;
+  }
+
+  private async _resolveManagedDid(mutation: CanonicalMutationEnvelope): Promise<string | null> {
+    const repo = _str(mutation.payload['_atRepo']);
+    if (repo?.startsWith('did:')) {
+      return repo;
+    }
+
+    const binding = await this.identityRepo.getByCanonicalAccountId(mutation.canonicalAccountId);
+    return binding?.atprotoDid ?? null;
+  }
+
+  private async _syncStoredPostMediaDescriptors(
+    canonicalPostId: string,
+    ownerDid: string,
+    descriptors: BridgePostMediaDescriptor[],
+  ): Promise<void> {
+    if (!this.postMediaStore) {
+      return;
+    }
+
+    const existingDescriptors = await this.postMediaStore.listByCanonicalPostId(canonicalPostId);
+    const nextMediaIds = new Set(descriptors.map((descriptor) => descriptor.mediaId));
+
+    for (const descriptor of descriptors) {
+      await this.postMediaStore.put(descriptor);
+    }
+
+    for (const descriptor of existingDescriptors) {
+      if (descriptor.ownerDid !== ownerDid || nextMediaIds.has(descriptor.mediaId)) {
+        continue;
+      }
+      await this.postMediaStore.delete(descriptor.mediaId);
+    }
+  }
+
+  private async _deleteStoredPostMediaDescriptors(
+    canonicalPostId: string,
+    ownerDid: string,
+  ): Promise<void> {
+    if (!this.postMediaStore) {
+      return;
+    }
+
+    const existingDescriptors = await this.postMediaStore.listByCanonicalPostId(canonicalPostId);
+    for (const descriptor of existingDescriptors) {
+      if (descriptor.ownerDid !== ownerDid) {
+        continue;
+      }
+      await this.postMediaStore.delete(descriptor.mediaId);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -395,4 +703,227 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
 
 function _str(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined;
+}
+
+function asBridgeMetadata(value: unknown): AtRepoBridgeMetadata | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const candidate = value as {
+    canonicalIntentId?: unknown;
+    sourceProtocol?: unknown;
+    provenance?: {
+      originProtocol?: unknown;
+      originEventId?: unknown;
+      originAccountId?: unknown;
+      mirroredFromCanonicalIntentId?: unknown;
+      projectionMode?: unknown;
+    };
+  };
+
+  if (
+    typeof candidate.canonicalIntentId !== 'string' ||
+    (candidate.sourceProtocol !== 'activitypub' && candidate.sourceProtocol !== 'atproto') ||
+    !candidate.provenance ||
+    (candidate.provenance.originProtocol !== 'activitypub' && candidate.provenance.originProtocol !== 'atproto') ||
+    typeof candidate.provenance.originEventId !== 'string' ||
+    (candidate.provenance.projectionMode !== 'native' && candidate.provenance.projectionMode !== 'mirrored')
+  ) {
+    return undefined;
+  }
+
+  return {
+    canonicalIntentId: candidate.canonicalIntentId,
+    sourceProtocol: candidate.sourceProtocol,
+    provenance: {
+      originProtocol: candidate.provenance.originProtocol,
+      originEventId: candidate.provenance.originEventId,
+      originAccountId:
+        typeof candidate.provenance.originAccountId === 'string'
+          ? candidate.provenance.originAccountId
+          : null,
+      mirroredFromCanonicalIntentId:
+        typeof candidate.provenance.mirroredFromCanonicalIntentId === 'string'
+          ? candidate.provenance.mirroredFromCanonicalIntentId
+          : null,
+      projectionMode: candidate.provenance.projectionMode,
+    },
+  };
+}
+
+function getNormalizedWriteOperation(
+  payload: Record<string, unknown>,
+): 'create' | 'update' {
+  return payload['_operation'] === 'update' ? 'update' : 'create';
+}
+
+function parseBridgeProfileMediaPayload(
+  value: unknown,
+): { avatar?: BridgeProfileMediaDraft; banner?: BridgeProfileMediaDraft } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  const container = value as Record<string, unknown>;
+  const avatar = asProfileMediaDraft(container['avatar'], 'avatar');
+  const banner = asProfileMediaDraft(container['banner'], 'banner');
+  return {
+    ...(avatar ? { avatar } : {}),
+    ...(banner ? { banner } : {}),
+  };
+}
+
+function buildPostMediaDescriptors(
+  canonicalPostId: string,
+  ownerDid: string,
+  record: Record<string, unknown>,
+  createdAt: string,
+): BridgePostMediaDescriptor[] {
+  return buildPostMediaDraftsFromRecord(canonicalPostId, record).map((draft) => ({
+    ...draft,
+    ownerDid,
+    createdAt,
+  }));
+}
+
+function extractAtRecordLocator(payload: Record<string, unknown>): AtRecordLocator | undefined {
+  const collection = _str(payload['_collection']);
+  const rkey = _str(payload['_rkey']);
+  if (!collection || !rkey || !isAtRepoCollection(collection)) {
+    return undefined;
+  }
+  return { collection, rkey };
+}
+
+function extractNativePostRecord(
+  payload: Record<string, unknown>,
+  collection: string | undefined,
+): Record<string, unknown> | undefined {
+  if (!collection) {
+    return undefined;
+  }
+
+  const recordEntries = Object.entries(payload).filter(([key]) => !key.startsWith('_'));
+  if (recordEntries.length === 0) {
+    return undefined;
+  }
+
+  const record = Object.fromEntries(recordEntries);
+  const recordType = _str(record['$type']) ?? collection;
+  if (recordType !== collection) {
+    return undefined;
+  }
+
+  return JSON.parse(JSON.stringify({
+    ...record,
+    $type: recordType,
+  })) as Record<string, unknown>;
+}
+
+function isAtRepoCollection(value: string): value is AtRepoCollection {
+  return value === 'app.bsky.actor.profile'
+    || value === 'app.bsky.feed.post'
+    || value === 'site.standard.document'
+    || value === 'app.bsky.graph.follow'
+    || value === 'app.bsky.feed.like'
+    || value === ACTIVITYPODS_EMOJI_REACTION_COLLECTION
+    || value === 'app.bsky.feed.repost';
+}
+
+function extractNativeRecord(
+  payload: Record<string, unknown>,
+  collection: string | undefined,
+): Record<string, unknown> | undefined {
+  return extractNativePostRecord(payload, collection);
+}
+
+function toCanonicalCustomEmoji(emoji: ActivityPodsEmojiDefinition) {
+  return {
+    shortcode: emoji.shortcode,
+    emojiId: _str(emoji.emojiId) ?? null,
+    iconUrl: _str(emoji.icon?.uri) ?? null,
+    mediaType: _str(emoji.icon?.mediaType) ?? null,
+    updatedAt: _str(emoji.updatedAt) ?? null,
+    alternateName: _str(emoji.alternateName) ?? null,
+    domain: _str(emoji.domain) ?? null,
+  };
+}
+
+function asProfileMediaDraft(
+  value: unknown,
+  expectedRole: 'avatar' | 'banner',
+): BridgeProfileMediaDraft | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const candidate = value as {
+    mediaId?: unknown;
+    role?: unknown;
+    sourceUrl?: unknown;
+    mimeType?: unknown;
+    alt?: unknown;
+    width?: unknown;
+    height?: unknown;
+  };
+
+  if (
+    typeof candidate.mediaId !== 'string' ||
+    candidate.role !== expectedRole ||
+    typeof candidate.sourceUrl !== 'string' ||
+    typeof candidate.mimeType !== 'string'
+  ) {
+    return undefined;
+  }
+
+  return {
+    mediaId: candidate.mediaId,
+    role: expectedRole,
+    sourceUrl: candidate.sourceUrl,
+    mimeType: candidate.mimeType,
+    alt: typeof candidate.alt === 'string' ? candidate.alt : null,
+    width: typeof candidate.width === 'number' && Number.isFinite(candidate.width) ? candidate.width : null,
+    height: typeof candidate.height === 'number' && Number.isFinite(candidate.height) ? candidate.height : null,
+  };
+}
+
+function asBlobRef(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const candidate = value as {
+    $type?: unknown;
+    ref?: {
+      $link?: unknown;
+    };
+    mimeType?: unknown;
+    size?: unknown;
+  };
+  if (!candidate.ref || typeof candidate.ref !== 'object' || Array.isArray(candidate.ref)) {
+    return undefined;
+  }
+  if (typeof candidate.ref.$link !== 'string') {
+    return undefined;
+  }
+  if (candidate.$type != null && candidate.$type !== 'blob') {
+    return undefined;
+  }
+
+  const blobRef: Record<string, unknown> = {
+    ref: {
+      $link: candidate.ref.$link,
+    },
+  };
+  if (candidate.$type === 'blob') {
+    blobRef['$type'] = 'blob';
+  }
+  if (typeof candidate.mimeType === 'string') {
+    blobRef['mimeType'] = candidate.mimeType;
+  }
+  if (typeof candidate.size === 'number' && Number.isFinite(candidate.size)) {
+    blobRef['size'] = candidate.size;
+  }
+  return blobRef;
 }

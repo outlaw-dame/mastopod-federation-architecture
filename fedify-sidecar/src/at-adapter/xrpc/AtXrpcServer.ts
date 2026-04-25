@@ -7,6 +7,7 @@
  * Public endpoints (unauthenticated, per ATProto spec):
  *   GET  /xrpc/com.atproto.sync.getRepo
  *   GET  /xrpc/com.atproto.sync.getLatestCommit
+ *   GET  /xrpc/com.atproto.sync.getBlob
  *   GET  /xrpc/com.atproto.repo.getRecord
  *   GET  /xrpc/com.atproto.repo.listRecords
  *   GET  /xrpc/com.atproto.identity.resolveHandle
@@ -27,33 +28,38 @@
  * Ref: https://atproto.com/specs/xrpc
  */
 
-import { AtRecordReader } from '../repo/AtRecordReader';
-import { AtCarExporter } from '../repo/AtCarExporter';
-import { HandleResolutionReader } from '../identity/HandleResolutionReader';
-import { AtFirehoseSubscriptionManager } from '../firehose/AtFirehoseSubscriptionManager';
-import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry';
-import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository';
-import { SyncGetRepoRoute } from './routes/SyncGetRepoRoute';
-import { SyncGetLatestCommitRoute } from './routes/SyncGetLatestCommitRoute';
-import { RepoGetRecordRoute } from './routes/RepoGetRecordRoute';
-import { RepoListRecordsRoute } from './routes/RepoListRecordsRoute';
-import { IdentityResolveHandleRoute } from './routes/IdentityResolveHandleRoute';
-import { SubscribeReposRoute } from './routes/SubscribeReposRoute';
-import { DefaultRepoRevLookup } from './middleware/AtRepoRevHeader';
-import { mapToXrpcError, XrpcErrors } from './middleware/XrpcErrorMapper';
+import { AtRecordReader } from '../repo/AtRecordReader.js';
+import { AtCarExporter } from '../repo/AtCarExporter.js';
+import type { AtBlobStore } from '../blob/AtBlobStore.js';
+import { HandleResolutionReader } from '../identity/HandleResolutionReader.js';
+import { AtFirehoseSubscriptionManager } from '../firehose/AtFirehoseSubscriptionManager.js';
+import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
+import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
+import { SyncGetRepoRoute } from './routes/SyncGetRepoRoute.js';
+import { SyncGetLatestCommitRoute } from './routes/SyncGetLatestCommitRoute.js';
+import { SyncGetBlobRoute } from './routes/SyncGetBlobRoute.js';
+import { RepoGetRecordRoute } from './routes/RepoGetRecordRoute.js';
+import { RepoListRecordsRoute } from './routes/RepoListRecordsRoute.js';
+import { IdentityResolveHandleRoute } from './routes/IdentityResolveHandleRoute.js';
+import { SubscribeReposRoute } from './routes/SubscribeReposRoute.js';
+import { DefaultRepoRevLookup } from './middleware/AtRepoRevHeader.js';
+import { mapToXrpcError, XrpcErrors } from './middleware/XrpcErrorMapper.js';
 // Phase 7: authenticated write + session routes
 import {
   ServerDescribeServerRoute,
   type ServerDescribeServerConfig,
-} from './routes/ServerDescribeServerRoute';
-import { ServerCreateSessionRoute } from './routes/ServerCreateSessionRoute';
-import { RepoCreateRecordRoute } from './routes/RepoCreateRecordRoute';
-import { RepoPutRecordRoute } from './routes/RepoPutRecordRoute';
-import { RepoDeleteRecordRoute } from './routes/RepoDeleteRecordRoute';
-import { RepoDescribeRepoRoute } from './routes/RepoDescribeRepoRoute';
-import type { AtSessionService, AtAccountResolver, AtPasswordVerifier } from '../auth/AtSessionTypes';
-import type { AtWriteGateway } from '../writes/AtWriteTypes';
-import type { AtSessionContext } from '../auth/AtSessionTypes';
+} from './routes/ServerDescribeServerRoute.js';
+import { ServerCreateSessionRoute } from './routes/ServerCreateSessionRoute.js';
+import { ServerRefreshSessionRoute } from './routes/ServerRefreshSessionRoute.js';
+import { RepoCreateRecordRoute } from './routes/RepoCreateRecordRoute.js';
+import { RepoPutRecordRoute } from './routes/RepoPutRecordRoute.js';
+import { RepoDeleteRecordRoute } from './routes/RepoDeleteRecordRoute.js';
+import { RepoDescribeRepoRoute } from './routes/RepoDescribeRepoRoute.js';
+import type { AtSessionService, AtAccountResolver, AtPasswordVerifier } from '../auth/AtSessionTypes.js';
+import type { AtWriteGateway } from '../writes/AtWriteTypes.js';
+import type { AtSessionContext } from '../auth/AtSessionTypes.js';
+import type { ExternalWriteGateway } from '../external/ExternalWriteGateway.js';
+import type { ExternalReadGateway } from '../external/ExternalReadGateway.js';
 
 // ---------------------------------------------------------------------------
 // Dependency injection interface
@@ -62,6 +68,7 @@ import type { AtSessionContext } from '../auth/AtSessionTypes';
 export interface AtXrpcServerDeps {
   recordReader: AtRecordReader;
   carExporter: AtCarExporter;
+  blobStore?: AtBlobStore;
   handleResolutionReader: HandleResolutionReader;
   firehoseSubscriptions: AtFirehoseSubscriptionManager;
   repoRegistry: AtprotoRepoRegistry;
@@ -73,6 +80,8 @@ export interface AtXrpcServerDeps {
   accountResolver?: AtAccountResolver;
   passwordVerifier?: AtPasswordVerifier;
   writeGateway?: AtWriteGateway;
+  externalWriteGateway?: ExternalWriteGateway;
+  externalReadGateway?: ExternalReadGateway;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +111,7 @@ const SECURITY_HEADERS: Record<string, string> = {
 export class DefaultAtXrpcServer implements AtXrpcServer {
   private readonly getRepoRoute: SyncGetRepoRoute;
   private readonly getLatestCommitRoute: SyncGetLatestCommitRoute;
+  private readonly getBlobRoute: SyncGetBlobRoute | null;
   private readonly getRecordRoute: RepoGetRecordRoute;
   private readonly listRecordsRoute: RepoListRecordsRoute;
   private readonly resolveHandleRoute: IdentityResolveHandleRoute;
@@ -109,6 +119,7 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
   // Phase 7 routes (null when Phase 7 deps not provided)
   private readonly describeServerRoute: ServerDescribeServerRoute | null;
   private readonly createSessionRoute: ServerCreateSessionRoute | null;
+  private readonly refreshSessionRoute: ServerRefreshSessionRoute | null;
   private readonly createRecordRoute: RepoCreateRecordRoute | null;
   private readonly putRecordRoute: RepoPutRecordRoute | null;
   private readonly deleteRecordRoute: RepoDeleteRecordRoute | null;
@@ -120,25 +131,40 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
     this.getRepoRoute = new SyncGetRepoRoute({
       carExporter: deps.carExporter,
       handleResolutionReader: deps.handleResolutionReader,
-      repoRegistry: deps.repoRegistry
+      repoRegistry: deps.repoRegistry,
+      identityRepo: deps.identityRepo,
+      externalReadGateway: deps.externalReadGateway,
     });
 
     this.getLatestCommitRoute = new SyncGetLatestCommitRoute(
       deps.repoRegistry,
       deps.handleResolutionReader,
-      revLookup
+      revLookup,
+      deps.identityRepo,
+      deps.externalReadGateway
     );
+
+    this.getBlobRoute = deps.blobStore
+      ? new SyncGetBlobRoute({
+          blobStore: deps.blobStore,
+          handleResolutionReader: deps.handleResolutionReader,
+        })
+      : null;
 
     this.getRecordRoute = new RepoGetRecordRoute(
       deps.recordReader,
       deps.handleResolutionReader,
-      revLookup
+      revLookup,
+      deps.identityRepo,
+      deps.externalReadGateway
     );
 
     this.listRecordsRoute = new RepoListRecordsRoute(
       deps.recordReader,
       deps.handleResolutionReader,
-      revLookup
+      revLookup,
+      deps.identityRepo,
+      deps.externalReadGateway
     );
 
     this.resolveHandleRoute = new IdentityResolveHandleRoute(
@@ -155,30 +181,44 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
       : null;
 
     this.createSessionRoute =
-      deps.accountResolver && deps.passwordVerifier && deps.sessionService
-        ? new ServerCreateSessionRoute(
-            deps.accountResolver,
-            deps.passwordVerifier,
-            deps.sessionService
-          )
+      deps.sessionService
+        ? new ServerCreateSessionRoute(deps.sessionService)
+        : null;
+
+    this.refreshSessionRoute =
+      deps.sessionService
+        ? new ServerRefreshSessionRoute(deps.sessionService)
         : null;
 
     this.createRecordRoute = deps.writeGateway
-      ? new RepoCreateRecordRoute(deps.writeGateway)
+      ? new RepoCreateRecordRoute(
+          deps.writeGateway,
+          deps.identityRepo,
+          deps.externalWriteGateway
+        )
       : null;
 
     this.putRecordRoute = deps.writeGateway
-      ? new RepoPutRecordRoute(deps.writeGateway)
+      ? new RepoPutRecordRoute(
+          deps.writeGateway,
+          deps.identityRepo,
+          deps.externalWriteGateway
+        )
       : null;
 
     this.deleteRecordRoute = deps.writeGateway
-      ? new RepoDeleteRecordRoute(deps.writeGateway)
+      ? new RepoDeleteRecordRoute(
+          deps.writeGateway,
+          deps.identityRepo,
+          deps.externalWriteGateway
+        )
       : null;
 
     this.describeRepoRoute = new RepoDescribeRepoRoute(
       deps.repoRegistry,
       deps.handleResolutionReader,
       deps.identityRepo,
+      deps.externalReadGateway,
     );
   }
 
@@ -209,33 +249,53 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
       // If exceeded, throw XrpcErrors.rateLimitExceeded()
       
       let result: { headers: Record<string, string>; body: any };
+      const did = query["did"] as string | undefined;
+      const since = query["since"] as string | undefined;
+      const cid = query["cid"] as string | undefined;
+      const repo = query["repo"] as string | undefined;
+      const collection = query["collection"] as string | undefined;
+      const rkey = query["rkey"] as string | undefined;
+      const cursor = query["cursor"] as string | undefined;
+      const reverse = query["reverse"] as string | undefined;
+      const handle = query["handle"] as string | undefined;
+      const limitValue = query["limit"] as string | undefined;
 
       if (method === 'GET' && path === '/xrpc/com.atproto.sync.getRepo') {
-        result = await this.getRepoRoute.handle(query.did, query.since);
+        result = await this.getRepoRoute.handle(did as string, since);
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.sync.getLatestCommit') {
-        result = await this.getLatestCommitRoute.handle(query.did);
+        result = await this.getLatestCommitRoute.handle(did as string);
+
+      } else if (method === 'GET' && path === '/xrpc/com.atproto.sync.getBlob') {
+        if (!this.getBlobRoute) {
+          return {
+            status: 501,
+            headers: { ...SECURITY_HEADERS },
+            body: { error: 'MethodNotImplemented', message: 'Blob reads are not configured' }
+          };
+        }
+        result = await this.getBlobRoute.handle(did as string, cid as string);
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.repo.getRecord') {
         result = await this.getRecordRoute.handle(
-          query.repo,
-          query.collection,
-          query.rkey,
-          query.cid
+          repo as string,
+          collection as string,
+          rkey as string,
+          cid
         );
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.repo.listRecords') {
-        const limit = query.limit ? parseInt(query.limit, 10) : undefined;
+        const limit = limitValue ? parseInt(limitValue, 10) : undefined;
         result = await this.listRecordsRoute.handle(
-          query.repo,
-          query.collection,
+          repo as string,
+          collection as string,
           limit,
-          query.cursor,
-          query.reverse === 'true'
+          cursor,
+          reverse === 'true'
         );
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.identity.resolveHandle') {
-        result = await this.resolveHandleRoute.handle(query.handle);
+        result = await this.resolveHandleRoute.handle(handle as string);
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.server.describeServer') {
         if (!this.describeServerRoute) {
@@ -244,7 +304,7 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
         result = await this.describeServerRoute.handle();
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.repo.describeRepo') {
-        result = await this.describeRepoRoute!.handle(query.repo);
+        result = await this.describeRepoRoute!.handle(repo as string);
 
       } else {
         return {
@@ -343,6 +403,33 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
         };
       }
       const result = await this.createSessionRoute.handle(body);
+      return {
+        status: 200,
+        headers: { ...SECURITY_HEADERS, ...result.headers },
+        body: result.body
+      };
+    } catch (err) {
+      const mapped = mapToXrpcError(err);
+      return {
+        status: mapped.status,
+        headers: { ...SECURITY_HEADERS, 'Content-Type': 'application/json' },
+        body: mapped.body
+      };
+    }
+  }
+
+  async handleRefreshSession(
+    authorizationHeader: string | undefined
+  ): Promise<{ status: number; headers: Record<string, string>; body: any }> {
+    try {
+      if (!this.refreshSessionRoute) {
+        return {
+          status: 501,
+          headers: { ...SECURITY_HEADERS },
+          body: { error: 'MethodNotImplemented', message: 'Session endpoints not configured' }
+        };
+      }
+      const result = await this.refreshSessionRoute.handle(authorizationHeader);
       return {
         status: 200,
         headers: { ...SECURITY_HEADERS, ...result.headers },

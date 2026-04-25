@@ -12,8 +12,8 @@
  * Ref: https://atproto.com/lexicon/com-atproto-identity#comatprotoidentityresolvehandle
  */
 
-import { HandleResolutionReader, isValidHandle } from '../../identity/HandleResolutionReader';
-import { XrpcErrors } from '../middleware/XrpcErrorMapper';
+import { HandleResolutionReader, isValidHandle } from '../../identity/HandleResolutionReader.js';
+import { XrpcErrors } from '../middleware/XrpcErrorMapper.js';
 
 export class IdentityResolveHandleRoute {
   constructor(private readonly handleResolver: HandleResolutionReader) {}

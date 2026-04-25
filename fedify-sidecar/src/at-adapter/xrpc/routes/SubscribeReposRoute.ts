@@ -20,8 +20,8 @@
  * Ref: https://atproto.com/lexicon/com-atproto-sync#comatprotosyncsubscriberepos
  */
 
-import { AtFirehoseSubscriptionManager, FirehoseSubscriber } from '../../firehose/AtFirehoseSubscriptionManager';
-import { XrpcErrors } from '../middleware/XrpcErrorMapper';
+import { AtFirehoseSubscriptionManager, FirehoseSubscriber } from '../../firehose/AtFirehoseSubscriptionManager.js';
+import { XrpcErrors } from '../middleware/XrpcErrorMapper.js';
 
 export class SubscribeReposRoute {
   constructor(private readonly subscriptionManager: AtFirehoseSubscriptionManager) {}

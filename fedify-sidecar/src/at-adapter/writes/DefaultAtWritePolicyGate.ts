@@ -11,8 +11,8 @@
  *      the repo-ownership assertion already in the route handlers.
  *   3. The collection must be in the supported Phase 7 allowlist.
  *   4. putRecord / profile_upsert: always allowed for app.bsky.actor.profile;
- *      post_create is used for both createRecord and putRecord on posts —
- *      reject putRecord on posts if canonical post editing is not enabled.
+ *      post_create is used for both createRecord and putRecord on posts/articles —
+ *      reject putRecord on posts/articles if canonical post editing is not enabled.
  *   5. Deletes: alias must exist and be owned by this canonical account.
  *      Deleting a record that was never projected here returns WriteNotAllowed.
  *
@@ -81,14 +81,14 @@ export class DefaultAtWritePolicyGate implements AtWritePolicyGate {
     // ------------------------------------------------------------------
     // Rule 2: caller must own the target repo
     // ------------------------------------------------------------------
-    const atRepo = (mutation.payload._atRepo as string | undefined)?.trim().toLowerCase();
+    const atRepo = (mutation.payload["_atRepo"] as string | undefined)?.trim().toLowerCase();
     if (atRepo) {
       const ownsDid    = binding.atprotoDid?.toLowerCase()    === atRepo;
       const ownsHandle = binding.atprotoHandle?.toLowerCase() === atRepo;
       if (!ownsDid && !ownsHandle) {
         return reject(
           'Forbidden',
-          `Cannot write to repo ${mutation.payload._atRepo}: not the authenticated account`
+          `Cannot write to repo ${mutation.payload["_atRepo"]}: not the authenticated account`
         );
       }
     }
@@ -96,7 +96,7 @@ export class DefaultAtWritePolicyGate implements AtWritePolicyGate {
     // ------------------------------------------------------------------
     // Rule 3: collection must be in the allowlist
     // ------------------------------------------------------------------
-    const collection = mutation.payload._collection as string | undefined;
+    const collection = mutation.payload["_collection"] as string | undefined;
     if (collection && !ALLOWED.has(collection)) {
       return reject('UnsupportedCollection', `Collection not supported: ${collection}`);
     }
@@ -109,14 +109,15 @@ export class DefaultAtWritePolicyGate implements AtWritePolicyGate {
       return ACCEPT;
     }
 
-    if (mutation.mutationType === 'post_create' && collection === 'app.bsky.feed.post') {
-      // For explicit PUT on posts (an rkey is provided): check editing policy
-      const hasExplicitRkey = typeof mutation.payload._rkey === 'string';
-      if (hasExplicitRkey && !this.allowPostEditing) {
-        // Canonical post editing not enabled; reject putRecord on posts
+    if (
+      mutation.mutationType === 'post_create' &&
+      (collection === 'app.bsky.feed.post' || collection === 'site.standard.document')
+    ) {
+      const operation = _normalizedOperation(mutation.payload);
+      if (operation === 'update' && !this.allowPostEditing) {
         return reject(
           'WriteNotAllowed',
-          'Post editing is not supported; use createRecord without an explicit rkey'
+          'Post editing is not supported on the canonical write path.'
         );
       }
       return ACCEPT;
@@ -129,8 +130,8 @@ export class DefaultAtWritePolicyGate implements AtWritePolicyGate {
       if (!binding.atprotoDid) {
         return reject('Forbidden', 'Account has no ATProto DID — cannot delete');
       }
-      const rkey       = mutation.payload._rkey       as string | undefined;
-      const targetRepo = mutation.payload._atRepo      as string | undefined;
+      const rkey = mutation.payload["_rkey"] as string | undefined;
+      const targetRepo = mutation.payload["_atRepo"] as string | undefined;
 
       if (!rkey || !collection || !targetRepo) {
         return reject('WriteNotAllowed', 'Delete requires _atRepo, _collection, _rkey in payload');
@@ -184,6 +185,20 @@ function _isDeleteMutation(t: CanonicalMutationEnvelope['mutationType']): boolea
     t === 'post_delete'   ||
     t === 'follow_delete' ||
     t === 'like_delete'   ||
+    t === 'emoji_reaction_delete' ||
     t === 'repost_delete'
   );
+}
+
+function _normalizedOperation(payload: Record<string, unknown>): 'create' | 'update' | 'delete' | 'unknown' {
+  const operation = payload["_operation"];
+  if (operation === 'create' || operation === 'update' || operation === 'delete') {
+    return operation;
+  }
+
+  if (typeof payload["_rkey"] === 'string') {
+    return 'update';
+  }
+
+  return 'unknown';
 }

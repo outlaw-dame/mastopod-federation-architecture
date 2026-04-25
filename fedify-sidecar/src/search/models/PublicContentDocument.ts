@@ -36,6 +36,7 @@ export interface PublicContentDocument {
   updatedAt?: string;
   langs?: string[];
   tags?: string[];
+  emojis?: string[];
 
   replyToStableId?: string;
   quoteOfStableId?: string;
@@ -57,6 +58,10 @@ export interface PublicContentDocument {
   };
 
   embedding?: number[];               // semantic vector
+  sparseEmbedding?: {
+    indices: number[];
+    values: number[];
+  };
   embeddingStatus?: 'pending' | 'complete' | 'failed';
   embeddingUpdatedAt?: string;
 

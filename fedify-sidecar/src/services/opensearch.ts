@@ -10,6 +10,12 @@ import { logger } from "../utils/logger.js";
 import { config } from "../config/index.js";
 import { metrics } from "../metrics/index.js";
 import type { StreamActivity } from "../streams/index.js";
+import {
+  extractHashtagsFromActivityPubTags,
+  extractHashtagsFromText,
+  normalizeHashtag,
+} from "../utils/hashtags.js";
+import { extractApEmojiReactionContent } from "../utils/apEmojiReactions.js";
 
 // Index mapping for activities
 const ACTIVITY_INDEX_MAPPING = {
@@ -34,6 +40,7 @@ const ACTIVITY_INDEX_MAPPING = {
       // Extracted fields for common queries
       in_reply_to: { type: "keyword" },
       hashtags: { type: "keyword" },
+      reaction_content: { type: "keyword" },
       mentions: { type: "keyword" },
       attachments: {
         type: "nested",
@@ -69,6 +76,7 @@ export interface ActivityDocument {
   raw: unknown;
   in_reply_to?: string;
   hashtags?: string[];
+  reaction_content?: string;
   mentions?: string[];
   attachments?: Array<{
     type: string;
@@ -121,6 +129,15 @@ export class OpenSearchService {
         await this.client.indices.create({
           index: this.indexName,
           body: ACTIVITY_INDEX_MAPPING,
+        });
+      } else {
+        await this.client.indices.putMapping({
+          index: this.indexName,
+          body: {
+            properties: {
+              reaction_content: { type: "keyword" },
+            },
+          },
         });
       }
 
@@ -187,8 +204,13 @@ export class OpenSearchService {
       const duration = Date.now() - startTime;
       metrics.opensearchIndexLatency.observe(duration / 1000);
 
-      if (response.body.errors) {
-        const errorCount = response.body.items.filter(
+      const bulkBody = response.body as {
+        errors?: boolean;
+        items?: Array<{ index?: { error?: unknown } }>;
+      };
+
+      if (bulkBody.errors) {
+        const errorCount = (bulkBody.items ?? []).filter(
           (item: any) => item.index?.error
         ).length;
         
@@ -220,7 +242,11 @@ export class OpenSearchService {
    */
   private mapActivityToDocument(activity: StreamActivity): ActivityDocument {
     const raw = activity.raw as Record<string, unknown>;
-    const object = raw.object as Record<string, unknown> | undefined;
+    const rawObject = raw["object"];
+    const object =
+      rawObject && typeof rawObject === "object" && !Array.isArray(rawObject)
+        ? (rawObject as Record<string, unknown>)
+        : undefined;
 
     // Extract object details
     let objectId: string | undefined;
@@ -229,16 +255,23 @@ export class OpenSearchService {
     let inReplyTo: string | undefined;
 
     if (object) {
-      objectId = (object.id ?? object["@id"]) as string | undefined;
-      objectType = (object.type ?? object["@type"]) as string | undefined;
-      objectContent = object.content as string | undefined;
-      inReplyTo = object.inReplyTo as string | undefined;
-    } else if (typeof raw.object === "string") {
-      objectId = raw.object;
+      objectId = (object["id"] ?? object["@id"]) as string | undefined;
+      objectType = (object["type"] ?? object["@type"]) as string | undefined;
+      objectContent = object["content"] as string | undefined;
+      inReplyTo = object["inReplyTo"] as string | undefined;
+    } else if (typeof rawObject === "string") {
+      objectId = rawObject;
     }
 
     // Extract hashtags
     const hashtags = this.extractHashtags(object);
+
+    // Extract AP EmojiReact / Like+content reaction token
+    const reactionContent = extractApEmojiReactionContent(raw);
+
+    if (!objectContent && reactionContent) {
+      objectContent = reactionContent;
+    }
 
     // Extract mentions
     const mentions = this.extractMentions(object);
@@ -262,6 +295,7 @@ export class OpenSearchService {
       raw: activity.raw,
       in_reply_to: inReplyTo,
       hashtags,
+      reaction_content: reactionContent,
       mentions,
       attachments,
     };
@@ -271,26 +305,25 @@ export class OpenSearchService {
    * Extract hashtags from object
    */
   private extractHashtags(object?: Record<string, unknown>): string[] {
-    if (!object?.tag) {
-      return [];
-    }
+    const fromTags = extractHashtagsFromActivityPubTags(object?.["tag"]);
+    const fromContent =
+      typeof object?.["content"] === "string"
+        ? extractHashtagsFromText(object["content"])
+        : [];
 
-    const tags = Array.isArray(object.tag) ? object.tag : [object.tag];
-    
-    return tags
-      .filter((tag: any) => tag.type === "Hashtag" && tag.name)
-      .map((tag: any) => tag.name.replace(/^#/, "").toLowerCase());
+    return Array.from(new Set([...fromTags, ...fromContent]));
   }
 
   /**
    * Extract mentions from object
    */
   private extractMentions(object?: Record<string, unknown>): string[] {
-    if (!object?.tag) {
+    const tagValue = object?.["tag"];
+    if (!tagValue) {
       return [];
     }
 
-    const tags = Array.isArray(object.tag) ? object.tag : [object.tag];
+    const tags = Array.isArray(tagValue) ? tagValue : [tagValue];
     
     return tags
       .filter((tag: any) => tag.type === "Mention" && tag.href)
@@ -303,13 +336,14 @@ export class OpenSearchService {
   private extractAttachments(
     object?: Record<string, unknown>
   ): ActivityDocument["attachments"] {
-    if (!object?.attachment) {
+    const attachmentValue = object?.["attachment"];
+    if (!attachmentValue) {
       return [];
     }
 
-    const attachments = Array.isArray(object.attachment)
-      ? object.attachment
-      : [object.attachment];
+    const attachments = Array.isArray(attachmentValue)
+      ? attachmentValue
+      : [attachmentValue];
 
     return attachments
       .filter((att: any) => att.url)
@@ -329,6 +363,7 @@ export class OpenSearchService {
     actor?: string;
     actorDomain?: string;
     hashtag?: string;
+    reaction?: string;
     from?: string;
     to?: string;
     limit?: number;
@@ -355,7 +390,19 @@ export class OpenSearchService {
     }
 
     if (query.hashtag) {
-      must.push({ term: { hashtags: query.hashtag.toLowerCase() } });
+      const normalizedHashtag = normalizeHashtag(query.hashtag, {
+        allowMissingHash: true,
+      });
+      if (normalizedHashtag) {
+        must.push({ term: { hashtags: normalizedHashtag } });
+      }
+    }
+
+    if (query.reaction) {
+      const reaction = extractApEmojiReactionContent({ type: 'Like', content: query.reaction });
+      if (reaction) {
+        must.push({ term: { reaction_content: reaction } });
+      }
     }
 
     if (query.from || query.to) {
@@ -379,9 +426,18 @@ export class OpenSearchService {
       },
     });
 
+    const searchBody = response.body as {
+      hits?: {
+        total?: { value?: number };
+        hits?: Array<{ _source?: ActivityDocument }>;
+      };
+    };
+
     return {
-      total: response.body.hits.total.value,
-      activities: response.body.hits.hits.map((hit: any) => hit._source),
+      total: searchBody.hits?.total?.value ?? 0,
+      activities: (searchBody.hits?.hits ?? [])
+        .map((hit) => hit._source)
+        .filter((hit): hit is ActivityDocument => hit !== undefined),
     };
   }
 
@@ -395,7 +451,8 @@ export class OpenSearchService {
         id,
       });
 
-      return response.body._source;
+      const body = response.body as { _source?: ActivityDocument };
+      return body._source ?? null;
     } catch (error: any) {
       if (error.meta?.statusCode === 404) {
         return null;

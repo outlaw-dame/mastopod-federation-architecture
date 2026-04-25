@@ -96,7 +96,7 @@ export class BlockedDomainPolicy implements MrfPolicy {
   name = 'blocked-domain';
   enabled = true;
   priority = 100;
-  direction = 'both';
+  direction: MrfPolicy['direction'] = 'both';
 
   private blockedDomains: Set<string>;
 
@@ -269,6 +269,7 @@ export class V6MrfRuntime {
   private producer: Producer;
   private config: MrfRuntimeConfig;
   private policies: MrfPolicy[] = [];
+  private isConnected = false;
 
   constructor(config: MrfRuntimeConfig) {
     this.config = config;
@@ -285,6 +286,7 @@ export class V6MrfRuntime {
    */
   async connect(): Promise<void> {
     await this.producer.connect();
+    this.isConnected = true;
     logger.info('V6 MRF runtime connected to Kafka');
   }
 
@@ -293,6 +295,7 @@ export class V6MrfRuntime {
    */
   async disconnect(): Promise<void> {
     await this.producer.disconnect();
+    this.isConnected = false;
     logger.info('V6 MRF runtime disconnected from Kafka');
   }
 
@@ -442,13 +445,10 @@ export class V6MrfRuntime {
    * Get health status
    */
   async health(): Promise<{ status: string; connected: boolean }> {
-    try {
-      await this.producer.admin().connect();
-      await this.producer.admin().disconnect();
-      return { status: 'healthy', connected: true };
-    } catch (err) {
-      return { status: 'unhealthy', connected: false };
-    }
+    return {
+      status: this.isConnected ? 'healthy' : 'unhealthy',
+      connected: this.isConnected,
+    };
   }
 }
 
@@ -456,27 +456,27 @@ export class V6MrfRuntime {
  * Create default MRF runtime configuration
  */
 export function createDefaultMrfConfig(): MrfRuntimeConfig {
-  const blockedDomains = (process.env.MRF_BLOCKED_DOMAINS || '')
+  const blockedDomains = (process.env["MRF_BLOCKED_DOMAINS"] || '')
     .split(',')
     .filter(Boolean);
 
   const policies: MrfPolicy[] = [];
 
   // Add enabled policies
-  if (process.env.MRF_POLICY_SIGNATURE_VALIDATION !== 'false') {
+  if (process.env["MRF_POLICY_SIGNATURE_VALIDATION"] !== 'false') {
     policies.push(new SignatureValidationPolicy());
   }
 
-  if (process.env.MRF_POLICY_BLOCKED_DOMAIN !== 'false') {
+  if (process.env["MRF_POLICY_BLOCKED_DOMAIN"] !== 'false') {
     policies.push(new BlockedDomainPolicy(blockedDomains));
   }
 
-  if (process.env.MRF_POLICY_SUSPICIOUS_ACTIVITY !== 'false') {
+  if (process.env["MRF_POLICY_SUSPICIOUS_ACTIVITY"] !== 'false') {
     policies.push(new SuspiciousActivityPolicy());
   }
 
-  if (process.env.MRF_POLICY_CONTENT_FILTER !== 'false') {
-    const patterns = (process.env.MRF_CONTENT_FILTER_PATTERNS || '')
+  if (process.env["MRF_POLICY_CONTENT_FILTER"] !== 'false') {
+    const patterns = (process.env["MRF_CONTENT_FILTER_PATTERNS"] || '')
       .split(',')
       .filter(Boolean);
     const contentFilter = new ContentFilterPolicy(patterns);
@@ -486,14 +486,14 @@ export function createDefaultMrfConfig(): MrfRuntimeConfig {
     policies.push(contentFilter);
   }
 
-  if (process.env.MRF_POLICY_RATE_LIMITING !== 'false') {
+  if (process.env["MRF_POLICY_RATE_LIMITING"] !== 'false') {
     policies.push(new RateLimitingPolicy());
   }
 
   return {
-    brokers: (process.env.REDPANDA_BROKERS || 'localhost:9092').split(','),
-    clientId: process.env.REDPANDA_CLIENT_ID || 'fedify-mrf-v6',
-    rejectionTopic: process.env.MRF_REJECTION_TOPIC || 'ap.mrf.rejected.v1',
+    brokers: (process.env["REDPANDA_BROKERS"] || 'localhost:9092').split(','),
+    clientId: process.env["REDPANDA_CLIENT_ID"] || 'fedify-mrf-v6',
+    rejectionTopic: process.env["MRF_REJECTION_TOPIC"] || 'ap.mrf.rejected.v1',
     policies,
   };
 }

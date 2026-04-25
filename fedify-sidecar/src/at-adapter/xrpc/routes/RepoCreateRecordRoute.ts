@@ -21,17 +21,24 @@
 
 import { XrpcErrors } from '../middleware/XrpcErrorMapper.js';
 import { SUPPORTED_COLLECTIONS } from '../../writes/AtWriteTypes.js';
+import type { IdentityBindingRepository } from '../../../core-domain/identity/IdentityBindingRepository.js';
 import type {
   AtCreateRecordInput,
   AtWriteGateway,
 } from '../../writes/AtWriteTypes.js';
 import type { AtSessionContext } from '../../auth/AtSessionTypes.js';
+import type { ExternalWriteGateway } from '../../external/ExternalWriteGateway.js';
+import { isExternalAtprotoBinding } from '../../external/ExternalAccountMode.js';
 
 /** Projection result timeout: 5 s is aggressive but safe for most setups. */
 const WRITE_RESULT_TIMEOUT_MS = 5_000;
 
 export class RepoCreateRecordRoute {
-  constructor(private readonly writeGateway: AtWriteGateway) {}
+  constructor(
+    private readonly writeGateway: AtWriteGateway,
+    private readonly identityRepo?: IdentityBindingRepository,
+    private readonly externalWriteGateway?: ExternalWriteGateway
+  ) {}
 
   async handle(
     body: Record<string, unknown> | undefined,
@@ -42,6 +49,22 @@ export class RepoCreateRecordRoute {
 
     // 2. Enforce repo ownership: caller may only write to their own repo
     this._assertRepoOwnership(input.repo, auth);
+
+    const binding = this.identityRepo
+      ? await this.identityRepo.getByCanonicalAccountId(auth.canonicalAccountId)
+      : null;
+
+    if (isExternalAtprotoBinding(binding)) {
+      if (!this.externalWriteGateway || !auth.tokenId) {
+        throw XrpcErrors.authRequired('External AT session is not available');
+      }
+
+      const result = await this.externalWriteGateway.createRecord(auth.tokenId, input);
+      return {
+        headers: { 'Content-Type': 'application/json' },
+        body: result,
+      };
+    }
 
     // 3. Delegate to write gateway (normalize → Tier 1 → await projection)
     const result = await this.writeGateway.createRecord(input, auth);

@@ -8,7 +8,10 @@
  * Environment variables:
  *   MEMORY_WEBHOOK_URL     — e.g. http://api:8794/at/webhook/ingress
  *   FIREHOSE_BRIDGE_SECRET — shared HMAC secret
- *   USE_REAL_FIREHOSE      — 'true' to connect to relay.bsky.network
+ *   FIREHOSE_MODE          — 'mock' | 'relay' | 'jetstream' (default: mock)
+ *   USE_REAL_FIREHOSE      — legacy flag; true maps to FIREHOSE_MODE=relay
+ *   JETSTREAM_URL          — optional Jetstream subscribe URL
+ *   JETSTREAM_MAX_EVENTS   — optional integer; exits after N forwarded events
  *
  * Usage (via docker-compose):
  *   docker compose -f docker-compose.local.yml up --build
@@ -34,19 +37,69 @@ import type { EventPublisher } from '../../core-domain/events/CoreIdentityEvents
 // Configuration from environment
 // ---------------------------------------------------------------------------
 
-const WEBHOOK_URL = process.env.MEMORY_WEBHOOK_URL || 'http://localhost:8794/at/webhook/ingress';
-const SECRET = process.env.FIREHOSE_BRIDGE_SECRET || 'local-bridge-secret-123';
-const USE_REAL_FIREHOSE = process.env.USE_REAL_FIREHOSE === 'true';
+const WEBHOOK_URL = process.env["MEMORY_WEBHOOK_URL"] || 'http://localhost:8794/at/webhook/ingress';
+const SECRET = process.env["FIREHOSE_BRIDGE_SECRET"] || 'local-bridge-secret-123';
+const USE_REAL_FIREHOSE = process.env["USE_REAL_FIREHOSE"] === 'true';
+const FIREHOSE_MODE = normalizeFirehoseMode(process.env["FIREHOSE_MODE"], USE_REAL_FIREHOSE);
 const MOCK_WS_PORT = 8999;
 const MOCK_FIREHOSE_URL = `ws://localhost:${MOCK_WS_PORT}`;
 const REAL_FIREHOSE_URL = 'wss://relay.bsky.network';
+const JETSTREAM_URL =
+  process.env["JETSTREAM_URL"] ||
+  'wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post';
+const JETSTREAM_MAX_EVENTS = parsePositiveInt(process.env["JETSTREAM_MAX_EVENTS"]);
+
+type FirehoseMode = 'mock' | 'relay' | 'jetstream';
 
 console.log('====================================================');
 console.log('  V6.5 Phase 5.5: AT Ingress Pipeline (Docker Mode) ');
 console.log('====================================================');
 console.log(`  Webhook URL:    ${WEBHOOK_URL}`);
-console.log(`  Firehose mode:  ${USE_REAL_FIREHOSE ? 'REAL (relay.bsky.network)' : 'MOCK (local)'}`);
+console.log(`  Firehose mode:  ${describeMode(FIREHOSE_MODE)}`);
+if (FIREHOSE_MODE === 'jetstream') {
+  console.log(`  Jetstream URL:  ${JETSTREAM_URL}`);
+  if (JETSTREAM_MAX_EVENTS) {
+    console.log(`  Max events:     ${JETSTREAM_MAX_EVENTS}`);
+  }
+}
 console.log('====================================================\n');
+
+function normalizeFirehoseMode(modeRaw: string | undefined, useRealFirehose: boolean): FirehoseMode {
+  const normalized = modeRaw?.trim().toLowerCase();
+  if (normalized === 'mock' || normalized === 'relay' || normalized === 'jetstream') {
+    return normalized;
+  }
+
+  // Backward compatibility with existing local scripts.
+  if (useRealFirehose) {
+    return 'relay';
+  }
+  return 'mock';
+}
+
+function describeMode(mode: FirehoseMode): string {
+  switch (mode) {
+    case 'mock':
+      return 'MOCK (local)';
+    case 'relay':
+      return 'REAL (relay.bsky.network)';
+    case 'jetstream':
+      return 'JETSTREAM (JSON stream)';
+    default:
+      return mode;
+  }
+}
+
+function parsePositiveInt(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Mock AT Firehose (only used when USE_REAL_FIREHOSE=false)
@@ -119,6 +172,111 @@ async function waitForApi(url: string, maxAttempts = 30): Promise<void> {
   console.warn('[Harness] ⚠️  Memory API did not respond in time. Continuing anyway...');
 }
 
+async function createForwarder() {
+  const forwarder = new AtIngressWebhookForwarder();
+  forwarder.registerEndpoint({
+    id: 'memory-api',
+    url: WEBHOOK_URL,
+    secret: SECRET,
+  });
+  return forwarder;
+}
+
+function toCommitOperation(value: unknown): 'create' | 'update' | 'delete' {
+  if (value === 'create' || value === 'update' || value === 'delete') {
+    return value;
+  }
+  return 'create';
+}
+
+async function startJetstreamPipeline(): Promise<void> {
+  const forwarder = await createForwarder();
+  let forwarded = 0;
+
+  console.log(`[Jetstream Pipeline] Connecting to ${JETSTREAM_URL}...`);
+
+  const ws = new WebSocket(JETSTREAM_URL, {
+    maxPayload: 5 * 1024 * 1024,
+  });
+
+  ws.on('open', () => {
+    console.log('[Jetstream Pipeline] ✅ Connected. Waiting for events...');
+  });
+
+  ws.on('message', async (data, isBinary) => {
+    if (isBinary) {
+      return;
+    }
+
+    try {
+      const text = typeof data === 'string' ? data : data.toString('utf8');
+      const payload = JSON.parse(text) as any;
+
+      if (payload?.kind !== 'commit' || !payload?.commit) {
+        return;
+      }
+
+      const commit = payload.commit;
+      const did = typeof payload.did === 'string' ? payload.did : null;
+      if (!did) {
+        return;
+      }
+
+      const operation = toCommitOperation(commit.operation);
+      const collection = typeof commit.collection === 'string' ? commit.collection : undefined;
+      const rkey = typeof commit.rkey === 'string' ? commit.rkey : undefined;
+
+      if (!collection || !rkey) {
+        return;
+      }
+
+      const ingressEvent = {
+        seq: Number.isFinite(payload.time_us) ? Number(payload.time_us) : Date.now() * 1000,
+        did,
+        eventType: '#commit' as const,
+        verifiedAt: new Date().toISOString(),
+        source: JETSTREAM_URL,
+        commit: {
+          rev: typeof commit.rev === 'string' ? commit.rev : `jetstream-${Date.now()}`,
+          operation,
+          collection,
+          rkey,
+          cid: typeof commit.cid === 'string' ? commit.cid : null,
+          record: commit.record && typeof commit.record === 'object' ? commit.record : null,
+          signatureValid: true as const,
+        },
+      };
+
+      const results = await forwarder.forwardBatch([ingressEvent as any]);
+      const success = results.filter(r => r.success).length;
+      const failed = results.filter(r => !r.success).length;
+      forwarded += success;
+
+      if (success > 0) {
+        console.log(
+          `[Jetstream Pipeline] 📨 Forwarded ${collection}/${operation} from ${did} (${success} ok, ${failed} failed)`,
+        );
+      }
+
+      if (JETSTREAM_MAX_EVENTS && forwarded >= JETSTREAM_MAX_EVENTS) {
+        console.log(`[Jetstream Pipeline] Reached JETSTREAM_MAX_EVENTS=${JETSTREAM_MAX_EVENTS}. Exiting.`);
+        ws.close(1000, 'max events reached');
+        process.exit(0);
+      }
+    } catch (err) {
+      console.error('[Jetstream Pipeline] Failed to process message:', err);
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    console.log(`[Jetstream Pipeline] Connection closed: ${code} ${reason.toString()}`);
+  });
+
+  ws.on('error', (err) => {
+    console.error('[Jetstream Pipeline] Connection error:', err);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Ingress Pipeline
 // ---------------------------------------------------------------------------
@@ -127,12 +285,7 @@ async function startIngressPipeline(firehoseUrl: string): Promise<void> {
   console.log('[Ingress Pipeline] Booting...');
 
   // Webhook forwarder → Memory API
-  const forwarder = new AtIngressWebhookForwarder();
-  forwarder.registerEndpoint({
-    id: 'memory-api',
-    url: WEBHOOK_URL,
-    secret: SECRET,
-  });
+  const forwarder = await createForwarder();
 
   // Mock commit verifier (Phase 5.5 boundary — real verification in Phase 6)
   const mockCommitVerifier = {
@@ -233,7 +386,19 @@ async function startIngressPipeline(firehoseUrl: string): Promise<void> {
 async function main(): Promise<void> {
   let firehoseUrl: string;
 
-  if (USE_REAL_FIREHOSE) {
+  // Wait for the Memory API to be ready before starting
+  await waitForApi(WEBHOOK_URL);
+
+  // Give a brief moment for everything to settle
+  await new Promise(r => setTimeout(r, 1000));
+
+  if (FIREHOSE_MODE === 'jetstream') {
+    console.log('[Harness] Using Jetstream JSON stream');
+    await startJetstreamPipeline();
+    return;
+  }
+
+  if (FIREHOSE_MODE === 'relay') {
     firehoseUrl = REAL_FIREHOSE_URL;
     console.log('[Harness] Using REAL AT Firehose (relay.bsky.network)');
   } else {
@@ -241,12 +406,6 @@ async function main(): Promise<void> {
     firehoseUrl = MOCK_FIREHOSE_URL;
     console.log('[Harness] Using MOCK firehose');
   }
-
-  // Wait for the Memory API to be ready before starting
-  await waitForApi(WEBHOOK_URL);
-
-  // Give a brief moment for everything to settle
-  await new Promise(r => setTimeout(r, 1000));
 
   await startIngressPipeline(firehoseUrl);
 

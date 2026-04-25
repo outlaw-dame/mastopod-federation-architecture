@@ -4,13 +4,14 @@
  * Acceptance Tests
  */
 
-import { DefaultSearchDedupService } from '../aliases/SearchDedupService';
-import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter';
-import { InMemoryOpenSearchClient } from '../writer/OpenSearchClient';
-import { InMemorySearchDocAliasCache } from '../writer/SearchDocAliasCache';
-import { SearchPublicUpsertV1 } from '../events/SearchEvents';
-import { EmbeddingIngestWorker, MockEmbeddingService } from '../embeddings/EmbeddingIngestWorker';
-import { HybridQueryBuilder } from '../queries/HybridQueryBuilder';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { DefaultSearchDedupService } from '../aliases/SearchDedupService.js';
+import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter.js';
+import { InMemoryOpenSearchClient } from '../writer/OpenSearchClient.js';
+import { InMemorySearchDocAliasCache } from '../writer/SearchDocAliasCache.js';
+import { SearchPublicUpsertV1 } from '../events/SearchEvents.js';
+import { EmbeddingIngestWorker, MockEmbeddingService } from '../embeddings/EmbeddingIngestWorker.js';
+import { HybridQueryBuilder } from '../queries/HybridQueryBuilder.js';
 
 describe('Phase 5.5 Acceptance Tests', () => {
   let osClient: InMemoryOpenSearchClient;

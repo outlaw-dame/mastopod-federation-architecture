@@ -107,8 +107,8 @@ export function createHttpAtPasswordVerifier(
   overrides?: Partial<HttpAtPasswordVerifierConfig>
 ): HttpAtPasswordVerifier {
   return new HttpAtPasswordVerifier({
-    baseUrl:   process.env.ACTIVITYPODS_URL   ?? 'http://localhost:3000',
-    token:     process.env.ACTIVITYPODS_TOKEN ?? '',
+    baseUrl:   process.env["ACTIVITYPODS_URL"]   ?? 'http://localhost:3000',
+    token:     process.env["ACTIVITYPODS_TOKEN"] ?? '',
     timeoutMs: 10_000,
     ...overrides,
   });

@@ -1,5 +1,5 @@
-import { IdentityBinding } from '../../../core-domain/identity/IdentityBinding';
-import { CanonicalProfile } from '../AtProjectionPolicy';
+import type { IdentityBinding } from '../../../core-domain/identity/IdentityBinding.js';
+import type { CanonicalProfile } from '../AtProjectionPolicy.js';
 
 export interface AppBskyActorProfileRecord {
   $type: 'app.bsky.actor.profile';
@@ -35,12 +35,16 @@ export class DefaultProfileRecordSerializer implements ProfileRecordSerializer {
     if (profile.displayName) record.displayName = profile.displayName;
     if (profile.summaryPlaintext) record.description = profile.summaryPlaintext;
 
-    if (profile.avatarMediaId) {
+    if (profile.avatarBlobRef) {
+      record.avatar = profile.avatarBlobRef;
+    } else if (profile.avatarMediaId) {
       const avatar = await mediaResolver.resolveAvatarBlob(profile.avatarMediaId);
       if (avatar) record.avatar = avatar;
     }
 
-    if (profile.bannerMediaId) {
+    if (profile.bannerBlobRef) {
+      record.banner = profile.bannerBlobRef;
+    } else if (profile.bannerMediaId) {
       const banner = await mediaResolver.resolveBannerBlob(profile.bannerMediaId);
       if (banner) record.banner = banner;
     }
