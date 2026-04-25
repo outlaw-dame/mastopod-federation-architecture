@@ -1,4 +1,5 @@
 import { request } from "undici";
+import { isSecureOrTrustedInternalUrl } from "../utils/internalAuthority.js";
 import { sanitizeJsonObject } from "../utils/safe-json.js";
 import { DefaultRetryClassifier, withRetry } from "../protocol-bridge/workers/Retry.js";
 import type { RetryPolicy } from "../protocol-bridge/ports/ProtocolBridgePorts.js";
@@ -194,10 +195,10 @@ function buildEndpointUrl(baseUrl: string, endpointPath: string): string {
     throw new Error(`Invalid ActivityPods URL: ${baseUrl}`);
   }
 
-  const localhostHosts = new Set(["localhost", "127.0.0.1", "::1"]);
-  const isLocalhost = localhostHosts.has(parsed.hostname);
-  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLocalhost)) {
-    throw new Error("ActivityPods internal streaming authority must use https unless the destination is localhost");
+  if (!isSecureOrTrustedInternalUrl(parsed)) {
+    throw new Error(
+      "ActivityPods internal streaming authority must use https unless the destination is a trusted internal host",
+    );
   }
 
   return new URL(endpointPath, parsed).toString();

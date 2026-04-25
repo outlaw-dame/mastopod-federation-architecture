@@ -1,12 +1,11 @@
 import { request } from "undici";
 import { z } from "zod";
+import { isSecureOrTrustedInternalUrl } from "../../utils/internalAuthority.js";
 import { sanitizeJsonObject } from "../../utils/safe-json.js";
 import type { ActivityPubProjectionCommand } from "../ports/ProtocolBridgePorts.js";
 import type { ActivityPubBridgeOutboundDelivery } from "../events/ActivityPubBridgeEvents.js";
 import { ProtocolBridgeAdapterError } from "../adapters/ProtocolBridgeAdapterError.js";
 import { DefaultRetryClassifier, withRetry } from "../workers/Retry.js";
-
-const localhostHostnames = new Set(["localhost", "127.0.0.1", "::1"]);
 
 const responseSchema = z.object({
   actorUri: z.string().url(),
@@ -163,13 +162,10 @@ function buildEndpointUrl(baseUrl: string, endpointPath: string): string {
     );
   }
 
-  if (
-    parsed.protocol !== "https:" &&
-    !(parsed.protocol === "http:" && localhostHostnames.has(parsed.hostname))
-  ) {
+  if (!isSecureOrTrustedInternalUrl(parsed)) {
     throw new ProtocolBridgeAdapterError(
       "AP_BRIDGE_OUTBOUND_URL_INSECURE",
-      "ActivityPub bridge outbound resolution requires https unless the destination is localhost.",
+      "ActivityPub bridge outbound resolution requires https unless the destination is a trusted internal host.",
     );
   }
 
