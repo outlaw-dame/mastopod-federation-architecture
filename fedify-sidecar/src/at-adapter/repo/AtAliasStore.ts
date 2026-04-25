@@ -8,6 +8,8 @@
  * - Resolving references for replies/quotes
  */
 
+import type { ActivityPodsEmojiDefinition } from "../lexicon/ActivityPodsEmojiLexicon.js";
+
 /**
  * AT Alias Record
  *
@@ -22,7 +24,8 @@ export interface AtAliasRecord {
   /**
    * Type of canonical entity
    */
-  canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost';
+  canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction';
+  
   
   /**
    * Repository DID
@@ -38,7 +41,8 @@ export interface AtAliasRecord {
     | 'site.standard.document'
     | 'app.bsky.graph.follow'
     | 'app.bsky.feed.like'
-    | 'app.bsky.feed.repost';
+    | 'app.bsky.feed.repost'
+    | 'org.activitypods.emojiReaction';
   
   /**
    * Record key
@@ -89,6 +93,16 @@ export interface AtAliasRecord {
    * Subject CID (for likes/reposts)
    */
   subjectCid?: string | null;
+
+  /**
+   * Emoji reaction content for custom reaction delete parity.
+   */
+  reactionContent?: string | null;
+
+  /**
+   * Emoji metadata for custom reaction delete parity.
+   */
+  reactionEmoji?: ActivityPodsEmojiDefinition | null;
 
   /**
    * Canonical public URL for AP/article projection parity

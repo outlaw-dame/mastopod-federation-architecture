@@ -21,18 +21,21 @@ const pinoOptions: LoggerOptions = {
 };
 
 // Use pretty printing in development
-const transport = format === "pretty"
-  ? pino.transport({
-      target: "pino-pretty",
-      options: {
-        colorize: true,
-        translateTime: "SYS:standard",
-        ignore: "pid,hostname",
-      },
-    })
-  : undefined;
-
-export const logger = pino(pinoOptions, transport);
+export const logger = pino(
+  format === "pretty"
+    ? {
+        ...pinoOptions,
+        transport: {
+          target: "pino-pretty",
+          options: {
+            colorize: true,
+            translateTime: "SYS:standard",
+            ignore: "pid,hostname",
+          },
+        },
+      }
+    : pinoOptions,
+);
 
 // Export log levels for convenience
 export const LogLevel = {

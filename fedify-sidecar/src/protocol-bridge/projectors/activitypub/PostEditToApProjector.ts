@@ -2,6 +2,7 @@ import type { CanonicalAttachment, CanonicalFacet } from "../../canonical/Canoni
 import type { CanonicalIntent, CanonicalPostEditIntent } from "../../canonical/CanonicalIntent.js";
 import { canonicalActorIdentityKey } from "../../canonical/CanonicalActorRef.js";
 import { canonicalBlocksToHtml } from "../../text/CanonicalBlocksToHtml.js";
+import { linkifyHashtagsInHtml } from "../../../utils/markdown.js";
 import { maxLossiness } from "../../canonical/CanonicalWarnings.js";
 import type {
   ActivityPubProjectionCommand,
@@ -15,14 +16,20 @@ import {
 } from "./ActivityPubProjectionPolicy.js";
 import {
   buildAudience,
+  buildApObjectLinkTag,
   canonicalAttachmentsToApAttachments,
   canonicalFacetsToApTags,
   canonicalMentionRecipients,
   escapeHtml,
+  safeOriginFromUrl,
 } from "./PostCreateToApProjector.js";
 import {
-  buildApLinkPreviewCard,
+  buildApArticlePreview,
+  buildApInteractionPolicy,
+  buildApLinkPreviewAttachment,
+  deriveConversationCollectionUris,
   apTargetTopic,
+  buildApActivityContext,
   buildApLinkPreviewIcon,
   buildPostMetadata,
   resolveApObjectId,
@@ -52,18 +59,24 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
       };
     }
 
+    const actorOrigin = safeOriginFromUrl(actorId);
     const objectId = resolveApObjectId(intent.object);
-    const html = intent.content.blocks.length > 0
+    const rawHtml = intent.content.blocks.length > 0
       ? canonicalBlocksToHtml(intent.content.blocks)
       : `<p>${escapeHtml(intent.content.plaintext).replace(/\n/g, "<br>")}</p>`;
-    const tag = canonicalFacetsToApTags(intent.content.facets);
+    const html = actorOrigin ? linkifyHashtagsInHtml(rawHtml, actorOrigin) : rawHtml;
+    const customEmojis = intent.content.customEmojis ?? [];
+    const tag = canonicalFacetsToApTags(intent.content.facets, actorOrigin, customEmojis);
     const attachment = canonicalAttachmentsToApAttachments(intent.content.attachments);
-    const linkPreviewCard =
+    const linkPreviewAttachment =
       intent.content.kind === "note" && this.policy.noteLinkPreviewMode !== "disabled"
-        ? buildApLinkPreviewCard(intent.content.linkPreview)
+        ? buildApLinkPreviewAttachment(intent.content.linkPreview)
         : null;
     const mentionRecipients = canonicalMentionRecipients(intent.content.facets);
-    const audience = buildAudience(actorId, intent.visibility, mentionRecipients);
+    // FEP-7888: include context owner in CC when editing a post that carries a
+    // foreign context with a known attributedTo actor.
+    const contextOwnerUris = intent.contextAttributedTo ? [intent.contextAttributedTo] : [];
+    const audience = buildAudience(actorId, intent.visibility, mentionRecipients, contextOwnerUris);
     const object: Record<string, unknown> = {
       id: objectId,
       type: intent.content.kind === "article" ? "Article" : "Note",
@@ -84,27 +97,64 @@ export class PostEditToApProjector implements CanonicalProjector<ActivityPubProj
     const previewIcon = intent.content.kind === "article"
       ? buildApLinkPreviewIcon(intent.content.linkPreview)
       : null;
+    const articlePreview = intent.content.kind === "article"
+      ? buildApArticlePreview({
+          title: intent.content.title,
+          summary: intent.content.summary,
+          linkPreview: intent.content.linkPreview,
+          attributedTo: actorId,
+          updated: intent.createdAt,
+          tag,
+        })
+      : null;
     if (previewIcon) {
       object["icon"] = previewIcon;
     }
-    if (linkPreviewCard && this.policy.noteLinkPreviewMode === "attachment_and_preview") {
-      object["preview"] = linkPreviewCard;
+    if (articlePreview) {
+      object["preview"] = articlePreview;
+    }
+    if (linkPreviewAttachment && this.policy.noteLinkPreviewMode === "attachment_and_preview") {
+      object["preview"] = { ...linkPreviewAttachment };
     }
     const inReplyTo = resolveOptionalApObjectId(intent.inReplyTo);
     if (inReplyTo) {
       object["inReplyTo"] = inReplyTo;
     }
-    if (tag.length > 0) {
-      object["tag"] = tag;
+    // FEP-f228: expose collection-backed conversation context and context history.
+    const conversationRoot = resolveOptionalApObjectId(intent.replyRoot);
+    const conversationUris = deriveConversationCollectionUris(objectId, conversationRoot);
+    object["context"] = conversationUris.context;
+    object["contextHistory"] = conversationUris.contextHistory;
+    // FEP-7458: advertise the replies collection so consumers can verify reply membership.
+    // ActivityPods creates and serves this collection lazily at ${noteId}/replies.
+    object["replies"] = `${objectId}/replies`;
+    const quoteId = resolveOptionalApObjectId(intent.quoteOf);
+    if (quoteId) {
+      // FEP-044f primary quote property + compatibility aliases
+      object["quote"] = quoteId;
+      object["quoteUrl"] = quoteId;
+      object["quoteUri"] = quoteId;
+      object["_misskey_quote"] = quoteId;
     }
-    if (attachment.length > 0 || linkPreviewCard) {
-      object["attachment"] = linkPreviewCard
-        ? [...attachment, linkPreviewCard]
+    // GoToSocial / FEP-044f interaction policy: advertise reply + quote policy on all published objects.
+    object["interactionPolicy"] = buildApInteractionPolicy(intent.interactionPolicy, actorId);
+    // Misskey FEP-e232 compatibility: include quote ref as a Link tag so tag-array consumers also find the quote ref
+    const quoteLinkTags: Array<Record<string, unknown>> = quoteId
+      ? [buildApObjectLinkTag(quoteId, { rel: "https://misskey-hub.net/ns#_misskey_quote" })]
+          .filter((tag): tag is Record<string, unknown> => Boolean(tag))
+      : [];
+    const allTags = [...tag, ...quoteLinkTags];
+    if (allTags.length > 0) {
+      object["tag"] = allTags;
+    }
+    if (attachment.length > 0 || linkPreviewAttachment) {
+      object["attachment"] = linkPreviewAttachment
+        ? [...attachment, linkPreviewAttachment]
         : attachment;
     }
 
     const activity: Record<string, unknown> = {
-      "@context": "https://www.w3.org/ns/activitystreams",
+      "@context": buildApActivityContext({ includeCustomEmojis: customEmojis.length > 0 }),
       id: `${objectId}#update-${intent.canonicalIntentId.slice(0, 12)}`,
       type: "Update",
       actor: actorId,

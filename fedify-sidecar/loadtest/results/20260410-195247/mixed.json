@@ -1,0 +1,204 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: loadtest/sidecar-loadtest.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 12 max VUs, 48s max duration (incl. graceful stop):
+              * mixed: Up to 12 looping VUs for 18s over 3 stages (gracefulRampDown: 30s, exec: runMixed, gracefulStop: 30s)
+
+
+running (01.0s), 02/12 VUs, 2 complete and 0 interrupted iterations
+mixed   [   6% ] 02/12 VUs  01.0s/18.0s
+
+running (02.0s), 03/12 VUs, 3 complete and 0 interrupted iterations
+mixed   [  11% ] 03/12 VUs  02.0s/18.0s
+
+running (03.0s), 05/12 VUs, 5 complete and 0 interrupted iterations
+mixed   [  17% ] 05/12 VUs  03.0s/18.0s
+
+running (04.0s), 06/12 VUs, 6 complete and 0 interrupted iterations
+mixed   [  22% ] 06/12 VUs  04.0s/18.0s
+
+running (05.0s), 07/12 VUs, 14 complete and 0 interrupted iterations
+mixed   [  28% ] 07/12 VUs  05.0s/18.0s
+
+running (06.0s), 07/12 VUs, 14 complete and 0 interrupted iterations
+mixed   [  33% ] 07/12 VUs  06.0s/18.0s
+
+running (07.0s), 08/12 VUs, 15 complete and 0 interrupted iterations
+mixed   [  39% ] 08/12 VUs  07.0s/18.0s
+
+running (08.0s), 08/12 VUs, 15 complete and 0 interrupted iterations
+mixed   [  44% ] 08/12 VUs  08.0s/18.0s
+
+running (09.0s), 09/12 VUs, 16 complete and 0 interrupted iterations
+mixed   [  50% ] 09/12 VUs  09.0s/18.0s
+
+running (10.0s), 09/12 VUs, 32 complete and 0 interrupted iterations
+mixed   [  56% ] 09/12 VUs  10.0s/18.0s
+
+running (11.0s), 10/12 VUs, 33 complete and 0 interrupted iterations
+mixed   [  61% ] 10/12 VUs  11.0s/18.0s
+
+running (12.0s), 10/12 VUs, 33 complete and 0 interrupted iterations
+mixed   [  67% ] 10/12 VUs  12.0s/18.0s
+
+running (13.0s), 11/12 VUs, 34 complete and 0 interrupted iterations
+mixed   [  72% ] 11/12 VUs  13.0s/18.0s
+
+running (14.0s), 11/12 VUs, 34 complete and 0 interrupted iterations
+mixed   [  78% ] 11/12 VUs  14.0s/18.0s
+
+running (15.0s), 10/12 VUs, 49 complete and 0 interrupted iterations
+mixed   [  83% ] 10/12 VUs  15.0s/18.0s
+
+running (16.0s), 10/12 VUs, 49 complete and 0 interrupted iterations
+mixed   [  89% ] 10/12 VUs  16.0s/18.0s
+
+running (17.0s), 10/12 VUs, 49 complete and 0 interrupted iterations
+mixed   [  94% ] 10/12 VUs  17.0s/18.0s
+
+running (18.0s), 10/12 VUs, 49 complete and 0 interrupted iterations
+mixed   [ 100% ] 10/12 VUs  18.0s/18.0s
+
+running (19.0s), 10/12 VUs, 49 complete and 0 interrupted iterations
+mixed ↓ [ 100% ] 10/12 VUs  18s
+
+running (20.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+
+running (21.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+
+running (22.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+
+running (23.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+
+running (24.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+
+running (25.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+
+running (26.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+
+running (27.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+
+running (28.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+
+running (29.0s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s
+{
+  "scenario": "mixed",
+  "checks": [
+    {
+      "name": "webhook status is 202",
+      "path": "::webhook status is 202",
+      "id": "2563b52dcec1fca9d1b785f43f56db40",
+      "passes": 0,
+      "fails": 21
+    },
+    {
+      "passes": 38,
+      "fails": 0,
+      "name": "inbox status is 202",
+      "path": "::inbox status is 202",
+      "id": "438c30637e205270ed0c89ce37d64a5d"
+    }
+  ],
+  "metrics": {
+    "http_req_failed": {
+      "type": "rate",
+      "contains": "default",
+      "values": {
+        "rate": 0.3442622950819672,
+        "passes": 21,
+        "fails": 40
+      },
+      "thresholds": {
+        "rate<0.02": {
+          "ok": false
+        }
+      }
+    },
+    "http_req_duration": {
+      "thresholds": {
+        "p(95)<300": {
+          "ok": false
+        },
+        "p(99)<650": {
+          "ok": false
+        }
+      },
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 2799.712852459016,
+        "min": 0.348,
+        "med": 3638.47,
+        "max": 10059.177,
+        "p(90)": 5003.978,
+        "p(95)": 5004.027,
+        "p(99)": 7026.130199999997
+      }
+    },
+    "fedify_loadtest_expected_status_rate": {
+      "type": "rate",
+      "contains": "default",
+      "values": {
+        "rate": 0.6440677966101694,
+        "passes": 38,
+        "fails": 21
+      },
+      "thresholds": {
+        "rate>0.98": {
+          "ok": false
+        }
+      }
+    },
+    "fedify_loadtest_app_latency_ms": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "p(90)": 5003.9708,
+        "p(95)": 5004.0243,
+        "p(99)": 5004.0705800000005,
+        "avg": 2724.117949152542,
+        "min": 0.371,
+        "med": 3638.47,
+        "max": 5004.099
+      },
+      "thresholds": {
+        "p(99)<650": {
+          "ok": false
+        },
+        "p(95)<300": {
+          "ok": false
+        }
+      }
+    },
+    "fedify_loadtest_accepted_total": {
+      "type": "counter",
+      "contains": "default",
+      "values": {
+        "count": 38,
+        "rate": 1.2694781375820317
+      }
+    }
+  }
+}
+
+running (29.9s), 00/12 VUs, 59 complete and 0 interrupted iterations
+mixed ✓ [ 100% ] 00/12 VUs  18s

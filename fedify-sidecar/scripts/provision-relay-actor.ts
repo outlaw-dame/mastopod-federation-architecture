@@ -91,6 +91,20 @@ async function createRelayAccount(): Promise<{ actorUri: string; created: boolea
     return { actorUri, created: true };
   }
 
+  const responseText = await resp.text().catch(() => "(unreadable body)");
+  const parsedError = tryParseJson(responseText);
+
+  // In some local stacks, account creation can return 500 during the
+  // activitypub phase even though the actor was actually created.
+  // Treat this as recoverable by resolving the actor URI.
+  if (
+    resp.status === 500 &&
+    isRecoverableExistingActorError(parsedError)
+  ) {
+    const actorUri = await resolveExistingActorUri();
+    return { actorUri, created: false };
+  }
+
   if (resp.status === 409) {
     // Account already exists — resolve the actor URI from the ActivityPods
     // internal actor API using the username.
@@ -98,16 +112,14 @@ async function createRelayAccount(): Promise<{ actorUri: string; created: boolea
     return { actorUri, created: false };
   }
 
-  const text = await resp.text().catch(() => "(unreadable body)");
-  throw new Error(`AccountCreate POST failed with HTTP ${resp.status}:\n${text}`);
+  throw new Error(`AccountCreate POST failed with HTTP ${resp.status}:\n${responseText}`);
 }
 
 async function resolveExistingActorUri(): Promise<string> {
   if (!ACTIVITYPODS_TOKEN) {
-    // Without a token we can't hit the internal API.  Construct the canonical
-    // URI pattern ActivityPods uses: https://{domain}/{username}
-    const domain = new URL(ACTIVITYPODS_URL).hostname;
-    const guessed = `https://${domain}/${USERNAME}`;
+    // Without a token we can't hit the internal API. Preserve scheme+port from
+    // ACTIVITYPODS_URL so local stacks resolve correctly.
+    const guessed = `${ACTIVITYPODS_URL}/${USERNAME}`;
     console.warn(
       `[warn] ACTIVITYPODS_TOKEN not set — cannot confirm actor URI via internal API.\n` +
       `       Guessing: ${guessed}\n` +
@@ -135,8 +147,26 @@ async function resolveExistingActorUri(): Promise<string> {
   }
 
   // Final fallback: construct from URL pattern.
-  const domain = new URL(ACTIVITYPODS_URL).hostname;
-  return `https://${domain}/${USERNAME}`;
+  return `${ACTIVITYPODS_URL}/${USERNAME}`;
+}
+
+function tryParseJson(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function isRecoverableExistingActorError(payload: Record<string, unknown> | null): boolean {
+  if (!payload) return false;
+  const type = typeof payload["type"] === "string" ? payload["type"] : "";
+  const phase =
+    payload["data"] && typeof payload["data"] === "object"
+      ? (payload["data"] as Record<string, unknown>)["phase"]
+      : undefined;
+  return type === "UNIFIED_ACCOUNT_PROVISIONING_FAILED" && phase === "activitypub";
 }
 
 // ---------------------------------------------------------------------------

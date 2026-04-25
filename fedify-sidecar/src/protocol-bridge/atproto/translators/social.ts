@@ -10,6 +10,12 @@ import type {
 import type { CanonicalProvenance } from "../../canonical/CanonicalEnvelope.js";
 import { buildCanonicalIntentId } from "../../idempotency/CanonicalIntentIdBuilder.js";
 import type { TranslationContext } from "../../ports/ProtocolBridgePorts.js";
+import {
+  ACTIVITYPODS_EMOJI_REACTION_COLLECTION,
+  activityPodsEmojiDefinitionSchema,
+  activityPodsRecordRefSchema,
+  normalizeActivityPodsReactionContent,
+} from "../../../at-adapter/lexicon/ActivityPodsEmojiLexicon.js";
 
 const bridgeSchema = z.object({
   originProtocol: z.enum(["activitypub", "atproto"]),
@@ -42,6 +48,14 @@ const followRecordSchema = z.object({
   createdAt: z.string().optional(),
 });
 
+const emojiReactionRecordSchema = z.object({
+  $type: z.literal(ACTIVITYPODS_EMOJI_REACTION_COLLECTION),
+  subject: activityPodsRecordRefSchema,
+  reaction: z.string().min(1),
+  emoji: activityPodsEmojiDefinitionSchema.optional().nullable(),
+  createdAt: z.string().optional(),
+});
+
 const baseEnvelopeSchema = z.object({
   repoDid: z.string().startsWith("did:"),
   uri: z.string().startsWith("at://").optional(),
@@ -52,6 +66,8 @@ const baseEnvelopeSchema = z.object({
   subjectDid: z.string().startsWith("did:").optional(),
   subjectUri: z.string().startsWith("at://").optional(),
   subjectCid: z.string().optional(),
+  reactionContent: z.string().min(1).optional(),
+  reactionEmoji: activityPodsEmojiDefinitionSchema.optional().nullable(),
   operation: z.enum(["create", "update", "delete"]).optional(),
   bridge: bridgeSchema,
 });
@@ -68,9 +84,14 @@ const followEnvelopeSchema = baseEnvelopeSchema.extend({
   record: followRecordSchema,
 });
 
+const emojiReactionEnvelopeSchema = baseEnvelopeSchema.extend({
+  record: emojiReactionRecordSchema,
+});
+
 type LikeEnvelope = z.infer<typeof likeEnvelopeSchema>;
 type RepostEnvelope = z.infer<typeof repostEnvelopeSchema>;
 type FollowEnvelope = z.infer<typeof followEnvelopeSchema>;
+type EmojiReactionEnvelope = z.infer<typeof emojiReactionEnvelopeSchema>;
 type DeleteEnvelope = z.infer<typeof baseEnvelopeSchema>;
 
 export function supportsLikeEnvelope(input: unknown): boolean {
@@ -83,6 +104,11 @@ export function supportsRepostEnvelope(input: unknown): boolean {
 
 export function supportsFollowEnvelope(input: unknown): boolean {
   return followEnvelopeSchema.safeParse(input).success || supportsDeleteEnvelope(input, "app.bsky.graph.follow");
+}
+
+export function supportsEmojiReactionEnvelope(input: unknown): boolean {
+  return emojiReactionEnvelopeSchema.safeParse(input).success
+    || supportsDeleteEnvelope(input, ACTIVITYPODS_EMOJI_REACTION_COLLECTION);
 }
 
 export async function translateLikeEnvelope(
@@ -122,6 +148,23 @@ export async function translateFollowEnvelope(
 
   const deleted = parseDeleteEnvelope(input, "app.bsky.graph.follow");
   return deleted ? buildFollowDeleteIntent(deleted, ctx) : null;
+}
+
+export async function translateEmojiReactionEnvelope(
+  input: unknown,
+  ctx: TranslationContext,
+): Promise<CanonicalReactionAddIntent | CanonicalReactionRemoveIntent | null> {
+  const direct = emojiReactionEnvelopeSchema.safeParse(input);
+  if (direct.success) {
+    return buildEmojiReactionIntent(
+      direct.data,
+      ctx,
+      direct.data.operation === "delete" ? "ReactionRemove" : "ReactionAdd",
+    );
+  }
+
+  const deleted = parseDeleteEnvelope(input, ACTIVITYPODS_EMOJI_REACTION_COLLECTION);
+  return deleted ? buildEmojiReactionDeleteIntent(deleted, ctx) : null;
 }
 
 async function buildReactionIntent(
@@ -207,6 +250,108 @@ async function buildReactionDeleteIntent(
     warnings: [],
     object: objectRef,
     reactionType: "like" as const,
+  };
+
+  return {
+    ...draft,
+    canonicalIntentId: buildCanonicalIntentId(draft),
+  };
+}
+
+async function buildEmojiReactionIntent(
+  envelope: EmojiReactionEnvelope,
+  ctx: TranslationContext,
+  kind: "ReactionAdd" | "ReactionRemove",
+): Promise<CanonicalReactionAddIntent | CanonicalReactionRemoveIntent | null> {
+  const reactionContent = normalizeActivityPodsReactionContent(envelope.record.reaction);
+  if (!reactionContent) {
+    return null;
+  }
+
+  const now = (ctx.now ?? (() => new Date()))();
+  const sourceAccountRef = await ctx.resolveActorRef({ did: envelope.repoDid });
+  const objectRef = await ctx.resolveObjectRef({
+    canonicalObjectId: envelope.record.subject.uri,
+    atUri: envelope.record.subject.uri,
+    cid: envelope.record.subject.cid ?? null,
+    canonicalUrl: toBskyUrl(envelope.record.subject.uri),
+  });
+  const draft = {
+    sourceProtocol: "atproto" as const,
+    sourceEventId:
+      envelope.uri ?? deriveUri(envelope.repoDid, ACTIVITYPODS_EMOJI_REACTION_COLLECTION, envelope.rkey),
+    sourceAccountRef,
+    createdAt: envelope.record.createdAt ?? now.toISOString(),
+    observedAt: now.toISOString(),
+    visibility: "public" as const,
+    provenance: toProvenance(
+      envelope.bridge,
+      envelope.uri ?? deriveUri(envelope.repoDid, ACTIVITYPODS_EMOJI_REACTION_COLLECTION, envelope.rkey),
+      sourceAccountRef.canonicalAccountId ?? null,
+    ),
+    warnings: [],
+    object: objectRef,
+    reactionType: "emoji" as const,
+    reactionContent,
+    reactionEmoji: envelope.record.emoji ? fromEmojiDefinition(envelope.record.emoji) : null,
+  };
+
+  if (kind === "ReactionAdd") {
+    const createDraft: Omit<CanonicalReactionAddIntent, "canonicalIntentId"> = {
+      kind,
+      ...draft,
+    };
+    return {
+      ...createDraft,
+      canonicalIntentId: buildCanonicalIntentId(createDraft),
+    };
+  }
+
+  const removeDraft: Omit<CanonicalReactionRemoveIntent, "canonicalIntentId"> = {
+    kind,
+    ...draft,
+  };
+  return {
+    ...removeDraft,
+    canonicalIntentId: buildCanonicalIntentId(removeDraft),
+  };
+}
+
+async function buildEmojiReactionDeleteIntent(
+  envelope: DeleteEnvelope,
+  ctx: TranslationContext,
+): Promise<CanonicalReactionRemoveIntent | null> {
+  if (!envelope.subjectUri) {
+    return null;
+  }
+
+  const now = (ctx.now ?? (() => new Date()))();
+  const sourceAccountRef = await ctx.resolveActorRef({ did: envelope.repoDid });
+  const objectRef = await ctx.resolveObjectRef({
+    canonicalObjectId: envelope.subjectUri,
+    atUri: envelope.subjectUri,
+    cid: envelope.subjectCid ?? null,
+    canonicalUrl: toBskyUrl(envelope.subjectUri),
+  });
+  const draft: Omit<CanonicalReactionRemoveIntent, "canonicalIntentId"> = {
+    kind: "ReactionRemove",
+    sourceProtocol: "atproto",
+    sourceEventId:
+      envelope.uri ?? deriveUri(envelope.repoDid, ACTIVITYPODS_EMOJI_REACTION_COLLECTION, envelope.rkey),
+    sourceAccountRef,
+    createdAt: now.toISOString(),
+    observedAt: now.toISOString(),
+    visibility: "public",
+    provenance: toProvenance(
+      envelope.bridge,
+      envelope.uri ?? deriveUri(envelope.repoDid, ACTIVITYPODS_EMOJI_REACTION_COLLECTION, envelope.rkey),
+      sourceAccountRef.canonicalAccountId ?? null,
+    ),
+    warnings: [],
+    object: objectRef,
+    reactionType: "emoji",
+    reactionContent: normalizeActivityPodsReactionContent(envelope.reactionContent) ?? null,
+    reactionEmoji: envelope.reactionEmoji ? fromEmojiDefinition(envelope.reactionEmoji) : null,
   };
 
   return {
@@ -412,6 +557,24 @@ function toProvenance(
     originAccountId: bridge?.originAccountId ?? originAccountId,
     mirroredFromCanonicalIntentId: bridge?.mirroredFromCanonicalIntentId ?? null,
     projectionMode: bridge?.projectionMode ?? "native",
+  };
+}
+
+function fromEmojiDefinition(
+  emoji: EmojiReactionEnvelope["record"]["emoji"],
+) {
+  if (!emoji) {
+    return null;
+  }
+
+  return {
+    shortcode: emoji.shortcode,
+    emojiId: emoji.emojiId ?? null,
+    iconUrl: emoji.icon?.uri ?? null,
+    mediaType: emoji.icon?.mediaType ?? null,
+    updatedAt: emoji.updatedAt ?? null,
+    alternateName: emoji.alternateName ?? null,
+    domain: emoji.domain ?? null,
   };
 }
 

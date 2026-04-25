@@ -1,0 +1,60 @@
+# HELP fedify_outbound_pending Number of pending outbound jobs
+# TYPE fedify_outbound_pending gauge
+fedify_outbound_pending 0
+# HELP fedify_inbound_pending Number of pending inbound envelopes
+# TYPE fedify_inbound_pending gauge
+fedify_inbound_pending 0
+# HELP fedify_outbound_stream_length Total outbound stream length
+# TYPE fedify_outbound_stream_length gauge
+fedify_outbound_stream_length 23
+# HELP fedify_inbound_stream_length Total inbound stream length
+# TYPE fedify_inbound_stream_length gauge
+fedify_inbound_stream_length 901
+# HELP fedify_uptime_seconds Uptime in seconds
+# TYPE fedify_uptime_seconds gauge
+fedify_uptime_seconds 579
+# HELP fedify_adaptive_scaling_enabled Adaptive scaling enabled flag
+# TYPE fedify_adaptive_scaling_enabled gauge
+fedify_adaptive_scaling_enabled 1
+# HELP fedify_adaptive_scaling_ticks_total Total adaptive scaling ticks completed
+# TYPE fedify_adaptive_scaling_ticks_total counter
+fedify_adaptive_scaling_ticks_total 55
+# HELP fedify_adaptive_scaling_errors_total Total adaptive scaling tick errors
+# TYPE fedify_adaptive_scaling_errors_total counter
+fedify_adaptive_scaling_errors_total 0
+# HELP fedify_adaptive_scaling_changes_total Total adaptive scaling changes applied
+# TYPE fedify_adaptive_scaling_changes_total counter
+fedify_adaptive_scaling_changes_total 6
+# HELP fedify_adaptive_scaling_last_tick_epoch_seconds Last adaptive scaling tick time (epoch seconds)
+# TYPE fedify_adaptive_scaling_last_tick_epoch_seconds gauge
+fedify_adaptive_scaling_last_tick_epoch_seconds 1775865259
+# HELP fedify_adaptive_inbound_lag Last inbound lag observed by autoscaler
+# TYPE fedify_adaptive_inbound_lag gauge
+fedify_adaptive_inbound_lag 0
+# HELP fedify_adaptive_outbound_lag Last outbound lag observed by autoscaler
+# TYPE fedify_adaptive_outbound_lag gauge
+fedify_adaptive_outbound_lag 0
+# HELP fedify_inbound_concurrency_current Current inbound worker concurrency
+# TYPE fedify_inbound_concurrency_current gauge
+fedify_inbound_concurrency_current 8
+# HELP fedify_outbound_concurrency_current Current outbound worker concurrency
+# TYPE fedify_outbound_concurrency_current gauge
+fedify_outbound_concurrency_current 16
+# HELP fedify_outbound_per_domain_concurrency_current Current outbound max concurrency per domain
+# TYPE fedify_outbound_per_domain_concurrency_current gauge
+fedify_outbound_per_domain_concurrency_current 2
+# HELP fedify_adaptive_inbound_direction_up Last inbound scaling direction was up
+# TYPE fedify_adaptive_inbound_direction_up gauge
+fedify_adaptive_inbound_direction_up 0
+# HELP fedify_adaptive_inbound_direction_down Last inbound scaling direction was down
+# TYPE fedify_adaptive_inbound_direction_down gauge
+fedify_adaptive_inbound_direction_down 0
+# HELP fedify_adaptive_outbound_direction_up Last outbound scaling direction was up
+# TYPE fedify_adaptive_outbound_direction_up gauge
+fedify_adaptive_outbound_direction_up 0
+# HELP fedify_adaptive_outbound_direction_down Last outbound scaling direction was down
+# TYPE fedify_adaptive_outbound_direction_down gauge
+fedify_adaptive_outbound_direction_down 0
+# HELP fedify_oauth_security_events_total Count of OAuth security-relevant events by type and outcome
+# TYPE fedify_oauth_security_events_total counter
+fedify_oauth_security_events_total{event="none",outcome="none"} 0

@@ -1,0 +1,155 @@
+{
+  "schemaVersion": "1.0.0",
+  "provider": {
+    "id": "pods.example",
+    "displayName": "Example Pods",
+    "region": "us-east-1"
+  },
+  "profiles": {
+    "active": ["dual-protocol-standard"],
+    "supported": ["ap-core", "ap-scale", "dual-protocol-standard"]
+  },
+  "protocols": {
+    "activitypub": {
+      "enabled": true,
+      "version": "1.0",
+      "status": "enabled"
+    },
+    "atproto": {
+      "enabled": true,
+      "version": "1.0",
+      "status": "enabled"
+    }
+  },
+  "capabilities": [
+    {
+      "id": "ap.federation.ingress",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": [],
+      "limits": {
+        "maxPayloadBytes": 1048576,
+        "requestsPerMinute": 3000
+      }
+    },
+    {
+      "id": "ap.federation.egress",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": ["ap.signing.batch", "ap.queue.delivery"],
+      "limits": {
+        "maxConcurrentPerDomain": 8,
+        "maxAttempts": 8
+      }
+    },
+    {
+      "id": "ap.signing.batch",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": [],
+      "limits": {
+        "batchSize": 200,
+        "timeoutMs": 5000
+      }
+    },
+    {
+      "id": "ap.queue.delivery",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": [],
+      "limits": {
+        "dlqEnabled": true,
+        "idempotencyTtlHours": 168
+      }
+    },
+    {
+      "id": "ap.streams",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": [],
+      "limits": {
+        "retentionDays": 30,
+        "replayWindowHours": 72
+      }
+    },
+    {
+      "id": "ap.firehose",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": ["ap.streams"],
+      "limits": {
+        "retentionDays": 30,
+        "replayWindowHours": 72
+      }
+    },
+    {
+      "id": "at.identity.binding",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": ["protocol.atproto"],
+      "limits": {
+        "maxBindingsPerTenant": 100000
+      }
+    },
+    {
+      "id": "at.xrpc.server",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": ["protocol.atproto"],
+      "limits": {
+        "requestsPerMinute": 1200
+      }
+    },
+    {
+      "id": "at.xrpc.repo",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": ["protocol.atproto", "at.identity.binding"],
+      "limits": {
+        "maxWritesPerMinute": 600
+      }
+    }
+  ],
+  "entitlements": {
+    "plan": "enterprise",
+    "effectiveAt": "2026-04-10T00:00:00Z",
+    "overrides": []
+  },
+  "degradation": {
+    "modes": [
+      {
+        "when": "ap.search.opensearch.disabled",
+        "behavior": "feeds_limited",
+        "contractRef": "feed-limited-v1"
+      }
+    ]
+  },
+  "events": {
+    "catalogVersion": "1.0.0",
+    "topics": [
+      {
+        "name": "ap.stream1.local-public.v1",
+        "schema": "activity-stream-event-v1",
+        "retentionDays": 30,
+        "replay": true
+      },
+      {
+        "name": "ap.stream2.remote-public.v1",
+        "schema": "activity-stream-event-v1",
+        "retentionDays": 30,
+        "replay": true
+      },
+      {
+        "name": "ap.firehose.v1",
+        "schema": "activity-stream-event-v1",
+        "retentionDays": 30,
+        "replay": true
+      }
+    ]
+  },
+  "security": {
+    "internalApisAuth": "bearer",
+    "signingKeysLocation": "activitypods-only",
+    "failClosed": true
+  }
+}

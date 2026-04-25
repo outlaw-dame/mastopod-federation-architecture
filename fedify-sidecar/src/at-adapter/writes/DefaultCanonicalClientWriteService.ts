@@ -52,6 +52,8 @@ import {
   buildPostMediaDraftsFromRecord,
 } from '../../protocol-bridge/post/BridgePostMedia.js';
 import type {
+  CoreEmojiReactionCreatedV1,
+  CoreEmojiReactionDeletedV1,
   CoreFollowCreatedV1,
   CoreFollowDeletedV1,
   CoreLikeCreatedV1,
@@ -59,6 +61,11 @@ import type {
   CoreRepostCreatedV1,
   CoreRepostDeletedV1,
 } from '../events/AtSocialRepoEvents.js';
+import {
+  ACTIVITYPODS_EMOJI_REACTION_COLLECTION,
+  type ActivityPodsEmojiDefinition,
+  parseActivityPodsEmojiReactionRecord,
+} from '../lexicon/ActivityPodsEmojiLexicon.js';
 import type {
   CorePostCreatedV1,
   CorePostUpdatedV1,
@@ -119,6 +126,9 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
       case 'like_create':
         canonicalRefId = await this._applyLikeCreate(mutation, now);
         break;
+      case 'emoji_reaction_create':
+        canonicalRefId = await this._applyEmojiReactionCreate(mutation, now);
+        break;
       case 'repost_create':
         canonicalRefId = await this._applyRepostCreate(mutation, now);
         break;
@@ -130,6 +140,9 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
         break;
       case 'like_delete':
         await this._applySocialDelete(mutation, now, 'like');
+        break;
+      case 'emoji_reaction_delete':
+        await this._applySocialDelete(mutation, now, 'emojiReaction');
         break;
       case 'repost_delete':
         await this._applySocialDelete(mutation, now, 'repost');
@@ -250,6 +263,7 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     const canonicalRefId = mutation.canonicalAccountId;
     const p = mutation.payload;
     const bridge = asBridgeMetadata(p['_bridgeMetadata']);
+    const nativeRecord = extractNativeRecord(p, 'app.bsky.actor.profile');
     const ownerDid = await this._resolveManagedDid(mutation);
     const profileMedia = parseBridgeProfileMediaPayload(p['_bridgeProfileMedia']);
 
@@ -281,6 +295,7 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
         bannerMediaId:       profileMedia.banner?.mediaId,
       },
       identity: { id: mutation.canonicalAccountId },
+      ...(nativeRecord ? { nativeRecord } : {}),
       ...(bridge ? { bridge } : {}),
       emittedAt: now,
     };
@@ -360,6 +375,51 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     return canonicalRefId;
   }
 
+  private async _applyEmojiReactionCreate(
+    mutation: CanonicalMutationEnvelope,
+    now: string,
+  ): Promise<string> {
+    const canonicalRefId = _str(mutation.payload['_bridgeCanonicalRefId']) ?? randomUUID();
+    const nativeRecord = extractNativeRecord(mutation.payload, ACTIVITYPODS_EMOJI_REACTION_COLLECTION);
+    const parsedRecord = nativeRecord ? parseActivityPodsEmojiReactionRecord(nativeRecord) : null;
+    const subject = parsedRecord?.subject;
+    const reactionContent = parsedRecord?.reaction;
+    const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(mutation.payload);
+
+    if (!subject?.uri) {
+      throw new Error('emoji_reaction_create: subject.uri is required in payload');
+    }
+    if (!reactionContent) {
+      throw new Error('emoji_reaction_create: reaction is required in payload');
+    }
+
+    const targetAlias = await this._resolveAliasByUri(subject.uri);
+    const targetPost = targetAlias
+      ? { id: targetAlias.canonicalRefId, authorId: '', bodyPlaintext: '', visibility: 'public' as const, publishedAt: now }
+      : { id: subject.uri, authorId: '', bodyPlaintext: '', visibility: 'public' as const, publishedAt: now };
+
+    const event: CoreEmojiReactionCreatedV1 = {
+      reaction: {
+        id: canonicalRefId,
+        actorId: mutation.canonicalAccountId,
+        postId: targetAlias?.canonicalRefId ?? subject.uri,
+        content: reactionContent,
+        emoji: parsedRecord?.emoji ? toCanonicalCustomEmoji(parsedRecord.emoji) : null,
+        createdAt: parsedRecord?.createdAt ?? now,
+      },
+      actor: { id: mutation.canonicalAccountId },
+      targetPost,
+      ...(nativeRecord ? { nativeRecord } : {}),
+      ...(atRecord ? { atRecord } : {}),
+      ...(bridge ? { bridge } : {}),
+      emittedAt: now,
+    };
+
+    await this.worker.onEmojiReactionCreated(event);
+    return canonicalRefId;
+  }
+
   private async _applyRepostCreate(
     mutation: CanonicalMutationEnvelope,
     now: string
@@ -431,7 +491,7 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
   private async _applySocialDelete(
     mutation: CanonicalMutationEnvelope,
     now: string,
-    kind: 'follow' | 'like' | 'repost'
+    kind: 'follow' | 'like' | 'emojiReaction' | 'repost'
   ): Promise<void> {
     const canonicalRefId = await this._resolveDeleteCanonicalRefId(mutation);
     const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
@@ -463,6 +523,19 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
           emittedAt:         now,
         };
         await this.worker.onLikeDeleted(event);
+        break;
+      }
+      case 'emojiReaction': {
+        const event: CoreEmojiReactionDeletedV1 = {
+          canonicalReactionId: canonicalRefId,
+          canonicalActorId: mutation.canonicalAccountId,
+          canonicalPostId: '',
+          ...(atRecord ? { atRecord } : {}),
+          ...(bridge ? { bridge } : {}),
+          deletedAt: now,
+          emittedAt: now,
+        };
+        await this.worker.onEmojiReactionDeleted(event);
         break;
       }
       case 'repost': {
@@ -727,12 +800,7 @@ function extractNativePostRecord(
   payload: Record<string, unknown>,
   collection: string | undefined,
 ): Record<string, unknown> | undefined {
-  const expectedType = collection === 'site.standard.document'
-    ? 'site.standard.document'
-    : collection === 'app.bsky.feed.post'
-      ? 'app.bsky.feed.post'
-      : null;
-  if (!expectedType) {
+  if (!collection) {
     return undefined;
   }
 
@@ -742,8 +810,8 @@ function extractNativePostRecord(
   }
 
   const record = Object.fromEntries(recordEntries);
-  const recordType = _str(record['$type']) ?? expectedType;
-  if (recordType !== expectedType) {
+  const recordType = _str(record['$type']) ?? collection;
+  if (recordType !== collection) {
     return undefined;
   }
 
@@ -759,7 +827,27 @@ function isAtRepoCollection(value: string): value is AtRepoCollection {
     || value === 'site.standard.document'
     || value === 'app.bsky.graph.follow'
     || value === 'app.bsky.feed.like'
+    || value === ACTIVITYPODS_EMOJI_REACTION_COLLECTION
     || value === 'app.bsky.feed.repost';
+}
+
+function extractNativeRecord(
+  payload: Record<string, unknown>,
+  collection: string | undefined,
+): Record<string, unknown> | undefined {
+  return extractNativePostRecord(payload, collection);
+}
+
+function toCanonicalCustomEmoji(emoji: ActivityPodsEmojiDefinition) {
+  return {
+    shortcode: emoji.shortcode,
+    emojiId: _str(emoji.emojiId) ?? null,
+    iconUrl: _str(emoji.icon?.uri) ?? null,
+    mediaType: _str(emoji.icon?.mediaType) ?? null,
+    updatedAt: _str(emoji.updatedAt) ?? null,
+    alternateName: _str(emoji.alternateName) ?? null,
+    domain: _str(emoji.domain) ?? null,
+  };
 }
 
 function asProfileMediaDraft(

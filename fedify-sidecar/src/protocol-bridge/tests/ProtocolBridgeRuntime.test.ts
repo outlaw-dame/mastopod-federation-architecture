@@ -158,11 +158,21 @@ describe("protocol bridge runtime", () => {
         },
         {
           action: "delete",
-          collection: "app.bsky.feed.like",
+          collection: "org.activitypods.emojiReaction",
           rkey: "3kdelete",
-          canonicalRefId: "canonical-like-1",
+          canonicalRefId: "canonical-emoji-reaction-1",
           subjectUri: "at://did:plc:bob/app.bsky.feed.post/3kpost",
           subjectCid: "bafy-post",
+          reactionContent: ":party_parrot:",
+          reactionEmoji: {
+            shortcode: ":party_parrot:",
+            emojiId: "https://emoji.example/party-parrot",
+            icon: {
+              uri: "https://emoji.example/party-parrot.png",
+              mediaType: "image/png",
+            },
+            domain: "emoji.example",
+          },
         },
       ],
     });
@@ -183,9 +193,13 @@ describe("protocol bridge runtime", () => {
       2,
       expect.objectContaining({
         repoDid: "did:plc:alice",
-        collection: "app.bsky.feed.like",
+        collection: "org.activitypods.emojiReaction",
         operation: "delete",
         subjectUri: "at://did:plc:bob/app.bsky.feed.post/3kpost",
+        reactionContent: ":party_parrot:",
+        reactionEmoji: expect.objectContaining({
+          shortcode: ":party_parrot:",
+        }),
       }),
       translationContext,
     );

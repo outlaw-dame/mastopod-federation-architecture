@@ -1,16 +1,23 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   handleApplyDecision,
+  handleGetCase,
   handleGetDecision,
   handleListAtLabels,
+  handleListCases,
   handleListDecisions,
   handleListKnownAtLabels,
   handleRevokeDecision,
   handleXrpcQueryLabels,
 } from "./handlers.js";
+import type { ActivityPubReportForwardingService } from "./ActivityPubReportForwardingService.js";
+import type { AtprotoReportForwardingService } from "./AtprotoReportForwardingService.js";
+import { handleIngestReportCreate, handleRetryReportForwarding } from "./report-handlers.js";
 import { errorToResponse } from "../mrf/utils.js";
 import { assertRateLimit, InMemoryRateLimiter, type RateLimitRule } from "../mrf/rate-limit.js";
+import { internal } from "../mrf/errors.js";
 import type { ModerationBridgeDeps } from "./types.js";
+import type { CanonicalIntentPublisher } from "../../protocol-bridge/canonical/CanonicalIntentPublisher.js";
 
 // ---------------------------------------------------------------------------
 // Shared toRequest / sendResponse helpers
@@ -85,6 +92,13 @@ function applyRateLimit(
 export function registerModerationBridgeFastifyRoutes(
   app: FastifyInstance,
   deps: ModerationBridgeDeps,
+  options: {
+    internalBridgeToken?: string;
+    canonicalPublisher?: CanonicalIntentPublisher;
+    activityPubReportForwardingService?: Pick<ActivityPubReportForwardingService, "handleCanonicalEvent">;
+    atprotoReportForwardingService?: Pick<AtprotoReportForwardingService, "handleCanonicalEvent">;
+    now?: () => string;
+  } = {},
 ): void {
   const limiter = new InMemoryRateLimiter();
 
@@ -139,6 +153,55 @@ export function registerModerationBridgeFastifyRoutes(
     }
   });
 
+  app.get("/internal/admin/moderation/cases", async (req, reply) => {
+    const request = toRequest(req);
+    try {
+      applyRateLimit(req, "moderation-cases", readRule, limiter);
+      await sendResponse(reply, await handleListCases(request, deps));
+    } catch (err) {
+      await sendResponse(
+        reply,
+        errorToResponse(err, request.headers.get("x-request-id") || undefined),
+      );
+    }
+  });
+
+  app.get("/internal/admin/moderation/cases/:id", async (req, reply) => {
+    const request = toRequest(req);
+    const params = req.params as { id: string };
+    try {
+      applyRateLimit(req, "moderation-case-get", readRule, limiter);
+      await sendResponse(reply, await handleGetCase(request, deps, params.id));
+    } catch (err) {
+      await sendResponse(
+        reply,
+        errorToResponse(err, request.headers.get("x-request-id") || undefined),
+      );
+    }
+  });
+
+  app.post("/internal/admin/moderation/cases/:id/forwarding/retry", async (req, reply) => {
+    const request = toRequest(req);
+    const params = req.params as { id: string };
+    try {
+      applyRateLimit(req, "moderation-case-forwarding-retry", applyRule, limiter);
+      await sendResponse(
+        reply,
+        await handleRetryReportForwarding(request, deps, {
+          caseId: params.id,
+          activityPubReportForwardingService: options.activityPubReportForwardingService,
+          atprotoReportForwardingService: options.atprotoReportForwardingService,
+          now: options.now,
+        }),
+      );
+    } catch (err) {
+      await sendResponse(
+        reply,
+        errorToResponse(err, request.headers.get("x-request-id") || undefined),
+      );
+    }
+  });
+
   app.delete("/internal/admin/moderation/decisions/:id", async (req, reply) => {
     const request = toRequest(req);
     const params = req.params as { id: string };
@@ -171,6 +234,29 @@ export function registerModerationBridgeFastifyRoutes(
     try {
       applyRateLimit(req, "moderation-known-labels", readRule, limiter);
       await sendResponse(reply, await handleListKnownAtLabels(request, deps));
+    } catch (err) {
+      await sendResponse(
+        reply,
+        errorToResponse(err, request.headers.get("x-request-id") || undefined),
+      );
+    }
+  });
+
+  app.post("/internal/bridge/moderation/reports", async (req, reply) => {
+    const request = toRequest(req);
+    try {
+      applyRateLimit(req, "moderation-report-bridge", applyRule, limiter);
+      if (!options.internalBridgeToken) {
+        throw internal("Internal moderation bridge token is not configured");
+      }
+      await sendResponse(
+        reply,
+        await handleIngestReportCreate(request, {
+          internalBridgeToken: options.internalBridgeToken,
+          canonicalPublisher: options.canonicalPublisher,
+          now: options.now,
+        }),
+      );
     } catch (err) {
       await sendResponse(
         reply,

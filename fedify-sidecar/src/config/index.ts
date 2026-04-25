@@ -99,11 +99,23 @@ function loadConfig(): Config {
     },
 
     opensearch: {
-      node: process.env["OPENSEARCH_NODE"] ?? "http://localhost:9200",
+      node: process.env["OPENSEARCH_URL"] ?? process.env["OPENSEARCH_NODE"] ?? "http://localhost:9200",
       username: process.env["OPENSEARCH_USERNAME"],
       password: process.env["OPENSEARCH_PASSWORD"],
       indexPrefix: process.env["OPENSEARCH_INDEX_PREFIX"] ?? "activitypods",
       ssl: process.env["OPENSEARCH_SSL"] === "true",
+    },
+
+    search: {
+      backend:
+        process.env["SEARCH_BACKEND"] === "opensearch" ||
+        process.env["SEARCH_BACKEND"] === "qdrant" ||
+        process.env["SEARCH_BACKEND"] === "dual"
+          ? process.env["SEARCH_BACKEND"]
+          : "dual",
+      qdrantUrl: process.env["QDRANT_URL"] ?? "http://localhost:6333",
+      qdrantCollectionName: process.env["QDRANT_COLLECTION_NAME"] ?? "public-content-v1",
+      qdrantVectorSize: parseInt(process.env["QDRANT_VECTOR_SIZE"] ?? "1024", 10),
     },
 
     metrics: {

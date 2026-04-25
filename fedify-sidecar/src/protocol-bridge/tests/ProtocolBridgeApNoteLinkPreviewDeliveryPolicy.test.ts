@@ -14,11 +14,16 @@ describe("AP outbound note link preview delivery policy", () => {
           type: "Note",
           attachment: [
             {
-              type: "Document",
+              type: "Link",
               mediaType: "text/html",
-              url: "https://example.com/page",
+              href: "https://example.com/page",
               name: "Example Page",
               summary: "Example description",
+              preview: {
+                type: "Article",
+                name: "Example Page",
+                summary: "Example description",
+              },
             },
           ],
         },
@@ -39,28 +44,32 @@ describe("AP outbound note link preview delivery policy", () => {
         object: expect.objectContaining({
           attachment: expect.arrayContaining([
             expect.objectContaining({
-              url: "https://example.com/page",
+              href: "https://example.com/page",
             }),
           ]),
           preview: expect.objectContaining({
-            url: "https://example.com/page",
+            href: "https://example.com/page",
           }),
         }),
       }),
     );
   });
 
-  it("removes only hinted note preview cards for disabled domains", () => {
+  it("removes only hinted note attached-link preview signals for disabled domains", () => {
     const activity = applyActivityPubOutboundDeliveryPolicy(
       {
         type: "Create",
         object: {
           type: "Note",
           preview: {
-            type: "Document",
+            type: "Link",
             mediaType: "text/html",
-            url: "https://example.com/page",
+            href: "https://example.com/page",
             name: "Example Page",
+            preview: {
+              type: "Article",
+              name: "Example Page",
+            },
           },
           attachment: [
             {
@@ -69,10 +78,14 @@ describe("AP outbound note link preview delivery policy", () => {
               url: "https://cdn.example.com/photo.png",
             },
             {
-              type: "Document",
+              type: "Link",
               mediaType: "text/html",
-              url: "https://example.com/page",
+              href: "https://example.com/page",
               name: "Example Page",
+              preview: {
+                type: "Article",
+                name: "Example Page",
+              },
             },
           ],
         },

@@ -73,7 +73,14 @@ describe("RedisStreamsQueue", () => {
     });
     const outboundConsumer = makeClient();
     const outboxIntentConsumer = makeClient();
-    fakeClients.push(adminClient, inboundConsumer, outboundConsumer, outboxIntentConsumer);
+    const originReconcileConsumer = makeClient();
+    fakeClients.push(
+      adminClient,
+      inboundConsumer,
+      outboundConsumer,
+      outboxIntentConsumer,
+      originReconcileConsumer,
+    );
 
     const queue = new RedisStreamsQueue();
     await queue.connect();
@@ -103,7 +110,14 @@ describe("RedisStreamsQueue", () => {
     const inboundConsumer = makeClient();
     const outboundConsumer = makeClient();
     const outboxIntentConsumer = makeClient();
-    fakeClients.push(adminClient, inboundConsumer, outboundConsumer, outboxIntentConsumer);
+    const originReconcileConsumer = makeClient();
+    fakeClients.push(
+      adminClient,
+      inboundConsumer,
+      outboundConsumer,
+      outboxIntentConsumer,
+      originReconcileConsumer,
+    );
 
     const queue = new RedisStreamsQueue();
     await queue.connect();

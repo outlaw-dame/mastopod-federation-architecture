@@ -21,7 +21,7 @@ input:
     topics:
       - ap.firehose.v1
     consumer_group: rpconnect-firehose-indexer-v1
-    start_from_oldest: false
+    start_offset: latest
     auto_replay_nacks: false
     commit_period: 5s
     tls:
@@ -38,14 +38,14 @@ output:
   fallback:
     # Primary sink: OpenSearch (Elasticsearch-compatible API).
     - label: os_activities
-      elasticsearch:
+      opensearch:
         urls:
           - "${OPENSEARCH_URL:http://opensearch:9200}"
         index: ap-activities
         # Use activityId as the document ID so redeliveries are idempotent.
         id: "${!this.activityId | uuid_v4()}"
         action: index
-        auth:
+        basic_auth:
           enabled: ${OPENSEARCH_AUTH_ENABLED:false}
           username: "${OPENSEARCH_USER:admin}"
           password: "${OPENSEARCH_PASSWORD:admin}"

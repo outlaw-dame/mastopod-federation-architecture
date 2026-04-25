@@ -1,9 +1,13 @@
 import { assertAdminBearer } from "../mrf/auth.js";
-import { badRequest, notFound } from "../mrf/errors.js";
+import { badRequest, internal, notFound } from "../mrf/errors.js";
 import { json, parseJson } from "../mrf/utils.js";
 import {
+  activityPubSubjectPolicyRegistration,
+  type ActivityPubSubjectPolicyConfig,
+  type ActivityPubSubjectRule,
+} from "../mrf/registry/modules/activitypub-subject-policy.js";
+import {
   ACTION_TO_AT_LABEL,
-  ACTION_TO_MRF_FIELD,
   AT_GLOBAL_LABELS,
 } from "./types.js";
 import type {
@@ -11,6 +15,8 @@ import type {
   AtLabelPage,
   ModerationAction,
   ModerationBridgeDeps,
+  ModerationCasePage,
+  ModerationCaseStatus,
   ModerationDecision,
   ModerationDecisionPage,
 } from "./types.js";
@@ -20,6 +26,12 @@ import type {
 // ---------------------------------------------------------------------------
 
 const VALID_ACTIONS = new Set<ModerationAction>(["label", "warn", "filter", "block", "suspend"]);
+const SUBJECT_POLICY_MODULE_ID = "activitypub-subject-policy";
+const AP_RULE_ACTION_BY_DECISION: Partial<Record<ModerationAction, "filter" | "reject">> = {
+  filter: "filter",
+  block: "reject",
+  suspend: "reject",
+};
 
 const DID_PATTERN = /^did:[a-z0-9]+:[a-zA-Z0-9._:%-]+$/;
 const HANDLE_PATTERN = /^[a-z0-9.-]+\.[a-z]{2,}$/i;
@@ -74,6 +86,20 @@ function validateTargetHandle(value: string | undefined): string | undefined {
   return value;
 }
 
+function validateTargetActorUri(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw badRequest("targetActorUri must use http or https");
+    }
+    url.hash = "";
+    return url.toString();
+  } catch {
+    throw badRequest("targetActorUri must be a valid URL");
+  }
+}
+
 async function retry<T>(
   operation: () => Promise<T>,
   options: { retries?: number; baseDelayMs?: number; maxDelayMs?: number } = {},
@@ -98,6 +124,143 @@ async function retry<T>(
   throw lastError;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function buildSubjectPolicyRule(params: {
+  decisionId: string;
+  action: ModerationAction;
+  targetActorUri?: string;
+  targetWebId?: string;
+  reason?: string;
+  actor: string;
+  createdAt: string;
+}): ActivityPubSubjectRule | null {
+  const apAction = AP_RULE_ACTION_BY_DECISION[params.action];
+  if (!apAction) {
+    return null;
+  }
+  if (!params.targetActorUri && !params.targetWebId) {
+    return null;
+  }
+
+  return {
+    id: params.decisionId,
+    action: apAction,
+    ...(params.targetActorUri ? { actorUri: params.targetActorUri } : {}),
+    ...(params.targetWebId ? { webId: params.targetWebId } : {}),
+    ...(params.reason ? { reason: params.reason } : {}),
+    createdAt: params.createdAt,
+    createdBy: params.actor,
+  };
+}
+
+async function readSubjectPolicyModule(
+  deps: ModerationBridgeDeps,
+): Promise<{
+  enabled: boolean;
+  mode: string;
+  revision: number;
+  config: ActivityPubSubjectPolicyConfig;
+}> {
+  const response = await deps.mrfInternalFetch({
+    method: "GET",
+    path: `/internal/admin/mrf/modules/${SUBJECT_POLICY_MODULE_ID}`,
+    permission: "provider:read",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to load ${SUBJECT_POLICY_MODULE_ID} module (${response.status})`);
+  }
+
+  const payload = await response.json() as { data?: { config?: unknown } };
+  const moduleConfig = payload?.data?.config;
+  if (!isRecord(moduleConfig)) {
+    throw new Error(`Malformed ${SUBJECT_POLICY_MODULE_ID} module response`);
+  }
+
+  const revision = typeof moduleConfig["revision"] === "number" ? moduleConfig["revision"] : 0;
+  const enabled = moduleConfig["enabled"] !== false;
+  const mode = typeof moduleConfig["mode"] === "string" ? moduleConfig["mode"] : "enforce";
+  const rawConfig = isRecord(moduleConfig["config"]) ? moduleConfig["config"] : {};
+  const normalized = activityPubSubjectPolicyRegistration.validateAndNormalizeConfig(rawConfig, {
+    existingConfig: activityPubSubjectPolicyRegistration.getDefaultConfig(),
+    partial: true,
+  });
+
+  return {
+    enabled,
+    mode,
+    revision,
+    config: normalized.config as ActivityPubSubjectPolicyConfig,
+  };
+}
+
+async function upsertSubjectPolicyRule(
+  deps: ModerationBridgeDeps,
+  rule: ActivityPubSubjectRule,
+  actor: string,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const current = await readSubjectPolicyModule(deps);
+    const rules = [
+      ...current.config.rules.filter((entry) => entry.id !== rule.id),
+      rule,
+    ];
+
+    const response = await deps.mrfInternalFetch({
+      method: "PATCH",
+      path: `/internal/admin/mrf/modules/${SUBJECT_POLICY_MODULE_ID}`,
+      permission: "provider:write",
+      actorWebId: actor,
+      body: {
+        enabled: true,
+        mode: "enforce",
+        config: { rules },
+        expectedRevision: current.revision,
+      },
+    });
+
+    if (response.status === 409) {
+      continue;
+    }
+
+    return response.ok;
+  }
+
+  return false;
+}
+
+async function removeSubjectPolicyRule(
+  deps: ModerationBridgeDeps,
+  ruleId: string,
+  actor: string,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const current = await readSubjectPolicyModule(deps);
+    const rules = current.config.rules.filter((entry) => entry.id !== ruleId);
+
+    const response = await deps.mrfInternalFetch({
+      method: "PATCH",
+      path: `/internal/admin/mrf/modules/${SUBJECT_POLICY_MODULE_ID}`,
+      permission: "provider:write",
+      actorWebId: actor,
+      body: {
+        config: { rules },
+        expectedRevision: current.revision,
+      },
+    });
+
+    if (response.status === 409) {
+      continue;
+    }
+
+    return response.ok;
+  }
+
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // POST /internal/admin/moderation/decisions
 // Apply a cross-protocol moderation decision
@@ -105,8 +268,10 @@ async function retry<T>(
 
 interface ApplyDecisionBody {
   targetWebId?: string;
+  targetActorUri?: string;
   targetAtDid?: string;
   targetHandle?: string;
+  sourceCaseId?: string;
   action: ModerationAction;
   labels?: string[];
   reason?: string;
@@ -128,17 +293,25 @@ export async function handleApplyDecision(
   }
 
   const targetWebId = validateTargetWebId(sanitise(body.targetWebId, "targetWebId"));
+  const targetActorUri = validateTargetActorUri(sanitise(body.targetActorUri, "targetActorUri"));
   const targetAtDid = validateTargetAtDid(sanitise(body.targetAtDid, "targetAtDid"));
   const targetHandle = validateTargetHandle(sanitise(body.targetHandle, "targetHandle"));
+  const sourceCaseId = body.sourceCaseId ? sanitiseRecordId(body.sourceCaseId, "case") : undefined;
   const reason = sanitise(body.reason, "reason", 500);
 
   // Must have at least one target identifier
-  if (!targetWebId && !targetAtDid && !targetHandle) {
-    throw badRequest("At least one of targetWebId, targetAtDid, or targetHandle must be provided");
+  if (!targetWebId && !targetActorUri && !targetAtDid && !targetHandle) {
+    throw badRequest("At least one of targetWebId, targetActorUri, targetAtDid, or targetHandle must be provided");
+  }
+
+  const linkedCase = sourceCaseId ? await deps.store.getCase(sourceCaseId) : null;
+  if (sourceCaseId && !linkedCase) {
+    throw notFound(`Case ${sourceCaseId} not found`);
   }
 
   // Build the resolved identities
   let resolvedWebId = targetWebId;
+  let resolvedActorUri = targetActorUri;
   let resolvedAtDid = targetAtDid;
 
   // Attempt to resolve missing identity half from the binding store
@@ -146,6 +319,9 @@ export async function handleApplyDecision(
     resolvedAtDid = (await deps.resolveAtDid(resolvedWebId)) ?? undefined;
   } else if (resolvedAtDid && !resolvedWebId) {
     resolvedWebId = (await deps.resolveWebId(resolvedAtDid)) ?? undefined;
+  }
+  if (resolvedWebId && !resolvedActorUri) {
+    resolvedActorUri = (await deps.resolveActivityPubActorUri(resolvedWebId)) ?? undefined;
   }
 
   // Determine labels to emit
@@ -160,8 +336,10 @@ export async function handleApplyDecision(
     id,
     source: "provider-dashboard",
     targetWebId: resolvedWebId,
+    targetActorUri: resolvedActorUri,
     targetAtDid: resolvedAtDid,
-    targetHandle: targetHandle ?? extractHandleFromTarget(resolvedWebId, resolvedAtDid),
+    targetHandle: targetHandle ?? extractHandleFromTarget(resolvedWebId, resolvedActorUri, resolvedAtDid),
+    ...(sourceCaseId ? { sourceCaseId } : {}),
     action: body.action,
     labels: allLabels,
     reason,
@@ -175,57 +353,10 @@ export async function handleApplyDecision(
   };
 
   // ------------------------------------------------------------------
-  // 1. Propagate to ActivityPub (MRF content-policy module)
+  // 1. Propagate to ATProto (emit AT label for each target DID)
   // ------------------------------------------------------------------
-  const mrfField = ACTION_TO_MRF_FIELD[body.action];
   let mrfPatched = false;
-
-  if (mrfField) {
-    const targetIdentifier = resolvedWebId || resolvedAtDid || targetHandle;
-    if (targetIdentifier) {
-      try {
-        // Read current module config so we append labels instead of replacing
-        // the entire blockedLabels/warnLabels list.
-        let mergedLabels = allLabels;
-        const currentResponse = await retry(() =>
-          deps.mrfInternalFetch({
-            method: "GET",
-            path: "/internal/admin/mrf/modules/content-policy",
-            permission: "provider:read",
-            actorWebId: actor,
-          }),
-        );
-
-        if (!currentResponse.ok) {
-          throw new Error("Unable to fetch existing content-policy module config");
-        }
-
-        const currentJson = await currentResponse.json().catch(() => null) as {
-          data?: { config?: { config?: { blockedLabels?: string[]; warnLabels?: string[] } } };
-        } | null;
-        const existing = currentJson?.data?.config?.config?.[mrfField] || [];
-        mergedLabels = [...new Set([...existing, ...allLabels])].slice(0, 200);
-
-        const mrfBody = { [mrfField]: mergedLabels };
-        const mrfResponse = await retry(() =>
-          deps.mrfInternalFetch({
-            method: "PATCH",
-            path: "/internal/admin/mrf/modules/content-policy",
-            body: mrfBody,
-            permission: "provider:write",
-            actorWebId: actor,
-          }),
-        );
-        mrfPatched = mrfResponse.ok;
-      } catch {
-        // MRF patch is best-effort — decision is persisted regardless
-      }
-    }
-  }
-
-  // ------------------------------------------------------------------
-  // 2. Propagate to ATProto (emit AT label for each target DID)
-  // ------------------------------------------------------------------
+  let apPatchAttempted = false;
   let atLabelEmitted = false;
   let atStatusUpdated = false;
 
@@ -260,12 +391,41 @@ export async function handleApplyDecision(
   }
 
   // ------------------------------------------------------------------
+  // 2. Propagate to ActivityPub subject policy when the action is enforceable
+  // ------------------------------------------------------------------
+  const subjectRule = buildSubjectPolicyRule({
+    decisionId: id,
+    action: body.action,
+    targetActorUri: resolvedActorUri,
+    targetWebId: resolvedWebId,
+    reason,
+    actor,
+    createdAt: now,
+  });
+  if (subjectRule) {
+    apPatchAttempted = true;
+    try {
+      mrfPatched = await upsertSubjectPolicyRule(deps, subjectRule, actor);
+    } catch {
+      mrfPatched = false;
+    }
+  }
+
+  // ------------------------------------------------------------------
   // 3. Update protocol propagation status and persist
   // ------------------------------------------------------------------
+  if (apPatchAttempted && !mrfPatched && !atLabelEmitted) {
+    throw internal("Failed to apply moderation to ActivityPub and no AT Protocol label was emitted");
+  }
+
   const protocols: ModerationDecision["protocols"] =
-    mrfPatched && atLabelEmitted ? "both" :
-    mrfPatched ? "ap" :
-    atLabelEmitted ? "at" : "none";
+    mrfPatched && atLabelEmitted
+      ? "both"
+      : mrfPatched
+        ? "ap"
+        : atLabelEmitted
+          ? "at"
+          : "none";
 
   const persisted: ModerationDecision = {
     ...decision,
@@ -276,6 +436,17 @@ export async function handleApplyDecision(
   };
 
   await deps.store.addDecision(persisted);
+
+  if (sourceCaseId && linkedCase) {
+    const relatedDecisionIds = [...new Set([...(linkedCase.relatedDecisionIds || []), persisted.id])];
+    await deps.store.patchCase(sourceCaseId, {
+      status: "resolved",
+      relatedDecisionIds,
+      updatedAt: now,
+      resolvedAt: now,
+      resolvedBy: actor,
+    });
+  }
 
   return json({ decision: persisted, ok: true }, 201);
 }
@@ -298,6 +469,7 @@ export async function handleListDecisions(
   const action = params["action"] as ModerationAction | undefined;
   const targetAtDid = params["targetAtDid"] || undefined;
   const targetWebId = params["targetWebId"] || undefined;
+  const targetActorUri = params["targetActorUri"] || undefined;
   const includeRevoked = params["includeRevoked"] !== "false";
 
   const page: ModerationDecisionPage = await deps.store.listDecisions({
@@ -306,6 +478,7 @@ export async function handleListDecisions(
     action,
     targetAtDid,
     targetWebId,
+    targetActorUri,
     includeRevoked,
   });
 
@@ -325,7 +498,7 @@ export async function handleGetDecision(
   assertAdminBearer(req.headers, deps.adminToken);
   deps.authorize(req, "provider:read");
 
-  const safeId = sanitiseId(id);
+  const safeId = sanitiseRecordId(id, "decision");
   const decision = await deps.store.getDecision(safeId);
   if (!decision) throw notFound(`Decision ${safeId} not found`);
 
@@ -346,7 +519,7 @@ export async function handleRevokeDecision(
   deps.authorize(req, "provider:write");
 
   const actor = deps.actorFromRequest(req);
-  const safeId = sanitiseId(id);
+  const safeId = sanitiseRecordId(id, "decision");
 
   const decision = await deps.store.getDecision(safeId);
   if (!decision) throw notFound(`Decision ${safeId} not found`);
@@ -355,7 +528,18 @@ export async function handleRevokeDecision(
   }
 
   // ------------------------------------------------------------------
-  // 1. Negate AT labels for the target DID
+  // 1. Remove the exact ActivityPub subject rule before we mark the decision
+  //    revoked. Rules are keyed by decision id, so duplicate decisions are safe.
+  // ------------------------------------------------------------------
+  if (decision.mrfPatched) {
+    const removed = await removeSubjectPolicyRule(deps, decision.id, actor);
+    if (!removed) {
+      throw internal("Failed to revoke ActivityPub subject policy rule");
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 2. Negate AT labels for the target DID
   // ------------------------------------------------------------------
   if (decision.targetAtDid && decision.atLabelEmitted) {
     for (const labelVal of decision.labels) {
@@ -367,21 +551,87 @@ export async function handleRevokeDecision(
     }
   }
 
-  // ------------------------------------------------------------------
-  // 2. Note: We do NOT automatically remove labels from MRF
-  //    content-policy.blockedLabels because the same label string may
-  //    have been added by multiple decisions. A dedicated MRF module
-  //    reconciliation pass would be needed for cleanup.
-  //    The UI shows a warning for this case.
-  // ------------------------------------------------------------------
-
   const updated = await deps.store.patchDecision(safeId, {
     revoked: true,
     revokedAt: deps.now(),
     revokedBy: actor,
   });
 
+  if (decision.sourceCaseId) {
+    const moderationCase = await deps.store.getCase(decision.sourceCaseId);
+    if (moderationCase) {
+      const remainingRelated = [];
+      for (const relatedId of moderationCase.relatedDecisionIds || []) {
+        const relatedDecision = await deps.store.getDecision(relatedId);
+        if (relatedDecision && !relatedDecision.revoked && relatedDecision.id !== decision.id) {
+          remainingRelated.push(relatedDecision.id);
+        }
+      }
+
+      await deps.store.patchCase(decision.sourceCaseId, {
+        status: remainingRelated.length > 0 ? "resolved" : "open",
+        updatedAt: deps.now(),
+        resolvedAt: remainingRelated.length > 0 ? moderationCase.resolvedAt ?? deps.now() : undefined,
+        resolvedBy: remainingRelated.length > 0 ? moderationCase.resolvedBy : undefined,
+      });
+    }
+  }
+
   return json({ decision: updated, ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// GET /internal/admin/moderation/cases
+// List inbound moderation cases
+// ---------------------------------------------------------------------------
+
+export async function handleListCases(
+  req: Request,
+  deps: ModerationBridgeDeps,
+): Promise<Response> {
+  assertAdminBearer(req.headers, deps.adminToken);
+  deps.authorize(req, "provider:read");
+
+  const params = parseQuery(req.url);
+  const limit = Math.min(Number(params["limit"]) || 50, 200);
+  const cursor = params["cursor"] || undefined;
+  const status = validateCaseStatus(params["status"]);
+  const source = validateCaseSource(params["source"]);
+  const sourceActorUri = params["sourceActorUri"] || undefined;
+  const recipientWebId = params["recipientWebId"] || undefined;
+  const reportedActorUri = params["reportedActorUri"] || undefined;
+
+  const page: ModerationCasePage = await deps.store.listCases({
+    limit,
+    cursor,
+    status,
+    source,
+    sourceActorUri,
+    recipientWebId,
+    reportedActorUri,
+  });
+
+  return json(page);
+}
+
+// ---------------------------------------------------------------------------
+// GET /internal/admin/moderation/cases/:id
+// Get a single moderation case
+// ---------------------------------------------------------------------------
+
+export async function handleGetCase(
+  req: Request,
+  deps: ModerationBridgeDeps,
+  id: string,
+): Promise<Response> {
+  assertAdminBearer(req.headers, deps.adminToken);
+  deps.authorize(req, "provider:read");
+
+  const safeId = sanitiseRecordId(id, "case");
+  const moderationCase = await deps.store.getCase(safeId);
+  if (!moderationCase) throw notFound(`Case ${safeId} not found`);
+
+  return json({ case: moderationCase });
 }
 
 // ---------------------------------------------------------------------------
@@ -480,22 +730,48 @@ function parseQuery(url: string): Record<string, string> {
   }
 }
 
-function sanitiseId(id: string): string {
-  // ULID: 26 chars, URL-safe base32
+function sanitiseRecordId(id: string, kind: "decision" | "case" = "decision"): string {
   const cleaned = id.trim();
-  if (!/^[0-9A-Z]{26}$/i.test(cleaned)) {
-    throw badRequest("Invalid decision id format");
+  const decisionId = /^[0-9A-Z]{26}$/i.test(cleaned);
+  const caseId = /^[a-z0-9._:-]{16,128}$/i.test(cleaned);
+  if (!decisionId && !caseId) {
+    throw badRequest(`Invalid ${kind} id format`);
   }
-  return cleaned.toUpperCase();
+  return decisionId ? cleaned.toUpperCase() : cleaned;
+}
+
+function validateCaseStatus(value: string | undefined): ModerationCaseStatus | undefined {
+  if (!value) return undefined;
+  if (value === "open" || value === "resolved" || value === "dismissed") {
+    return value;
+  }
+  throw badRequest("Invalid case status");
+}
+
+function validateCaseSource(value: string | undefined): "activitypub-flag" | "local-user-report" | undefined {
+  if (!value) return undefined;
+  if (value === "activitypub-flag" || value === "local-user-report") {
+    return value;
+  }
+  throw badRequest("Invalid case source");
 }
 
 function extractHandleFromTarget(
   webId: string | undefined,
+  actorUri: string | undefined,
   atDid: string | undefined,
 ): string | undefined {
   if (atDid) {
     const match = atDid.match(/did:web:(.+)/);
     if (match) return match[1];
+  }
+  if (actorUri) {
+    try {
+      const u = new URL(actorUri);
+      return u.hostname + (u.pathname !== "/" ? u.pathname : "");
+    } catch {
+      return undefined;
+    }
   }
   if (webId) {
     try {

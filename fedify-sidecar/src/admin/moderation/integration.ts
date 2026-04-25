@@ -5,10 +5,14 @@ import type { IdentityBindingRepository } from "../../core-domain/identity/Ident
 import { forbidden } from "../mrf/errors.js";
 import type { MRFPermission } from "../mrf/types.js";
 import { registerModerationBridgeFastifyRoutes } from "./fastify-routes.js";
+import { ActivityPodsModerationCaseStore, CompositeModerationBridgeStore } from "./activitypods-case-store.js";
 import { createAtLabelEmitter } from "./label-emitter.js";
 import { InMemoryModerationBridgeStore } from "./store.memory.js";
 import { RedisModerationBridgeStore } from "./store.redis.js";
-import type { ModerationBridgeDeps } from "./types.js";
+import type { ModerationBridgeDeps, ModerationBridgeStore } from "./types.js";
+import type { CanonicalIntentPublisher } from "../../protocol-bridge/canonical/CanonicalIntentPublisher.js";
+import type { ActivityPubReportForwardingService } from "./ActivityPubReportForwardingService.js";
+import type { AtprotoReportForwardingService } from "./AtprotoReportForwardingService.js";
 
 interface RegisterOptions {
   app: any;
@@ -24,6 +28,16 @@ interface RegisterOptions {
   atAdminXrpcBaseUrl?: string;
   atAdminBearerToken?: string;
   atAdminTimeoutMs?: number;
+  activityPodsBaseUrl?: string;
+  activityPodsBearerToken?: string;
+  activityPodsTimeoutMs?: number;
+  activityPodsRetries?: number;
+  activityPodsRetryBaseMs?: number;
+  activityPodsRetryMaxMs?: number;
+  internalBridgeToken?: string;
+  canonicalPublisher?: CanonicalIntentPublisher;
+  activityPubReportForwardingService?: Pick<ActivityPubReportForwardingService, "handleCanonicalEvent">;
+  atprotoReportForwardingService?: Pick<AtprotoReportForwardingService, "handleCanonicalEvent">;
 }
 
 function parsePermissions(req: Request): Set<string> {
@@ -44,10 +58,13 @@ function sanitizeActor(raw: string | null): string {
   return trimmed.slice(0, 256);
 }
 
-export async function registerModerationBridgeIntegration(options: RegisterOptions): Promise<{ redisClient: Redis | null }> {
+export async function registerModerationBridgeIntegration(options: RegisterOptions): Promise<{
+  redisClient: Redis | null;
+  store: ModerationBridgeStore;
+}> {
   if (!options.enabled) {
     options.logger.info("Moderation bridge integration disabled");
-    return { redisClient: null };
+    return { redisClient: null, store: new InMemoryModerationBridgeStore() };
   }
 
   if (!options.adminToken) {
@@ -68,6 +85,20 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
   const store = redisClient
     ? new RedisModerationBridgeStore(redisClient, { prefix: options.redisPrefix, now })
     : new InMemoryModerationBridgeStore();
+  const remoteCaseStore =
+    options.activityPodsBaseUrl && options.activityPodsBearerToken
+      ? new ActivityPodsModerationCaseStore({
+          baseUrl: options.activityPodsBaseUrl,
+          bearerToken: options.activityPodsBearerToken,
+          timeoutMs: options.activityPodsTimeoutMs,
+          retries: options.activityPodsRetries,
+          retryBaseMs: options.activityPodsRetryBaseMs,
+          retryMaxMs: options.activityPodsRetryMaxMs,
+        })
+      : null;
+  const compositeStore = remoteCaseStore
+    ? new CompositeModerationBridgeStore(store, remoteCaseStore)
+    : store;
 
   const labelEmitter = createAtLabelEmitter(store, {
     labelerDid: options.labelerDid,
@@ -78,7 +109,7 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
   const deps = {} as ModerationBridgeDeps;
   Object.assign(deps, {
     adminToken: options.adminToken,
-    store,
+    store: compositeStore,
     labelEmitter,
     now,
     uuid: () => ulid(),
@@ -95,6 +126,14 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
     },
     resolveWebId: async (atDid: string): Promise<string | null> => {
       const binding = await options.identityBindingRepository.getByAtprotoDid(atDid);
+      return binding?.webId ?? null;
+    },
+    resolveActivityPubActorUri: async (webId: string): Promise<string | null> => {
+      const binding = await options.identityBindingRepository.getByWebId(webId);
+      return binding?.activityPubActorUri ?? null;
+    },
+    resolveWebIdForActorUri: async (actorUri: string): Promise<string | null> => {
+      const binding = await options.identityBindingRepository.getByActivityPubActorUri(actorUri);
       return binding?.webId ?? null;
     },
     mrfInternalFetch: async ({
@@ -189,7 +228,13 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
       : undefined,
   });
 
-  registerModerationBridgeFastifyRoutes(options.app, deps);
+  registerModerationBridgeFastifyRoutes(options.app, deps, {
+    internalBridgeToken: options.internalBridgeToken,
+    canonicalPublisher: options.canonicalPublisher,
+    activityPubReportForwardingService: options.activityPubReportForwardingService,
+    atprotoReportForwardingService: options.atprotoReportForwardingService,
+    now,
+  });
 
   options.logger.info(
     {
@@ -200,5 +245,5 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
     "Moderation bridge routes registered",
   );
 
-  return { redisClient };
+  return { redisClient, store: compositeStore };
 }

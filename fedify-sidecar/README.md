@@ -316,8 +316,19 @@ Add these Moleculer services to your ActivityPods instance:
 
 1. **`signing.service.js`** - Signing API for HTTP signatures
 2. **`outbox-emitter.service.js`** - Emit events when activities are committed
+3. **`activitypub-bridge-recipient-resolver.service.js`** - Trusted internal resolver for outbound targets and bridge media fetches
+
+Optional but recommended when you want derivative generation and media analysis off the pod request path:
+
+4. **`media-pipeline-emitter.service.js`** - Forward newly created pod file resources to `media-pipeline-sidecar`
 
 See `activitypods-integration/` directory for implementations.
+
+Important architecture note:
+
+- `activitypub-bridge-recipient-resolver.service.js` resolves bridge attachment bytes for AP->AT projection and link-preview flows.
+- `media-pipeline-emitter.service.js` is the asynchronous handoff into `media-pipeline-sidecar`.
+- These are complementary paths, not the same subsystem.
 
 ## Monitoring
 

@@ -83,6 +83,14 @@ describe("protocol bridge video parity", () => {
     ]);
 
     const projector = new CanonicalToActivityPubProjector();
+    const firstAttachment = intent.content.attachments[0]!;
+    intent.content.attachments[0] = {
+      ...firstAttachment,
+      digestMultibase: "uzgl43huxjn5jwbqf6f6x4tpg5iuuib6doqzuzehciunx7tqpv7uq",
+      focalPoint: [0.25, -0.4],
+      blurhash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+      duration: "PT12S",
+    };
     const projected = await projector.project(intent, projectionContext);
     expect(projected.kind).toBe("success");
     if (projected.kind !== "success") {
@@ -90,14 +98,24 @@ describe("protocol bridge video parity", () => {
     }
 
     const object = projected.commands[0]?.activity["object"] as Record<string, unknown>;
+    // FEP-1311: when both HTTP URL and CID are present, both are emitted
+    // so recipients can verify integrity and access via IPFS.
     expect(object["attachment"]).toEqual([
       expect.objectContaining({
         type: "Video",
         mediaType: "video/mp4",
-        url: "https://cdn.example.com/did:plc:alice/bafkrei-video-1",
+        url: [
+          "https://cdn.example.com/did:plc:alice/bafkrei-video-1",
+          "ipfs://bafkrei-video-1",
+        ],
         name: "A sample bridge video",
+        size: 1024,
+        duration: "PT12S",
+        digestMultibase: "uzgl43huxjn5jwbqf6f6x4tpg5iuuib6doqzuzehciunx7tqpv7uq",
         width: 1920,
         height: 1080,
+        focalPoint: [0.25, -0.4],
+        blurhash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
       }),
     ]);
   });
@@ -119,6 +137,11 @@ describe("protocol bridge video parity", () => {
               mediaType: "video/mp4",
               url: "https://media.remote.example/video.mp4",
               summary: "Remote video alt text",
+              size: 2048,
+              duration: "PT9S",
+              digestMultibase: "uzgl43huxjn5jwbqf6f6x4tpg5iuuib6doqzuzehciunx7tqpv7uq",
+              focalPoint: [0.1, -0.2],
+              blurHash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
               width: 1280,
               height: 720,
             },
@@ -162,7 +185,12 @@ describe("protocol bridge video parity", () => {
       expect.objectContaining({
         mediaType: "video/mp4",
         url: "https://media.remote.example/video.mp4",
+        byteSize: 2048,
         alt: "Remote video alt text",
+        duration: "PT9S",
+        digestMultibase: "uzgl43huxjn5jwbqf6f6x4tpg5iuuib6doqzuzehciunx7tqpv7uq",
+        focalPoint: [0.1, -0.2],
+        blurhash: "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
         width: 1280,
         height: 720,
       }),

@@ -185,6 +185,7 @@ function _isDeleteMutation(t: CanonicalMutationEnvelope['mutationType']): boolea
     t === 'post_delete'   ||
     t === 'follow_delete' ||
     t === 'like_delete'   ||
+    t === 'emoji_reaction_delete' ||
     t === 'repost_delete'
   );
 }

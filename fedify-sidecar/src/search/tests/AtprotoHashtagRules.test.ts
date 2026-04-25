@@ -10,6 +10,10 @@ describe('ATProto hashtag handling', () => {
     expect(normalizeAtprotoTag('Tag')).toBe('tag');
     expect(normalizeAtprotoTag('#Tag')).toBe('tag');
     expect(normalizeAtprotoTag('##Tag')).toBe('#tag');
+    expect(normalizeAtprotoTag('＃タグ')).toBe('タグ');
+    expect(normalizeAtprotoTag('#Привет')).toBe('привет');
+    expect(normalizeAtprotoTag('#world!!!')).toBe('world');
+    expect(normalizeAtprotoTag('#12345')).toBeUndefined();
   });
 
   it('extracts tags from facets and normalizes them', () => {
@@ -26,9 +30,22 @@ describe('ATProto hashtag handling', () => {
         index: { byteStart: 11, byteEnd: 16 },
         features: [{ $type: 'app.bsky.richtext.facet#link', uri: 'https://example.com' }],
       },
+      {
+        index: { byteStart: 17, byteEnd: 21 },
+        features: [{ $type: 'app.bsky.richtext.facet#tag', tag: 'ぼっち・ざ・ろっく' }],
+      },
+      {
+        index: { byteStart: 22, byteEnd: 28 },
+        features: [{ $type: 'app.bsky.richtext.facet#tag', tag: '＃Привет' }],
+      },
     ];
 
-    expect(extractAtprotoTagsFromFacets(facets)).toEqual(['news', 'tech']);
+    expect(extractAtprotoTagsFromFacets(facets)).toEqual([
+      'news',
+      'tech',
+      'ぼっち・ざ・ろっく',
+      'привет',
+    ]);
   });
 
   it('builds hashtag facets with UTF-8 byte indices', async () => {
@@ -50,5 +67,21 @@ describe('ATProto hashtag handling', () => {
     const first = facets[0] as any;
     expect(first.index.byteStart).toBe(6);
     expect(first.index.byteEnd).toBe(12);
+  });
+
+  it('builds facets for multilingual tags and excludes pure-digit tags', async () => {
+    const builder = new DefaultFacetBuilder();
+    const post = {
+      id: 'post-2',
+      authorId: 'author-1',
+      bodyPlaintext: 'Mix #ぼっち・ざ・ろっく #Привет #1234',
+      visibility: 'public',
+      publishedAt: new Date().toISOString(),
+    };
+
+    const facets = await builder.build(post as any);
+    const tags = facets.map(f => (f as any).features[0].tag);
+
+    expect(tags).toEqual(['ぼっち・ざ・ろっく', 'привет']);
   });
 });

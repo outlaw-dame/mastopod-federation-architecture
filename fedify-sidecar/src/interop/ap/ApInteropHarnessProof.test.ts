@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildCreateNoteWithVideoAttachment,
   buildFollowActivity,
   extractRemoteInboxTarget,
   matchesAcceptForFollow,
@@ -85,6 +86,48 @@ describe("AP interop harness helpers", () => {
         },
       ),
     ).toBe(true);
+  });
+
+  it("builds a public Create(Note) with a video attachment for media interop proofing", () => {
+    const activity = buildCreateNoteWithVideoAttachment({
+      actorUri: "https://sidecar/users/alice",
+      targetActorUri: "https://gotosocial/users/interop",
+      mediaUrl: "https://sidecar/interop-fixtures/sample.mp4",
+      mediaType: "video/mp4",
+      contentMarker: "ap-interop-media-test-marker",
+      id: "https://sidecar/users/alice/activities/create-1",
+      published: "2026-04-13T00:00:00.000Z",
+    });
+
+    expect(activity.type).toBe("Create");
+    expect(activity.object["type"]).toBe("Note");
+    expect(activity.object["content"]).toContain("@interop@gotosocial");
+    expect(activity.object["content"]).toContain("ap-interop-media-test-marker");
+    expect(activity.object["url"]).toBe("https://sidecar/users/alice/activities/create-1#object");
+    expect(activity.object["tag"]).toEqual([
+      {
+        type: "Mention",
+        href: "https://gotosocial/users/interop",
+        name: "@interop@gotosocial",
+      },
+    ]);
+    expect(activity.object["attachment"]).toEqual([
+      expect.objectContaining({
+        type: "Video",
+        mediaType: "video/mp4",
+        url: "https://sidecar/interop-fixtures/sample.mp4",
+      }),
+    ]);
+    expect(activity.to).toEqual(["https://www.w3.org/ns/activitystreams#Public"]);
+    expect(activity.cc).toEqual([
+      "https://sidecar/users/alice/followers",
+      "https://gotosocial/users/interop",
+    ]);
+    expect(activity.object["to"]).toEqual(["https://www.w3.org/ns/activitystreams#Public"]);
+    expect(activity.object["cc"]).toEqual([
+      "https://sidecar/users/alice/followers",
+      "https://gotosocial/users/interop",
+    ]);
   });
 
   it("detects discovery responses that require a signed ActivityPub GET", () => {

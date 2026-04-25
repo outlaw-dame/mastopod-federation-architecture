@@ -7,6 +7,7 @@
 
 import type { CanonicalPost } from '../projection/AtProjectionPolicy.js';
 import type { AtRecordLocator, AtRepoBridgeMetadata } from './AtRepoEvents.js';
+import type { CanonicalCustomEmoji } from '../../protocol-bridge/canonical/CanonicalContent.js';
 
 export interface CanonicalIdentity {
   id: string;
@@ -35,6 +36,15 @@ export interface CanonicalRepost {
   id: string;
   actorId: string;
   postId: string;
+  createdAt: string;
+}
+
+export interface CanonicalEmojiReaction {
+  id: string;
+  actorId: string;
+  postId: string;
+  content: string;
+  emoji?: CanonicalCustomEmoji | null;
   createdAt: string;
 }
 
@@ -99,6 +109,26 @@ export interface CoreRepostDeletedV1 {
   emittedAt: string;
 }
 
+export interface CoreEmojiReactionCreatedV1 {
+  reaction: CanonicalEmojiReaction;
+  actor: CanonicalIdentity;
+  targetPost: CanonicalPost;
+  atRecord?: AtRecordLocator;
+  nativeRecord?: Record<string, unknown>;
+  bridge?: AtRepoBridgeMetadata;
+  emittedAt: string;
+}
+
+export interface CoreEmojiReactionDeletedV1 {
+  canonicalReactionId: string;
+  canonicalActorId: string;
+  canonicalPostId: string;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
+  deletedAt: string;
+  emittedAt: string;
+}
+
 // ---------------------------------------------------------------------------
 // AT Repo Social Operations
 // ---------------------------------------------------------------------------
@@ -106,7 +136,8 @@ export interface CoreRepostDeletedV1 {
 export type AtSocialCollection =
   | 'app.bsky.graph.follow'
   | 'app.bsky.feed.like'
-  | 'app.bsky.feed.repost';
+  | 'app.bsky.feed.repost'
+  | 'org.activitypods.emojiReaction';
 
 export interface AtSocialRepoOpV1 {
   did: string;

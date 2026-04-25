@@ -1,11 +1,10 @@
 import { Buffer } from "node:buffer";
 import { request } from "undici";
 import { z } from "zod";
+import { isSecureOrTrustedInternalUrl } from "../../utils/internalAuthority.js";
 import { sanitizeJsonObject } from "../../utils/safe-json.js";
 import { ProtocolBridgeAdapterError } from "../adapters/ProtocolBridgeAdapterError.js";
 import { DefaultRetryClassifier, withRetry } from "../workers/Retry.js";
-
-const localhostHostnames = new Set(["localhost", "127.0.0.1", "::1"]);
 
 const responseSchema = z.object({
   mediaUrl: z.string().url(),
@@ -174,13 +173,10 @@ function buildEndpointUrl(baseUrl: string, endpointPath: string): string {
     );
   }
 
-  if (
-    parsed.protocol !== "https:" &&
-    !(parsed.protocol === "http:" && localhostHostnames.has(parsed.hostname))
-  ) {
+  if (!isSecureOrTrustedInternalUrl(parsed)) {
     throw new ProtocolBridgeAdapterError(
       "AP_BRIDGE_PROFILE_MEDIA_BASE_URL_INSECURE",
-      "ActivityPub bridge profile media resolution requires https unless the destination is localhost.",
+      "ActivityPub bridge profile media resolution requires https unless the destination is a trusted internal host.",
     );
   }
 
@@ -199,10 +195,7 @@ function normalizeResourceUrl(
     throw new ProtocolBridgeAdapterError(code, message);
   }
 
-  if (
-    parsed.protocol !== "https:" &&
-    !(parsed.protocol === "http:" && localhostHostnames.has(parsed.hostname))
-  ) {
+  if (!isSecureOrTrustedInternalUrl(parsed)) {
     throw new ProtocolBridgeAdapterError(code, message);
   }
 

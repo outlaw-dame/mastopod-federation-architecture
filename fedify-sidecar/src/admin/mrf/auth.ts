@@ -8,7 +8,7 @@ function safeEqual(a: string, b: string): boolean {
   return crypto.timingSafeEqual(ab, bb);
 }
 
-export function assertAdminBearer(headers: Headers, expectedToken: string): void {
+export function assertBearerToken(headers: Headers, expectedToken: string): void {
   const auth = headers.get("authorization") || "";
   const [scheme, token] = auth.split(" ");
 
@@ -19,4 +19,8 @@ export function assertAdminBearer(headers: Headers, expectedToken: string): void
   if (!safeEqual(token, expectedToken)) {
     throw unauthorized("Invalid bearer token");
   }
+}
+
+export function assertAdminBearer(headers: Headers, expectedToken: string): void {
+  assertBearerToken(headers, expectedToken);
 }

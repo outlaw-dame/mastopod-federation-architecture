@@ -27,16 +27,32 @@ import { createSigningClient } from "./signing/signing-client.js";
 import { createRedPandaProducer } from "./streams/redpanda-producer.js";
 import { createSearchIndexerService, SearchIndexerService } from "./search/service/SearchIndexerService.js";
 import {
+  OpenSearchBootstrapService,
+  createOpenSearchBootstrapConfig,
+} from "./search/service/OpenSearchBootstrapService.js";
+import {
+  QdrantBootstrapService,
+  createQdrantBootstrapConfig,
+} from "./search/service/QdrantBootstrapService.js";
+import {
   resolveTopicGovernanceOptionsFromEnv,
   verifyRedpandaTopics,
 } from "./streams/redpanda-topic-governance.js";
 import { createOutboundWorker, OutboundWorker } from "./delivery/outbound-worker.js";
 import { createInboundWorker, InboundWorker } from "./delivery/inbound-worker.js";
+import { InboundIdempotencyGuard } from "./delivery/InboundIdempotencyGuard.js";
+import { ProviderAnnounceGuard } from "./delivery/ProviderAnnounceGuard.js";
+import { RemoteSharedInboxCache } from "./delivery/RemoteSharedInboxCache.js";
 import {
   createOutboxIntentWorker,
   OutboxIntentWorker,
 } from "./delivery/outbox-intent-worker.js";
+import {
+  createOriginReconciliationWorker,
+  OriginReconciliationWorker,
+} from "./delivery/origin-reconciliation-worker.js";
 import { logger } from "./utils/logger.js";
+import { ActivityPodsClient } from "./services/activitypods-client.js";
 import { registerAtXrpcRoutes, attachSubscribeReposWebSocket } from "./at-adapter/xrpc/AtXrpcFastifyBridge.js";
 import { registerOAuthRoutes } from "./at-adapter/oauth/OAuthFastifyBridge.js";
 import { OAuthParStore, OAuthAuthorizationCodeStore, OAuthRefreshTokenStore, OAuthGrantStore, OAuthDpopNonceStore, OAuthConsentChallengeStore, OAuthRateLimitStore } from "./at-adapter/oauth/OAuthRedisStores.js";
@@ -138,6 +154,13 @@ import { AtprotoProfileMediaResolver } from "./protocol-bridge/runtime/AtprotoPr
 import { AtprotoLinkPreviewThumbResolver } from "./protocol-bridge/runtime/AtprotoLinkPreviewThumbResolver.js";
 import { AtIngressRuntime } from "./at-adapter/ingress/AtIngressRuntime.js";
 import { buildAtExternalFirehoseBootstrap, parseAtExternalFirehoseSources } from "./at-adapter/ingress/AtExternalFirehoseBootstrap.js";
+import {
+  isApInteropMediaFixtureEnabled,
+  listApInteropMediaFixtureAccesses,
+  recordApInteropMediaFixtureAccess,
+  resetApInteropMediaFixtureAccesses,
+  resolveApInteropMediaFixtureResponse,
+} from "./interop/ap/mediaFixtures.js";
 import { HttpAtIdentityResolver } from "./at-adapter/ingress/HttpAtIdentityResolver.js";
 import { ProductionAtCommitVerifier } from "./at-adapter/ingress/ProductionAtCommitVerifier.js";
 import { normalizeActivityPubNoteLinkPreviewMode } from "./protocol-bridge/projectors/activitypub/ActivityPubProjectionPolicy.js";
@@ -148,14 +171,25 @@ import { ProtocolBridgeRuntime } from "./protocol-bridge/runtime/ProtocolBridgeR
 import { createProtocolBridgeContexts } from "./protocol-bridge/runtime/createProtocolBridgeContexts.js";
 import { RedisBridgeProfileMediaStore } from "./protocol-bridge/profile/BridgeProfileMedia.js";
 import { RedisBridgePostMediaStore } from "./protocol-bridge/post/BridgePostMedia.js";
+import { RedisObservedAtIdentityStore } from "./protocol-bridge/identity/ObservedAtIdentityStore.js";
+import { AtIdentityObservationService } from "./protocol-bridge/identity/AtIdentityObservationService.js";
 import { ApToAtProjectionWorker } from "./protocol-bridge/workers/ApToAtProjectionWorker.js";
 import { AtToApProjectionWorker } from "./protocol-bridge/workers/AtToApProjectionWorker.js";
 import { CanonicalIntentPublisher, CANONICAL_V1_TOPIC } from "./protocol-bridge/canonical/CanonicalIntentPublisher.js";
 import { CanonicalNotificationConsumer } from "./protocol-bridge/notifications/CanonicalNotificationConsumer.js";
+import { registerAtIdentityObservabilityFastifyRoutes } from "./admin/at-observability/fastify-routes.js";
 // Fedify runtime integration (feature-flagged: ENABLE_FEDIFY_RUNTIME_INTEGRATION=true)
 import { FedifyKvAdapter } from "./federation/FedifyKvAdapter.js";
 import { createFedifyAdapter, type FedifyFederationAdapter } from "./federation/FedifyFederationAdapter.js";
 import { registerFedifyRoutes } from "./federation/FedifyFastifyBridge.js";
+import { FollowersSyncService } from "./federation/fep8fcf/FollowersSyncService.js";
+import { registerFollowersSyncRoutes } from "./federation/fep8fcf/FollowersSyncFastifyBridge.js";
+import { registerBlockedCollectionRoutes } from "./federation/fep-c648/BlockedCollectionFastifyBridge.js";
+import { registerMutedCollectionRoutes } from "./federation/MutedCollectionFastifyBridge.js";
+import { registerHashtagRoutes } from "./federation/HashtagFastifyBridge.js";
+import { RepliesBackfillService } from "./federation/replies-backfill/RepliesBackfillService.js";
+import { OriginReconciliationService } from "./federation/origin-reconciliation/OriginReconciliationService.js";
+import { SidecarLocalSigningService } from "./signing/SidecarLocalSigningService.js";
 import {
   evaluateOutboundWebhookBackpressure,
   normalizeAndDedupeOutboundTargets,
@@ -164,6 +198,16 @@ import {
 } from "./delivery/outbound-webhook.js";
 import { registerMrfAdminIntegration } from "./admin/mrf/integration.js";
 import { registerModerationBridgeIntegration } from "./admin/moderation/integration.js";
+import type { ModerationBridgeStore } from "./admin/moderation/types.js";
+import { ActivityPodsModerationCaseStore } from "./admin/moderation/activitypods-case-store.js";
+import {
+  ActivityPubReportForwardingService,
+  DEFAULT_MODERATION_ACTOR_IDENTIFIER,
+  buildModerationActorUri,
+} from "./admin/moderation/ActivityPubReportForwardingService.js";
+import { CanonicalActivityPubReportForwarder } from "./admin/moderation/CanonicalActivityPubReportForwarder.js";
+import { AtprotoReportForwardingService } from "./admin/moderation/AtprotoReportForwardingService.js";
+import { CanonicalAtprotoReportForwarder } from "./admin/moderation/CanonicalAtprotoReportForwarder.js";
 import {
   ApRelaySubscriptionService,
   parseRelayActorUrls,
@@ -172,9 +216,43 @@ import {
   AtJetstreamService,
   parseJetstreamUrl,
 } from "./at-adapter/jetstream/AtJetstreamService.js";
+import { Client as OpenSearchNativeClient } from "@opensearch-project/opensearch";
+import { DefaultFeedCandidateService } from "./search/queries/FeedCandidateService.js";
+import { QdrantFeedCandidateService } from "./search/queries/QdrantFeedCandidateService.js";
+import { FeedRegistry } from "./feed/FeedRegistry.js";
+import { DefaultPodFeedService } from "./feed/PodFeedService.js";
+import { DefaultPodHydrationService } from "./feed/PodHydrationService.js";
+import { OpenSearchFeedProvider } from "./feed/OpenSearchFeedProvider.js";
+import { OpenSearchHydrator } from "./feed/OpenSearchHydrator.js";
+import { QdrantFeedProvider } from "./feed/QdrantFeedProvider.js";
+import { QdrantHydrator } from "./feed/QdrantHydrator.js";
+import { QdrantDocumentStore } from "./feed/QdrantDocumentStore.js";
+import type { FeedDefinition } from "./feed/contracts.js";
+import { registerFeedFastifyRoutes, attachFeedStreamWebSocket } from "./feed/fastify-routes.js";
+import { DurableStreamSubscriptionService, buildCapabilityLookup } from "./feed/DurableStreamSubscriptionService.js";
+import { FeedStreamKafkaConsumer } from "./feed/FeedStreamKafkaConsumer.js";
+import { UnifiedFeedBridge } from "./feed/UnifiedFeedBridge.js";
+import type { DurableStreamCapability } from "./feed/DurableStreamContracts.js";
+import { Fep3ab2Runtime } from "./fep3ab2/Fep3ab2Runtime.js";
+import {
+  buildProviderCapabilities,
+  inferProviderProfile,
+  renderCapabilitiesResponse,
+} from "./capabilities/provider-capabilities.js";
+import { evaluateCapabilityGate } from "./capabilities/gates.js";
+import { validateProviderCapabilitiesConfig } from "./capabilities/startup-validator.js";
+import { buildEntitlementOverridesFromEnv, checkCapabilityLimit } from "./capabilities/entitlement.js";
+import type { ProviderProfile } from "./capabilities/types.js";
+import { MediaAssetSyncConsumer } from "./media/MediaAssetSyncConsumer.js";
+import { evaluateMediaSignalPolicy } from "./media/MediaSignalPolicy.js";
+import type { MRFAdminStore } from "./admin/mrf/store.js";
+import { applyLocaleHeaders, resolveLocale, t as translateLocale } from "./http/locale.js";
 
 function normalizeMrfAdminStoreMode(raw: string | undefined): "memory" | "redis" {
-  return raw === "redis" ? "redis" : "memory";
+  if (raw === "memory" || raw === "redis") {
+    return raw;
+  }
+  return "redis";
 }
 
 type StartupMode = "blocking" | "background";
@@ -204,6 +282,18 @@ function resolveStartupMode(raw: string | undefined, nodeEnv: string): StartupMo
   return nodeEnv === "production" ? "blocking" : "background";
 }
 
+function resolveProviderProfile(raw: string | undefined, enableXrpcServer: boolean): ProviderProfile {
+  if (
+    raw === "ap-core" ||
+    raw === "ap-scale" ||
+    raw === "dual-protocol-standard"
+  ) {
+    return raw;
+  }
+
+  return inferProviderProfile(enableXrpcServer);
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -219,15 +309,34 @@ const config = {
   host: process.env["HOST"] || "0.0.0.0",
   domain: process.env["DOMAIN"] || "localhost",
   sidecarToken: process.env["SIDECAR_TOKEN"] || "",
+  providerProfile: process.env["PROVIDER_PROFILE"],
+  providerPlan: process.env["PROVIDER_PLAN"] || "standard",
+  providerDisplayName: process.env["PROVIDER_DISPLAY_NAME"] || "ActivityPods Provider",
+  providerRegion: process.env["PROVIDER_REGION"] || "unknown",
+  enableProviderCapabilitiesEndpoint:
+    process.env["ENABLE_PROVIDER_CAPABILITIES_ENDPOINT"] !== "false",
+  enableMediaAssetSync:
+    process.env["ENABLE_MEDIA_ASSET_SYNC"] !== "false",
+  mediaAssetTopic: process.env["MEDIA_ASSET_TOPIC"] || "media.asset.created.v1",
   
   // Feature flags
   enableOutboundWorker: process.env["ENABLE_OUTBOUND_WORKER"] !== "false",
   enableInboundWorker: process.env["ENABLE_INBOUND_WORKER"] !== "false",
   enableOutboxIntentWorker: process.env["ENABLE_OUTBOX_INTENT_WORKER"] !== "false",
+  enableOriginReconciliation:
+    process.env["ENABLE_ORIGIN_RECONCILIATION"] !== "false" &&
+    process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
   enableOpenSearchIndexer: process.env["ENABLE_OPENSEARCH_INDEXER"] !== "false",
+  searchBackend:
+    process.env["SEARCH_BACKEND"] === "opensearch" ||
+    process.env["SEARCH_BACKEND"] === "qdrant" ||
+    process.env["SEARCH_BACKEND"] === "dual"
+      ? process.env["SEARCH_BACKEND"]
+      : "dual",
   enableXrpcServer: process.env["ENABLE_XRPC_SERVER"] !== "false",
   enableFedifyRuntimeIntegration:
     process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
+  enableFollowersSync: process.env["ENABLE_FOLLOWERS_SYNC"] === "true",
   enableProtocolBridgeApToAt: process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true",
   // AT→AP is auto-enabled when Jetstream is on, so Bluesky content reaches the AP timeline.
   // Can be explicitly set to "false" to disable even when ENABLE_AT_JETSTREAM=true.
@@ -236,12 +345,21 @@ const config = {
     (process.env["ENABLE_AT_JETSTREAM"] === "true" &&
       process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] !== "false"),
   enableMrfAdminApi: process.env["ENABLE_MRF_ADMIN_API"] === "true",
+  enableApInteropMediaFixtures: isApInteropMediaFixtureEnabled(),
   mrfAdminToken: process.env["MRF_ADMIN_TOKEN"] || "",
   mrfAdminStore: normalizeMrfAdminStoreMode(process.env["MRF_ADMIN_STORE"]),
   mrfAdminRedisPrefix: process.env["MRF_ADMIN_REDIS_PREFIX"] || "mrf:admin",
   enableModerationBridgeApi:
     process.env["ENABLE_MODERATION_BRIDGE_API"] === "true" ||
     process.env["ENABLE_MRF_ADMIN_API"] === "true",
+  enableActivityPubReportForwarder:
+    process.env["ENABLE_ACTIVITYPUB_REPORT_FORWARDER"] !== "false" &&
+    (process.env["ENABLE_MODERATION_BRIDGE_API"] === "true"
+      || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
+  enableAtprotoReportForwarder:
+    process.env["ENABLE_ATPROTO_REPORT_FORWARDER"] !== "false" &&
+    (process.env["ENABLE_MODERATION_BRIDGE_API"] === "true"
+      || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
   moderationBridgeRedisPrefix:
     process.env["MODERATION_BRIDGE_REDIS_PREFIX"] || "moderation:bridge",
   moderationLabelerDid:
@@ -334,7 +452,11 @@ const config = {
     process.env["ENABLE_CANONICAL_EVENT_LOG"] !== "false" &&
     (process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true" ||
       process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true" ||
-      process.env["ENABLE_AT_JETSTREAM"] === "true"),
+      process.env["ENABLE_AT_JETSTREAM"] === "true" ||
+      process.env["ENABLE_MODERATION_BRIDGE_API"] === "true" ||
+      process.env["ENABLE_MRF_ADMIN_API"] === "true" ||
+      process.env["ENABLE_ACTIVITYPUB_REPORT_FORWARDER"] === "true" ||
+      process.env["ENABLE_ATPROTO_REPORT_FORWARDER"] === "true"),
   enableCanonicalNotifications:
     process.env["ENABLE_CANONICAL_NOTIFICATIONS"] !== "false" &&
     (process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true" ||
@@ -415,6 +537,7 @@ const config = {
   ),
   externalPdsTimeoutMs: Number.parseInt(process.env["EXTERNAL_PDS_TIMEOUT_MS"] || "8000", 10),
   externalPdsMaxAttempts: Number.parseInt(process.env["EXTERNAL_PDS_MAX_ATTEMPTS"] || "5", 10),
+  didDocCacheTtlSeconds: Number.parseInt(process.env["DID_DOC_CACHE_TTL_SECONDS"] || "300", 10),
   atOauthRouteRateLimits: parseOAuthRouteRateLimitsFromEnv(process.env),
   protocolBridgeConsumerGroupId:
     process.env["PROTOCOL_BRIDGE_CONSUMER_GROUP_ID"] || "fedify-sidecar-protocol-bridge",
@@ -499,20 +622,34 @@ let queue: RedisStreamsQueue | null = null;
 let outboundWorker: OutboundWorker | null = null;
 let inboundWorker: InboundWorker | null = null;
 let outboxIntentWorker: OutboxIntentWorker | null = null;
+let originReconciliationWorker: OriginReconciliationWorker | null = null;
 let opensearchIndexer: SearchIndexerService | null = null;
 let atRedisClient: Redis | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
 let identityWarmupService: IdentityWarmupService | null = null;
 let atEventPublisher: RedpandaEventPublisher | null = null;
+let canonicalPublisher: CanonicalIntentPublisher | undefined;
 let atFirehoseRuntime: AtFirehoseRuntime | null = null;
 let atExternalFirehoseRuntime: AtIngressRuntime | null = null;
 let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
+let mediaAssetSyncConsumer: MediaAssetSyncConsumer | null = null;
 let searchIndexerRedis: Redis | null = null;
 let mrfAdminRedisClient: Redis | null = null;
+let mrfAdminStore: MRFAdminStore | null = null;
 let moderationBridgeRedisClient: Redis | null = null;
+let moderationBridgeStore: ModerationBridgeStore | null = null;
+let identityRepo: RedisIdentityBindingRepository | null = null;
 let fedifyAdapter: FedifyFederationAdapter | null = null;
+let activityPubReportForwardingService: ActivityPubReportForwardingService | null = null;
+let canonicalActivityPubReportForwarder: CanonicalActivityPubReportForwarder | null = null;
+let atprotoReportForwardingService: AtprotoReportForwardingService | null = null;
+let canonicalAtprotoReportForwarder: CanonicalAtprotoReportForwarder | null = null;
 let apRelaySubscriptionService: ApRelaySubscriptionService | null = null;
 let atJetstreamService: AtJetstreamService | null = null;
+let streamSubscriptionService: DurableStreamSubscriptionService | null = null;
+let feedStreamKafkaConsumer: FeedStreamKafkaConsumer | null = null;
+let unifiedFeedBridge: UnifiedFeedBridge | null = null;
+let fep3ab2Runtime: Fep3ab2Runtime | null = null;
 let isShuttingDown = false;
 const startupState: StartupState = {
   mode: config.startupMode,
@@ -577,6 +714,20 @@ function markStartupReady(): void {
   startupState.error = null;
 }
 
+/**
+ * Populate Prometheus capability health gauges from the live capabilities
+ * document.  Called once after all startup tasks complete.
+ *   1  = enabled
+ *   0  = disabled
+ *  -1  = degraded (reserved for future runtime checks)
+ */
+function populateCapabilityHealthGauges(doc: import("./capabilities/types.js").ProviderCapabilitiesDocument): void {
+  for (const cap of doc.capabilities) {
+    const value = cap.status === "enabled" ? 1 : 0;
+    promMetrics.capabilityHealthGauge.set({ capability: cap.id }, value);
+  }
+}
+
 // ============================================================================
 // Main Application
 // ============================================================================
@@ -593,6 +744,69 @@ async function main() {
     richNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewRichDomains,
     disabledNoteLinkPreviewDomains: config.protocolBridgeApNoteLinkPreviewDisabledDomains,
   } as const;
+  const providerProfile = resolveProviderProfile(
+    config.providerProfile,
+    config.enableXrpcServer,
+  );
+  const providerCapabilitiesDocument = buildProviderCapabilities({
+    providerId: config.domain,
+    providerDisplayName: config.providerDisplayName,
+    providerRegion: config.providerRegion,
+    profile: providerProfile,
+    plan: config.providerPlan,
+    enableInboundWorker: config.enableInboundWorker,
+    enableOutboundWorker: config.enableOutboundWorker,
+    enableOpenSearchIndexer: config.enableOpenSearchIndexer,
+    enableXrpcServer: config.enableXrpcServer,
+    enableMediaPipeline: config.enableMediaAssetSync,
+    enableMrf: config.enableMrfAdminApi,
+    atprotoEnabled: config.enableXrpcServer,
+    firehoseRetentionDays: Number.parseInt(process.env["FIREHOSE_RETENTION_DAYS"] || "30", 10),
+    includeAtDisabledEntries: true,
+    enableCanonicalEventLog: config.enableCanonicalEventLog,
+    enableUnifiedFeed: true,
+  });
+  const providerCapabilitiesResponse = renderCapabilitiesResponse(providerCapabilitiesDocument);
+  const capabilityGate = (capabilityId: string) =>
+    evaluateCapabilityGate(providerCapabilitiesDocument, capabilityId);
+  const providerValidation = validateProviderCapabilitiesConfig(providerCapabilitiesDocument, {
+    profile: providerProfile,
+    // Redis and Redpanda have safe localhost defaults; treat as present unless
+    // the operator has explicitly disabled them.
+    hasRedisUrl: true,
+    hasRedpandaBrokers: true,
+    // Signing endpoint / ActivityPods URL have no safe default in production.
+    hasSigningEndpoint: !!(process.env["ACTIVITYPODS_URL"]) || config.atLocalFixture,
+    hasSigningToken: !!(process.env["ACTIVITYPODS_TOKEN"]) || config.atLocalFixture,
+    // OpenSearch also has a localhost default but treat missing URL as advisory.
+    hasOpenSearchUrl: true,
+    hasActivityPodsUrl: !!(process.env["ACTIVITYPODS_URL"]) || config.atLocalFixture,
+    hasActivityPodsToken: !!(process.env["ACTIVITYPODS_TOKEN"]) || config.atLocalFixture,
+    enableMrf: config.enableMrfAdminApi,
+  });
+
+  for (const issue of providerValidation.issues) {
+    const logMessage = "Provider capability validation issue";
+    if (issue.severity === "fatal") {
+      logger.error({
+        ruleId: issue.ruleId,
+        code: issue.code,
+        message: issue.message,
+        details: issue.details,
+      }, logMessage);
+    } else {
+      logger.warn({
+        ruleId: issue.ruleId,
+        code: issue.code,
+        message: issue.message,
+        details: issue.details,
+      }, logMessage);
+    }
+  }
+
+  if (!providerValidation.ok) {
+    throw new Error("Provider capability validation failed");
+  }
 
   const redpandaProducerRequired =
     config.enableOutboxIntentWorker
@@ -607,7 +821,8 @@ async function main() {
     || config.enableAtJetstream
     || config.enableAtExternalFirehose
     || config.enableCanonicalEventLog
-    || config.enableCanonicalNotifications;
+    || config.enableCanonicalNotifications
+    || config.enableMediaAssetSync;
   const startupTasks: StartupTask[] = [];
 
   const enforceTopicGovernance = process.env["REDPANDA_ENFORCE_TOPIC_GOVERNANCE"] !== "false";
@@ -686,6 +901,165 @@ async function main() {
     const signingClient = createSigningClient();
     logger.info("Signing client initialized");
 
+    // FEP-8fcf Followers Sync Service (optional, feature-flagged)
+    const followersSyncService: FollowersSyncService | undefined = config.enableFollowersSync
+      ? new FollowersSyncService({
+          domain: config.domain,
+          activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://localhost:3000",
+          activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+          requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+          userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+          digestCacheTtlSeconds: Number.parseInt(
+            process.env["FOLLOWERS_SYNC_DIGEST_TTL_SECONDS"] || "300", 10,
+          ),
+        })
+      : undefined;
+    if (followersSyncService) {
+      logger.info("FEP-8fcf followers sync service enabled");
+    }
+
+    const repliesBackfillService: RepliesBackfillService | undefined =
+      config.enableFedifyRuntimeIntegration
+        ? new RepliesBackfillService(signingClient, queue, {
+            signerActorUri: config.apRelayLocalActorUri || `https://${config.domain}/users/relay`,
+            requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+            userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+          })
+        : undefined;
+    const originReconciliationService: OriginReconciliationService | undefined =
+      config.enableOriginReconciliation
+        ? new OriginReconciliationService({
+            queue,
+            domain: config.domain,
+            initialDelayMs: Number.parseInt(
+              process.env["ORIGIN_RECONCILIATION_INITIAL_DELAY_MS"] || "30000",
+              10,
+            ),
+            activationWindowMs: Number.parseInt(
+              process.env["ORIGIN_RECONCILIATION_WINDOW_MS"] || `${30 * 60 * 1000}`,
+              10,
+            ),
+            maxAttempts: Number.parseInt(
+              process.env["ORIGIN_RECONCILIATION_MAX_ATTEMPTS"] || "5",
+              10,
+            ),
+          })
+        : undefined;
+    if (repliesBackfillService) {
+      logger.info("Mastodon-compatible replies backfill service enabled");
+    }
+    if (originReconciliationService) {
+      logger.info("Origin reconciliation service enabled");
+    }
+
+    const moderationActorUri = config.enableActivityPubReportForwarder
+      ? buildModerationActorUri(config.domain, DEFAULT_MODERATION_ACTOR_IDENTIFIER)
+      : null;
+    const moderationActorPath = moderationActorUri ? new URL(moderationActorUri).pathname : null;
+    const moderationReportCaseStore =
+      (config.enableActivityPubReportForwarder || config.enableAtprotoReportForwarder)
+      && process.env["ACTIVITYPODS_URL"]
+      && process.env["ACTIVITYPODS_TOKEN"]
+        ? new ActivityPodsModerationCaseStore({
+            baseUrl: process.env["ACTIVITYPODS_URL"],
+            bearerToken: process.env["ACTIVITYPODS_TOKEN"],
+            timeoutMs: 5_000,
+            retries: 3,
+            retryBaseMs: 100,
+            retryMaxMs: 2_000,
+          })
+        : null;
+
+    if (
+      config.enableActivityPubReportForwarder
+      && moderationReportCaseStore
+      && config.enableOutboxIntentWorker
+      && config.enableCanonicalEventLog
+      && config.enableFedifyRuntimeIntegration
+    ) {
+      activityPubReportForwardingService = new ActivityPubReportForwardingService(
+        queue,
+        moderationReportCaseStore,
+        {
+          domain: config.domain,
+          moderationActorIdentifier: DEFAULT_MODERATION_ACTOR_IDENTIFIER,
+          userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+          fetchTimeoutMs: Number.parseInt(
+            process.env["ACTIVITYPUB_REPORT_FETCH_TIMEOUT_MS"] || "10000",
+            10,
+          ),
+          fetchRetries: Number.parseInt(
+            process.env["ACTIVITYPUB_REPORT_FETCH_RETRIES"] || "2",
+            10,
+          ),
+          fetchRetryBaseMs: Number.parseInt(
+            process.env["ACTIVITYPUB_REPORT_FETCH_RETRY_BASE_MS"] || "250",
+            10,
+          ),
+          fetchRetryMaxMs: Number.parseInt(
+            process.env["ACTIVITYPUB_REPORT_FETCH_RETRY_MAX_MS"] || "2500",
+            10,
+          ),
+        },
+        {
+          info: (message, meta) => logger.info(meta || {}, message),
+          warn: (message, meta) => logger.warn(meta || {}, message),
+          error: (message, meta) => logger.error(meta || {}, message),
+        },
+      );
+      logger.info("ActivityPub report forwarding service initialized", {
+        moderationActorUri,
+      });
+    } else if (config.enableActivityPubReportForwarder) {
+      logger.warn("ActivityPub report forwarding requested but prerequisites were not met", {
+        hasActivityPodsUrl: Boolean(process.env["ACTIVITYPODS_URL"]),
+        hasActivityPodsToken: Boolean(process.env["ACTIVITYPODS_TOKEN"]),
+        enableOutboxIntentWorker: config.enableOutboxIntentWorker,
+        enableCanonicalEventLog: config.enableCanonicalEventLog,
+        enableFedifyRuntimeIntegration: config.enableFedifyRuntimeIntegration,
+      });
+    }
+
+    if (
+      config.enableAtprotoReportForwarder
+      && moderationReportCaseStore
+      && config.enableCanonicalEventLog
+    ) {
+      atprotoReportForwardingService = new AtprotoReportForwardingService(
+        moderationReportCaseStore,
+        {
+          requestTimeoutMs: Number.parseInt(
+            process.env["ATPROTO_REPORT_REQUEST_TIMEOUT_MS"] || "10000",
+            10,
+          ),
+          requestRetries: Number.parseInt(
+            process.env["ATPROTO_REPORT_REQUEST_RETRIES"] || "2",
+            10,
+          ),
+          requestRetryBaseMs: Number.parseInt(
+            process.env["ATPROTO_REPORT_REQUEST_RETRY_BASE_MS"] || "250",
+            10,
+          ),
+          requestRetryMaxMs: Number.parseInt(
+            process.env["ATPROTO_REPORT_REQUEST_RETRY_MAX_MS"] || "2500",
+            10,
+          ),
+        },
+        {
+          info: (message, meta) => logger.info(meta || {}, message),
+          warn: (message, meta) => logger.warn(meta || {}, message),
+          error: (message, meta) => logger.error(meta || {}, message),
+        },
+      );
+      logger.info("ATProto report forwarding service initialized");
+    } else if (config.enableAtprotoReportForwarder) {
+      logger.warn("ATProto report forwarding requested but prerequisites were not met", {
+        hasActivityPodsUrl: Boolean(process.env["ACTIVITYPODS_URL"]),
+        hasActivityPodsToken: Boolean(process.env["ACTIVITYPODS_TOKEN"]),
+        enableCanonicalEventLog: config.enableCanonicalEventLog,
+      });
+    }
+
     // Initialize RedPanda producer only when worker/indexer features need it.
     let redpanda: any = null;
     if (redpandaProducerRequired) {
@@ -708,6 +1082,19 @@ async function main() {
         logger.error("Fedify KV Redis error", { error: err.message }),
       );
       const kv = new FedifyKvAdapter(fedifyRedis);
+
+      // Local signing service for sidecar-owned service actors (e.g. relay).
+      // Key pairs are generated on first use and persisted in Redis.
+      const localSigningRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      localSigningRedis.on("error", (err: Error) =>
+        logger.error("Local signing Redis error", { error: err.message }),
+      );
+      const localSigningService = new SidecarLocalSigningService(localSigningRedis);
+      const sidecarServiceActors = ["relay"];
+      if (activityPubReportForwardingService && moderationActorUri) {
+        sidecarServiceActors.push(DEFAULT_MODERATION_ACTOR_IDENTIFIER);
+      }
+
       fedifyAdapter = createFedifyAdapter(
         kv,
         {
@@ -716,6 +1103,37 @@ async function main() {
           activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
           requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
           userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+          localSigningService,
+          sidecarServiceActors,
+          ...(activityPubReportForwardingService
+            ? {
+                onModerationReportDelivered: async ({ meta, targetDomain, statusCode }) => {
+                  await activityPubReportForwardingService!.markDelivered(meta, {
+                    targetDomain,
+                    statusCode,
+                  });
+                },
+                onModerationReportFailed: async ({
+                  meta,
+                  targetDomain,
+                  targetInbox,
+                  statusCode,
+                  error,
+                  responseBody,
+                  attempt,
+                }) => {
+                  await activityPubReportForwardingService!.markFailed(meta.caseId, meta, {
+                    error,
+                    targetDomain,
+                    targetInbox,
+                    statusCode,
+                    responseBody,
+                    attempt,
+                    moderationActorUri: moderationActorUri ?? undefined,
+                  });
+                },
+              }
+            : {}),
           enqueueVerifiedInbox: async (delivery) => {
             if (!queue) {
               throw new Error("Redis queue not initialized");
@@ -738,6 +1156,7 @@ async function main() {
     }
 
     // Initialize AP relay subscription service (requires Fedify + outbox intent worker)
+    let relayLocalActorPath: string | null = null;
     if (
       config.enableFedifyRuntimeIntegration &&
       config.enableOutboxIntentWorker &&
@@ -745,6 +1164,12 @@ async function main() {
     ) {
       const relayLocalActorUri =
         config.apRelayLocalActorUri || `https://${config.domain}/users/relay`;
+      // Derive the path portion (e.g. "/users/relay") for the inbound bypass.
+      try {
+        relayLocalActorPath = new URL(relayLocalActorUri).pathname;
+      } catch {
+        // ignore malformed URI
+      }
       const relayRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
       relayRedis.on("error", (err: Error) =>
         logger.error("Relay subscription Redis error", { error: err.message }),
@@ -785,15 +1210,44 @@ async function main() {
       );
       opensearchIndexer = createSearchIndexerService({
         redis: searchIndexerRedis as any,
+        searchBackend: config.searchBackend as 'opensearch' | 'qdrant' | 'dual',
       });
+      if (config.searchBackend === "opensearch" || config.searchBackend === "dual") {
+        startupTasks.push({
+          name: "bootstrap OpenSearch indices and pipelines",
+          start: async () => {
+            const bootstrapConfig = createOpenSearchBootstrapConfig();
+            const bootstrap = new OpenSearchBootstrapService(bootstrapConfig);
+            try {
+              await bootstrap.bootstrap();
+            } finally {
+              await bootstrap.close();
+            }
+          },
+        });
+      }
+      if (config.searchBackend === "qdrant" || config.searchBackend === "dual") {
+        startupTasks.push({
+          name: "bootstrap Qdrant collection and payload indexes",
+          start: async () => {
+            const bootstrap = new QdrantBootstrapService(createQdrantBootstrapConfig());
+            await bootstrap.bootstrap();
+          },
+        });
+      }
       startupTasks.push({
-        name: "start OpenSearch indexer",
+        name: "start search indexer",
         start: async () => {
           await opensearchIndexer!.initialize();
           opensearchIndexer!.start().catch(err => {
-            logger.error("OpenSearch indexer error", { error: err.message });
+            logger.error("Search indexer error", {
+              backend: config.searchBackend,
+              error: err.message,
+            });
           });
-          logger.info("OpenSearch indexer started");
+          logger.info("Search indexer started", {
+            backend: config.searchBackend,
+          });
         },
       });
     }
@@ -801,8 +1255,13 @@ async function main() {
     // Initialize outbound worker
     if (config.enableOutboundWorker) {
       outboundWorker = createOutboundWorker(queue, signingClient, redpanda, {
+        capabilityGate,
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
+        ...(followersSyncService ? {
+          followersSyncService,
+          domain: config.domain,
+        } : {}),
       });
       startupTasks.push({
         name: "start outbound worker",
@@ -816,8 +1275,21 @@ async function main() {
     }
 
     if (config.enableOutboxIntentWorker) {
+      // Dedicated Redis connection for the sharedInbox cache so its error
+      // handler never pollutes the queue or idempotency Redis clients.
+      const sharedInboxCacheRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      sharedInboxCacheRedis.on("error", (err: Error) =>
+        logger.error("SharedInbox cache Redis error", { error: err.message }),
+      );
+      const sharedInboxCache = new RemoteSharedInboxCache(
+        sharedInboxCacheRedis,
+        process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
+      );
+      logger.info("Remote sharedInbox cache initialized");
+
       outboxIntentWorker = createOutboxIntentWorker(queue, redpanda, {
         activityPubOutboundDeliveryPolicy,
+        sharedInboxCache,
       });
       startupTasks.push({
         name: "start outbox intent worker",
@@ -830,11 +1302,74 @@ async function main() {
       });
     }
 
+    if (config.enableOriginReconciliation) {
+      originReconciliationWorker = createOriginReconciliationWorker(queue, signingClient, {
+        signerActorUri: config.apRelayLocalActorUri || `https://${config.domain}/users/relay`,
+      });
+      startupTasks.push({
+        name: "start origin reconciliation worker",
+        start: async () => {
+          originReconciliationWorker!.start().catch((err) => {
+            logger.error("Origin reconciliation worker error", { error: err.message });
+          });
+          logger.info("Origin reconciliation worker started");
+        },
+      });
+    }
+
     // Initialize inbound worker
     if (config.enableInboundWorker) {
+      const sidecarActorPaths = new Set<string>();
+      if (relayLocalActorPath) {
+        sidecarActorPaths.add(relayLocalActorPath);
+      }
+      if (moderationActorPath) {
+        sidecarActorPaths.add(moderationActorPath);
+      }
+
+      // Durable Redis idempotency guard — one dedicated connection so its
+      // error handler never pollutes other Redis clients.
+      const idempotencyRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      idempotencyRedis.on("error", (err: Error) =>
+        logger.error("Inbound idempotency Redis error", { error: err.message }),
+      );
+      const inboundIdempotencyGuard = new InboundIdempotencyGuard(idempotencyRedis);
+      logger.info("Inbound idempotency guard initialized");
+
+      // Provider-level Announce aggregator — deduplicates boosts by (actor, object)
+      // within a 24-hour window, on top of the activity-ID idempotency guard.
+      const announceAggregatorRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      announceAggregatorRedis.on("error", (err: Error) =>
+        logger.error("Announce aggregator Redis error", { error: err.message }),
+      );
+      const announceAggregator = new ProviderAnnounceGuard(announceAggregatorRedis);
+      logger.info("Provider-level Announce aggregator initialized");
+
       inboundWorker = createInboundWorker(queue, redpanda, {
+        capabilityGate,
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
         ...(fedifyAdapter ? { adapter: fedifyAdapter } : {}),
+        ...(sidecarActorPaths.size > 0 ? { sidecarActorPaths } : {}),
+        inboundIdempotencyGuard,
+        announceAggregator,
+        ...(process.env["MEMORY_AP_WEBHOOK_URL"] ? {
+          apRemoteWebhookUrl: process.env["MEMORY_AP_WEBHOOK_URL"],
+          apRemoteWebhookSecret: process.env["AP_BRIDGE_SECRET"] ?? "",
+        } : {}),
+        getMrfAdminStore: () => mrfAdminStore,
+        getModerationBridgeStore: () => moderationBridgeStore,
+        resolveWebIdForActorUri: async (actorUri: string) => {
+          if (!identityRepo) return null;
+          const binding = await identityRepo.getByActivityPubActorUri(actorUri);
+          return binding?.webId ?? null;
+        },
+        ...(followersSyncService ? {
+          followersSyncService,
+          followersSyncSigningClient: signingClient,
+          domain: config.domain,
+        } : {}),
+        ...(repliesBackfillService ? { repliesBackfillService } : {}),
+        ...(originReconciliationService ? { originReconciliationService } : {}),
       });
       startupTasks.push({
         name: "start inbound worker",
@@ -847,6 +1382,47 @@ async function main() {
       });
     }
 
+    if (config.enableMediaAssetSync) {
+      mediaAssetSyncConsumer = new MediaAssetSyncConsumer(
+        {
+          brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+            .split(",")
+            .map((broker) => broker.trim())
+            .filter(Boolean),
+          clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+          consumerGroupId: `${config.protocolBridgeConsumerGroupId}-media-assets`,
+          mediaAssetTopic: config.mediaAssetTopic,
+          activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+          activityPodsBearerToken: process.env["ACTIVITYPODS_TOKEN"] || "",
+        },
+        {
+          info: (message, meta) => logger.info(meta || {}, message),
+          warn: (message, meta) => logger.warn(meta || {}, message),
+          error: (message, meta) => logger.error(meta || {}, message),
+        },
+        async (event) => {
+          const bindingUrl = event.bindings?.activitypub?.url;
+          const activityId = bindingUrl || event.asset.canonicalUrl;
+          return evaluateMediaSignalPolicy(mrfAdminStore, {
+            activityId,
+            originHost: bindingUrl ? new URL(bindingUrl).host : undefined,
+            actorId: event.asset.ownerId,
+            visibility: "public",
+            signals: event.signals ?? null,
+          });
+        },
+      );
+      startupTasks.push({
+        name: "start media asset sync consumer",
+        start: async () => {
+          await mediaAssetSyncConsumer!.start();
+          logger.info("Media asset sync consumer started", {
+            topic: config.mediaAssetTopic,
+          });
+        },
+      });
+    }
+
     // Create HTTP server
     const app = Fastify({
       logger: false,
@@ -854,6 +1430,11 @@ async function main() {
       bodyLimit: 1024 * 1024,  // 1MB
     });
     let xrpcServerForWebSocket: any = null;
+
+    app.addHook("onRequest", async (request, reply) => {
+      const locale = resolveLocale(request.headers["accept-language"]);
+      applyLocaleHeaders(reply, locale);
+    });
 
     // Raw body parser for signature verification
     app.addContentTypeParser(
@@ -871,8 +1452,34 @@ async function main() {
         version: config.version,
         uptime: process.uptime(),
         startup: snapshotStartupState(),
+        capabilities: providerCapabilitiesDocument.capabilities.map((cap) => ({
+          id: cap.id,
+          status: cap.status,
+        })),
       };
     });
+
+    if (config.enableProviderCapabilitiesEndpoint) {
+      app.get("/.well-known/provider-capabilities", async (request, reply) => {
+        const currentEtag = `"${providerCapabilitiesResponse.etag}"`;
+        const ifNoneMatch = request.headers["if-none-match"];
+        const normalizedIfNoneMatch = typeof ifNoneMatch === "string"
+          ? ifNoneMatch.split(",").map((value) => value.trim())
+          : [];
+
+        if (normalizedIfNoneMatch.includes(currentEtag) || normalizedIfNoneMatch.includes(providerCapabilitiesResponse.etag)) {
+          reply.code(304);
+          reply.header("etag", currentEtag);
+          reply.header("cache-control", "public, max-age=60, stale-while-revalidate=300");
+          return reply.send();
+        }
+
+        reply.header("content-type", "application/json; charset=utf-8");
+        reply.header("cache-control", "public, max-age=60, stale-while-revalidate=300");
+        reply.header("etag", currentEtag);
+        return reply.send(providerCapabilitiesResponse.body);
+      });
+    }
 
     // Readiness check endpoint
     app.get("/ready", async (_request, reply) => {
@@ -894,12 +1501,26 @@ async function main() {
         };
       }
       
-      const [outboundPending, inboundPending, outboxIntentPending] = await Promise.all([
+      const [
+        outboundPending,
+        inboundPending,
+        outboxIntentPending,
+        originReconcilePending,
+        dlqInboundLen,
+        dlqOutboundLen,
+        dlqOutboxIntentLen,
+        dlqOriginReconcileLen,
+      ] = await Promise.all([
         queue.getPendingCount("outbound"),
         queue.getPendingCount("inbound"),
         queue.getPendingCount("outbox_intent"),
+        queue.getPendingCount("origin_reconcile"),
+        queue.getDlqLength("inbound"),
+        queue.getDlqLength("outbound"),
+        queue.getDlqLength("outbox_intent"),
+        queue.getDlqLength("origin_reconcile"),
       ]);
-      
+
       return {
         status: "ready",
         startup,
@@ -907,11 +1528,19 @@ async function main() {
           outbound: { pending: outboundPending },
           inbound: { pending: inboundPending },
           outboxIntent: { pending: outboxIntentPending },
+          originReconcile: { pending: originReconcilePending },
+          dlq: {
+            inbound: dlqInboundLen,
+            outbound: dlqOutboundLen,
+            outboxIntent: dlqOutboxIntentLen,
+            originReconcile: dlqOriginReconcileLen,
+          },
         },
         workers: {
           outbound: config.enableOutboundWorker,
           inbound: config.enableInboundWorker,
           outboxIntent: config.enableOutboxIntentWorker,
+          originReconcile: config.enableOriginReconciliation,
           opensearch: config.enableOpenSearchIndexer,
         },
       };
@@ -927,21 +1556,32 @@ async function main() {
         outboundPending,
         inboundPending,
         outboxIntentPending,
+        originReconcilePending,
         outboundLength,
         inboundLength,
         outboxIntentLength,
+        originReconcileLength,
       ] = await Promise.all([
         queue.getPendingCount("outbound"),
         queue.getPendingCount("inbound"),
         queue.getPendingCount("outbox_intent"),
+        queue.getPendingCount("origin_reconcile"),
         queue.getStreamLength("outbound"),
         queue.getStreamLength("inbound"),
         queue.getStreamLength("outbox_intent"),
+        queue.getStreamLength("origin_reconcile"),
+      ]);
+      const [dlqInboundLength, dlqOutboundLength, dlqOutboxIntentLength, dlqOriginReconcileLength] = await Promise.all([
+        queue.getDlqLength("inbound"),
+        queue.getDlqLength("outbound"),
+        queue.getDlqLength("outbox_intent"),
+        queue.getDlqLength("origin_reconcile"),
       ]);
 
       promMetrics.queueDepth.set({ topic: "outbound" }, outboundLength);
       promMetrics.queueDepth.set({ topic: "inbound" }, inboundLength);
       promMetrics.queueDepth.set({ topic: "outbox_intent" }, outboxIntentLength);
+      promMetrics.queueDepth.set({ topic: "origin_reconcile" }, originReconcileLength);
       const prometheusMetrics = (await renderPrometheusMetrics()).trimEnd();
 
       return [
@@ -955,6 +1595,9 @@ async function main() {
         `# HELP fedify_outbox_intent_pending Number of pending outbox intents`,
         `# TYPE fedify_outbox_intent_pending gauge`,
         `fedify_outbox_intent_pending ${outboxIntentPending}`,
+        `# HELP fedify_origin_reconcile_pending Number of pending origin reconciliation jobs`,
+        `# TYPE fedify_origin_reconcile_pending gauge`,
+        `fedify_origin_reconcile_pending ${originReconcilePending}`,
         `# HELP fedify_outbound_stream_length Total outbound stream length`,
         `# TYPE fedify_outbound_stream_length gauge`,
         `fedify_outbound_stream_length ${outboundLength}`,
@@ -964,12 +1607,308 @@ async function main() {
         `# HELP fedify_outbox_intent_stream_length Total outbox intent stream length`,
         `# TYPE fedify_outbox_intent_stream_length gauge`,
         `fedify_outbox_intent_stream_length ${outboxIntentLength}`,
+        `# HELP fedify_origin_reconcile_stream_length Total origin reconciliation stream length`,
+        `# TYPE fedify_origin_reconcile_stream_length gauge`,
+        `fedify_origin_reconcile_stream_length ${originReconcileLength}`,
+        `# HELP fedify_dlq_inbound_length Inbound DLQ entries (signature failures, validation errors)`,
+        `# TYPE fedify_dlq_inbound_length gauge`,
+        `fedify_dlq_inbound_length ${dlqInboundLength}`,
+        `# HELP fedify_dlq_outbound_length Outbound DLQ entries (exhausted/deferred delivery jobs)`,
+        `# TYPE fedify_dlq_outbound_length gauge`,
+        `fedify_dlq_outbound_length ${dlqOutboundLength}`,
+        `# HELP fedify_dlq_outbox_intent_length Outbox-intent DLQ entries`,
+        `# TYPE fedify_dlq_outbox_intent_length gauge`,
+        `fedify_dlq_outbox_intent_length ${dlqOutboxIntentLength}`,
+        `# HELP fedify_dlq_origin_reconcile_length Origin reconciliation DLQ entries`,
+        `# TYPE fedify_dlq_origin_reconcile_length gauge`,
+        `fedify_dlq_origin_reconcile_length ${dlqOriginReconcileLength}`,
         `# HELP fedify_uptime_seconds Uptime in seconds`,
         `# TYPE fedify_uptime_seconds gauge`,
         `fedify_uptime_seconds ${Math.floor(process.uptime())}`,
         ...renderOAuthSecurityMetricsLines(),
       ].filter((line) => line.length > 0).join("\n") + "\n";
     });
+
+    const openSearchReader =
+      config.searchBackend === "opensearch"
+        ? new OpenSearchNativeClient(
+            process.env["OPENSEARCH_USERNAME"]
+              ? {
+                  node: process.env["OPENSEARCH_URL"] ?? "http://localhost:9200",
+                  auth: {
+                    username: process.env["OPENSEARCH_USERNAME"],
+                    password: process.env["OPENSEARCH_PASSWORD"] ?? "",
+                  },
+                  ssl: {
+                    rejectUnauthorized: process.env["OPENSEARCH_SSL_VERIFY"] !== "false",
+                  },
+                }
+              : {
+                  node: process.env["OPENSEARCH_URL"] ?? "http://localhost:9200",
+                  ssl: {
+                    rejectUnauthorized: process.env["OPENSEARCH_SSL_VERIFY"] !== "false",
+                  },
+                },
+          )
+        : null;
+
+    const qdrantReadConfig = {
+      baseUrl: process.env["QDRANT_URL"] ?? "http://localhost:6333",
+      apiKey: process.env["QDRANT_API_KEY"],
+      collectionName: process.env["QDRANT_COLLECTION_NAME"] ?? "public-content-v1",
+      requestTimeoutMs: parseInt(process.env["QDRANT_REQUEST_TIMEOUT_MS"] ?? "5000", 10),
+    };
+
+    const feedDefinitions: FeedDefinition[] = [
+      {
+        id: "urn:activitypods:feed:public-discovery:v1",
+        kind: "discovery",
+        visibility: "public",
+        title: "Public Discovery",
+        description: "Public relay and canonical-discovery feed skeletons",
+        sourcePolicy: {
+          includeStream1: false,
+          includeStream2: true,
+          includeCanonical: true,
+          includeFirehose: false,
+          includeUnified: true,
+        },
+        rankingPolicy: { mode: "ranked", providerHint: "search-feed-candidates" },
+        hydrationShape: "card",
+        realtimeCapable: true,
+        supportsSse: true,
+        supportsWebSocket: true,
+        experimental: false,
+        providerId: "search.candidates.v1",
+      },
+      {
+        id: "urn:activitypods:feed:graph-personalized:v1",
+        kind: "graph",
+        visibility: "authenticated",
+        title: "Graph Personalized",
+        description: "Viewer-scoped graph feed skeletons",
+        sourcePolicy: {
+          includeStream1: true,
+          includeStream2: true,
+          includeCanonical: true,
+          includeFirehose: false,
+          includeUnified: true,
+        },
+        rankingPolicy: { mode: "blended", providerHint: "search-feed-candidates" },
+        hydrationShape: "card",
+        realtimeCapable: true,
+        supportsSse: true,
+        supportsWebSocket: true,
+        experimental: false,
+        providerId: "search.candidates.v1",
+      },
+      {
+        id: "urn:activitypods:feed:topic:v1",
+        kind: "topic",
+        visibility: "public",
+        title: "Topic",
+        description: "Topic-filtered public feed skeletons",
+        sourcePolicy: {
+          includeStream1: false,
+          includeStream2: true,
+          includeCanonical: true,
+          includeFirehose: false,
+          includeUnified: true,
+        },
+        rankingPolicy: { mode: "blended", providerHint: "search-feed-candidates" },
+        hydrationShape: "card",
+        realtimeCapable: true,
+        supportsSse: true,
+        supportsWebSocket: true,
+        experimental: false,
+        providerId: "search.candidates.v1",
+      },
+    ];
+
+    const feedRegistry = new FeedRegistry(feedDefinitions);
+    const feedProvider =
+      config.searchBackend === "opensearch"
+        ? new OpenSearchFeedProvider(
+            openSearchReader as any,
+            new DefaultFeedCandidateService(openSearchReader as any),
+          )
+        : new QdrantFeedProvider(
+            qdrantReadConfig,
+            new QdrantFeedCandidateService(new QdrantDocumentStore(qdrantReadConfig)),
+          );
+    const feedService = new DefaultPodFeedService(
+      feedRegistry,
+      new Map([["search.candidates.v1", feedProvider]]),
+      {
+        maxAttempts: 3,
+        initialDelayMs: 150,
+        maxDelayMs: 2_000,
+      },
+    );
+    const hydrationService = new DefaultPodHydrationService(
+      new Map([
+        [
+          "default",
+          config.searchBackend === "opensearch"
+            ? new OpenSearchHydrator(openSearchReader as any)
+            : new QdrantHydrator(qdrantReadConfig),
+        ],
+      ]),
+      {
+        concurrency: 4,
+        maxAttempts: 3,
+        initialDelayMs: 150,
+        maxDelayMs: 2_000,
+      },
+    );
+    // Build stream capabilities by scanning feed definitions for SSE/WS support per source.
+    const sourceSseSupport = new Map<string, boolean>();
+    const sourceWsSupport = new Map<string, boolean>();
+    const sourceToPolicy: Array<[string, keyof typeof feedDefinitions[0]["sourcePolicy"]]> = [
+      ["stream1", "includeStream1"],
+      ["stream2", "includeStream2"],
+      ["canonical", "includeCanonical"],
+      ["firehose", "includeFirehose"],
+      ["unified", "includeUnified"],
+    ];
+    for (const def of feedDefinitions) {
+      for (const [source, policyKey] of sourceToPolicy) {
+        if (def.sourcePolicy[policyKey]) {
+          if (def.supportsSse) sourceSseSupport.set(source, true);
+          if (def.supportsWebSocket) sourceWsSupport.set(source, true);
+        }
+      }
+    }
+    const streamCapabilities: DurableStreamCapability[] = (["stream1", "stream2", "canonical", "firehose", "unified"] as const)
+      .filter((s) => sourceSseSupport.has(s) || sourceWsSupport.has(s))
+      .map((s) => ({
+        stream: s,
+        supportsSse: sourceSseSupport.get(s) ?? false,
+        supportsWebSocket: sourceWsSupport.get(s) ?? false,
+        requiresAuthentication: false,
+        replayCapable: false,
+      }));
+    streamSubscriptionService = new DurableStreamSubscriptionService({
+      sidecarToken: config.sidecarToken,
+      capabilityLookup: buildCapabilityLookup(streamCapabilities),
+    });
+    streamSubscriptionService.start();
+
+    feedStreamKafkaConsumer = new FeedStreamKafkaConsumer(
+      {
+        brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+          .split(",")
+          .map((b) => b.trim())
+          .filter(Boolean),
+        clientId: "fedify-feed-stream-consumer",
+        groupId: process.env["FEED_STREAM_CONSUMER_GROUP_ID"] || "fedify-feed-stream-consumer-v1",
+        stream1Topic: process.env["STREAM1_TOPIC"] || "ap.stream1.local-public.v1",
+        stream2Topic: process.env["STREAM2_TOPIC"] || "ap.stream2.remote-public.v1",
+        canonicalTopic: config.canonicalTopic,
+        firehoseTopic: process.env["FIREHOSE_TOPIC"] || "ap.firehose.v1",
+      },
+      streamSubscriptionService,
+    );
+    void feedStreamKafkaConsumer.start().catch((err) => {
+      logger.error("FeedStreamKafkaConsumer failed to start", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    unifiedFeedBridge = new UnifiedFeedBridge(
+      {
+        brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+          .split(",")
+          .map((b) => b.trim())
+          .filter(Boolean),
+        clientId: "fedify-unified-feed-bridge",
+        groupId: process.env["UNIFIED_FEED_BRIDGE_GROUP_ID"] || "fedify-unified-feed-bridge-v1",
+        canonicalTopic: config.canonicalTopic,
+        stream2Topic: process.env["STREAM2_TOPIC"] || "ap.stream2.remote-public.v1",
+      },
+      streamSubscriptionService,
+    );
+    void unifiedFeedBridge.start().catch((err) => {
+      logger.error("UnifiedFeedBridge failed to start", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    const entitlementOverrides = buildEntitlementOverridesFromEnv(process.env);
+    const checkStreamEntitlement = (
+      transport: "sse" | "websocket",
+      currentCount: number,
+    ) => {
+      const field = transport === "sse" ? "maxSseConnections" : "maxWsConnections";
+      const result = checkCapabilityLimit(
+        providerCapabilitiesDocument.entitlements.plan,
+        "ap.feeds.realtime",
+        field,
+        currentCount,
+        entitlementOverrides,
+      );
+      return { allowed: result.allowed, effectiveLimit: result.effectiveLimit };
+    };
+
+    const activityPodsClient = new ActivityPodsClient(process.env["ACTIVITYPODS_URL"] ?? "http://localhost:3000");
+
+    registerFeedFastifyRoutes(app, {
+      sidecarToken: config.sidecarToken,
+      feedRegistry,
+      feedService,
+      hydrationService,
+      viewershipHistoryClient: process.env["ACTIVITYPODS_INTERNAL_API_KEY"] ? activityPodsClient : undefined,
+      streamSubscriptionService,
+      capabilityGate,
+      checkStreamEntitlement,
+    });
+
+    const enableFep3ab2Streaming = (process.env["ENABLE_FEP_3AB2_STREAMING"] ?? "true") !== "false";
+    if (enableFep3ab2Streaming) {
+      const activityPodsBaseUrl = process.env["ACTIVITYPODS_URL"] || "";
+      const activityPodsToken = process.env["ACTIVITYPODS_TOKEN"] || "";
+      const ticketSecret = process.env["FEP_3AB2_TICKET_SECRET"] || config.sidecarToken;
+      if (activityPodsBaseUrl && activityPodsToken && ticketSecret) {
+        const allowedOrigins = String(process.env["FEP_3AB2_ALLOWED_ORIGINS"] || "")
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        const sameSiteRaw = String(process.env["FEP_3AB2_COOKIE_SAMESITE"] || "Lax").trim();
+        const cookieSameSite = sameSiteRaw === "Strict" || sameSiteRaw === "None" ? sameSiteRaw : "Lax";
+        fep3ab2Runtime = new Fep3ab2Runtime({
+          app,
+          streamSubscriptionService,
+          redisUrl: process.env["REDIS_URL"] ?? "redis://localhost:6379",
+          activityPodsBaseUrl,
+          activityPodsToken,
+          ticketSecret,
+          publicBaseUrl: process.env["FEP_3AB2_PUBLIC_BASE_URL"],
+          allowedOrigins,
+          ticketTtlSec: Number.parseInt(process.env["FEP_3AB2_TICKET_TTL_SEC"] || "900", 10),
+          heartbeatIntervalMs: Number.parseInt(process.env["FEP_3AB2_HEARTBEAT_INTERVAL_MS"] || "20000", 10),
+          cookieName: process.env["FEP_3AB2_COOKIE_NAME"] || "ap_stream_ticket",
+          cookiePath: process.env["FEP_3AB2_COOKIE_PATH"] || "/streaming",
+          cookieSameSite,
+          cookieSecure: process.env["FEP_3AB2_COOKIE_SECURE"] === "false" ? false : undefined,
+          cookieDomain: process.env["FEP_3AB2_COOKIE_DOMAIN"] || undefined,
+          prefix: process.env["FEP_3AB2_REDIS_PREFIX"] || "fep3ab2",
+          privateRealtimeChannel:
+            process.env["FEP_3AB2_PRIVATE_REALTIME_CHANNEL"] || "fep3ab2:private-events",
+          replayTtlSec: Number.parseInt(process.env["FEP_3AB2_REPLAY_TTL_SEC"] || "900", 10),
+          replayMaxEvents: Number.parseInt(process.env["FEP_3AB2_REPLAY_MAX_EVENTS"] || "500", 10),
+          replayMaxIndexSize: Number.parseInt(process.env["FEP_3AB2_REPLAY_MAX_INDEX_SIZE"] || "10000", 10),
+          maxPendingReplayPublishes:
+            Number.parseInt(process.env["FEP_3AB2_MAX_PENDING_REPLAY_PUBLISHES"] || "2048", 10),
+          maxStreamBufferBytes:
+            Number.parseInt(process.env["FEP_3AB2_MAX_STREAM_BUFFER_BYTES"] || "1048576", 10),
+        });
+        await fep3ab2Runtime.start();
+      } else {
+        logger.warn(
+          "FEP-3ab2 streaming routes were not started because ACTIVITYPODS_URL or ACTIVITYPODS_TOKEN is missing",
+        );
+      }
+    }
 
     if (config.enableMrfAdminApi) {
       const registration = await registerMrfAdminIntegration({
@@ -982,6 +1921,7 @@ async function main() {
         redisPrefix: config.mrfAdminRedisPrefix,
       });
       mrfAdminRedisClient = registration.redisClient;
+      mrfAdminStore = registration.store;
     }
 
     // Shared inbox endpoint
@@ -990,8 +1930,12 @@ async function main() {
       reply: FastifyReply,
       path: string,
     ): Promise<void> => {
+      const locale = resolveLocale(request.headers["accept-language"]);
       if (!queue) {
-        reply.status(503).send({ error: "Service unavailable" });
+        reply.status(503).send({
+          error: "Service unavailable",
+          message: translateLocale(locale, "common.serviceUnavailable"),
+        });
         return;
       }
 
@@ -1007,6 +1951,158 @@ async function main() {
       reply.status(202).send({ accepted: true, envelopeId: envelope.envelopeId });
     };
 
+    const enqueueVerifiedBenchmarkInboundRequest = async (
+      request: FastifyRequest,
+      reply: FastifyReply,
+      path: string,
+    ): Promise<void> => {
+      const locale = resolveLocale(request.headers["accept-language"]);
+      if (!queue) {
+        reply.status(503).send({
+          error: "Service unavailable",
+          message: translateLocale(locale, "common.serviceUnavailable"),
+        });
+        return;
+      }
+
+      const authHeader = (request.headers["authorization"] as string) || "";
+      const [scheme, token] = authHeader.split(" ");
+      if (scheme !== "Bearer" || token !== config.sidecarToken) {
+        reply.status(401).send({
+          error: "Unauthorized",
+          message: translateLocale(locale, "common.unauthorized"),
+        });
+        return;
+      }
+
+      let activity: Record<string, unknown>;
+      let serializedBody: string;
+      if (typeof request.body === "string") {
+        try {
+          activity = JSON.parse(request.body) as Record<string, unknown>;
+          serializedBody = request.body;
+        } catch {
+          reply.status(400).send({
+            error: "Invalid JSON body",
+            message: translateLocale(locale, "common.invalidJsonBody"),
+          });
+          return;
+        }
+      } else if (request.body && typeof request.body === "object" && !Array.isArray(request.body)) {
+        activity = request.body as Record<string, unknown>;
+        serializedBody = JSON.stringify(activity);
+      } else {
+        reply.status(400).send({
+          error: "Invalid JSON body",
+          message: translateLocale(locale, "common.invalidJsonBody"),
+        });
+        return;
+      }
+
+      const verifiedActorUri = typeof activity["actor"] === "string" ? activity["actor"] : null;
+      if (!verifiedActorUri) {
+        reply.status(400).send({
+          error: "Missing string actor field",
+          message: translateLocale(locale, "common.missingStringActorField"),
+        });
+        return;
+      }
+
+      const envelope = createVerifiedInboundEnvelope({
+        path,
+        body: serializedBody,
+        remoteIp: request.ip,
+        verifiedActorUri,
+        headers: {
+          "x-sidecar-benchmark": "1",
+        },
+      });
+
+      await queue.enqueueInbound(envelope);
+      reply.status(202).send({ accepted: true, envelopeId: envelope.envelopeId });
+    };
+
+    const isAuthorizedSidecarInternalRequest = (request: FastifyRequest): boolean => {
+      const authHeader = (request.headers["authorization"] as string) || "";
+      const [scheme, token] = authHeader.split(" ");
+      return scheme === "Bearer" && token === config.sidecarToken;
+    };
+
+    if (config.enableApInteropMediaFixtures) {
+      app.route({
+        method: ["GET", "HEAD"],
+        url: "/interop-fixtures/:fixtureName",
+        handler: async (request, reply) => {
+          const { fixtureName } = request.params as { fixtureName: string };
+          const response = resolveApInteropMediaFixtureResponse(
+            fixtureName,
+            typeof request.headers.range === "string" ? request.headers.range : undefined,
+          );
+          if (!response) {
+            const locale = resolveLocale(request.headers["accept-language"]);
+            reply.status(404).send({
+              error: "Not Found",
+              message: translateLocale(locale, "common.notFound"),
+            });
+            return;
+          }
+
+          recordApInteropMediaFixtureAccess(fixtureName, {
+            method: request.method,
+            receivedAt: Date.now(),
+            userAgent: typeof request.headers["user-agent"] === "string"
+              ? request.headers["user-agent"]
+              : undefined,
+            remoteAddress: typeof request.headers["x-forwarded-for"] === "string"
+              ? request.headers["x-forwarded-for"]
+              : request.ip,
+            range: typeof request.headers.range === "string" ? request.headers.range : undefined,
+            accept: typeof request.headers.accept === "string" ? request.headers.accept : undefined,
+          });
+
+          for (const [headerName, headerValue] of Object.entries(response.headers)) {
+            reply.header(headerName, headerValue);
+          }
+          reply.status(response.statusCode);
+          reply.send(request.method === "HEAD" ? undefined : response.body);
+        },
+      });
+
+      app.get("/internal/interop/fixtures/:fixtureName/accesses", async (request, reply) => {
+        const locale = resolveLocale(request.headers["accept-language"]);
+        if (!isAuthorizedSidecarInternalRequest(request)) {
+          reply.status(401).send({
+            error: "Unauthorized",
+            message: translateLocale(locale, "common.unauthorized"),
+          });
+          return;
+        }
+
+        const { fixtureName } = request.params as { fixtureName: string };
+        const accesses = listApInteropMediaFixtureAccesses(fixtureName);
+        reply.send({
+          fixtureName,
+          count: accesses.length,
+          accesses,
+        });
+      });
+
+      app.delete("/internal/interop/fixtures/:fixtureName/accesses", async (request, reply) => {
+        const locale = resolveLocale(request.headers["accept-language"]);
+        if (!isAuthorizedSidecarInternalRequest(request)) {
+          reply.status(401).send({
+            error: "Unauthorized",
+            message: translateLocale(locale, "common.unauthorized"),
+          });
+          return;
+        }
+
+        const { fixtureName } = request.params as { fixtureName: string };
+        resetApInteropMediaFixtureAccesses(fixtureName);
+        reply.status(204).send();
+      });
+    }
+
     // Shared inbox uses Fedify as the primary verifier/router when enabled.
     // Actor-specific inboxes stay on the sidecar-native verifier so the sidecar
     // never needs local private keys to satisfy Fedify's authenticated
@@ -1017,9 +2113,39 @@ async function main() {
       });
     }
 
+    // /sharedInbox is an explicit per-pod shared inbox URL that actor documents
+    // may advertise.  It normalises to "/inbox" before queuing so ActivityPods
+    // always receives the canonical shared-inbox path for recipient resolution.
+    // This route is unconditional — when Fedify is active it handles "/inbox"
+    // directly; "/sharedInbox" goes through the sidecar-native raw path whose
+    // inbound worker performs its own signature verification (fail-closed).
+    app.post("/sharedInbox", async (request, reply) => {
+      await enqueueRawInboundRequest(request, reply, "/inbox");
+    });
+
     app.post("/users/:username/inbox", async (request, reply) => {
       const { username } = request.params as { username: string };
       await enqueueRawInboundRequest(request, reply, `/users/${username}/inbox`);
+    });
+
+    // Internal benchmark-only ingress that enqueues a trusted envelope while
+    // preserving the downstream target inbox path for ActivityPods forwarding.
+    app.post("/internal/bench/users/:username/inbox", async (request, reply) => {
+      const { username } = request.params as { username: string };
+      await enqueueVerifiedBenchmarkInboundRequest(
+        request,
+        reply,
+        `/users/${username}/inbox`,
+      );
+    });
+
+    app.post("/internal/bench/:username/inbox", async (request, reply) => {
+      const { username } = request.params as { username: string };
+      await enqueueVerifiedBenchmarkInboundRequest(
+        request,
+        reply,
+        `/${username}/inbox`,
+      );
     });
 
     // Legacy compatibility alias. Canonical actor documents advertise
@@ -1191,7 +2317,11 @@ async function main() {
         logger.error("Outbound webhook processing failed", {
           error: error instanceof Error ? error.message : String(error),
         });
-        reply.status(500).send({ error: "Internal server error" });
+        const locale = resolveLocale(request.headers["accept-language"]);
+        reply.status(500).send({
+          error: "Internal server error",
+          message: translateLocale(locale, "common.internalServerError"),
+        });
       }
     });
 
@@ -1199,6 +2329,47 @@ async function main() {
     // Fedify 2.x HTTP routes (WebFinger, NodeInfo, actor documents)
     // Only registered when the runtime integration flag is on.
     // -----------------------------------------------------------------------
+    // FEP-8fcf partial followers collection endpoint — must be registered
+    // before the Fedify catch-all so it takes priority over Fedify's own
+    // /users/:id/followers dispatcher.
+    if (followersSyncService) {
+      registerFollowersSyncRoutes(app, {
+        service: followersSyncService,
+        domain: config.domain,
+        userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+        requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+      });
+      logger.info("FEP-8fcf followers_synchronization endpoint registered");
+    }
+
+    // FEP-eb48 hashtag tag document endpoint — must be before the Fedify
+    // catch-all to ensure /tags/:tag routes are handled here.
+    registerHashtagRoutes(app, {
+      domain: config.domain,
+      searchBaseUrl: process.env["HASHTAG_SEARCH_BASE_URL"] || undefined,
+    });
+    logger.info("FEP-eb48 hashtag document endpoint registered (/tags/:tag)");
+
+    // FEP-c648 blocked collection endpoint — registered before the Fedify
+    // catch-all so /users/:id/blocked takes priority.
+    registerBlockedCollectionRoutes(app, {
+      activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://activitypods:3000",
+      activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+      domain: config.domain,
+      userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+      requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    });
+    logger.info("FEP-c648 blocked collection endpoint registered");
+
+    registerMutedCollectionRoutes(app, {
+      activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://activitypods:3000",
+      activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+      domain: config.domain,
+      userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+      requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    });
+    logger.info("Muted collection endpoint registered");
+
     if (fedifyAdapter) {
       registerFedifyRoutes(app, fedifyAdapter);
       logger.info(
@@ -1227,7 +2398,30 @@ async function main() {
         );
 
         // ---- Identity binding repository ----
-        const identityRepo = new RedisIdentityBindingRepository(atRedis);
+        identityRepo = new RedisIdentityBindingRepository(atRedis);
+        const observedAtIdentityStore = new RedisObservedAtIdentityStore(atRedis);
+        const observedAtIdentityResolver = new HttpAtIdentityResolver({
+          timeoutMs: config.externalPdsTimeoutMs,
+          maxAttempts: config.externalPdsMaxAttempts,
+          failedResolutionCacheTtlMs: 60_000,
+          redisCache: atRedis,
+          redisCacheTtlSeconds: config.didDocCacheTtlSeconds,
+        });
+        const atIdentityObservationService = new AtIdentityObservationService(
+          observedAtIdentityStore,
+          identityRepo,
+          observedAtIdentityResolver,
+          {
+            warn: (message, meta) => logger.warn(meta || {}, message),
+          },
+        );
+
+        if (config.mrfAdminToken) {
+          registerAtIdentityObservabilityFastifyRoutes(app, {
+            adminToken: config.mrfAdminToken,
+            store: observedAtIdentityStore,
+          });
+        }
 
         // ---- Repo / alias stores ----
         const aliasStore   = new RedisAtAliasStore(atRedis);
@@ -1566,7 +2760,7 @@ async function main() {
               })
             : undefined;
 
-          const canonicalPublisher = config.enableCanonicalEventLog && atEventPublisher
+          canonicalPublisher = config.enableCanonicalEventLog && atEventPublisher
             ? new CanonicalIntentPublisher(atEventPublisher, config.canonicalTopic)
             : undefined;
 
@@ -1631,6 +2825,7 @@ async function main() {
                   projectionContext,
                   undefined,
                   canonicalPublisher,
+                  atIdentityObservationService,
                 )
               : undefined,
             apIngressForwarder: bridgeApIngressForwarder,
@@ -1764,6 +2959,11 @@ async function main() {
             return;
           }
 
+          if (!identityRepo) {
+            reply.status(503).send({ error: 'Identity repository unavailable' });
+            return;
+          }
+
           const binding = await identityRepo.getByCanonicalAccountId(canonicalAccountId);
           if (!binding || !binding.atprotoDid || !binding.atprotoHandle) {
             reply.status(404).send({ error: 'ATProto identity binding not found' });
@@ -1816,6 +3016,7 @@ async function main() {
           xrpcServer,
           sessionService,
           oauthTokenVerifier,
+          capabilityGate,
         });
         xrpcServerForWebSocket = xrpcServer;
 
@@ -1836,8 +3037,78 @@ async function main() {
             atAdminTimeoutMs: Number.isFinite(config.moderationAtAdminTimeoutMs)
               ? Math.max(1_000, config.moderationAtAdminTimeoutMs)
               : 5_000,
+            activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || undefined,
+            activityPodsBearerToken: process.env["ACTIVITYPODS_TOKEN"] || undefined,
+            activityPodsTimeoutMs: 5_000,
+            activityPodsRetries: 3,
+            activityPodsRetryBaseMs: 100,
+            activityPodsRetryMaxMs: 2_000,
+            internalBridgeToken: process.env["ACTIVITYPODS_TOKEN"] || undefined,
+            canonicalPublisher,
+            activityPubReportForwardingService: activityPubReportForwardingService || undefined,
+            atprotoReportForwardingService: atprotoReportForwardingService || undefined,
           });
           moderationBridgeRedisClient = moderationRegistration.redisClient;
+          moderationBridgeStore = moderationRegistration.store;
+        }
+
+        if (activityPubReportForwardingService && config.enableActivityPubReportForwarder) {
+          canonicalActivityPubReportForwarder = new CanonicalActivityPubReportForwarder(
+            {
+              brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+                .split(",")
+                .map((broker) => broker.trim())
+                .filter(Boolean),
+              clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+              consumerGroupId: `${config.protocolBridgeConsumerGroupId}-canonical-ap-report-forwarder`,
+              canonicalTopic: config.canonicalTopic,
+            },
+            activityPubReportForwardingService,
+            {
+              info: (message, meta) => logger.info(meta || {}, message),
+              warn: (message, meta) => logger.warn(meta || {}, message),
+              error: (message, meta) => logger.error(meta || {}, message),
+            },
+          );
+          startupTasks.push({
+            name: "start canonical ActivityPub report forwarder",
+            start: async () => {
+              await canonicalActivityPubReportForwarder!.start();
+              logger.info("Canonical ActivityPub report forwarder started", {
+                moderationActorUri,
+                canonicalTopic: config.canonicalTopic,
+              });
+            },
+          });
+        }
+
+        if (atprotoReportForwardingService && config.enableAtprotoReportForwarder) {
+          canonicalAtprotoReportForwarder = new CanonicalAtprotoReportForwarder(
+            {
+              brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+                .split(",")
+                .map((broker) => broker.trim())
+                .filter(Boolean),
+              clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+              consumerGroupId: `${config.protocolBridgeConsumerGroupId}-canonical-atproto-report-forwarder`,
+              canonicalTopic: config.canonicalTopic,
+            },
+            atprotoReportForwardingService,
+            {
+              info: (message, meta) => logger.info(meta || {}, message),
+              warn: (message, meta) => logger.warn(meta || {}, message),
+              error: (message, meta) => logger.error(meta || {}, message),
+            },
+          );
+          startupTasks.push({
+            name: "start canonical ATProto report forwarder",
+            start: async () => {
+              await canonicalAtprotoReportForwarder!.start();
+              logger.info("Canonical ATProto report forwarder started", {
+                canonicalTopic: config.canonicalTopic,
+              });
+            },
+          });
         }
 
         if (!config.atLocalFixture) {
@@ -1872,12 +3143,15 @@ async function main() {
                 const externalFirehoseSources = parseAtExternalFirehoseSources(
                   process.env["AT_EXTERNAL_FIREHOSE_SOURCES"],
                 );
-                const externalDidFailureCacheTtlMs = 60_000;
                 const externalIdentityResolver = new HttpAtIdentityResolver({
                   fetchImpl: fetch,
                   timeoutMs: config.externalPdsTimeoutMs,
                   maxAttempts: config.externalPdsMaxAttempts,
-                  failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
+                  failedResolutionCacheTtlMs: 60_000,
+                  ...(atRedisClient ? {
+                    redisCache: atRedisClient,
+                    redisCacheTtlSeconds: config.didDocCacheTtlSeconds,
+                  } : {}),
                 });
                 const externalCommitVerifier = new ProductionAtCommitVerifier({
                   identityResolver: externalIdentityResolver,
@@ -1906,7 +3180,7 @@ async function main() {
                   identityResolverOptions: {
                     timeoutMs: config.externalPdsTimeoutMs,
                     maxAttempts: config.externalPdsMaxAttempts,
-                    failedResolutionCacheTtlMs: externalDidFailureCacheTtlMs,
+                    failedResolutionCacheTtlMs: 60_000,
                   },
                   syncRebuilderOptions: {
                     fetchImpl: fetch,
@@ -2029,6 +3303,10 @@ async function main() {
     if (xrpcServerForWebSocket) {
       attachSubscribeReposWebSocket(app, xrpcServerForWebSocket);
     }
+    attachFeedStreamWebSocket(app, streamSubscriptionService, {
+      capabilityGate,
+      checkStreamEntitlement,
+    });
 
     // Start HTTP server only after all HTTP and WebSocket routes are registered.
     if (config.startupMode === "blocking") {
@@ -2041,10 +3319,12 @@ async function main() {
     logger.info(`Metrics available at http://${config.host}:${config.port}/metrics`);
     logger.info("Configuration summary", {
       domain: config.domain,
+      providerProfile,
       startupMode: config.startupMode,
       enableOutboundWorker: config.enableOutboundWorker,
       enableInboundWorker: config.enableInboundWorker,
       enableOpenSearchIndexer: config.enableOpenSearchIndexer,
+      enableMediaAssetSync: config.enableMediaAssetSync,
     });
 
     if (config.startupMode === "background") {
@@ -2056,6 +3336,7 @@ async function main() {
         try {
           await runStartupTasks(startupTasks);
           markStartupReady();
+          populateCapabilityHealthGauges(providerCapabilitiesDocument);
           logger.info("Background startup completed", {
             startup: snapshotStartupState(),
           });
@@ -2071,6 +3352,7 @@ async function main() {
       })();
     } else {
       markStartupReady();
+      populateCapabilityHealthGauges(providerCapabilitiesDocument);
       logger.info("Startup completed", {
         startup: snapshotStartupState(),
       });
@@ -2121,15 +3403,52 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("AP relay subscription service stopped");
     }
 
+    if (streamSubscriptionService) {
+      streamSubscriptionService.shutdown();
+      logger.info("Feed stream subscription service stopped");
+    }
+
+    if (feedStreamKafkaConsumer) {
+      await feedStreamKafkaConsumer.shutdown();
+      logger.info("Feed stream Kafka consumer stopped");
+    }
+
+    if (unifiedFeedBridge) {
+      await unifiedFeedBridge.shutdown();
+      logger.info("Unified feed bridge stopped");
+    }
+
+    if (fep3ab2Runtime) {
+      await fep3ab2Runtime.shutdown();
+      logger.info("FEP-3ab2 runtime stopped");
+    }
+
     if (atJetstreamService) {
       atJetstreamService.shutdown();
       logger.info("AT Jetstream service stopped");
+    }
+
+    if (canonicalActivityPubReportForwarder) {
+      await canonicalActivityPubReportForwarder.stop();
+      canonicalActivityPubReportForwarder = null;
+      logger.info("Canonical ActivityPub report forwarder stopped");
+    }
+
+    if (canonicalAtprotoReportForwarder) {
+      await canonicalAtprotoReportForwarder.stop();
+      canonicalAtprotoReportForwarder = null;
+      logger.info("Canonical ATProto report forwarder stopped");
     }
 
     // Stop workers first
     if (outboxIntentWorker) {
       await outboxIntentWorker.stop();
       logger.info("Outbox intent worker stopped");
+    }
+
+    if (originReconciliationWorker) {
+      await originReconciliationWorker.stop();
+      logger.info("Origin reconciliation worker stopped");
     }
 
     if (outboundWorker) {
@@ -2140,6 +3459,12 @@ async function shutdown(signal: string): Promise<void> {
     if (inboundWorker) {
       await inboundWorker.stop();
       logger.info("Inbound worker stopped");
+    }
+
+    if (mediaAssetSyncConsumer) {
+      await mediaAssetSyncConsumer.stop();
+      mediaAssetSyncConsumer = null;
+      logger.info("Media asset sync consumer stopped");
     }
 
     if (opensearchIndexer) {

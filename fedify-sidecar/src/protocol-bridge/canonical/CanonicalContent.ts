@@ -24,16 +24,29 @@ export type CanonicalFacet =
 
 export type CanonicalAttachmentRole = "avatar" | "banner";
 
+export interface CanonicalCustomEmoji {
+  shortcode: string;
+  emojiId?: string | null;
+  iconUrl?: string | null;
+  mediaType?: string | null;
+  updatedAt?: string | null;
+  alternateName?: string | null;
+  domain?: string | null;
+}
+
 export interface CanonicalAttachment {
   attachmentId: string;
   mediaType: string;
   url?: string | null;
   cid?: string | null;
   byteSize?: number | null;
+  duration?: string | number | null;
+  digestMultibase?: string | null;
   role?: CanonicalAttachmentRole | null;
   alt?: string | null;
   width?: number | null;
   height?: number | null;
+  focalPoint?: [number, number] | null;
   blurhash?: string | null;
 }
 
@@ -46,6 +59,37 @@ export interface CanonicalLinkPreview {
   description?: string | null;
   /** Preview thumbnail image URL (from og:image). */
   thumbUrl?: string | null;
+  /** Deprecated Mastodon-style single-author compatibility fields. */
+  authorName?: string | null;
+  authorUrl?: string | null;
+  /** Mastodon-compatible preview authors, enriched with ActivityPods verification state. */
+  authors?: CanonicalLinkPreviewAuthor[] | null;
+}
+
+export interface CanonicalLinkPreviewAuthorAccount {
+  acct: string;
+  uri?: string | null;
+  url?: string | null;
+  displayName?: string | null;
+  avatarUrl?: string | null;
+  attributionDomains?: string[];
+}
+
+export interface CanonicalLinkPreviewAuthor {
+  name: string;
+  url: string;
+  handle?: string | null;
+  account?: CanonicalLinkPreviewAuthorAccount | null;
+  verified?: boolean;
+  verificationState?: "verified" | "claimed";
+  verificationReason?: string | null;
+}
+
+export interface CanonicalPollOption {
+  /** The label text of this poll option. MUST be unique within a poll. */
+  name: string;
+  /** Number of votes for this option (0 when unknown). */
+  voteCount: number;
 }
 
 export interface CanonicalContent {
@@ -57,6 +101,7 @@ export interface CanonicalContent {
   language?: string | null;
   blocks: CanonicalBlock[];
   facets: CanonicalFacet[];
+  customEmojis?: CanonicalCustomEmoji[];
   attachments: CanonicalAttachment[];
   externalUrl?: string | null;
   /** Pre-fetched OpenGraph link preview for the primary URL in this content. */

@@ -6,21 +6,34 @@
  * Writes: OpenSearch public-content-v1 index
  */
 
-import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchPublicPartialUpdateV1 } from '../events/SearchEvents.js';
+import {
+  SearchPublicUpsertV1,
+  SearchPublicDeleteV1,
+  SearchPublicDeleteByAuthorV1,
+  SearchPublicPartialUpdateV1,
+} from '../events/SearchEvents.js';
 import { PublicContentDocument } from '../models/PublicContentDocument.js';
 import { SearchDocAliasCache } from './SearchDocAliasCache.js';
 import { SearchDedupService } from '../aliases/SearchDedupService.js';
 
-export interface OpenSearchClient {
+export interface PublicContentStore {
   get(id: string): Promise<PublicContentDocument | null>;
   upsert(id: string, doc: Partial<PublicContentDocument>): Promise<void>;
   updateScripted(id: string, script: string, params: Record<string, any>): Promise<void>;
   delete(id: string): Promise<void>;
+  deleteByAuthor(author: {
+    canonicalId?: string;
+    apUri?: string;
+    did?: string;
+    handle?: string;
+  }): Promise<void>;
 }
+
+export type OpenSearchClient = PublicContentStore;
 
 export class PublicContentIndexWriter {
   constructor(
-    private readonly osClient: OpenSearchClient,
+    private readonly osClient: PublicContentStore,
     private readonly aliasCache: SearchDocAliasCache,
     private readonly dedupService: SearchDedupService
   ) {}
@@ -67,6 +80,7 @@ export class PublicContentIndexWriter {
       quoteOfStableId: event.relations?.quoteOfStableId,
       hasMedia: event.media?.hasMedia || false,
       mediaCount: event.media?.mediaCount || 0,
+      embeddingStatus: 'pending',
       isDeleted: false,
       indexedAt: new Date().toISOString()
     };
@@ -153,6 +167,10 @@ export class PublicContentIndexWriter {
         });
       }
     }
+  }
+
+  async onDeleteByAuthor(event: SearchPublicDeleteByAuthorV1): Promise<void> {
+    await this.osClient.deleteByAuthor(event.author);
   }
 
   /**

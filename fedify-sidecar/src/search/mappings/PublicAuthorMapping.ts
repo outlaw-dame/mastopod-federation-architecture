@@ -46,6 +46,11 @@ export const PublicAuthorMapping = {
       },
       labels:             { type: 'keyword' },
       langs:              { type: 'keyword' },
+      searchConsentPublic: { type: 'boolean' },
+      searchConsentExplicit: { type: 'boolean' },
+      searchConsentSource: { type: 'keyword' },
+      searchableBy: { type: 'keyword' },
+      indexable: { type: 'boolean' },
 
       protocolPresence:   { type: 'keyword' },
       sourceKind:         { type: 'keyword' },

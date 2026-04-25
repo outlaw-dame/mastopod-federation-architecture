@@ -25,6 +25,7 @@ function makeDeps(): MRFAdminDeps {
       setChainConfig: vi.fn(),
       listTraces: vi.fn(),
       getTrace: vi.fn(),
+      appendTrace: vi.fn().mockResolvedValue(undefined),
       createSimulationJob: vi.fn(),
       getSimulationJob: vi.fn(),
     },

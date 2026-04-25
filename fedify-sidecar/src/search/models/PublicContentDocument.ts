@@ -58,6 +58,10 @@ export interface PublicContentDocument {
   };
 
   embedding?: number[];               // semantic vector
+  sparseEmbedding?: {
+    indices: number[];
+    values: number[];
+  };
   embeddingStatus?: 'pending' | 'complete' | 'failed';
   embeddingUpdatedAt?: string;
 

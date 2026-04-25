@@ -46,6 +46,7 @@ function makeIntent(overrides: Partial<OutboxIntent> = {}): OutboxIntent {
     maxAttempts: 8,
     notBeforeMs: 0,
     meta: {
+      isPublicActivity: true,
       isPublicIndexable: true,
       visibility: "public",
     },
@@ -161,5 +162,23 @@ describe("OutboxIntentWorker", () => {
     expect(redpanda.publishToStream1).not.toHaveBeenCalled();
     expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
     expect(queue.markOutboxIntentCompleted).not.toHaveBeenCalled();
+  });
+
+  it("still publishes public activities to Stream1 when search indexing is disabled", async () => {
+    const queue = makeQueue();
+    const redpanda = makeRedpanda();
+    const worker = new TestOutboxIntentWorker(queue, redpanda, makeConfig());
+    const intent = makeIntent({
+      meta: {
+        isPublicActivity: true,
+        isPublicIndexable: false,
+        visibility: "public",
+      },
+    });
+
+    await worker.runIntent("msg-004", intent);
+
+    expect(redpanda.publishToStream1).toHaveBeenCalledTimes(1);
+    expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledTimes(1);
   });
 });

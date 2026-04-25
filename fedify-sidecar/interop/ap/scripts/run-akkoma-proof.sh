@@ -8,6 +8,7 @@ USERNAME="${AP_INTEROP_AKKOMA_USERNAME:-interop}"
 SKIP_BUILD="${AP_INTEROP_SKIP_BUILD:-0}"
 RESET_STATE="${AP_INTEROP_AKKOMA_RESET_STATE:-1}"
 AKKOMA_RUNTIME_DIR="${SCRIPT_DIR}/../runtime/akkoma"
+RESULT_FILE="${SCRIPT_DIR}/../runtime/akkoma-proof-result.json"
 
 run_compose() {
   docker compose -f "${COMPOSE_FILE}" --profile akkoma "$@"
@@ -44,7 +45,17 @@ AP_INTEROP_AKKOMA_USERNAME="${USERNAME}" \
   "${SCRIPT_DIR}/bootstrap-akkoma-account.sh"
 
 "${SCRIPT_DIR}/reset-harness-redis-state.sh"
+rm -f "${RESULT_FILE}"
 
 AP_INTEROP_TARGET=akkoma \
 AP_INTEROP_TARGET_USERNAME="${USERNAME}" \
+AP_INTEROP_RESULT_PATH=/interop/runtime/akkoma-proof-result.json \
   run_compose run --rm ap-interop-proof
+
+(
+  cd "${SCRIPT_DIR}/../../.."
+  AP_INTEROP_TARGET=akkoma \
+  AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" \
+  AP_INTEROP_PROOF_RESULT_FILE="${RESULT_FILE}" \
+    sh ./interop/ap/scripts/verify-target-media-proof.sh
+)

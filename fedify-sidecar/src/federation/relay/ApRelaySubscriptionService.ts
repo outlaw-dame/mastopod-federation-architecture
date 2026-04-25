@@ -36,6 +36,7 @@ import {
   createOutboxIntent,
   type RedisStreamsQueue,
 } from "../../queue/sidecar-redis-queue.js";
+import { metrics } from "../../metrics/index.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -292,6 +293,7 @@ export class ApRelaySubscriptionService {
 
     // Backoff: relay has errored too many times recently — skip until nextRetryAt.
     if (state.nextRetryAt > now) {
+      metrics.apRelaySubscriptionAttempts.inc({ relay: relayActorUrl, status: "backoff_skip" });
       this.logger.info("[relay] Relay in backoff window, skipping", {
         relayActorUrl,
         retryAt: new Date(state.nextRetryAt).toISOString(),
@@ -301,6 +303,7 @@ export class ApRelaySubscriptionService {
 
     // Already followed recently and not stale — skip.
     if (state.lastFollowAt > 0 && now - state.lastFollowAt < this.followStalenessMs) {
+      metrics.apRelaySubscriptionAttempts.inc({ relay: relayActorUrl, status: "fresh_skip" });
       this.logger.info("[relay] Relay follow is still fresh, skipping", {
         relayActorUrl,
         followAge: now - state.lastFollowAt,
@@ -315,6 +318,8 @@ export class ApRelaySubscriptionService {
     // Enqueue Follow activity via the outbound intent queue.
     const enqueued = await this.enqueueFollow(relayActorUrl, inboxUrl);
     if (!enqueued) return;
+
+    metrics.apRelaySubscriptionAttempts.inc({ relay: relayActorUrl, status: "follow_enqueued" });
 
     // Mark follow as sent.
     await this.saveState(relayActorUrl, {
@@ -370,6 +375,8 @@ export class ApRelaySubscriptionService {
         nextRetryIn: `${Math.round(backoffMs / 60_000)} min`,
       });
 
+      metrics.apRelaySubscriptionAttempts.inc({ relay: relayActorUrl, status: "fetch_failed" });
+
       await this.saveState(relayActorUrl, {
         ...state,
         errorCount: newErrorCount,
@@ -382,6 +389,7 @@ export class ApRelaySubscriptionService {
     // Extract inbox URL. The AP spec puts it at the top-level "inbox" key.
     const inbox = doc["inbox"];
     if (typeof inbox !== "string" || inbox.length === 0) {
+      metrics.apRelaySubscriptionAttempts.inc({ relay: relayActorUrl, status: "invalid_inbox" });
       this.logger.warn("[relay] Relay actor document has no inbox URL", {
         relayActorUrl,
         docKeys: Object.keys(doc).slice(0, 10),
@@ -401,14 +409,17 @@ export class ApRelaySubscriptionService {
       return null;
     }
     if (inboxUrl.protocol !== "https:") {
+      metrics.apRelaySubscriptionAttempts.inc({ relay: relayActorUrl, status: "invalid_inbox" });
       this.logger.warn("[relay] Relay inbox URL is not https", { relayActorUrl, inbox });
       return null;
     }
     if (inboxUrl.username || inboxUrl.password) {
+      metrics.apRelaySubscriptionAttempts.inc({ relay: relayActorUrl, status: "invalid_inbox" });
       this.logger.warn("[relay] Relay inbox URL contains credentials", { relayActorUrl });
       return null;
     }
     if (isPrivateLiteralIp(inboxUrl.hostname.toLowerCase())) {
+      metrics.apRelaySubscriptionAttempts.inc({ relay: relayActorUrl, status: "invalid_inbox" });
       this.logger.warn("[relay] Relay inbox URL resolves to private IP", { relayActorUrl });
       return null;
     }
@@ -454,6 +465,7 @@ export class ApRelaySubscriptionService {
       await this.queue.enqueueOutboxIntent(intent);
       return true;
     } catch (err) {
+      metrics.apRelaySubscriptionAttempts.inc({ relay: relayActorUrl, status: "enqueue_failed" });
       this.logger.error("[relay] Failed to enqueue Follow activity", {
         relayActorUrl,
         inboxUrl,

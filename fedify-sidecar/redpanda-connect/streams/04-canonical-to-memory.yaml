@@ -1,0 +1,38 @@
+# Pipeline: canonical.v1 → in-memory accumulator (dev/debug mode)
+#
+# Consumes canonical protocol-bridge events (CanonicalIntent records produced
+# by the AP→AT and AT→AP projection workers) and accumulates them in the
+# Redpanda Connect in-memory store for local inspection.
+#
+# In production this stream would be replaced with a durable sink such as
+# OpenSearch, S3, or a dedicated notifications fanout.  For local development
+# this no-op accumulator is sufficient to stop crash-loops while keeping the
+# canonical event log pipeline exercisable.
+#
+# Consumer group: rpconnect-canonical-dev-v1
+# Required env vars:
+#   REDPANDA_BROKER — single broker endpoint (default: redpanda:9092)
+
+input:
+  kafka_franz:
+    seed_brokers:
+      - "${REDPANDA_BROKER:redpanda:9092}"
+    topics:
+      - canonical.v1
+    consumer_group: rpconnect-canonical-dev-v1
+    start_offset: latest
+    auto_replay_nacks: false
+    commit_period: 5s
+    tls:
+      enabled: false
+
+pipeline:
+  processors:
+    - bloblang: |
+        root = this
+        root._connect_received_at = now().format("2006-01-02T15:04:05Z07:00")
+
+output:
+  # Drop output: events are acked and discarded. Replace with a real sink
+  # (elasticsearch, s3, http_client, etc.) for production use.
+  drop: {}

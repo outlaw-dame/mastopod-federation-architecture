@@ -425,7 +425,16 @@ describe("OutboundWorker: flag OFF → adapter hooks never called", () => {
       onOutboundDelivered: hookCalled,
     };
 
-    const job = makeOutboundJob();
+    const job = makeOutboundJob({
+      meta: {
+        moderationReport: {
+          protocol: "activitypub",
+          caseId: "case-1",
+          canonicalIntentId: "c".repeat(64),
+          targetActorUri: "https://remote.com/users/bob",
+        },
+      },
+    });
     const queue = makeQueueWithOutbound(job);
     const signingClient = makeSigningClient();
     const redpanda = makeRedpanda();
@@ -463,7 +472,16 @@ describe("OutboundWorker: flag ON → onOutboundDelivered called with correct pa
       onOutboundDelivered: hookCalled,
     };
 
-    const job = makeOutboundJob();
+    const job = makeOutboundJob({
+      meta: {
+        moderationReport: {
+          protocol: "activitypub",
+          caseId: "case-1",
+          canonicalIntentId: "c".repeat(64),
+          targetActorUri: "https://remote.com/users/bob",
+        },
+      },
+    });
     const queue = makeQueueWithOutbound(job);
     const signingClient = makeSigningClient();
     const redpanda = makeRedpanda();
@@ -501,6 +519,12 @@ describe("OutboundWorker: flag ON → onOutboundDelivered called with correct pa
       actorUri: job.actorUri,
       activityId: job.activityId,
       targetDomain: job.targetDomain,
+      meta: expect.objectContaining({
+        moderationReport: expect.objectContaining({
+          caseId: "case-1",
+          canonicalIntentId: "c".repeat(64),
+        }),
+      }),
     });
     expect(typeof callArg.statusCode).toBe("number");
   });
@@ -523,7 +547,16 @@ describe("OutboundWorker: flag ON → onOutboundDelivered called with correct pa
       }
     }
 
-    const job = makeOutboundJob();
+    const job = makeOutboundJob({
+      meta: {
+        moderationReport: {
+          protocol: "activitypub",
+          caseId: "case-1",
+          canonicalIntentId: "f".repeat(64),
+          targetActorUri: "https://remote.com/users/bob",
+        },
+      },
+    });
     const signingClient = makeSigningClient();
     const worker = new OutboundWorkerDelegating(
       makeQueueWithOutbound(job),
@@ -562,7 +595,16 @@ describe("OutboundWorker: flag ON, adapter throws → error swallowed", () => {
       },
     };
 
-    const job = makeOutboundJob();
+    const job = makeOutboundJob({
+      meta: {
+        moderationReport: {
+          protocol: "activitypub",
+          caseId: "case-1",
+          canonicalIntentId: "f".repeat(64),
+          targetActorUri: "https://remote.com/users/bob",
+        },
+      },
+    });
     const queue = makeQueueWithOutbound(job);
     const signingClient = makeSigningClient();
     const redpanda = makeRedpanda();
@@ -612,7 +654,16 @@ describe("OutboundWorker: permanent failure hook", () => {
       }
     }
 
-    const job = makeOutboundJob();
+    const job = makeOutboundJob({
+      meta: {
+        moderationReport: {
+          protocol: "activitypub",
+          caseId: "case-1",
+          canonicalIntentId: "f".repeat(64),
+          targetActorUri: "https://remote.com/users/bob",
+        },
+      },
+    });
     const worker = new OutboundWorkerStubbed(
       makeQueueWithOutbound(job),
       makeSigningClient(),
@@ -639,6 +690,80 @@ describe("OutboundWorker: permanent failure hook", () => {
       error: "Gone",
       responseBody: "gone",
       attempt: 1,
+      meta: expect.objectContaining({
+        moderationReport: expect.objectContaining({
+          caseId: "case-1",
+          canonicalIntentId: "f".repeat(64),
+        }),
+      }),
+    });
+  });
+
+  it("calls onOutboundPermanentFailure when transient retries are exhausted", async () => {
+    const permanentFailureHook = vi.fn().mockResolvedValue(undefined);
+    const adapter: FederationRuntimeAdapter = {
+      name: "spy",
+      enabled: true,
+      onOutboundPermanentFailure: permanentFailureHook,
+    };
+
+    class OutboundWorkerStubbed extends OutboundWorker {
+      protected override async deliver(_job: OutboundJob): Promise<import("../outbound-worker.js").DeliveryResult> {
+        return {
+          jobId: _job.jobId,
+          success: false,
+          permanent: false,
+          error: "timeout",
+        };
+      }
+      async runJob(msgId: string, j: OutboundJob) {
+        return this.processJob(msgId, j);
+      }
+    }
+
+    const job = makeOutboundJob({
+      maxAttempts: 1,
+      meta: {
+        moderationReport: {
+          protocol: "activitypub",
+          caseId: "case-2",
+          canonicalIntentId: "e".repeat(64),
+          targetActorUri: "https://remote.com/users/bob",
+        },
+      },
+    });
+    const queue = makeQueueWithOutbound(job);
+    const worker = new OutboundWorkerStubbed(
+      queue,
+      makeSigningClient(),
+      makeRedpanda(),
+      {
+        concurrency: 1,
+        maxConcurrentPerDomain: 10,
+        requestTimeoutMs: 5000,
+        userAgent: "test",
+        fedifyRuntimeIntegrationEnabled: true,
+        adapter,
+      },
+    );
+
+    await worker.runJob("msg-002", job);
+
+    expect(queue.moveToDlq).toHaveBeenCalledTimes(1);
+    expect(permanentFailureHook).toHaveBeenCalledTimes(1);
+    expect(permanentFailureHook.mock.calls[0]?.[0]).toMatchObject({
+      actorUri: job.actorUri,
+      activityId: job.activityId,
+      targetDomain: job.targetDomain,
+      targetInbox: job.targetInbox,
+      error: "timeout",
+      attempt: 1,
+      meta: expect.objectContaining({
+        moderationReport: expect.objectContaining({
+          caseId: "case-2",
+          canonicalIntentId: "e".repeat(64),
+        }),
+      }),
     });
   });
 });

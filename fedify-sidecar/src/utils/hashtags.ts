@@ -1,6 +1,11 @@
-const HASHTAG_BODY_RE = /^[A-Za-z0-9][A-Za-z0-9_]*$/;
-const HASHTAG_WITH_PREFIX_RE = /^#[A-Za-z0-9][A-Za-z0-9_]*$/;
-const HASHTAG_SCAN_RE = /#([A-Za-z0-9][A-Za-z0-9_]*)/g;
+const HASHTAG_HASH_RE = /^[#＃]/u;
+const HASHTAG_SCAN_RE = /[#＃]([\p{L}\p{M}\p{N}\p{Pc}\u00B7\u30FB\u200C]+)/gu;
+const HASHTAG_STRIP_URL_RE = /\bhttps?:\/\/[^\s<>'"]+/giu;
+const HASHTAG_SEPARATOR_TRAILING_RE = /[\u00B7\u30FB\u200C]+$/gu;
+const HASHTAG_INVALID_EDGE_RE = /^[^\p{L}\p{N}]|[^\p{L}\p{M}\p{N}\p{Pc}]$/u;
+const HASHTAG_ALLOWED_BODY_RE = /^[\p{L}\p{M}\p{N}\p{Pc}\u00B7\u30FB\u200C]+$/u;
+const HASHTAG_REQUIRES_LETTER_RE = /[\p{L}\p{M}]/u;
+const ATPROTO_TRAILING_PUNCTUATION_RE = /[.,;:!?\)\]\}"'\u2019\u201d\u00bb]+$/gu;
 const ATPROTO_TAG_GRAPHEME_MAX = 64;
 
 function countGraphemes(input: string): number {
@@ -12,10 +17,27 @@ function countGraphemes(input: string): number {
 }
 
 function normalizeHashtagBody(value: string): string | undefined {
-  if (!HASHTAG_BODY_RE.test(value)) {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(HASHTAG_SEPARATOR_TRAILING_RE, "");
+
+  if (!normalized) {
     return undefined;
   }
-  return value.toLowerCase();
+
+  if (!HASHTAG_ALLOWED_BODY_RE.test(normalized)) {
+    return undefined;
+  }
+
+  if (HASHTAG_INVALID_EDGE_RE.test(normalized)) {
+    return undefined;
+  }
+
+  if (!HASHTAG_REQUIRES_LETTER_RE.test(normalized)) {
+    return undefined;
+  }
+
+  return normalized.toLowerCase();
 }
 
 export function normalizeHashtag(
@@ -28,10 +50,7 @@ export function normalizeHashtag(
     return undefined;
   }
 
-  if (trimmed.startsWith("#")) {
-    if (!HASHTAG_WITH_PREFIX_RE.test(trimmed)) {
-      return undefined;
-    }
+  if (HASHTAG_HASH_RE.test(trimmed)) {
     return normalizeHashtagBody(trimmed.slice(1));
   }
 
@@ -47,8 +66,9 @@ export function extractHashtagsFromText(text: string): string[] {
     return [];
   }
 
+  const source = text.replace(HASHTAG_STRIP_URL_RE, " ");
   const hashtags = new Set<string>();
-  const matches = text.matchAll(HASHTAG_SCAN_RE);
+  const matches = source.matchAll(HASHTAG_SCAN_RE);
 
   for (const match of matches) {
     const body = match[1];
@@ -92,7 +112,7 @@ export function extractHashtagsFromActivityPubTags(tags: unknown): string[] {
 }
 
 export function normalizeAtprotoTag(value: string): string | undefined {
-  const trimmed = value.trim();
+  const trimmed = value.trim().normalize("NFKC");
   if (!trimmed) {
     return undefined;
   }
@@ -100,13 +120,27 @@ export function normalizeAtprotoTag(value: string): string | undefined {
   let normalized = trimmed;
 
   // ATProto facet tags usually omit '#'. For "double hash tags", retain one '#'.
-  if (normalized.startsWith("##")) {
+  if (normalized.startsWith("##") || normalized.startsWith("＃＃")) {
     normalized = normalized.slice(1);
-  } else if (normalized.startsWith("#")) {
+  } else if (normalized.startsWith("#") || normalized.startsWith("＃")) {
     normalized = normalized.slice(1);
   }
 
-  if (!normalized || countGraphemes(normalized) > ATPROTO_TAG_GRAPHEME_MAX) {
+  normalized = normalized.trim().replace(ATPROTO_TRAILING_PUNCTUATION_RE, "");
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (/\s/u.test(normalized)) {
+    return undefined;
+  }
+
+  if (/^\d+$/u.test(normalized)) {
+    return undefined;
+  }
+
+  if (countGraphemes(normalized) > ATPROTO_TAG_GRAPHEME_MAX) {
     return undefined;
   }
 

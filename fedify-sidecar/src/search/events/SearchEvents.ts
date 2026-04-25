@@ -4,6 +4,8 @@
  * Event contracts for the search indexing pipeline.
  */
 
+import type { PublicSearchConsentSource } from "../../utils/searchConsent.js";
+
 /**
  * search.public.upsert.v1
  *
@@ -85,7 +87,20 @@ export interface SearchPublicDeleteV1 {
     | 'ap_tombstone'
     | 'at_delete'
     | 'moderation'
-    | 'account_deactivated';
+    | 'account_deactivated'
+    | 'search_consent_revoked';
+  deleteMode: 'soft' | 'hard';
+  deletedAt: string;
+}
+
+export interface SearchPublicDeleteByAuthorV1 {
+  author: {
+    canonicalId?: string;
+    apUri?: string;
+    did?: string;
+    handle?: string;
+  };
+  reason: 'search_consent_revoked' | 'account_deactivated' | 'moderation';
   deleteMode: 'soft' | 'hard';
   deletedAt: string;
 }
@@ -105,6 +120,13 @@ export interface SearchAuthorUpsertV1 {
   summaryText?: string;
   labels?: string[];
   langs?: string[];
+  searchConsent?: {
+    publicSearchable: boolean;
+    explicitlySet: boolean;
+    source: Exclude<PublicSearchConsentSource, "object_searchableBy">;
+    searchableBy?: string[];
+    indexable?: boolean | null;
+  };
   updatedAt: string;
 }
 

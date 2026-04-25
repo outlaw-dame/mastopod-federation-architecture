@@ -31,8 +31,25 @@ run_gotosocial_healthcheck() {
     /bin/sh -lc "wget -qO- http://127.0.0.1:8080/api/v1/instance >/dev/null"
 }
 
+run_gotosocial_webfinger() {
+  docker compose -f "${COMPOSE_FILE}" exec -T gotosocial-app \
+    /bin/sh -lc "wget -qO- 'http://127.0.0.1:8080/.well-known/webfinger?resource=acct:${USERNAME}@gotosocial'"
+}
+
 escape_sql_string() {
   printf "%s" "$1" | sed "s/'/''/g"
+}
+
+normalize_runtime_permissions() {
+  if [ ! -d "${RUNTIME_DIR}" ]; then
+    return 0
+  fi
+
+  chmod -R u+rwX,go+rwX "${RUNTIME_DIR}" >/dev/null 2>&1 || true
+  docker compose -f "${COMPOSE_FILE}" exec -T -u 0 gotosocial-app \
+    /bin/sh -lc "chmod -R u+rwX,go+rwX /gotosocial/storage" >/dev/null 2>&1 || true
+  docker compose -f "${COMPOSE_FILE}" run --rm --no-deps -u 0 --entrypoint /bin/sh gotosocial-app \
+    -lc "chmod -R u+rwX,go+rwX /gotosocial/storage" >/dev/null 2>&1 || true
 }
 
 wait_for_gotosocial() {
@@ -137,24 +154,47 @@ WHERE account_id = (
 );
 COMMIT;
 EOF
+}
 
-  sqlite3 "${DB_FILE}" "
-    select
-      a.username,
-      a.locked,
-      a.discoverable,
-      a.indexable,
-      u.approved,
-      u.disabled,
-      u.confirmed_at is not null
-    from accounts a
-    join users u on u.account_id = a.id
-    where a.username = '${username_sql}' and a.domain is null;
-  "
+ensure_webfinger_ready() {
+  attempt=1
+  delay="${BOOTSTRAP_INITIAL_DELAY_SECONDS}"
+  expected_actor="https://gotosocial/users/${USERNAME}"
+
+  while [ "${attempt}" -le "${BOOTSTRAP_ATTEMPTS}" ]; do
+    webfinger_json=$(run_gotosocial_webfinger 2>/dev/null || true)
+    if printf "%s" "${webfinger_json}" | grep -q "\"href\":\"${expected_actor}\""; then
+      return 0
+    fi
+
+    if [ "${attempt}" -eq "${BOOTSTRAP_ATTEMPTS}" ]; then
+      break
+    fi
+
+    echo "Waiting for GoToSocial WebFinger discovery to expose '${USERNAME}' (attempt ${attempt}/${BOOTSTRAP_ATTEMPTS})..." >&2
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+    if [ "${delay}" -lt "${BOOTSTRAP_MAX_DELAY_SECONDS}" ]; then
+      delay=$((delay * 2))
+      if [ "${delay}" -gt "${BOOTSTRAP_MAX_DELAY_SECONDS}" ]; then
+        delay="${BOOTSTRAP_MAX_DELAY_SECONDS}"
+      fi
+    fi
+  done
+
+  echo "GoToSocial WebFinger did not expose '${USERNAME}' in time." >&2
+  printf "%s\n" "${webfinger_json:-}" >&2
+  exit 1
 }
 
 require_command docker
 require_command sqlite3
 wait_for_gotosocial
+normalize_runtime_permissions
 ensure_account_created
+docker compose -f "${COMPOSE_FILE}" stop gotosocial-app >/dev/null
+normalize_runtime_permissions
 ensure_account_state
+docker compose -f "${COMPOSE_FILE}" up -d gotosocial-app >/dev/null
+wait_for_gotosocial
+ensure_webfinger_ready

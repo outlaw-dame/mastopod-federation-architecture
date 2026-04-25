@@ -361,4 +361,53 @@ describe("native AT record locator worker behavior", () => {
       }),
     );
   });
+
+  it("uses explicit AT locators for bridged emoji reaction deletes when alias state is missing", async () => {
+    const { worker, aliasStore, commitBuilder } = createWorkerHarness();
+
+    await worker.onEmojiReactionDeleted({
+      canonicalReactionId: "canonical-emoji-reaction-1",
+      canonicalActorId: "acct:alice",
+      canonicalPostId: "",
+      atRecord: {
+        collection: "org.activitypods.emojiReaction",
+        rkey: "fixedemoji1234",
+      },
+      bridge: {
+        canonicalIntentId: "intent-emoji-delete-1",
+        sourceProtocol: "activitypub",
+        provenance: {
+          originProtocol: "activitypub",
+          originEventId: "https://example.com/activities/undo-emoji-react-1",
+          mirroredFromCanonicalIntentId: "intent-emoji-delete-1",
+          projectionMode: "mirrored",
+        },
+      },
+      deletedAt: "2026-04-03T12:11:00.000Z",
+      emittedAt: "2026-04-03T12:11:00.000Z",
+    });
+
+    expect(commitBuilder.buildCommit).toHaveBeenCalledWith(
+      expect.anything(),
+      [
+        expect.objectContaining({
+          collection: "org.activitypods.emojiReaction",
+          rkey: "fixedemoji1234",
+          canonicalRefId: "canonical-emoji-reaction-1",
+          opType: "delete",
+          bridge: expect.objectContaining({
+            canonicalIntentId: "intent-emoji-delete-1",
+          }),
+        }),
+      ],
+    );
+    const alias = await aliasStore.getByCanonicalRefId("canonical-emoji-reaction-1");
+    expect(alias).toEqual(
+      expect.objectContaining({
+        collection: "org.activitypods.emojiReaction",
+        rkey: "fixedemoji1234",
+        deletedAt: "2026-04-03T12:11:00.000Z",
+      }),
+    );
+  });
 });

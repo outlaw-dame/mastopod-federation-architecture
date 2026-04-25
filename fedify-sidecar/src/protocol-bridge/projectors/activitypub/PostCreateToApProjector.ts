@@ -1,7 +1,8 @@
-import type { CanonicalAttachment, CanonicalFacet } from "../../canonical/CanonicalContent.js";
+import type { CanonicalAttachment, CanonicalCustomEmoji, CanonicalFacet } from "../../canonical/CanonicalContent.js";
 import type { CanonicalIntent, CanonicalPostCreateIntent } from "../../canonical/CanonicalIntent.js";
 import { canonicalActorIdentityKey } from "../../canonical/CanonicalActorRef.js";
 import { canonicalBlocksToHtml } from "../../text/CanonicalBlocksToHtml.js";
+import { linkifyHashtagsInHtml } from "../../../utils/markdown.js";
 import { maxLossiness } from "../../canonical/CanonicalWarnings.js";
 import type {
   ActivityPubProjectionCommand,
@@ -14,14 +15,65 @@ import {
   type ActivityPubProjectionPolicy,
 } from "./ActivityPubProjectionPolicy.js";
 import {
-  buildApLinkPreviewCard,
+  buildApArticlePreview,
+  buildApInteractionPolicy,
+  buildApLinkPreviewAttachment,
+  deriveConversationCollectionUris,
   apTargetTopic,
+  buildApActivityContext,
   buildApLinkPreviewIcon,
   buildPostMetadata,
   PUBLIC_AUDIENCE,
   resolveApObjectId,
   resolveOptionalApObjectId,
 } from "./post-shared.js";
+
+const AP_OBJECT_LINK_MEDIA_TYPE = "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"";
+
+function sanitizeObjectLinkHref(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if ((parsed.protocol === "http:" || parsed.protocol === "https:") && !parsed.username && !parsed.password) {
+      return parsed.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+export function buildApObjectLinkTag(
+  href: string,
+  options?: { name?: string | null; rel?: string | null },
+): Record<string, unknown> | null {
+  const sanitizedHref = sanitizeObjectLinkHref(href);
+  if (!sanitizedHref) {
+    return null;
+  }
+
+  const tag: Record<string, unknown> = {
+    type: "Link",
+    mediaType: AP_OBJECT_LINK_MEDIA_TYPE,
+    href: sanitizedHref,
+  };
+
+  const name = options?.name?.trim();
+  if (name) {
+    tag["name"] = name;
+  }
+
+  const rel = options?.rel?.trim();
+  if (rel) {
+    tag["rel"] = rel;
+  }
+
+  return tag;
+}
 
 export class PostCreateToApProjector implements CanonicalProjector<ActivityPubProjectionCommand> {
   public constructor(
@@ -46,18 +98,24 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
       };
     }
 
+    const actorOrigin = safeOrigin(actorId);
     const objectId = resolveApObjectId(intent.object);
-    const html = intent.content.blocks.length > 0
+    const rawHtml = intent.content.blocks.length > 0
       ? canonicalBlocksToHtml(intent.content.blocks)
       : `<p>${escapeHtml(intent.content.plaintext).replace(/\n/g, "<br>")}</p>`;
-    const tag = canonicalFacetsToApTags(intent.content.facets);
+    const html = actorOrigin ? linkifyHashtagsInHtml(rawHtml, actorOrigin) : rawHtml;
+    const customEmojis = intent.content.customEmojis ?? [];
+    const tag = canonicalFacetsToApTags(intent.content.facets, actorOrigin, customEmojis);
     const attachment = canonicalAttachmentsToApAttachments(intent.content.attachments);
-    const linkPreviewCard =
+    const linkPreviewAttachment =
       intent.content.kind === "note" && this.policy.noteLinkPreviewMode !== "disabled"
-        ? buildApLinkPreviewCard(intent.content.linkPreview)
+        ? buildApLinkPreviewAttachment(intent.content.linkPreview)
         : null;
     const mentionRecipients = canonicalMentionRecipients(intent.content.facets);
-    const audience = buildAudience(actorId, intent.visibility, mentionRecipients);
+    // FEP-7888: include context owner in CC for public/unlisted posts when the
+    // context was copied from a foreign inline Collection with attributedTo.
+    const contextOwnerUris = intent.contextAttributedTo ? [intent.contextAttributedTo] : [];
+    const audience = buildAudience(actorId, intent.visibility, mentionRecipients, contextOwnerUris);
     const object: Record<string, unknown> = {
       id: objectId,
       type: intent.content.kind === "article" ? "Article" : "Note",
@@ -78,27 +136,65 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
     const previewIcon = intent.content.kind === "article"
       ? buildApLinkPreviewIcon(intent.content.linkPreview)
       : null;
+    const articlePreview = intent.content.kind === "article"
+      ? buildApArticlePreview({
+          title: intent.content.title,
+          summary: intent.content.summary,
+          linkPreview: intent.content.linkPreview,
+          attributedTo: actorId,
+          published: intent.createdAt,
+          tag,
+        })
+      : null;
     if (previewIcon) {
       object["icon"] = previewIcon;
     }
-    if (linkPreviewCard && this.policy.noteLinkPreviewMode === "attachment_and_preview") {
-      object["preview"] = linkPreviewCard;
+    if (articlePreview) {
+      object["preview"] = articlePreview;
+    }
+    if (linkPreviewAttachment && this.policy.noteLinkPreviewMode === "attachment_and_preview") {
+      object["preview"] = { ...linkPreviewAttachment };
     }
     const inReplyTo = resolveOptionalApObjectId(intent.inReplyTo);
     if (inReplyTo) {
       object["inReplyTo"] = inReplyTo;
     }
-    if (tag.length > 0) {
-      object["tag"] = tag;
+    // FEP-f228: expose collection-backed conversation context and context history.
+    // Root posts use their own object ID as conversation root.
+    const conversationRoot = resolveOptionalApObjectId(intent.replyRoot);
+    const conversationUris = deriveConversationCollectionUris(objectId, conversationRoot);
+    object["context"] = conversationUris.context;
+    object["contextHistory"] = conversationUris.contextHistory;
+    // FEP-7458: advertise the replies collection so consumers can verify reply membership.
+    // ActivityPods creates and serves this collection lazily at ${noteId}/replies.
+    object["replies"] = `${objectId}/replies`;
+    const quoteId = resolveOptionalApObjectId(intent.quoteOf);
+    if (quoteId) {
+      // FEP-044f primary quote property + compatibility aliases
+      object["quote"] = quoteId;
+      object["quoteUrl"] = quoteId;
+      object["quoteUri"] = quoteId;
+      object["_misskey_quote"] = quoteId;
     }
-    if (attachment.length > 0 || linkPreviewCard) {
-      object["attachment"] = linkPreviewCard
-        ? [...attachment, linkPreviewCard]
+    // GoToSocial / FEP-044f interaction policy: advertise reply + quote policy on all published objects.
+    object["interactionPolicy"] = buildApInteractionPolicy(intent.interactionPolicy, actorId);
+    // Misskey FEP-e232 compatibility: include quote ref as a Link tag so tag-array consumers also find the quote ref
+    const quoteLinkTags: Array<Record<string, unknown>> = quoteId
+      ? [buildApObjectLinkTag(quoteId, { rel: "https://misskey-hub.net/ns#_misskey_quote" })]
+          .filter((tag): tag is Record<string, unknown> => Boolean(tag))
+      : [];
+    const allTags = [...tag, ...quoteLinkTags];
+    if (allTags.length > 0) {
+      object["tag"] = allTags;
+    }
+    if (attachment.length > 0 || linkPreviewAttachment) {
+      object["attachment"] = linkPreviewAttachment
+        ? [...attachment, linkPreviewAttachment]
         : attachment;
     }
 
     const activity: Record<string, unknown> = {
-      "@context": "https://www.w3.org/ns/activitystreams",
+      "@context": buildApActivityContext({ includeCustomEmojis: customEmojis.length > 0 }),
       id: `${objectId}#create`,
       type: "Create",
       actor: actorId,
@@ -124,8 +220,12 @@ export class PostCreateToApProjector implements CanonicalProjector<ActivityPubPr
   }
 }
 
-export function canonicalFacetsToApTags(facets: readonly CanonicalFacet[]): Array<Record<string, unknown>> {
-  return facets.flatMap((facet) => {
+export function canonicalFacetsToApTags(
+  facets: readonly CanonicalFacet[],
+  actorOrigin?: string | null,
+  customEmojis: readonly CanonicalCustomEmoji[] = [],
+): Array<Record<string, unknown>> {
+  const structuralTags = facets.flatMap((facet) => {
     switch (facet.type) {
       case "mention":
         return facet.target.activityPubActorUri
@@ -135,35 +235,102 @@ export function canonicalFacetsToApTags(facets: readonly CanonicalFacet[]): Arra
               name: facet.label,
             }]
           : [];
-      case "tag":
-        return [{
+      case "tag": {
+        const nameWithHash = facet.tag.startsWith("#") ? facet.tag : `#${facet.tag}`;
+        const tagBody = nameWithHash.slice(1).toLowerCase();
+        const entry: Record<string, unknown> = {
           type: "Hashtag",
-          name: facet.tag.startsWith("#") ? facet.tag : `#${facet.tag}`,
-        }];
-      case "link":
-        return [];
+          name: nameWithHash,
+        };
+        if (actorOrigin) {
+          entry["href"] = `${actorOrigin}/tags/${encodeURIComponent(tagBody)}`;
+        }
+        return [entry];
+      }
+      case "link": {
+        const linkTag = buildApObjectLinkTag(facet.url);
+        return linkTag ? [linkTag] : [];
+      }
     }
   });
+
+  const emojiTags = customEmojis
+    .filter((emoji) => typeof emoji.iconUrl === "string" && emoji.iconUrl.trim().length > 0)
+    .map((emoji) => ({
+      type: "Emoji",
+      name: emoji.shortcode,
+      ...(emoji.emojiId ? { id: emoji.emojiId } : {}),
+      ...(emoji.updatedAt ? { updated: emoji.updatedAt } : {}),
+      ...(emoji.alternateName ? { alternateName: emoji.alternateName } : {}),
+      icon: {
+        type: "Image",
+        url: emoji.iconUrl,
+        ...(emoji.mediaType ? { mediaType: emoji.mediaType } : {}),
+      },
+    }));
+
+  return [...structuralTags, ...emojiTags];
 }
+
+export function safeOriginFromUrl(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+// Module-local alias used within this file.
+const safeOrigin = safeOriginFromUrl;
 
 export function canonicalAttachmentsToApAttachments(
   attachments: readonly CanonicalAttachment[],
 ): Array<Record<string, unknown>> {
-  return attachments.map((attachment) => ({
-    type: attachment.mediaType.startsWith("image/")
-      ? "Image"
-      : attachment.mediaType.startsWith("video/")
-        ? "Video"
-        : attachment.mediaType.startsWith("audio/")
-          ? "Audio"
-          : "Document",
-    mediaType: attachment.mediaType,
-    url: attachment.url ?? attachment.cid ?? attachment.attachmentId,
-    name: attachment.alt ?? undefined,
-    width: attachment.width ?? undefined,
-    height: attachment.height ?? undefined,
-    blurhash: attachment.blurhash ?? undefined,
-  }));
+  return attachments.map((attachment) => {
+    const primaryUrl = attachment.url ?? attachment.attachmentId;
+    const ipfsUrl = toIpfsUrl(attachment.cid);
+
+    // FEP-1311: when both an HTTP URL and an IPFS CID are available, emit both
+    // as a url array so consumers can verify content integrity and fetch via IPFS.
+    const urlValue: unknown = primaryUrl && ipfsUrl
+      ? [primaryUrl, ipfsUrl]
+      : primaryUrl ?? ipfsUrl ?? attachment.attachmentId;
+
+    return {
+      type: activityPubMediaTypeForAttachment(attachment.mediaType),
+      mediaType: attachment.mediaType,
+      url: urlValue,
+      name: attachment.alt ?? undefined,
+      size: attachment.byteSize ?? undefined,
+      duration: attachment.duration ?? undefined,
+      digestMultibase: attachment.digestMultibase ?? undefined,
+      width: attachment.width ?? undefined,
+      height: attachment.height ?? undefined,
+      focalPoint: attachment.focalPoint ?? undefined,
+      blurhash: attachment.blurhash ?? undefined,
+    };
+  });
+}
+
+function activityPubMediaTypeForAttachment(mediaType: string): "Image" | "Video" | "Audio" | "Document" {
+  if (mediaType.startsWith("image/")) {
+    return "Image";
+  }
+  if (mediaType.startsWith("video/")) {
+    return "Video";
+  }
+  if (mediaType.startsWith("audio/")) {
+    return "Audio";
+  }
+  return "Document";
+}
+
+function toIpfsUrl(cid: string | null | undefined): string | null {
+  if (!cid || cid.trim().length === 0) {
+    return null;
+  }
+
+  return `ipfs://${cid}`;
 }
 
 export function canonicalMentionRecipients(facets: readonly CanonicalFacet[]): string[] {
@@ -186,16 +353,42 @@ export function buildAudience(
   actorId: string,
   visibility: CanonicalPostCreateIntent["visibility"],
   mentionRecipients: readonly string[],
+  /**
+   * FEP-7888 §"Keeping relevant entities in the loop": URI(s) of actors that
+   * own the conversation context being copied.  When provided and the actor
+   * origin differs from our own, they are added to the activity CC so the
+   * context owner is kept in the loop.  Only applied to public/unlisted posts
+   * where adding a foreign recipient cannot expose private content.
+   */
+  contextOwnerUris?: readonly string[],
 ) {
   const followers = `${actorId}/followers`;
   const unique = (values: readonly string[]) => [...new Set(values.filter(Boolean))];
 
+  // Exclude the publishing actor and their own collections from context owners
+  // to avoid self-addressing, then exclude any non-HTTP values for safety.
+  const foreignContextOwners = (contextOwnerUris ?? []).filter(
+    (uri) =>
+      uri &&
+      uri !== actorId &&
+      !uri.startsWith(`${actorId}/`) &&
+      /^https?:\/\//.test(uri),
+  );
+
   switch (visibility) {
     case "public":
-      return { to: [PUBLIC_AUDIENCE], cc: unique([followers, ...mentionRecipients]) };
+      return {
+        to: [PUBLIC_AUDIENCE],
+        cc: unique([followers, ...mentionRecipients, ...foreignContextOwners]),
+      };
     case "unlisted":
-      return { to: [followers], cc: unique([PUBLIC_AUDIENCE, ...mentionRecipients]) };
+      return {
+        to: [followers],
+        cc: unique([PUBLIC_AUDIENCE, ...mentionRecipients, ...foreignContextOwners]),
+      };
     case "followers":
+      // For followers-only posts we do not CC foreign context owners — adding
+      // them would expose follower-gated content to a potentially unknown actor.
       return { to: [followers], cc: unique(mentionRecipients) };
     case "direct":
     case "unknown":

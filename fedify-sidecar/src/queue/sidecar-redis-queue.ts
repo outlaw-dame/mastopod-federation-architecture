@@ -20,6 +20,7 @@
 
 import { createClient, RedisClientType } from "redis";
 import { logger } from "../utils/logger.js";
+import type { OutboundDeliveryMeta } from "../core-domain/contracts/SigningContracts.js";
 
 // ============================================================================
 // Configuration
@@ -30,12 +31,19 @@ export interface QueueConfig {
   inboundStreamKey?: string;
   outboundStreamKey?: string;
   outboxIntentStreamKey?: string;
-  dlqStreamKey?: string;
+  originReconcileStreamKey?: string;
+  inboundDlqStreamKey?: string;
+  outboundDlqStreamKey?: string;
+  outboxIntentDlqStreamKey?: string;
+  originReconcileDlqStreamKey?: string;
+  maxDlqLength?: number;
   consumerGroup?: string;
   consumerId?: string;
   blockTimeoutMs?: number;
   claimIdleTimeMs?: number;
   maxStreamLength?: number;
+  readBatchCount?: number;
+  claimBatchCount?: number;
 }
 
 // ============================================================================
@@ -77,18 +85,10 @@ export interface OutboundJob {
   attempt: number;
   maxAttempts: number;
   notBeforeMs: number;
+  deferCount?: number;
   /** Error message from the last delivery attempt, carried forward for DLQ diagnostics. */
   lastError?: string;
-  meta?: {
-    isPublicIndexable?: boolean;
-    isDeleteOrTombstone?: boolean;
-    visibility?: "public" | "unlisted" | "followers" | "direct";
-    searchConsent?: {
-      raw?: string[];
-      isPublic?: boolean;
-      explicitlySet?: boolean;
-    };
-  };
+  meta?: OutboundDeliveryMeta;
 }
 
 export interface OutboxIntentTarget {
@@ -120,11 +120,28 @@ export interface OutboxIntentState {
   jobCount?: number;
 }
 
+export interface OriginReconciliationJob {
+  jobId: string;
+  originObjectUrl: string;
+  canonicalObjectId?: string;
+  actorUriHint?: string;
+  reason: string;
+  createdAt: number;
+  attempt: number;
+  maxAttempts: number;
+  notBeforeMs: number;
+  windowExpiresAt: number;
+  lastFingerprint?: string;
+  unchangedSuccesses: number;
+  notFoundCount: number;
+  lastError?: string;
+}
+
 export interface DLQEntry {
   id: string;
   reason: string;
   timestamp: number;
-  data: InboundEnvelope | OutboundJob | OutboxIntent;
+  data: InboundEnvelope | OutboundJob | OutboxIntent | OriginReconciliationJob;
 }
 
 // ============================================================================
@@ -136,15 +153,23 @@ export class RedisStreamsQueue {
   private inboundConsumerRedis: RedisClientType;
   private outboundConsumerRedis: RedisClientType;
   private outboxIntentConsumerRedis: RedisClientType;
+  private originReconcileConsumerRedis: RedisClientType;
   private readonly inboundStreamKey: string;
   private readonly outboundStreamKey: string;
   private readonly outboxIntentStreamKey: string;
-  private readonly dlqStreamKey: string;
+  private readonly originReconcileStreamKey: string;
+  private readonly inboundDlqStreamKey: string;
+  private readonly outboundDlqStreamKey: string;
+  private readonly outboxIntentDlqStreamKey: string;
+  private readonly originReconcileDlqStreamKey: string;
+  private readonly maxDlqLength: number;
   private readonly consumerGroup: string;
   private readonly consumerId: string;
   private readonly blockTimeoutMs: number;
   private readonly claimIdleTimeMs: number;
   private readonly maxStreamLength: number;
+  private readonly readBatchCount: number;
+  private readonly claimBatchCount: number;
 
   private isConnected = false;
 
@@ -155,16 +180,24 @@ export class RedisStreamsQueue {
     this.inboundConsumerRedis = createClient({ url: redisUrl });
     this.outboundConsumerRedis = createClient({ url: redisUrl });
     this.outboxIntentConsumerRedis = createClient({ url: redisUrl });
+    this.originReconcileConsumerRedis = createClient({ url: redisUrl });
 
     this.inboundStreamKey = config.inboundStreamKey ?? "ap:queue:inbound:v1";
     this.outboundStreamKey = config.outboundStreamKey ?? "ap:queue:outbound:v1";
     this.outboxIntentStreamKey = config.outboxIntentStreamKey ?? "ap:queue:outbox-intent:v1";
-    this.dlqStreamKey = config.dlqStreamKey ?? "ap:queue:dlq:v1";
+    this.originReconcileStreamKey = config.originReconcileStreamKey ?? "ap:queue:origin-reconcile:v1";
+    this.inboundDlqStreamKey = config.inboundDlqStreamKey ?? "ap:queue:dlq:inbound:v1";
+    this.outboundDlqStreamKey = config.outboundDlqStreamKey ?? "ap:queue:dlq:outbound:v1";
+    this.outboxIntentDlqStreamKey = config.outboxIntentDlqStreamKey ?? "ap:queue:dlq:outbox-intent:v1";
+    this.originReconcileDlqStreamKey = config.originReconcileDlqStreamKey ?? "ap:queue:dlq:origin-reconcile:v1";
+    this.maxDlqLength = config.maxDlqLength ?? 10000;
     this.consumerGroup = config.consumerGroup ?? "sidecar-workers";
     this.consumerId = config.consumerId ?? `worker-${process.pid}-${Date.now()}`;
     this.blockTimeoutMs = config.blockTimeoutMs ?? 5000;
     this.claimIdleTimeMs = config.claimIdleTimeMs ?? 60000;
     this.maxStreamLength = config.maxStreamLength ?? 100000;
+    this.readBatchCount = normalizeQueueBatchCount(config.readBatchCount, process.env["QUEUE_READ_BATCH_COUNT"], 10);
+    this.claimBatchCount = normalizeQueueBatchCount(config.claimBatchCount, process.env["QUEUE_CLAIM_BATCH_COUNT"], 10);
 
     this.redis.on("error", (err) => {
       logger.error({ error: err.message }, "Redis client error");
@@ -181,6 +214,10 @@ export class RedisStreamsQueue {
     this.outboxIntentConsumerRedis.on("error", (err) => {
       logger.error({ error: err.message }, "Redis outbox-intent consumer error");
     });
+
+    this.originReconcileConsumerRedis.on("error", (err) => {
+      logger.error({ error: err.message }, "Redis origin-reconcile consumer error");
+    });
   }
 
   // ==========================================================================
@@ -195,6 +232,7 @@ export class RedisStreamsQueue {
       this.inboundConsumerRedis.connect(),
       this.outboundConsumerRedis.connect(),
       this.outboxIntentConsumerRedis.connect(),
+      this.originReconcileConsumerRedis.connect(),
     ]);
 
     await this.ensureConsumerGroups();
@@ -204,6 +242,7 @@ export class RedisStreamsQueue {
       inboundStream: this.inboundStreamKey,
       outboundStream: this.outboundStreamKey,
       outboxIntentStream: this.outboxIntentStreamKey,
+      originReconcileStream: this.originReconcileStreamKey,
       consumerId: this.consumerId,
     });
   }
@@ -216,6 +255,7 @@ export class RedisStreamsQueue {
       this.inboundConsumerRedis.quit(),
       this.outboundConsumerRedis.quit(),
       this.outboxIntentConsumerRedis.quit(),
+      this.originReconcileConsumerRedis.quit(),
     ]);
     this.isConnected = false;
     logger.info("Redis Streams Queue disconnected");
@@ -400,7 +440,7 @@ export class RedisStreamsQueue {
           this.consumerId,
           this.claimIdleTimeMs,
           "0-0",
-          { COUNT: 10 }
+          { COUNT: this.claimBatchCount }
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
@@ -413,7 +453,7 @@ export class RedisStreamsQueue {
           this.consumerGroup,
           this.consumerId,
           { key: this.outboundStreamKey, id: ">" },
-          { COUNT: 10, BLOCK: this.blockTimeoutMs }
+          { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs }
         );
 
         if (!messages || messages.length === 0) {
@@ -471,7 +511,7 @@ export class RedisStreamsQueue {
           this.consumerId,
           this.claimIdleTimeMs,
           "0-0",
-          { COUNT: 10 },
+          { COUNT: this.claimBatchCount },
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
@@ -483,7 +523,7 @@ export class RedisStreamsQueue {
           this.consumerGroup,
           this.consumerId,
           { key: this.outboxIntentStreamKey, id: ">" },
-          { COUNT: 10, BLOCK: this.blockTimeoutMs },
+          { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs },
         );
 
         if (!messages || messages.length === 0) {
@@ -501,6 +541,75 @@ export class RedisStreamsQueue {
           await this.ensureConsumerGroup(this.outboxIntentStreamKey);
         }
         logger.error({ error: err.message }, "Error consuming outbox intent messages");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+  }
+
+  // ==========================================================================
+  // Origin Reconciliation Queue Operations
+  // ==========================================================================
+
+  async enqueueOriginReconciliation(job: OriginReconciliationJob): Promise<string> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+
+    const messageId = await this.redis.xAdd(
+      this.originReconcileStreamKey,
+      "*",
+      this.serializeOriginReconciliationJob(job),
+      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxStreamLength } },
+    );
+
+    logger.debug("Enqueued origin reconciliation job", {
+      jobId: job.jobId,
+      originObjectUrl: job.originObjectUrl,
+      messageId,
+    });
+
+    return messageId;
+  }
+
+  async *consumeOriginReconciliation(): AsyncIterable<{ messageId: string; job: OriginReconciliationJob }> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+
+    while (true) {
+      try {
+        const pending = await (this.originReconcileConsumerRedis as any).xAutoClaim(
+          this.originReconcileStreamKey,
+          this.consumerGroup,
+          this.consumerId,
+          this.claimIdleTimeMs,
+          "0-0",
+          { COUNT: this.claimBatchCount },
+        );
+
+        for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
+          const job = this.deserializeOriginReconciliationJob(messageId, fields);
+          yield { messageId, job };
+        }
+
+        const messages = await (this.originReconcileConsumerRedis as any).xReadGroup(
+          this.consumerGroup,
+          this.consumerId,
+          { key: this.originReconcileStreamKey, id: ">" },
+          { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs },
+        );
+
+        if (!messages || messages.length === 0) {
+          continue;
+        }
+
+        for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
+          for (const [messageId, fields] of streamMessages) {
+            const job = this.deserializeOriginReconciliationJob(messageId, fields);
+            yield { messageId, job };
+          }
+        }
+      } catch (err: any) {
+        if (this.isMissingConsumerGroupError(err)) {
+          await this.ensureConsumerGroup(this.originReconcileStreamKey);
+        }
+        logger.error({ error: err.message }, "Error consuming origin reconciliation messages");
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     }
@@ -540,8 +649,31 @@ export class RedisStreamsQueue {
       attempt: parseInt(this.requireField(fields, "attempt", messageId), 10),
       maxAttempts: parseInt(this.requireField(fields, "maxAttempts", messageId), 10),
       notBeforeMs: parseInt(this.requireField(fields, "notBeforeMs", messageId), 10),
+      deferCount: parseInt(fields["deferCount"] || "0", 10),
       lastError: fields["lastError"] || undefined,
       meta: fields["meta"] ? JSON.parse(fields["meta"]) : undefined,
+    };
+  }
+
+  private deserializeOriginReconciliationJob(
+    messageId: string,
+    fields: Record<string, string>,
+  ): OriginReconciliationJob {
+    return {
+      jobId: this.requireField(fields, "jobId", messageId),
+      originObjectUrl: this.requireField(fields, "originObjectUrl", messageId),
+      canonicalObjectId: fields["canonicalObjectId"] || undefined,
+      actorUriHint: fields["actorUriHint"] || undefined,
+      reason: this.requireField(fields, "reason", messageId),
+      createdAt: parseInt(this.requireField(fields, "createdAt", messageId), 10),
+      attempt: parseInt(this.requireField(fields, "attempt", messageId), 10),
+      maxAttempts: parseInt(this.requireField(fields, "maxAttempts", messageId), 10),
+      notBeforeMs: parseInt(this.requireField(fields, "notBeforeMs", messageId), 10),
+      windowExpiresAt: parseInt(this.requireField(fields, "windowExpiresAt", messageId), 10),
+      lastFingerprint: fields["lastFingerprint"] || undefined,
+      unchangedSuccesses: parseInt(fields["unchangedSuccesses"] || "0", 10),
+      notFoundCount: parseInt(fields["notFoundCount"] || "0", 10),
+      lastError: fields["lastError"] || undefined,
     };
   }
 
@@ -614,7 +746,7 @@ export class RedisStreamsQueue {
   // Message Acknowledgment
   // ==========================================================================
 
-  async ack(type: "inbound" | "outbound" | "outbox_intent", messageId: string): Promise<void> {
+  async ack(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile", messageId: string): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
     const streamKey =
@@ -622,7 +754,9 @@ export class RedisStreamsQueue {
         ? this.inboundStreamKey
         : type === "outbound"
           ? this.outboundStreamKey
-          : this.outboxIntentStreamKey;
+          : type === "outbox_intent"
+            ? this.outboxIntentStreamKey
+            : this.originReconcileStreamKey;
     await this.redis.xAck(streamKey, this.consumerGroup, messageId);
     logger.debug("Message acknowledged", { type, messageId });
   }
@@ -649,6 +783,32 @@ export class RedisStreamsQueue {
     await this.redis.del(key);
   }
 
+  async claimOriginReconciliation(originObjectUrl: string, ttlSeconds: number): Promise<boolean> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+
+    const claimed = await this.redis.set(
+      `ap:origin-reconcile:claim:${encodeURIComponent(originObjectUrl)}`,
+      "1",
+      { EX: ttlSeconds, NX: true },
+    );
+    return claimed === "OK";
+  }
+
+  async markOriginReconciliationApplied(
+    objectKey: string,
+    fingerprint: string,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+
+    const claimed = await this.redis.set(
+      `ap:origin-reconcile:apply:${encodeURIComponent(objectKey)}:${fingerprint}`,
+      "1",
+      { EX: ttlSeconds, NX: true },
+    );
+    return claimed === "OK";
+  }
+
   async cacheActorDoc(actorUri: string, document: unknown, ttlSeconds: number = 3600): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
@@ -662,7 +822,7 @@ export class RedisStreamsQueue {
     return raw ? JSON.parse(raw) : null;
   }
 
-  async getPendingCount(type: "inbound" | "outbound" | "outbox_intent"): Promise<number> {
+  async getPendingCount(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile"): Promise<number> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
     const streamKey =
@@ -670,7 +830,9 @@ export class RedisStreamsQueue {
         ? this.inboundStreamKey
         : type === "outbound"
           ? this.outboundStreamKey
-          : this.outboxIntentStreamKey;
+          : type === "outbox_intent"
+            ? this.outboxIntentStreamKey
+            : this.originReconcileStreamKey;
     let pending: { pending?: number } | null = null;
     try {
       pending = await (this.redis as any).xPending(streamKey, this.consumerGroup);
@@ -684,7 +846,7 @@ export class RedisStreamsQueue {
     return typeof pending?.pending === "number" ? pending.pending : 0;
   }
 
-  async getStreamLength(type: "inbound" | "outbound" | "outbox_intent"): Promise<number> {
+  async getStreamLength(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile"): Promise<number> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
     const streamKey =
@@ -692,7 +854,9 @@ export class RedisStreamsQueue {
         ? this.inboundStreamKey
         : type === "outbound"
           ? this.outboundStreamKey
-          : this.outboxIntentStreamKey;
+          : type === "outbox_intent"
+            ? this.outboxIntentStreamKey
+            : this.originReconcileStreamKey;
     const length = await this.redis.xLen(streamKey);
     return typeof length === "number" ? length : 0;
   }
@@ -783,8 +947,8 @@ export class RedisStreamsQueue {
   // ==========================================================================
 
   async moveToDlq(
-    type: "inbound" | "outbound" | "outbox_intent",
-    data: InboundEnvelope | OutboundJob | OutboxIntent,
+    type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile",
+    data: InboundEnvelope | OutboundJob | OutboxIntent | OriginReconciliationJob,
     reason: string,
   ): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -795,14 +959,25 @@ export class RedisStreamsQueue {
           ? (data as InboundEnvelope).envelopeId
           : type === "outbound"
             ? (data as OutboundJob).jobId
-            : (data as OutboxIntent).intentId,
+            : type === "outbox_intent"
+              ? (data as OutboxIntent).intentId
+              : (data as OriginReconciliationJob).jobId,
       reason,
       timestamp: Date.now(),
       data,
     };
 
+    const dlqKey =
+      type === "inbound"
+        ? this.inboundDlqStreamKey
+        : type === "outbound"
+          ? this.outboundDlqStreamKey
+          : type === "outbox_intent"
+            ? this.outboxIntentDlqStreamKey
+            : this.originReconcileDlqStreamKey;
+
     await this.redis.xAdd(
-      this.dlqStreamKey,
+      dlqKey,
       "*",
       {
         type,
@@ -811,7 +986,7 @@ export class RedisStreamsQueue {
         timestamp: entry.timestamp.toString(),
         data: JSON.stringify(entry.data),
       },
-      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: 10000 } }
+      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxDlqLength } }
     );
 
     logger.warn("Message moved to DLQ", { type, id: entry.id, reason });
@@ -827,14 +1002,41 @@ export class RedisStreamsQueue {
     const inboundLen = await this.redis.xLen(this.inboundStreamKey);
     const outboundLen = await this.redis.xLen(this.outboundStreamKey);
     const outboxIntentLen = await this.redis.xLen(this.outboxIntentStreamKey);
-    const dlqLen = await this.redis.xLen(this.dlqStreamKey);
+    const originReconcileLen = await this.redis.xLen(this.originReconcileStreamKey);
+    const [dlqInboundLen, dlqOutboundLen, dlqOutboxIntentLen, dlqOriginReconcileLen] = await Promise.all([
+      this.redis.xLen(this.inboundDlqStreamKey),
+      this.redis.xLen(this.outboundDlqStreamKey),
+      this.redis.xLen(this.outboxIntentDlqStreamKey),
+      this.redis.xLen(this.originReconcileDlqStreamKey),
+    ]);
 
     return {
       inboundQueueLength: inboundLen,
       outboundQueueLength: outboundLen,
       outboxIntentQueueLength: outboxIntentLen,
-      dlqLength: dlqLen,
+      originReconcileQueueLength: originReconcileLen,
+      dlqInboundLength: dlqInboundLen,
+      dlqOutboundLength: dlqOutboundLen,
+      dlqOutboxIntentLength: dlqOutboxIntentLen,
+      dlqOriginReconcileLength: dlqOriginReconcileLen,
     };
+  }
+
+  async getDlqLength(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile"): Promise<number> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+    const key =
+      type === "inbound"
+        ? this.inboundDlqStreamKey
+        : type === "outbound"
+          ? this.outboundDlqStreamKey
+          : type === "outbox_intent"
+            ? this.outboxIntentDlqStreamKey
+            : this.originReconcileDlqStreamKey;
+    return this.redis.xLen(key);
+  }
+
+  getClaimIdleTimeMs(): number {
+    return this.claimIdleTimeMs;
   }
 
   private async ensureConsumerGroups(): Promise<void> {
@@ -842,6 +1044,7 @@ export class RedisStreamsQueue {
       this.inboundStreamKey,
       this.outboundStreamKey,
       this.outboxIntentStreamKey,
+      this.originReconcileStreamKey,
     ]) {
       await this.ensureConsumerGroup(streamKey);
     }
@@ -873,6 +1076,7 @@ export class RedisStreamsQueue {
       attempt: job.attempt.toString(),
       maxAttempts: job.maxAttempts.toString(),
       notBeforeMs: job.notBeforeMs.toString(),
+      deferCount: (job.deferCount ?? 0).toString(),
       lastError: job.lastError ?? "",
       meta: job.meta ? JSON.stringify(job.meta) : "",
     };
@@ -892,6 +1096,25 @@ export class RedisStreamsQueue {
       lastError: intent.lastError ?? "",
       meta: intent.meta ? JSON.stringify(intent.meta) : "",
       bridgeHints: intent.bridgeHints ? JSON.stringify(intent.bridgeHints) : "",
+    };
+  }
+
+  private serializeOriginReconciliationJob(job: OriginReconciliationJob): Record<string, string> {
+    return {
+      jobId: job.jobId,
+      originObjectUrl: job.originObjectUrl,
+      canonicalObjectId: job.canonicalObjectId ?? "",
+      actorUriHint: job.actorUriHint ?? "",
+      reason: job.reason,
+      createdAt: job.createdAt.toString(),
+      attempt: job.attempt.toString(),
+      maxAttempts: job.maxAttempts.toString(),
+      notBeforeMs: job.notBeforeMs.toString(),
+      windowExpiresAt: job.windowExpiresAt.toString(),
+      lastFingerprint: job.lastFingerprint ?? "",
+      unchangedSuccesses: job.unchangedSuccesses.toString(),
+      notFoundCount: job.notFoundCount.toString(),
+      lastError: job.lastError ?? "",
     };
   }
 
@@ -956,10 +1179,11 @@ export class RedisStreamsQueue {
           'attempt', ARGV[index + 6],
           'maxAttempts', ARGV[index + 7],
           'notBeforeMs', ARGV[index + 8],
-          'lastError', ARGV[index + 9],
-          'meta', ARGV[index + 10]
+          'deferCount', ARGV[index + 9],
+          'lastError', ARGV[index + 10],
+          'meta', ARGV[index + 11]
         )
-        index = index + 11
+        index = index + 12
       end
       redis.call('HSET', stateKey, 'outboundEnqueuedAt', outboundEnqueuedAt, 'jobCount', tostring(jobCount))
       redis.call('EXPIRE', stateKey, 604800)
@@ -982,6 +1206,7 @@ export class RedisStreamsQueue {
           serialized["attempt"] ?? "0",
           serialized["maxAttempts"] ?? "0",
           serialized["notBeforeMs"] ?? "0",
+          serialized["deferCount"] ?? "0",
           serialized["lastError"] ?? "",
           serialized["meta"] ?? "",
         ];
@@ -1027,12 +1252,40 @@ export function createDefaultConfig(): QueueConfig {
     outboundStreamKey: process.env["OUTBOUND_STREAM_KEY"] || "ap:queue:outbound:v1",
     outboxIntentStreamKey:
       process.env["OUTBOX_INTENT_STREAM_KEY"] || "ap:queue:outbox-intent:v1",
-    dlqStreamKey: process.env["DLQ_STREAM_KEY"] || "ap:queue:dlq:v1",
+    originReconcileStreamKey:
+      process.env["ORIGIN_RECONCILE_STREAM_KEY"] || "ap:queue:origin-reconcile:v1",
+    inboundDlqStreamKey: process.env["DLQ_INBOUND_STREAM_KEY"] || "ap:queue:dlq:inbound:v1",
+    outboundDlqStreamKey: process.env["DLQ_OUTBOUND_STREAM_KEY"] || "ap:queue:dlq:outbound:v1",
+    outboxIntentDlqStreamKey: process.env["DLQ_OUTBOX_INTENT_STREAM_KEY"] || "ap:queue:dlq:outbox-intent:v1",
+    originReconcileDlqStreamKey:
+      process.env["DLQ_ORIGIN_RECONCILE_STREAM_KEY"] || "ap:queue:dlq:origin-reconcile:v1",
+    maxDlqLength: parseInt(process.env["MAX_DLQ_LENGTH"] || "10000", 10),
     consumerGroup: process.env["CONSUMER_GROUP"] || "sidecar-workers",
     blockTimeoutMs: parseInt(process.env["BLOCK_TIMEOUT_MS"] || "5000", 10),
     claimIdleTimeMs: parseInt(process.env["CLAIM_IDLE_TIME_MS"] || "60000", 10),
-    maxStreamLength: parseInt(process.env["MAX_STREAM_LENGTH"] || "100000", 10),
+    maxStreamLength: parseInt(process.env["MAX_STREAM_LENGTH"] || "500000", 10),
+    readBatchCount: parseInt(process.env["QUEUE_READ_BATCH_COUNT"] || "10", 10),
+    claimBatchCount: parseInt(process.env["QUEUE_CLAIM_BATCH_COUNT"] || "10", 10),
   };
+}
+
+function normalizeQueueBatchCount(
+  configured: number | undefined,
+  fromEnv: string | undefined,
+  fallback: number,
+): number {
+  if (typeof configured === "number" && Number.isFinite(configured)) {
+    return Math.max(1, Math.min(250, Math.floor(configured)));
+  }
+
+  if (typeof fromEnv === "string" && fromEnv.length > 0) {
+    const parsed = Number.parseInt(fromEnv, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, Math.min(250, parsed));
+    }
+  }
+
+  return fallback;
 }
 
 export function createInboundEnvelope(params: {
@@ -1063,11 +1316,12 @@ export function createVerifiedInboundEnvelope(params: {
   remoteIp: string;
   verifiedActorUri: string;
   verifiedAt?: number;
+  headers?: Record<string, string>;
 }): InboundEnvelope {
   return createInboundEnvelope({
     method: "POST",
     path: params.path,
-    headers: {},
+    headers: params.headers ?? {},
     body: params.body,
     remoteIp: params.remoteIp,
     verification: {
@@ -1079,6 +1333,7 @@ export function createVerifiedInboundEnvelope(params: {
 }
 
 export function createOutboxIntent(params: {
+  intentId?: string;
   activityId: string;
   actorUri: string;
   activity: string;
@@ -1087,7 +1342,7 @@ export function createOutboxIntent(params: {
   bridgeHints?: Record<string, unknown>;
 }): OutboxIntent {
   return {
-    intentId: crypto.randomUUID(),
+    intentId: params.intentId ?? crypto.randomUUID(),
     activityId: params.activityId,
     actorUri: params.actorUri,
     activity: params.activity,

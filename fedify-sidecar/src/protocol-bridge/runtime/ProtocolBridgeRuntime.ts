@@ -244,6 +244,8 @@ export class ProtocolBridgeRuntime {
           subjectDid: op.subjectDid ?? undefined,
           subjectUri: op.subjectUri ?? undefined,
           subjectCid: op.subjectCid ?? undefined,
+          reactionContent: op.reactionContent ?? undefined,
+          reactionEmoji: op.reactionEmoji ?? undefined,
           operation: op.action,
           bridge: op.bridge?.provenance,
           ...(op.record && typeof op.record === "object" ? { record: op.record } : {}),

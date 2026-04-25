@@ -1,21 +1,20 @@
 import type { MRFPermission } from "../mrf/types.js";
+import type { CanonicalActorRef } from "../../protocol-bridge/canonical/CanonicalActorRef.js";
+import type { CanonicalObjectRef } from "../../protocol-bridge/canonical/CanonicalObjectRef.js";
+import type { CanonicalReportReasonType, CanonicalReportSubject } from "../../protocol-bridge/canonical/CanonicalIntent.js";
 
 // ---------------------------------------------------------------------------
 // Cross-Protocol Moderation Bridge — Types
 //
-// This module defines the type layer for bi-directional moderation decisions
-// between ActivityPub (via MRF policy) and ATProto (via AT labels / admin ops).
+// This module defines the type layer for dashboard-driven moderation decisions
+// and their AT Protocol propagation state.
 //
 // Decision flow:
 //   Provider applies decision (Dashboard UI)
-//     → (1) PATCH content-policy MRF module (blockedLabels / warnLabels)
-//     → (2) Emit signed AT label for target DID (if AT identity is known)
+//     → (1) Resolve the target into a concrete AT subject when possible
+//     → (2) Emit signed AT label for target DID
 //     → (3) Optionally: com.atproto.admin.updateSubjectStatus (suspend)
 //     → (4) Store decision record (Redis-backed, returned to UI)
-//
-//   AT Firehose label event (AtIngressEventClassifier → bridge)
-//     → (1) PATCH content-policy MRF module (adds label to blockedLabels)
-//     → (2) Store decision record
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -24,10 +23,10 @@ import type { MRFPermission } from "../mrf/types.js";
 
 /** The moderation action to apply across both protocols. */
 export type ModerationAction =
-  | "label"     // Attach an informational AT label; add to MRF content-policy warnLabels
-  | "warn"      // AT !warn label; add to MRF content-policy warnLabels
-  | "filter"    // AT !hide label; add to MRF content-policy blockedLabels
-  | "block"     // Full AT !hide label; add to MRF blockedLabels; reject incoming AP activity
+  | "label"     // Attach an informational AT label
+  | "warn"      // AT !warn label
+  | "filter"    // AT !hide label
+  | "block"     // Full AT !hide label
   | "suspend";  // AT takedown via PDS admin updateSubjectStatus + block label
 
 /** Which protocol(s) the decision was propagated to. */
@@ -64,15 +63,6 @@ export const ACTION_TO_AT_LABEL: Record<ModerationAction, string> = {
   filter:  "!hide",
   block:   "!hide",
   suspend: "!hide",
-};
-
-/** Maps a ModerationAction to the MRF content-policy target array. */
-export const ACTION_TO_MRF_FIELD: Record<ModerationAction, "blockedLabels" | "warnLabels" | null> = {
-  label:   "warnLabels",
-  warn:    "warnLabels",
-  filter:  "blockedLabels",
-  block:   "blockedLabels",
-  suspend: "blockedLabels",
 };
 
 // ---------------------------------------------------------------------------
@@ -141,11 +131,17 @@ export interface ModerationDecision {
   /** Target WebID (ActivityPods user), if known */
   targetWebId?: string;
 
+  /** Target ActivityPub actor URI, if known */
+  targetActorUri?: string;
+
   /** Target AT Protocol DID, if known */
   targetAtDid?: string;
 
   /** Human-readable handle or username (AT handle, AP username, etc.) */
   targetHandle?: string;
+
+  /** Optional moderation case id that triggered this decision. */
+  sourceCaseId?: string;
 
   /** The action applied */
   action: ModerationAction;
@@ -168,7 +164,9 @@ export interface ModerationDecision {
   /** Which protocol(s) the decision was propagated to */
   protocols: ModerationProtocol;
 
-  /** Whether the MRF content-policy module was updated (blockedLabels / warnLabels) */
+  /**
+   * Whether a subject-specific ActivityPub moderation rule was applied.
+   */
   mrfPatched: boolean;
 
   /** Whether an AT label record was emitted */
@@ -188,6 +186,156 @@ export interface ModerationDecision {
 }
 
 // ---------------------------------------------------------------------------
+// Inbound moderation case record
+// ---------------------------------------------------------------------------
+
+export type ModerationCaseSource = "activitypub-flag" | "local-user-report";
+export type ModerationCaseStatus = "open" | "resolved" | "dismissed";
+export type ModerationCaseProtocol = "ap" | "activitypods";
+
+export interface ModerationCaseReporter extends CanonicalActorRef {
+  webId?: string | null;
+}
+
+export interface ModerationCaseRecipient {
+  webId?: string | null;
+  activityPubActorUri?: string | null;
+}
+
+export interface ModerationCaseCanonicalEventState {
+  status: "pending" | "published" | "failed";
+  canonicalIntentId?: string;
+  lastAttemptAt?: string;
+  publishedAt?: string;
+  lastError?: string;
+}
+
+export interface ModerationCaseActivityPubForwardingState {
+  status: "pending" | "queued" | "delivered" | "failed" | "skipped";
+  canonicalIntentId?: string;
+  moderationActorUri?: string;
+  activityId?: string;
+  outboxIntentId?: string;
+  targetActorUri?: string;
+  targetInbox?: string;
+  targetDomain?: string;
+  lastAttemptAt?: string;
+  queuedAt?: string;
+  deliveredAt?: string;
+  lastError?: string;
+  skippedReason?: string;
+  lastStatusCode?: number;
+}
+
+export interface ModerationCaseAtprotoForwardingState {
+  status: "pending" | "delivered" | "failed" | "skipped";
+  canonicalIntentId?: string;
+  serviceDid?: string;
+  pdsUrl?: string;
+  reporterDid?: string;
+  reporterHandle?: string;
+  subjectDid?: string;
+  subjectAtUri?: string;
+  reportId?: number;
+  lastAttemptAt?: string;
+  deliveredAt?: string;
+  lastError?: string;
+  skippedReason?: string;
+  lastStatusCode?: number;
+}
+
+export interface ModerationCaseForwardingState {
+  activityPub?: ModerationCaseActivityPubForwardingState | null;
+  atproto?: ModerationCaseAtprotoForwardingState | null;
+}
+
+/**
+ * A stored moderation case, owned by ActivityPods and shared by local user
+ * reports plus inbound federated reports.
+ */
+export interface ModerationCase {
+  /** Opaque local identifier (UUID/ULID) */
+  id: string;
+
+  /** Source of the case */
+  source: ModerationCaseSource;
+
+  /** Protocol or local surface where the case originated */
+  protocol: ModerationCaseProtocol;
+
+  /** Remote activity identifier when present */
+  activityId?: string;
+
+  /**
+   * Internal de-duplication key derived from the verified source actor,
+   * reported activity id, and local inbox target.
+   */
+  dedupeKey: string;
+
+  /** Reporter identity retained for local moderation only. */
+  reporter?: ModerationCaseReporter | null;
+
+  /** Local inbox path the report was delivered to (ActivityPub only). */
+  inboxPath?: string;
+
+  /** Recipient/local target that received the report (when applicable). */
+  recipient?: ModerationCaseRecipient | null;
+
+  /** Structured reason category */
+  reasonType: CanonicalReportReasonType;
+
+  /** Free-form reason/content extracted from the report */
+  reason?: string;
+
+  /** Whether the reporter requested remote forwarding. */
+  requestedForwarding?: {
+    remote: boolean;
+  } | null;
+
+  /** Client surface metadata for local reports when available. */
+  clientContext?: {
+    app?: string | null;
+    surface?: string | null;
+  } | null;
+
+  /** Normalized report subject. */
+  subject: CanonicalReportSubject;
+
+  /** Evidence objects attached to the report. */
+  evidenceObjectRefs: CanonicalObjectRef[];
+
+  /** Timestamp on the original remote report when present */
+  createdAt?: string;
+
+  /** Local receipt timestamp */
+  receivedAt: string;
+
+  /** Current moderation workflow status */
+  status: ModerationCaseStatus;
+
+  /** Related manual or automated decision ids */
+  relatedDecisionIds: string[];
+
+  /**
+   * Canonical event publication status for this case.
+   * Forwarding to remote moderation systems is tracked separately later.
+   */
+  canonicalEvent: ModerationCaseCanonicalEventState;
+
+  /** Remote moderation forwarding state by protocol. */
+  forwarding?: ModerationCaseForwardingState | null;
+
+  /** Last time the case was updated by a decision or workflow action */
+  updatedAt?: string;
+
+  /** Resolution timestamp when the case is no longer open */
+  resolvedAt?: string;
+
+  /** Provider actor who resolved or dismissed the case */
+  resolvedBy?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Store interface
 // ---------------------------------------------------------------------------
 
@@ -197,11 +345,27 @@ export interface ModerationDecisionQuery {
   action?: ModerationAction;
   targetAtDid?: string;
   targetWebId?: string;
+  targetActorUri?: string;
   includeRevoked?: boolean;
 }
 
 export interface ModerationDecisionPage {
   decisions: ModerationDecision[];
+  cursor?: string;
+}
+
+export interface ModerationCaseQuery {
+  limit?: number;
+  cursor?: string;
+  status?: ModerationCaseStatus;
+  source?: ModerationCaseSource;
+  sourceActorUri?: string;
+  recipientWebId?: string;
+  reportedActorUri?: string;
+}
+
+export interface ModerationCasePage {
+  cases: ModerationCase[];
   cursor?: string;
 }
 
@@ -228,6 +392,21 @@ export interface ModerationBridgeStore {
 
   /** Update fields on an existing decision. Returns the updated record or null. */
   patchDecision(id: string, patch: Partial<ModerationDecision>): Promise<ModerationDecision | null>;
+
+  /** Persist a new moderation case. Rejects if id already exists. */
+  addCase(entry: ModerationCase): Promise<void>;
+
+  /** Retrieve a single case by its local id. Returns null if not found. */
+  getCase(id: string): Promise<ModerationCase | null>;
+
+  /** Retrieve a single case by its internal de-duplication key. */
+  findCaseByDedupeKey(dedupeKey: string): Promise<ModerationCase | null>;
+
+  /** List stored moderation cases, newest first. */
+  listCases(query?: ModerationCaseQuery): Promise<ModerationCasePage>;
+
+  /** Update fields on an existing case. Returns the updated record or null. */
+  patchCase(id: string, patch: Partial<ModerationCase>): Promise<ModerationCase | null>;
 
   /** Store an emitted AT label record. */
   addAtLabel(label: AtLabel): Promise<void>;
@@ -271,10 +450,7 @@ export interface ModerationBridgeDeps {
   /** Redis-backed moderation decision + AT label store */
   store: ModerationBridgeStore;
 
-  /**
-   * Fetch function for patching MRF content-policy module.
-   * Called with { method, path, body, permission }.
-   */
+  /** Reserved hook for future subject-specific ActivityPub moderation integration. */
   mrfInternalFetch(opts: {
     method: string;
     path: string;
@@ -306,6 +482,18 @@ export interface ModerationBridgeDeps {
    * Returns null if no binding exists or DID belongs to an external user.
    */
   resolveWebId(atDid: string): Promise<string | null>;
+
+  /**
+   * Resolve the ActivityPub actor URI for a given WebID.
+   * Returns null if no local binding exists.
+   */
+  resolveActivityPubActorUri(webId: string): Promise<string | null>;
+
+  /**
+   * Resolve the WebID for a given ActivityPub actor URI when a local binding
+   * exists. Returns null for unbound remote actors.
+   */
+  resolveWebIdForActorUri(actorUri: string): Promise<string | null>;
 
   /** Return the current ISO timestamp. */
   now(): string;

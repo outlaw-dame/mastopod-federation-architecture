@@ -13,6 +13,7 @@ import {
   normalizeAndDedupeOutboundTargets,
   OutboundWebhookValidationError,
 } from "./outbound-webhook.js";
+import type { RemoteSharedInboxCache } from "./RemoteSharedInboxCache.js";
 import { metrics } from "../metrics/index.js";
 import type { ActivityEventMeta, RedPandaProducer } from "../streams/redpanda-producer.js";
 import { logger } from "../utils/logger.js";
@@ -21,6 +22,18 @@ export interface OutboxIntentWorkerConfig {
   concurrency: number;
   outboundJobMaxAttempts: number;
   activityPubOutboundDeliveryPolicy: ActivityPubOutboundDeliveryPolicy;
+  /**
+   * Optional sidecar-side remote sharedInbox discovery cache.
+   *
+   * When present, outbound targets that lack a `sharedInboxUrl` are enriched
+   * by resolving the remote server's sharedInbox endpoint (fetched once per
+   * domain, then cached in Redis for 24 h).  After enrichment the standard
+   * deduplication collapses multiple recipients at the same remote host into a
+   * single delivery job — reducing outbound HTTP requests per activity.
+   *
+   * Absent (or on enrichment error): falls back silently to per-inbox delivery.
+   */
+  sharedInboxCache?: RemoteSharedInboxCache;
 }
 
 class OutboxIntentProcessingError extends Error {
@@ -37,6 +50,7 @@ export class OutboxIntentWorker {
   private readonly queue: RedisStreamsQueue;
   private readonly redpanda: RedPandaProducer | null;
   private readonly config: OutboxIntentWorkerConfig;
+  private readonly sharedInboxCache: RemoteSharedInboxCache | null;
   private isRunning = false;
   private activeJobs = 0;
 
@@ -48,6 +62,7 @@ export class OutboxIntentWorker {
     this.queue = queue;
     this.redpanda = redpanda;
     this.config = config;
+    this.sharedInboxCache = config.sharedInboxCache ?? null;
   }
 
   async start(): Promise<void> {
@@ -115,9 +130,24 @@ export class OutboxIntentWorker {
       }
 
       const activity = this.parseIntentActivity(intent);
+
+      // Enrich targets with remotely-discovered sharedInbox endpoints before
+      // deduplication so that multiple recipients on the same remote server
+      // collapse into a single delivery job (one POST per host per activity).
+      // Fault-isolated: enrichment errors fall back silently to per-inbox delivery.
+      const enrichedTargets = this.sharedInboxCache
+        ? await this.sharedInboxCache.enrichTargets(intent.targets).catch((err: Error) => {
+            logger.warn("Outbound sharedInbox enrichment failed (using original targets)", {
+              intentId: intent.intentId,
+              error: err.message,
+            });
+            return intent.targets;
+          })
+        : intent.targets;
+
       const normalizedTargets = normalizeAndDedupeOutboundTargets(
-        intent.targets,
-        { maxTargetsPerRequest: Math.max(intent.targets.length, 1) },
+        enrichedTargets,
+        { maxTargetsPerRequest: Math.max(enrichedTargets.length, 1) },
       );
       if (normalizedTargets.targets.length === 0) {
         throw new OutboxIntentProcessingError(
@@ -268,7 +298,12 @@ export class OutboxIntentWorker {
       return;
     }
 
-    if (!intent.meta?.isPublicIndexable) {
+    const isPublicActivity =
+      intent.meta?.isPublicActivity === true ||
+      intent.meta?.visibility === "public" ||
+      intent.meta?.visibility === "unlisted";
+
+    if (!isPublicActivity) {
       return;
     }
 

@@ -1,5 +1,42 @@
 version: '3.8'
 
+x-media-pipeline-sidecar-base: &media_pipeline_sidecar_base
+  build:
+    context: ../media-pipeline-sidecar
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  environment:
+    - NODE_ENV=production
+    - PORT=8090
+    - HOST=0.0.0.0
+    - INTERNAL_BEARER_TOKEN=${MEDIA_PIPELINE_TOKEN:-change-me}
+    - REDIS_URL=redis://redis:6379
+    - REDPANDA_BROKERS=redpanda:9092
+    - ENABLE_EVENT_PUBLISH=${MEDIA_PIPELINE_ENABLE_EVENT_PUBLISH:-false}
+    - OPENSEARCH_URL=http://opensearch:9200
+    - ASSET_STORE_BACKEND=redis
+    - S3_ENDPOINT=${MEDIA_PIPELINE_S3_ENDPOINT:-https://s3.filebase.com}
+    - S3_REGION=${MEDIA_PIPELINE_S3_REGION:-us-east-1}
+    - S3_BUCKET=${MEDIA_PIPELINE_S3_BUCKET:-}
+    - S3_ACCESS_KEY_ID=${MEDIA_PIPELINE_S3_ACCESS_KEY_ID:-}
+    - S3_SECRET_ACCESS_KEY=${MEDIA_PIPELINE_S3_SECRET_ACCESS_KEY:-}
+    - S3_PUBLIC_BASE_URL=${MEDIA_PIPELINE_S3_PUBLIC_BASE_URL:-}
+    - CLOUDFLARE_MEDIA_DOMAIN=${MEDIA_PIPELINE_CLOUDFLARE_MEDIA_DOMAIN:-}
+    - SAFE_BROWSING_API_KEY=${SAFE_BROWSING_API_KEY:-}
+    - GOOGLE_VISION_API_KEY=${GOOGLE_VISION_API_KEY:-}
+    - GOOGLE_VIDEO_ACCESS_TOKEN=${GOOGLE_VIDEO_ACCESS_TOKEN:-}
+    - PDQ_HASH_SERVICE_BASE_URL=${PDQ_HASH_SERVICE_BASE_URL:-http://pdq-hash:7050}
+    - PDQ_HASH_SERVICE_BEARER_TOKEN=${PDQ_HASH_SERVICE_BEARER_TOKEN:-}
+  depends_on:
+    redis:
+      condition: service_healthy
+    redpanda:
+      condition: service_healthy
+    opensearch:
+      condition: service_healthy
+  networks:
+    - activitypods-network
+
 services:
   # ==========================================================================
   # Redis - Work queues (inbound/outbound), idempotency, rate limiting
@@ -52,9 +89,9 @@ services:
       # RedPanda - event logs ONLY (not work queues)
       - REDPANDA_BROKERS=redpanda:9092
       - REDPANDA_CLIENT_ID=fedify-sidecar
-      - TOPIC_STREAM1=ap.public.local.v1
-      - TOPIC_STREAM2=ap.public.remote.v1
-      - TOPIC_FIREHOSE=ap.public.firehose.v1
+      - STREAM1_TOPIC=ap.stream1.local-public.v1
+      - STREAM2_TOPIC=ap.stream2.remote-public.v1
+      - FIREHOSE_TOPIC=ap.firehose.v1
       - CONSUMER_GROUP_INDEXER=sidecar-indexer
       
       # ActivityPods - signing API (keys never leave)
@@ -77,6 +114,25 @@ services:
       - ENABLE_OUTBOUND_WORKER=true
       - ENABLE_INBOUND_WORKER=true
       - ENABLE_OPENSEARCH_INDEXER=true
+      - ENABLE_OUTBOX_INTENT_WORKER=true
+      # Required for AP relay subscriptions, Fedify runtime adapter, and origin reconciliation
+      - ENABLE_FEDIFY_RUNTIME_INTEGRATION=true
+
+      # AP relay subscription
+      # AP_RELAY_ACTOR_URLS: override the default relay list (comma-separated actor URLs).
+      # Omit to use the built-in fedi.buzz list.
+      - AP_RELAY_ACTOR_URLS=${AP_RELAY_ACTOR_URLS:-}
+      # The local AP actor that sends Follow activities to relay servers.
+      # Must be an actor whose private key is held by ActivityPods.
+      - AP_RELAY_LOCAL_ACTOR_URI=https://${DOMAIN:-localhost}/users/relay
+      - AP_RELAY_RESUBSCRIBE_INTERVAL_MS=${AP_RELAY_RESUBSCRIBE_INTERVAL_MS:-86400000}
+
+      # Memory API AP ingress webhook (relay content forwarding).
+      # Default targets the 'api' service in memory/docker-compose.local.yml on
+      # the shared activitypods-network.  Override in .env for prod deployments
+      # (e.g. MEMORY_AP_WEBHOOK_URL=http://memory-api:8794/ap/webhook/ingress).
+      - MEMORY_AP_WEBHOOK_URL=${MEMORY_AP_WEBHOOK_URL:-http://api:8794/ap/webhook/ingress}
+      - AP_BRIDGE_SECRET=${AP_BRIDGE_SECRET:-change-me-ap-secret}
       
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-info}
@@ -96,6 +152,60 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ==========================================================================
+  # Media Pipeline Sidecar - derivative generation, media analysis, asset index
+  # Optional AP module; canonical pod blobs remain owned by ActivityPods
+  # ==========================================================================
+  media-pipeline-sidecar:
+    <<: *media_pipeline_sidecar_base
+    container_name: media-pipeline-sidecar
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8090/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  media-pipeline-ingest-worker:
+    <<: *media_pipeline_sidecar_base
+    command: ["npm", "run", "worker:ingest"]
+
+  media-pipeline-fetch-worker:
+    <<: *media_pipeline_sidecar_base
+    command: ["npm", "run", "worker:fetch"]
+
+  media-pipeline-process-image-worker:
+    <<: *media_pipeline_sidecar_base
+    command: ["npm", "run", "worker:process:image"]
+
+  media-pipeline-process-video-worker:
+    <<: *media_pipeline_sidecar_base
+    command: ["npm", "run", "worker:process:video"]
+
+  media-pipeline-video-rendition-worker:
+    <<: *media_pipeline_sidecar_base
+    command: ["npm", "run", "worker:rendition:video"]
+
+  media-pipeline-finalize-worker:
+    <<: *media_pipeline_sidecar_base
+    command: ["npm", "run", "worker:finalize"]
+
+  pdq-hash:
+    build:
+      context: ./docker/pdqhash
+    container_name: pdq-hash
+    restart: unless-stopped
+    ports:
+      - "7070:7050"
+    environment:
+      - REDIS_URI=${PDQ_HASH_REDIS_URI:-redis://redis:6379}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - activitypods-network
 
   # ==========================================================================
   # RedPanda - Kafka-compatible streaming platform

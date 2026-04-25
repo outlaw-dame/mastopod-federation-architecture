@@ -6,11 +6,22 @@
  * Outputs: search.public.upsert.v1, search.public.delete.v1
  */
 
-import { SearchPublicUpsertV1, SearchPublicDeleteV1, SearchAuthorUpsertV1, SearchAuthorDeleteV1 } from '../events/SearchEvents.js';
+import {
+  SearchPublicUpsertV1,
+  SearchPublicDeleteV1,
+  SearchPublicDeleteByAuthorV1,
+  SearchAuthorUpsertV1,
+  SearchAuthorDeleteV1,
+} from '../events/SearchEvents.js';
 import { IdentityAliasResolver } from '../identity/IdentityAliasResolver.js';
 import { SearchDocIdStrategy } from '../identity/SearchDocIdStrategy.js';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 import { extractHashtagsFromActivityPubTags, extractHashtagsFromText } from '../../utils/hashtags.js';
+import {
+  isPublicSearchIndexable,
+  normalizePublicSearchConsent,
+  resolvePublicSearchConsent,
+} from '../../utils/searchConsent.js';
 
 export class ApSearchProjector {
   constructor(
@@ -38,15 +49,29 @@ export class ApSearchProjector {
     const object = activity.object;
     if (!object || typeof object !== 'object' || object.type !== 'Note') return;
 
-    // Only index public content
-    const isPublic = this.isPublic(activity) || this.isPublic(object);
-    if (!isPublic) return;
-
     const actorUri = typeof activity.actor === 'string' ? activity.actor : activity.actor?.id;
     if (!actorUri) return;
 
     const objectUri = typeof object.id === 'string' ? object.id : undefined;
     if (!objectUri) return;
+
+    const searchConsent =
+      normalizePublicSearchConsent(event.meta?.searchConsent) ??
+      resolvePublicSearchConsent(object, {
+        attributedToActor:
+          activity.actor && typeof activity.actor === 'object' ? activity.actor : undefined,
+      });
+
+    // Backward compatibility: when no explicit consent signal is present,
+    // keep indexing public-addressed content (legacy liberal default).
+    // Explicit consent signals remain authoritative.
+    const shouldIndex = searchConsent.explicitlySet
+      ? isPublicSearchIndexable(object, { consent: searchConsent })
+      : this.isPublic(activity) || this.isPublic(object);
+
+    if (!shouldIndex) {
+      return;
+    }
 
     // Resolve identity
     const identity = await this.identityResolver.resolveByApUri(actorUri);
@@ -66,6 +91,19 @@ export class ApSearchProjector {
 
     // Extract reply
     const inReplyTo = typeof object.inReplyTo === 'string' ? object.inReplyTo : object.inReplyTo?.id;
+    const quoteUrl = this.extractQuoteUrl(object);
+    const relations = inReplyTo || quoteUrl ? {
+      ...(inReplyTo ? {
+        replyToStableId: isLocal
+          ? SearchDocIdStrategy.forLocal(inReplyTo)
+          : SearchDocIdStrategy.forRemoteAp(inReplyTo)
+      } : {}),
+      ...(quoteUrl ? {
+        quoteOfStableId: isLocal
+          ? SearchDocIdStrategy.forLocal(quoteUrl)
+          : SearchDocIdStrategy.forRemoteAp(quoteUrl)
+      } : {}),
+    } : undefined;
 
     const upsert: SearchPublicUpsertV1 = {
       upsertKind: 'full',
@@ -89,9 +127,7 @@ export class ApSearchProjector {
         langs: object.contentMap ? Object.keys(object.contentMap) : undefined,
         tags: this.extractTags(object.tag, object.content)
       },
-      relations: inReplyTo ? {
-        replyToStableId: SearchDocIdStrategy.forRemoteAp(inReplyTo) // Best effort without full resolution
-      } : undefined,
+      relations,
       media: {
         hasMedia: mediaCount > 0,
         mediaCount
@@ -133,6 +169,7 @@ export class ApSearchProjector {
     
     // Try to resolve canonical ID if known
     const identity = await this.identityResolver.resolveByApUri(apUri);
+    const actorConsent = resolvePublicSearchConsent({}, { attributedToActor: actor });
 
     const upsert: SearchAuthorUpsertV1 = {
       stableAuthorId: identity.canonicalId || stableAuthorId,
@@ -143,23 +180,33 @@ export class ApSearchProjector {
       displayName: actor.name,
       summaryText: actor.summary ? this.stripHtml(actor.summary) : undefined,
       handle: actor.preferredUsername,
+      searchConsent: {
+        publicSearchable: actorConsent.isPublic,
+        explicitlySet: actorConsent.explicitlySet,
+        source: actorConsent.source === 'object_searchableBy' ? 'none' : actorConsent.source,
+        searchableBy: actorConsent.actorSearchableBy.length > 0 ? actorConsent.actorSearchableBy : undefined,
+        indexable: actorConsent.actorIndexable,
+      },
       updatedAt: new Date().toISOString()
     };
 
     await this.eventPublisher.publish('search.author.upsert.v1', upsert as any);
-  }
 
-  private isPublic(obj: any): boolean {
-    const publicUris = [
-      'https://www.w3.org/ns/activitystreams#Public',
-      'as:Public',
-      'Public'
-    ];
-    
-    const to = Array.isArray(obj.to) ? obj.to : (obj.to ? [obj.to] : []);
-    const cc = Array.isArray(obj.cc) ? obj.cc : (obj.cc ? [obj.cc] : []);
-    
-    return to.some((uri: any) => publicUris.includes(uri)) || cc.some((uri: any) => publicUris.includes(uri));
+    if (!actorConsent.isPublic) {
+      const deleteByAuthor: SearchPublicDeleteByAuthorV1 = {
+        author: {
+          canonicalId: identity.canonicalId,
+          apUri,
+          did: identity.atDid,
+          handle: identity.atHandle,
+        },
+        reason: 'search_consent_revoked',
+        deleteMode: 'hard',
+        deletedAt: new Date().toISOString(),
+      };
+
+      await this.eventPublisher.publish('search.public.delete-by-author.v1', deleteByAuthor as any);
+    }
   }
 
   private stripHtml(html: string): string {
@@ -175,5 +222,32 @@ export class ApSearchProjector {
     const hashtags = Array.from(new Set([...fromTags, ...fromContent]));
 
     return hashtags.length > 0 ? hashtags : undefined;
+  }
+
+  private extractQuoteUrl(object: any): string | undefined {
+    const raw = object?.quoteUrl ?? object?.quoteUri ?? object?.quoteURI;
+    if (typeof raw === 'string') {
+      return raw;
+    }
+    if (raw && typeof raw === 'object' && typeof raw.id === 'string') {
+      return raw.id;
+    }
+    if (raw && typeof raw === 'object' && typeof raw.href === 'string') {
+      return raw.href;
+    }
+    return undefined;
+  }
+
+  private isPublic(obj: any): boolean {
+    const publicUris = [
+      'https://www.w3.org/ns/activitystreams#Public',
+      'as:Public',
+      'Public'
+    ];
+
+    const to = Array.isArray(obj?.to) ? obj.to : (obj?.to ? [obj.to] : []);
+    const cc = Array.isArray(obj?.cc) ? obj.cc : (obj?.cc ? [obj.cc] : []);
+
+    return to.some((uri: any) => publicUris.includes(uri)) || cc.some((uri: any) => publicUris.includes(uri));
   }
 }

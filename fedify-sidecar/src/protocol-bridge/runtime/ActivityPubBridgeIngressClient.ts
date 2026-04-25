@@ -1,4 +1,5 @@
 import { request, type Dispatcher } from "undici";
+import { isSecureOrTrustedInternalUrl } from "../../utils/internalAuthority.js";
 import { sanitizeJsonObject } from "../../utils/safe-json.js";
 import type { ActivityPubBridgeIngressEvent } from "../events/ActivityPubBridgeEvents.js";
 import { ProtocolBridgeAdapterError } from "../adapters/ProtocolBridgeAdapterError.js";
@@ -101,11 +102,10 @@ function buildEndpointUrl(baseUrl: string, endpointPath: string): string {
     );
   }
 
-  const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
-  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLocalhost)) {
+  if (!isSecureOrTrustedInternalUrl(parsed)) {
     throw new ProtocolBridgeAdapterError(
       "AP_BRIDGE_INGRESS_URL_INSECURE",
-      "ActivityPods bridge ingress requires https unless the destination is localhost.",
+      "ActivityPods bridge ingress requires https unless the destination is a trusted internal host.",
     );
   }
 

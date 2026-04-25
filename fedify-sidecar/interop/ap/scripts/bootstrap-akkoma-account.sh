@@ -3,6 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COMPOSE_FILE="${SCRIPT_DIR}/../docker-compose.ap-interop.yml"
+AKKOMA_RUNTIME_DIR="${AP_INTEROP_AKKOMA_RUNTIME_DIR:-${SCRIPT_DIR}/../runtime/akkoma}"
 USERNAME="${AP_INTEROP_AKKOMA_USERNAME:-interop}"
 EMAIL="${AP_INTEROP_AKKOMA_EMAIL:-interop@akkoma}"
 PASSWORD="${AP_INTEROP_AKKOMA_PASSWORD:-InteropPassword!123}"
@@ -48,6 +49,41 @@ wait_for_akkoma() {
   done
 
   echo "Akkoma did not become ready in time." >&2
+  exit 1
+}
+
+wait_for_akkoma_webfinger() {
+  attempt=1
+  delay="${BOOTSTRAP_INITIAL_DELAY_SECONDS}"
+  expected_actor="https://akkoma/users/${USERNAME}"
+
+  while [ "${attempt}" -le "${BOOTSTRAP_ATTEMPTS}" ]; do
+    webfinger_json=$(
+      run_compose exec -T akkoma-app /bin/sh -lc \
+        "wget -qO- 'http://127.0.0.1:4000/.well-known/webfinger?resource=acct:${USERNAME}@akkoma'" \
+        2>/dev/null || true
+    )
+    if printf "%s" "${webfinger_json}" | grep -q "\"href\":\"${expected_actor}\""; then
+      return 0
+    fi
+
+    if [ "${attempt}" -eq "${BOOTSTRAP_ATTEMPTS}" ]; then
+      break
+    fi
+
+    echo "Waiting for Akkoma WebFinger discovery to expose '${USERNAME}' (attempt ${attempt}/${BOOTSTRAP_ATTEMPTS})..." >&2
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+    if [ "${delay}" -lt "${BOOTSTRAP_MAX_DELAY_SECONDS}" ]; then
+      delay=$((delay * 2))
+      if [ "${delay}" -gt "${BOOTSTRAP_MAX_DELAY_SECONDS}" ]; then
+        delay="${BOOTSTRAP_MAX_DELAY_SECONDS}"
+      fi
+    fi
+  done
+
+  echo "Akkoma WebFinger did not expose '${USERNAME}' in time." >&2
+  printf "%s\n" "${webfinger_json:-}" >&2
   exit 1
 }
 
@@ -143,11 +179,12 @@ ensure_database
 run_migrations
 
 if account_exists; then
-  ensure_account_state
-  run_compose up -d akkoma-app
-  wait_for_akkoma
-  echo "Akkoma account '${USERNAME}' already exists; reusing it."
-  exit 0
+ensure_account_state
+run_compose up -d akkoma-app
+wait_for_akkoma
+wait_for_akkoma_webfinger
+echo "Akkoma account '${USERNAME}' already exists; reusing it."
+exit 0
 fi
 
 run_compose run --rm akkoma-app /bin/sh -lc \
@@ -159,4 +196,5 @@ run_compose run --rm akkoma-app /bin/sh -lc \
 ensure_account_state
 run_compose up -d akkoma-app
 wait_for_akkoma
+wait_for_akkoma_webfinger
 echo "Created Akkoma account '${USERNAME}'."

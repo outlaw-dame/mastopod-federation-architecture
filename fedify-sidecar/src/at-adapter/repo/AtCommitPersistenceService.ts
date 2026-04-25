@@ -51,6 +51,8 @@ export class DefaultAtCommitPersistenceService implements AtCommitPersistenceSer
         ...(typeof alias?.subjectDid === 'string' ? { subjectDid: alias.subjectDid } : {}),
         ...(typeof alias?.subjectUri === 'string' ? { subjectUri: alias.subjectUri } : {}),
         ...(typeof alias?.subjectCid === 'string' ? { subjectCid: alias.subjectCid } : {}),
+        ...(typeof alias?.reactionContent === 'string' ? { reactionContent: alias.reactionContent } : {}),
+        ...(alias?.reactionEmoji ? { reactionEmoji: alias.reactionEmoji } : {}),
         record: op.record as Record<string, unknown> | null | undefined,
         ...(op.bridge ? { bridge: op.bridge } : {})
       };
@@ -83,6 +85,8 @@ export class DefaultAtCommitPersistenceService implements AtCommitPersistenceSer
                 ? 'follow'
                 : op.collection === 'app.bsky.feed.like'
                   ? 'like'
+                  : op.collection === 'org.activitypods.emojiReaction'
+                    ? 'emojiReaction'
                   : op.collection === 'app.bsky.feed.repost'
                     ? 'repost'
                     : 'post',

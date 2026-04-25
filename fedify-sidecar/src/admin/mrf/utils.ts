@@ -71,7 +71,13 @@ export async function withRetry<T>(
     retries = 4,
     baseMs = 100,
     maxMs = 2000,
-  }: { retries?: number; baseMs?: number; maxMs?: number } = {},
+    retryIf,
+  }: {
+    retries?: number;
+    baseMs?: number;
+    maxMs?: number;
+    retryIf?: (error: unknown) => boolean;
+  } = {},
 ): Promise<T> {
   let attempt = 0;
   let lastErr: unknown;
@@ -81,6 +87,9 @@ export async function withRetry<T>(
       return await fn();
     } catch (err) {
       lastErr = err;
+      if (retryIf && !retryIf(err)) {
+        break;
+      }
       if (attempt === retries) break;
       const backoff = Math.min(maxMs, baseMs * 2 ** attempt);
       const jitter = Math.floor(Math.random() * Math.max(25, backoff / 4));

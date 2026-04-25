@@ -8,12 +8,16 @@ import type {
   MRFSimulationJob,
 } from "./types.js";
 
+const MAX_IN_MEMORY_TRACES = 10_000;
+const MAX_IN_MEMORY_SIMULATIONS = 1_000;
+
 export class InMemoryMRFAdminStore implements MRFAdminStore {
   private readonly moduleConfigs = new Map<string, MRFModuleConfig>();
   private chainConfig: MRFChainConfig;
   private readonly traces = new Map<string, MRFDecisionTrace>();
   private readonly traceOrder: string[] = [];
   private readonly simulations = new Map<string, MRFSimulationJob>();
+  private readonly simulationOrder: string[] = [];
 
   constructor(now: () => string = () => new Date().toISOString()) {
     this.chainConfig = {
@@ -93,8 +97,24 @@ export class InMemoryMRFAdminStore implements MRFAdminStore {
     return this.traces.get(traceId) ?? null;
   }
 
+  async appendTrace(trace: MRFDecisionTrace): Promise<void> {
+    this.traces.set(trace.traceId, trace);
+    this.traceOrder.unshift(trace.traceId);
+    if (this.traceOrder.length > MAX_IN_MEMORY_TRACES) {
+      const evictedId = this.traceOrder.pop();
+      if (evictedId) this.traces.delete(evictedId);
+    }
+  }
+
   async createSimulationJob(job: MRFSimulationJob): Promise<void> {
+    if (!this.simulations.has(job.jobId)) {
+      this.simulationOrder.unshift(job.jobId);
+    }
     this.simulations.set(job.jobId, job);
+    if (this.simulationOrder.length > MAX_IN_MEMORY_SIMULATIONS) {
+      const evictedId = this.simulationOrder.pop();
+      if (evictedId) this.simulations.delete(evictedId);
+    }
   }
 
   async getSimulationJob(jobId: string): Promise<MRFSimulationJob | null> {

@@ -7,6 +7,7 @@ CERTS_DIR="${SCRIPT_DIR}/../runtime/certs"
 ENV_FILE="${SCRIPT_DIR}/../runtime/mastodon.env"
 USERNAME="${AP_INTEROP_MASTODON_USERNAME:-interop}"
 SKIP_BUILD="${AP_INTEROP_SKIP_BUILD:-0}"
+RESULT_FILE="${SCRIPT_DIR}/../runtime/mastodon-proof-result.json"
 
 if [ ! -f "${CERTS_DIR}/rootCA.crt" ] || [ ! -f "${CERTS_DIR}/sidecar.crt" ] || [ ! -f "${CERTS_DIR}/mastodon.crt" ]; then
   "${SCRIPT_DIR}/generate-certs.sh"
@@ -41,7 +42,17 @@ AP_INTEROP_MASTODON_USERNAME="${USERNAME}" \
   "${SCRIPT_DIR}/bootstrap-mastodon-account.sh"
 
 "${SCRIPT_DIR}/reset-harness-redis-state.sh"
+rm -f "${RESULT_FILE}"
 
 AP_INTEROP_TARGET=mastodon \
 AP_INTEROP_TARGET_USERNAME="${USERNAME}" \
+AP_INTEROP_RESULT_PATH=/interop/runtime/mastodon-proof-result.json \
   docker compose -f "${COMPOSE_FILE}" --profile proof run --rm ap-interop-proof
+
+(
+  cd "${SCRIPT_DIR}/../../.."
+  AP_INTEROP_TARGET=mastodon \
+  AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" \
+  AP_INTEROP_PROOF_RESULT_FILE="${RESULT_FILE}" \
+    sh ./interop/ap/scripts/verify-target-media-proof.sh
+)

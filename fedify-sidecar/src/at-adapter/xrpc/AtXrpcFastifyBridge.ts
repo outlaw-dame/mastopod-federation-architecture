@@ -24,6 +24,7 @@ import { WebSocketServer } from 'ws';
 import type { DefaultAtXrpcServer } from './AtXrpcServer.js';
 import type { AtSessionService } from '../auth/AtSessionTypes.js';
 import type { OAuthAccessTokenVerifier } from '../oauth/OAuthTokenVerifier.js';
+import type { CapabilityGateResult } from '../../capabilities/gates.js';
 
 // ---------------------------------------------------------------------------
 // Bridge options
@@ -52,6 +53,12 @@ export interface AtXrpcFastifyBridgeOptions {
    * Prefix for all XRPC routes.  Defaults to '/xrpc'.
    */
   prefix?: string;
+
+  /**
+   * Optional capability gate callback.
+   * If provided, XRPC routes enforce feature availability per provider profile.
+   */
+  capabilityGate?: (capabilityId: string) => CapabilityGateResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -77,7 +84,7 @@ export function registerAtXrpcRoutes(
   app: FastifyInstance,
   opts: AtXrpcFastifyBridgeOptions
 ): void {
-  const { xrpcServer, sessionService, oauthTokenVerifier } = opts;
+  const { xrpcServer, sessionService, oauthTokenVerifier, capabilityGate } = opts;
 
   // ---- Unauthenticated GET routes ----------------------------------------
 
@@ -121,6 +128,18 @@ export function registerAtXrpcRoutes(
   app.post(
     '/xrpc/com.atproto.server.createSession',
     async (req: FastifyRequest, reply: FastifyReply) => {
+      if (capabilityGate) {
+        const gate = capabilityGate('at.xrpc.server');
+        if (!gate.allowed) {
+          return reply.status(403).send({
+            error: gate.reasonCode ?? 'feature_disabled',
+            message: gate.message ?? 'AT XRPC server capability is disabled',
+            capabilityId: gate.capabilityId,
+            retryable: gate.retryable ?? false,
+          });
+        }
+      }
+
       const body = typeof req.body === 'string'
         ? JSON.parse(req.body)
         : (req.body as Record<string, unknown> | undefined);
@@ -137,6 +156,18 @@ export function registerAtXrpcRoutes(
   app.post(
     '/xrpc/com.atproto.server.refreshSession',
     async (req: FastifyRequest, reply: FastifyReply) => {
+      if (capabilityGate) {
+        const gate = capabilityGate('at.xrpc.server');
+        if (!gate.allowed) {
+          return reply.status(403).send({
+            error: gate.reasonCode ?? 'feature_disabled',
+            message: gate.message ?? 'AT XRPC server capability is disabled',
+            capabilityId: gate.capabilityId,
+            retryable: gate.retryable ?? false,
+          });
+        }
+      }
+
       const result = await xrpcServer.handleRefreshSession(
         (req.headers.authorization as string | undefined) ?? undefined
       );
@@ -152,6 +183,18 @@ export function registerAtXrpcRoutes(
 
   for (const route of AUTHENTICATED_POST_ROUTES) {
     app.post(route, async (req: FastifyRequest, reply: FastifyReply) => {
+      if (capabilityGate) {
+        const gate = capabilityGate('at.xrpc.repo');
+        if (!gate.allowed) {
+          return reply.status(403).send({
+            error: gate.reasonCode ?? 'feature_disabled',
+            message: gate.message ?? 'AT XRPC repo capability is disabled',
+            capabilityId: gate.capabilityId,
+            retryable: gate.retryable ?? false,
+          });
+        }
+      }
+
       const authHeader = (req.headers.authorization as string | undefined) ?? '';
       const dpopHeader =
         typeof req.headers["dpop"] === 'string'
@@ -247,19 +290,80 @@ export function registerAtXrpcRoutes(
  */
 export function attachSubscribeReposWebSocket(
   app: FastifyInstance,
-  xrpcServer: DefaultAtXrpcServer
+  xrpcServer: DefaultAtXrpcServer,
+  options?: {
+    capabilityGate?: (capabilityId: string) => CapabilityGateResult;
+    maxConnections?: number;
+    idleTimeoutMs?: number;
+    heartbeatIntervalMs?: number;
+  }
 ): void {
   const SUBSCRIBE_REPOS_PATH = '/xrpc/com.atproto.sync.subscribeRepos';
+  const maxConnections = options?.maxConnections ?? 5000;
+  const idleTimeoutMs = options?.idleTimeoutMs ?? 120000;
+  const heartbeatIntervalMs = options?.heartbeatIntervalMs ?? 30000;
 
   const wss = new WebSocketServer({ noServer: true });
+  const activeSockets = new Set<WebSocket>();
+  const lastActivity = new WeakMap<WebSocket, number>();
+
+  const markActivity = (ws: WebSocket) => {
+    lastActivity.set(ws, Date.now());
+  };
+
+  const heartbeatTimer = setInterval(() => {
+    const now = Date.now();
+
+    for (const ws of activeSockets) {
+      const lastSeen = lastActivity.get(ws) ?? now;
+      if (now - lastSeen > idleTimeoutMs) {
+        ws.terminate();
+        continue;
+      }
+
+      if (ws.readyState === ws.OPEN) {
+        ws.ping();
+      }
+    }
+  }, heartbeatIntervalMs);
+
+  heartbeatTimer.unref();
 
   app.server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     if (url.pathname !== SUBSCRIBE_REPOS_PATH) return;
 
+    if (activeSockets.size >= maxConnections) {
+      socket.write(
+        'HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n' +
+        JSON.stringify({ error: 'service_unavailable', message: 'subscribeRepos capacity reached' })
+      );
+      socket.destroy();
+      return;
+    }
+
+    // Capability gate: deny the upgrade before the WebSocket handshake
+    if (options?.capabilityGate) {
+      const gate = options.capabilityGate('at.xrpc.server');
+      if (!gate.allowed) {
+        socket.write(
+          'HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n' +
+          JSON.stringify({ error: gate.reasonCode ?? 'feature_disabled', capabilityId: 'at.xrpc.server', retryable: gate.retryable ?? false })
+        );
+        socket.destroy();
+        return;
+      }
+    }
+
     wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+      activeSockets.add(ws);
+      markActivity(ws);
+
       const connectionId = `ws-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const rawCursor = url.searchParams.get('cursor') ?? undefined;
+
+      ws.on('message', () => markActivity(ws));
+      ws.on('pong', () => markActivity(ws));
 
       xrpcServer
         .handleWebSocketConnection(
@@ -282,9 +386,14 @@ export function attachSubscribeReposWebSocket(
         });
 
       ws.on('close', () => {
+        activeSockets.delete(ws);
         xrpcServer.handleWebSocketDisconnection(connectionId).catch((err: unknown) => {
           console.error('[subscribeRepos] Disconnection handler error:', err);
         });
+      });
+
+      ws.on('error', () => {
+        activeSockets.delete(ws);
       });
     });
   });

@@ -36,6 +36,7 @@ const CREATE_MUTATION_MAP: Partial<Record<string, CanonicalMutationEnvelope['mut
   'app.bsky.actor.profile': 'profile_upsert',
   'app.bsky.graph.follow':  'follow_create',
   'app.bsky.feed.like':     'like_create',
+  'org.activitypods.emojiReaction': 'emoji_reaction_create',
   'app.bsky.feed.repost':   'repost_create',
 };
 
@@ -44,6 +45,7 @@ const DELETE_MUTATION_MAP: Partial<Record<string, CanonicalMutationEnvelope['mut
   'site.standard.document': 'post_delete',
   'app.bsky.graph.follow': 'follow_delete',
   'app.bsky.feed.like':    'like_delete',
+  'org.activitypods.emojiReaction': 'emoji_reaction_delete',
   'app.bsky.feed.repost':  'repost_delete',
 };
 

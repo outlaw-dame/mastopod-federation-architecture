@@ -2,7 +2,7 @@ import type { CanonicalAudience } from "./CanonicalAudience.js";
 import type { CanonicalActorRef } from "./CanonicalActorRef.js";
 import type { CanonicalWarning } from "./CanonicalWarnings.js";
 
-export type ProtocolName = "activitypub" | "atproto";
+export type ProtocolName = "activitypub" | "atproto" | "activitypods";
 
 export interface CanonicalProvenance {
   originProtocol: ProtocolName;

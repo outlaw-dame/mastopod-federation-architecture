@@ -13,12 +13,27 @@ export class FollowAddToAtProjector implements CanonicalProjector<AtProjectionCo
     intent: CanonicalFollowAddIntent,
     ctx: ProjectionContext,
   ): Promise<ProjectionResult<AtProjectionCommand>> {
+    if (intent.targetObject) {
+      return {
+        kind: "unsupported",
+        reason: "ATProto does not have a native followable-object follow model.",
+      };
+    }
+
     const actor = await ctx.resolveActorRef(intent.sourceAccountRef);
     if (!actor.did) {
       return {
         kind: "error",
         code: "AT_FOLLOW_REPO_DID_MISSING",
         message: "Cannot project a follow to ATProto without a repository DID.",
+      };
+    }
+
+    if (!intent.subject) {
+      return {
+        kind: "error",
+        code: "AT_FOLLOW_SUBJECT_MISSING",
+        message: "ATProto follow projection requires a target actor reference.",
       };
     }
 

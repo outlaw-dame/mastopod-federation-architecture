@@ -195,6 +195,7 @@ export interface TombstoneEvent {
 export interface CanonicalV1ActorRef {
   canonicalAccountId?: string | null;
   did?: string | null;
+  webId?: string | null;
   activityPubActorUri?: string | null;
   handle?: string | null;
 }
@@ -206,6 +207,27 @@ export interface CanonicalV1ObjectRef {
   canonicalUrl?: string | null;
 }
 
+export interface CanonicalV1ReportPayload {
+  subjectKind: "account" | "object";
+  authoritativeProtocol?: "local" | "ap" | "at";
+  reasonType:
+    | "spam"
+    | "harassment"
+    | "abuse"
+    | "impersonation"
+    | "copyright"
+    | "illegal"
+    | "safety"
+    | "other";
+  reason?: string | null;
+  evidence?: CanonicalV1ObjectRef[];
+  requestedForwardingRemote?: boolean | null;
+  clientContext?: {
+    app?: string | null;
+    surface?: string | null;
+  } | null;
+}
+
 export interface CanonicalV1Event {
   /** Unique deterministic ID for this canonical intent. */
   canonicalIntentId: string;
@@ -214,6 +236,11 @@ export interface CanonicalV1Event {
     | "PostCreate"
     | "PostEdit"
     | "PostDelete"
+    | "PostInteractionPolicyUpdate"
+    | "PollCreate"
+    | "PollEdit"
+    | "PollDelete"
+    | "PollVoteAdd"
     | "ReactionAdd"
     | "ReactionRemove"
     | "ShareAdd"
@@ -221,20 +248,25 @@ export interface CanonicalV1Event {
     | "FollowAdd"
     | "FollowRemove"
     | "ProfileUpdate"
-    | "AccountState";
+    | "AccountState"
+    | "ReportCreate";
   /** Protocol the event originated from. */
-  sourceProtocol: "activitypub" | "atproto";
+  sourceProtocol: "activitypub" | "atproto" | "activitypods";
   /** Original event ID in the source protocol. */
   sourceEventId: string;
   /** Actor who performed the action. */
   actor: CanonicalV1ActorRef;
   /**
    * Primary object of the action (posts, reactions, shares, deletes).
-   * Absent for FollowAdd/FollowRemove/ProfileUpdate/AccountState.
+   * Also present for FollowAdd/FollowRemove when the followed target is an
+   * ActivityPub object instead of an actor.
+   * Absent for actor-target follows, ProfileUpdate, and AccountState.
    */
   object?: CanonicalV1ObjectRef;
   /**
-   * Target actor (for FollowAdd/FollowRemove — the person being followed).
+   * Target actor (for actor-target FollowAdd/FollowRemove — the person being
+   * followed). For object-target follows this may carry the owning or delivery
+   * actor when one is known.
    */
   subject?: CanonicalV1ActorRef;
   /**
@@ -242,6 +274,12 @@ export interface CanonicalV1Event {
    * Used by the notification consumer to fan-out mention notifications.
    */
   mentions?: string[];
+  /**
+   * Additional report metadata for ReportCreate.
+   * The reported account/object still uses the top-level `subject`/`object`
+   * fields when applicable so downstream consumers can index them normally.
+   */
+  report?: CanonicalV1ReportPayload;
   /** ISO timestamp when the original social action occurred. */
   createdAt: string;
   /** ISO timestamp when the sidecar observed the event. */

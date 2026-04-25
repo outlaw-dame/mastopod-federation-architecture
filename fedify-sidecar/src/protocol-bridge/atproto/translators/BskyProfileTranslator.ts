@@ -5,6 +5,11 @@ import { createParagraphBlocks } from "../../canonical/CanonicalContent.js";
 import { buildCanonicalIntentId } from "../../idempotency/CanonicalIntentIdBuilder.js";
 import type { TranslationContext } from "../../ports/ProtocolBridgePorts.js";
 import type { ProtocolTranslator } from "../../registry/TranslatorRegistry.js";
+import {
+  ACTIVITYPODS_CUSTOM_EMOJIS_FIELD,
+  activityPodsEmbeddedCustomEmojiFieldSchema,
+  parseActivityPodsCustomEmojiField,
+} from "../../../at-adapter/lexicon/ActivityPodsEmojiLexicon.js";
 
 const bridgeSchema = z.object({
   originProtocol: z.enum(["activitypub", "atproto"]),
@@ -20,6 +25,7 @@ const recordSchema = z.object({
   description: z.string().optional(),
   avatar: z.unknown().optional(),
   banner: z.unknown().optional(),
+  [ACTIVITYPODS_CUSTOM_EMOJIS_FIELD]: activityPodsEmbeddedCustomEmojiFieldSchema.optional(),
 });
 
 const directEnvelopeSchema = z.object({
@@ -89,6 +95,9 @@ async function translateDirectEnvelope(
     ...(await translateBlobAttachment(envelope.repoDid, envelope.record.avatar, "avatar", ctx, warnings)),
     ...(await translateBlobAttachment(envelope.repoDid, envelope.record.banner, "banner", ctx, warnings)),
   ];
+  const customEmojis = parseActivityPodsCustomEmojiField(
+    envelope.record[ACTIVITYPODS_CUSTOM_EMOJIS_FIELD],
+  );
 
   const draft: Omit<CanonicalProfileUpdateIntent, "canonicalIntentId"> = {
     kind: "ProfileUpdate",
@@ -113,6 +122,7 @@ async function translateDirectEnvelope(
       language: null,
       blocks: createParagraphBlocks(envelope.record.description ?? ""),
       facets: [],
+      customEmojis,
       attachments,
       externalUrl: sourceAccountRef.activityPubActorUri ?? null,
     },

@@ -42,7 +42,7 @@ describe("AP-side note link preview parity", () => {
     mockedFetchOpenGraph.mockReset();
   });
 
-  it("projects AT note link previews conservatively by default as attachment cards without preview", async () => {
+  it("projects AT note link previews conservatively by default as FEP-8967 Link attachments without root preview mirroring", async () => {
     mockedFetchOpenGraph.mockResolvedValue({
       uri: "https://example.com/page",
       title: "Example Page",
@@ -111,10 +111,15 @@ describe("AP-side note link preview parity", () => {
           type: "Note",
           attachment: expect.arrayContaining([
             expect.objectContaining({
-              type: "Document",
+              type: "Link",
               mediaType: "text/html",
-              url: "https://example.com/page",
+              href: "https://example.com/page",
               name: "Example Page",
+              preview: expect.objectContaining({
+                type: "Article",
+                name: "Example Page",
+                summary: "Example description",
+              }),
             }),
           ]),
         }),
@@ -131,7 +136,7 @@ describe("AP-side note link preview parity", () => {
     );
   });
 
-  it("projects AT note link previews with explicit preview objects in rich mode", async () => {
+  it("projects AT note link previews with explicit preview mirroring in rich mode", async () => {
     mockedFetchOpenGraph.mockResolvedValue({
       uri: "https://example.com/page",
       title: "Example Page",
@@ -187,11 +192,16 @@ describe("AP-side note link preview parity", () => {
         object: expect.objectContaining({
           type: "Note",
           preview: expect.objectContaining({
-            type: "Document",
+            type: "Link",
             mediaType: "text/html",
-            url: "https://example.com/page",
+            href: "https://example.com/page",
             name: "Example Page",
             summary: "Example description",
+            preview: expect.objectContaining({
+              type: "Article",
+              name: "Example Page",
+              summary: "Example description",
+            }),
           }),
         }),
       }),
@@ -206,7 +216,7 @@ describe("AP-side note link preview parity", () => {
     expect(normalizeActivityPubNoteLinkPreviewMode("not-a-real-mode")).toBe("attachment_only");
   });
 
-  it("omits AP-side note preview cards entirely when disabled", async () => {
+  it("omits AP-side note attached-link preview signals entirely when disabled", async () => {
     mockedFetchOpenGraph.mockResolvedValue({
       uri: "https://example.com/page",
       title: "Example Page",

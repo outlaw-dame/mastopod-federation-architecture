@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createClient } from "redis";
 import { SigningClient } from "../../signing/signing-client.js";
 
 import {
+  buildCreateNoteWithVideoAttachment,
   buildFollowActivity,
   extractRemoteInboxTarget,
   matchesAcceptForFollow,
@@ -27,6 +30,23 @@ const INBOUND_STREAM_KEY = process.env["AP_INTEROP_INBOUND_STREAM_KEY"] || "ap:q
 const TIMEOUT_MS = Number.parseInt(process.env["AP_INTEROP_TIMEOUT_MS"] || "120000", 10);
 const ACTIVITYPODS_URL = process.env["AP_INTEROP_ACTIVITYPODS_URL"] || "http://mock-activitypods:8793";
 const ACTIVITYPODS_TOKEN = process.env["AP_INTEROP_ACTIVITYPODS_TOKEN"] || "interop-activitypods-token";
+const ATTACHMENT_PROOF_ENABLED = process.env["AP_INTEROP_ATTACHMENT_PROOF_ENABLED"] !== "false";
+const MEDIA_FIXTURE_NAME = process.env["AP_INTEROP_MEDIA_FIXTURE_NAME"] || "sample.mp4";
+const MEDIA_FIXTURE_TYPE = process.env["AP_INTEROP_MEDIA_FIXTURE_TYPE"] || "video/mp4";
+const MEDIA_FIXTURE_URL =
+  process.env["AP_INTEROP_MEDIA_FIXTURE_URL"] || `https://sidecar/interop-fixtures/${MEDIA_FIXTURE_NAME}`;
+const MEDIA_FIXTURE_ACCESS_URL =
+  process.env["AP_INTEROP_MEDIA_FIXTURE_ACCESS_URL"]
+  || `http://fedify-sidecar:8080/internal/interop/fixtures/${encodeURIComponent(MEDIA_FIXTURE_NAME)}/accesses`;
+const RESULT_PATH = process.env["AP_INTEROP_RESULT_PATH"] || "";
+const FIXTURE_OBSERVE_TIMEOUT_MS = Number.parseInt(
+  process.env["AP_INTEROP_FIXTURE_OBSERVE_TIMEOUT_MS"] || "15000",
+  10,
+);
+const POST_FOLLOW_SETTLE_MS = Number.parseInt(
+  process.env["AP_INTEROP_POST_FOLLOW_SETTLE_MS"] || "2500",
+  10,
+);
 const FOLLOW_ACTIVITY_ID =
   process.env["AP_INTEROP_FOLLOW_ACTIVITY_ID"]
   || `${SIDECAR_ACTOR_URI.replace(/\/+$/, "")}/activities/follow-${randomUUID()}`;
@@ -126,23 +146,32 @@ async function main(): Promise<void> {
       localActorUri: SIDECAR_ACTOR_URI,
       remoteActorUri: remoteTarget.actorId,
     });
+    if (POST_FOLLOW_SETTLE_MS > 0) {
+      await sleep(POST_FOLLOW_SETTLE_MS);
+    }
 
-    console.log(
-      JSON.stringify(
-        {
-          ok: true,
-          target: TARGET,
-          targetAcct: TARGET_ACCT,
+    const attachmentProof = ATTACHMENT_PROOF_ENABLED
+      ? await runAttachmentProof({
+          deadline,
+          remoteTarget,
           remoteActorUri: remoteTarget.actorId,
-          followActivityId: followActivity.id,
-          inboundMessageId: inboundAccept.messageId,
-          inboundReceivedAt: inboundAccept.receivedAt,
-          verification: inboundAccept.verification,
-        },
-        null,
-        2,
-      ),
-    );
+        })
+      : undefined;
+
+    const result = {
+      ok: true,
+      target: TARGET,
+      targetAcct: TARGET_ACCT,
+      remoteActorUri: remoteTarget.actorId,
+      followActivityId: followActivity.id,
+      inboundMessageId: inboundAccept.messageId,
+      inboundReceivedAt: inboundAccept.receivedAt,
+      verification: inboundAccept.verification,
+      ...(attachmentProof ? { attachmentProof } : {}),
+    };
+
+    await persistProofResult(result);
+    console.log(JSON.stringify(result, null, 2));
   } finally {
     await redis.quit().catch(() => redis.disconnect());
   }
@@ -221,7 +250,7 @@ async function readBodySnippet(response: Response): Promise<string> {
 }
 
 async function postWebhook(
-  followActivity: ReturnType<typeof buildFollowActivity>,
+  activity: { id?: unknown },
   remoteTarget: ReturnType<typeof extractRemoteInboxTarget>,
 ): Promise<void> {
   const response = await fetch(SIDECAR_WEBHOOK_URL, {
@@ -232,8 +261,8 @@ async function postWebhook(
     },
     body: JSON.stringify({
       actorUri: SIDECAR_ACTOR_URI,
-      activityId: followActivity.id,
-      activity: followActivity,
+      activityId: typeof activity.id === "string" ? activity.id : undefined,
+      activity,
       remoteTargets: [
         {
           inboxUrl: remoteTarget.inboxUrl,
@@ -324,6 +353,129 @@ async function waitForAccept(
   );
 }
 
+async function runAttachmentProof(params: {
+  deadline: number;
+  remoteTarget: ReturnType<typeof extractRemoteInboxTarget>;
+  remoteActorUri: string;
+}): Promise<{
+  fixtureUrl: string;
+  fixtureType: string;
+  mediaActivityId: string;
+  mediaObjectId: string;
+  contentMarker: string;
+  publishedAt: string;
+  dereferenceObserved: boolean;
+  accessCount: number;
+  methods: string[];
+  firstReceivedAt?: number;
+  userAgents: string[];
+}> {
+  await resetFixtureAccesses();
+  const contentMarker = `ap-interop-media-${randomUUID()}`;
+
+  const mediaActivity = buildCreateNoteWithVideoAttachment({
+    actorUri: SIDECAR_ACTOR_URI,
+    targetActorUri: params.remoteActorUri,
+    mediaUrl: MEDIA_FIXTURE_URL,
+    mediaType: MEDIA_FIXTURE_TYPE,
+    contentMarker,
+  });
+
+  await postWebhook(mediaActivity, params.remoteTarget);
+  const fixtureAccess = await observeFixtureAccess({
+    deadline: Math.min(params.deadline, Date.now() + Math.max(FIXTURE_OBSERVE_TIMEOUT_MS, 1_000)),
+  });
+  const mediaObject =
+    mediaActivity.object && typeof mediaActivity.object === "object" && !Array.isArray(mediaActivity.object)
+      ? mediaActivity.object as { id?: unknown }
+      : {};
+
+  return {
+    fixtureUrl: MEDIA_FIXTURE_URL,
+    fixtureType: MEDIA_FIXTURE_TYPE,
+    mediaActivityId: mediaActivity.id,
+    mediaObjectId: typeof mediaObject.id === "string" ? mediaObject.id : `${mediaActivity.id}#object`,
+    contentMarker,
+    publishedAt: mediaActivity.published,
+    dereferenceObserved: fixtureAccess.accessCount > 0,
+    accessCount: fixtureAccess.accessCount,
+    methods: fixtureAccess.methods,
+    ...(fixtureAccess.firstReceivedAt != null ? { firstReceivedAt: fixtureAccess.firstReceivedAt } : {}),
+    userAgents: fixtureAccess.userAgents,
+  };
+}
+
+async function resetFixtureAccesses(): Promise<void> {
+  const response = await fetch(MEDIA_FIXTURE_ACCESS_URL, {
+    method: "DELETE",
+    headers: {
+      authorization: `Bearer ${SIDECAR_TOKEN}`,
+    },
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (response.status !== 204) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`Failed to reset fixture access log: ${response.status} ${body}`);
+  }
+}
+
+async function observeFixtureAccess(params: {
+  deadline: number;
+}): Promise<{
+  accessCount: number;
+  methods: string[];
+  firstReceivedAt?: number;
+  userAgents: string[];
+}> {
+  let attempt = 0;
+
+  while (Date.now() < params.deadline) {
+    const response = await fetch(MEDIA_FIXTURE_ACCESS_URL, {
+      headers: {
+        authorization: `Bearer ${SIDECAR_TOKEN}`,
+        accept: "application/json",
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`Fixture access query failed with ${response.status}: ${body}`);
+    }
+
+    const payload = await response.json() as {
+      count?: number;
+      accesses?: Array<{ method?: string; receivedAt?: number; userAgent?: string }>;
+    };
+
+    const accesses = Array.isArray(payload.accesses) ? payload.accesses : [];
+    if (accesses.length > 0) {
+      return {
+        accessCount: accesses.length,
+        methods: [...new Set(accesses
+          .map((entry) => entry.method)
+          .filter((entry): entry is string => typeof entry === "string" && entry.length > 0))],
+        firstReceivedAt: Math.min(...accesses
+          .map((entry) => entry.receivedAt)
+          .filter((entry): entry is number => typeof entry === "number" && Number.isFinite(entry))),
+        userAgents: [...new Set(accesses
+          .map((entry) => entry.userAgent)
+          .filter((entry): entry is string => typeof entry === "string" && entry.length > 0))],
+      };
+    }
+
+    const delayMs = computeBackoffDelay(attempt++, DEFAULT_BACKOFF);
+    await sleep(delayMs);
+  }
+
+  return {
+    accessCount: 0,
+    methods: [],
+    userAgents: [],
+  };
+}
+
 async function withBackoff<T>(
   fn: () => Promise<T>,
   options: {
@@ -355,6 +507,15 @@ function computeBackoffDelay(attempt: number, options: BackoffOptions): number {
   );
   const jitter = Math.floor(Math.random() * Math.max(250, Math.floor(exponential / 5)));
   return exponential + jitter;
+}
+
+async function persistProofResult(result: Record<string, unknown>): Promise<void> {
+  if (RESULT_PATH.length === 0) {
+    return;
+  }
+
+  await mkdir(dirname(RESULT_PATH), { recursive: true });
+  await writeFile(RESULT_PATH, `${JSON.stringify(result, null, 2)}\n`, "utf8");
 }
 
 main().catch((error) => {

@@ -1,55 +1,81 @@
-import { generateHLS } from '../processing/hls.js'
-import { generateDASH } from '../processing/dash.js'
-import { probeVideo } from '../processing/ffprobe.js'
-import { uploadWithLimit } from '../utils/uploadPool.js'
-import { promises as fs } from 'node:fs'
+import path from 'node:path';
+import { MediaStreams } from '../contracts/MediaStreams';
+import { logger } from '../logger';
+import { processVideoFile, videoExtensionForMime } from '../processing/video';
+import { enqueue } from '../queue/producer';
+import { runSecureWorker } from '../queue/secureWorker';
+import { buildCanonicalMediaUrl, buildGatewayUrl } from '../storage/cdnUrlBuilder';
+import { deleteFromFilebase, downloadFromFilebaseToPath, uploadFileToFilebase } from '../storage/filebaseClient';
+import { cleanupWorkerScratchDir, createWorkerScratchDir } from '../utils/tempFiles';
 
-export async function processVideoWorker(message, { uploadToFilebase, fileHash }) {
-  const input = Buffer.from(message.bytesBase64, 'base64')
-  const tmpPath = `/tmp/${message.traceId}.mp4`
+/**
+ * MEDIA PIPELINE RULE:
+ * This service MUST NOT make moderation decisions.
+ * Only emits raw safety signals.
+ * Policy decisions are handled by MRF.
+ */
+runSecureWorker({
+  stream: MediaStreams.PROCESS_VIDEO,
+  group: 'media',
+  consumer: 'process-video-worker-1',
+  handler: async (message) => {
+    const transientKey = message.sourceObjectKey || '';
+    let scratchDir: string | undefined;
+    let deleteTransientOnExit = false;
 
-  await fs.writeFile(tmpPath, input)
+    try {
+      if (!transientKey) {
+        throw new Error('Missing transient video object reference');
+      }
 
-  const meta = await probeVideo(tmpPath)
-  if (meta.duration > 600) throw new Error('Video too long')
+      scratchDir = await createWorkerScratchDir('process-video');
+      const inputPath = path.join(scratchDir, 'source-video.bin');
+      await downloadFromFilebaseToPath(transientKey, inputPath);
 
-  const hls = await generateHLS(tmpPath)
-  const dash = await generateDASH(tmpPath, hls.dir)
+      const processed = await processVideoFile(inputPath, message.mimeType);
+      const original = await uploadFileToFilebase({
+        key: `${processed.sha256}.${videoExtensionForMime(processed.mimeType)}`,
+        filePath: inputPath,
+        contentType: processed.mimeType,
+        resolveCid: true,
+        objectClass: 'canonical-original'
+      });
 
-  const base = `video/${fileHash}`
+      await enqueue(MediaStreams.RENDITION_VIDEO, {
+        traceId: message.traceId,
+        ownerId: message.ownerId,
+        sourceUrl: message.sourceUrl || '',
+        alt: message.alt || '',
+        contentWarning: message.contentWarning || '',
+        isSensitive: message.isSensitive || 'false',
+        sha256: processed.sha256,
+        cid: original.cid || '',
+        originalObjectKey: original.key,
+        canonicalUrl: buildCanonicalMediaUrl(original.key),
+        gatewayUrl: buildGatewayUrl(original.cid) || '',
+        mimeType: processed.mimeType,
+        size: String(processed.size),
+        signals: message.signals || '[]'
+      });
 
-  await uploadToFilebase({
-    key: `${base}/master.m3u8`,
-    body: hls.master,
-    contentType: 'application/vnd.apple.mpegurl'
-  })
-
-  await uploadWithLimit(hls.variants, 4, async (v) => {
-    await uploadToFilebase({
-      key: `${base}/${v.name}.m3u8`,
-      body: v.playlist,
-      contentType: 'application/vnd.apple.mpegurl'
-    })
-
-    await uploadWithLimit(v.segments, 4, async (seg) => {
-      await uploadToFilebase({
-        key: `${base}/${seg.name}`,
-        body: seg.buffer,
-        contentType: 'video/mp4'
-      })
-    })
-  })
-
-  await uploadToFilebase({
-    key: `${base}/manifest.mpd`,
-    body: await fs.readFile(dash),
-    contentType: 'application/dash+xml'
-  })
-
-  return {
-    streaming: {
-      hlsMaster: `${base}/master.m3u8`,
-      dashManifest: `${base}/manifest.mpd`
+      deleteTransientOnExit = true;
+    } finally {
+      if (deleteTransientOnExit && transientKey) {
+        await deleteTransientObject(transientKey, message.traceId);
+      }
+      await cleanupWorkerScratchDir(scratchDir);
     }
+  }
+});
+
+async function deleteTransientObject(key: string, traceId: string | undefined): Promise<void> {
+  try {
+    await deleteFromFilebase(key);
+  } catch (error) {
+    logger.warn({
+      traceId: traceId || null,
+      key,
+      error: error instanceof Error ? error.message : String(error)
+    }, 'process-video-worker-transient-cleanup-failed');
   }
 }

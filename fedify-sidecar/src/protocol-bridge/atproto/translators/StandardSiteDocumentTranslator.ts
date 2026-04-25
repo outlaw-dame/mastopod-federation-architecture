@@ -8,6 +8,11 @@ import type { ProtocolTranslator } from "../../registry/TranslatorRegistry.js";
 import { htmlToCanonicalBlocks } from "../../text/HtmlToCanonicalBlocks.js";
 import { renderMarkdownToHtml } from "../../../utils/markdown.js";
 import { fetchOpenGraph } from "../../../utils/opengraph.js";
+import {
+  ACTIVITYPODS_CUSTOM_EMOJIS_FIELD,
+  activityPodsEmbeddedCustomEmojiFieldSchema,
+  parseActivityPodsCustomEmojiField,
+} from "../../../at-adapter/lexicon/ActivityPodsEmojiLexicon.js";
 
 const recordSchema = z.object({
   $type: z.literal("site.standard.document"),
@@ -16,6 +21,7 @@ const recordSchema = z.object({
   text: z.string().max(100_000),
   publishedAt: z.string().optional(),
   url: z.string().url().optional().nullable(),
+  [ACTIVITYPODS_CUSTOM_EMOJIS_FIELD]: activityPodsEmbeddedCustomEmojiFieldSchema.optional(),
 });
 
 const bridgeSchema = z.object({
@@ -118,13 +124,19 @@ async function translateDirectEnvelope(
   const previewUrl = envelope.record.url ?? null;
   const ogData = previewUrl ? await fetchOpenGraph(previewUrl) : null;
   const linkPreview = ogData
-    ? {
+      ? {
         uri: ogData.uri,
         title: ogData.title,
         description: ogData.description ?? null,
         thumbUrl: ogData.thumbUrl ?? null,
+        ...(ogData.authorName ? { authorName: ogData.authorName } : {}),
+        ...(ogData.authorUrl ? { authorUrl: ogData.authorUrl } : {}),
+        ...(ogData.authors && ogData.authors.length > 0 ? { authors: ogData.authors } : {}),
       }
-    : null;
+      : null;
+  const customEmojis = parseActivityPodsCustomEmojiField(
+    envelope.record[ACTIVITYPODS_CUSTOM_EMOJIS_FIELD],
+  );
 
   const baseDraft = {
     sourceProtocol: "atproto" as const,
@@ -146,6 +158,7 @@ async function translateDirectEnvelope(
       language: null,
       blocks,
       facets: [],
+      customEmojis,
       attachments: [],
       externalUrl: envelope.record.url ?? null,
       linkPreview,

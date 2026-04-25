@@ -102,6 +102,99 @@ describe("note link preview parity", () => {
     );
   });
 
+  it("prefers an attached Link href over inline body links for AP note preview selection", async () => {
+    mockedFetchOpenGraph.mockResolvedValue({
+      uri: "https://example.com/attached-card",
+      title: "Attached Card",
+      description: "Attached card description",
+      thumbUrl: "https://cdn.example.com/attached-card.png",
+    });
+
+    const translator = new ActivityPubToCanonicalTranslator();
+    const intent = await translator.translate(
+      {
+        id: "https://example.com/activities/note-create-2",
+        type: "Create",
+        actor: "https://example.com/users/alice",
+        object: {
+          id: "https://example.com/notes/2",
+          type: "Note",
+          content: "<p>Inline https://example.com/inline-link should not win.</p>",
+          attachment: {
+            type: "Link",
+            href: "https://example.com/attached-card",
+          },
+        },
+      },
+      translationContext,
+    );
+
+    expect(mockedFetchOpenGraph).toHaveBeenCalledWith("https://example.com/attached-card");
+    expect(intent?.kind).toBe("PostCreate");
+    if (!intent || intent.kind !== "PostCreate") {
+      return;
+    }
+
+    expect(intent.content.attachments).toEqual([]);
+    expect(intent.content.linkPreview).toEqual({
+      uri: "https://example.com/attached-card",
+      title: "Attached Card",
+      description: "Attached card description",
+      thumbUrl: "https://cdn.example.com/attached-card.png",
+    });
+  });
+
+  it("consumes publisher-provided attached Link preview data without fetching OpenGraph", async () => {
+    const translator = new ActivityPubToCanonicalTranslator();
+    const intent = await translator.translate(
+      {
+        id: "https://example.com/activities/note-create-3",
+        type: "Create",
+        actor: "https://example.com/users/alice",
+        object: {
+          id: "https://example.com/notes/3",
+          type: "Note",
+          content: "<p>Publisher-specified card.</p>",
+          attachment: {
+            type: "Link",
+            href: "https://example.com/publisher-card",
+            preview: {
+              type: "Article",
+              name: "Publisher Card",
+              summary: "Publisher-supplied preview",
+              image: {
+                type: "Image",
+                url: "https://cdn.example.com/publisher-card.png",
+              },
+              attributedTo: {
+                type: "Person",
+                name: "Publisher Author",
+                url: "https://example.com/authors/publisher",
+              },
+            },
+          },
+        },
+      },
+      translationContext,
+    );
+
+    expect(mockedFetchOpenGraph).not.toHaveBeenCalled();
+    expect(intent?.kind).toBe("PostCreate");
+    if (!intent || intent.kind !== "PostCreate") {
+      return;
+    }
+
+    expect(intent.content.attachments).toEqual([]);
+    expect(intent.content.linkPreview).toEqual({
+      uri: "https://example.com/publisher-card",
+      title: "Publisher Card",
+      description: "Publisher-supplied preview",
+      thumbUrl: "https://cdn.example.com/publisher-card.png",
+      authorName: "Publisher Author",
+      authorUrl: "https://example.com/authors/publisher",
+    });
+  });
+
   it("preserves note link previews through AT commit replay", async () => {
     mockedFetchOpenGraph.mockResolvedValue({
       uri: "https://example.com/page",

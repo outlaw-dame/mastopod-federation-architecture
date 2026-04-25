@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
 import type {
+  CanonicalInteractionPolicy,
   CanonicalPostCreateIntent,
   CanonicalPostDeleteIntent,
   CanonicalPostEditIntent,
+  CanonicalPostInteractionPolicyUpdateIntent,
+  CanonicalPollCreateIntent,
+  CanonicalPollDeleteIntent,
+  CanonicalPollEditIntent,
+  CanonicalPollVoteAddIntent,
 } from "../../canonical/CanonicalIntent.js";
 import type {
   CanonicalAttachment,
@@ -18,7 +24,12 @@ import { canonicalFacetsToAtFacets, type AtFacet } from "../../text/CanonicalTex
 type CanonicalPostIntent =
   | CanonicalPostCreateIntent
   | CanonicalPostEditIntent
-  | CanonicalPostDeleteIntent;
+  | CanonicalPostDeleteIntent
+  | CanonicalPostInteractionPolicyUpdateIntent
+  | CanonicalPollCreateIntent
+  | CanonicalPollEditIntent
+  | CanonicalPollDeleteIntent
+  | CanonicalPollVoteAddIntent;
 
 type CanonicalPostWriteIntent = CanonicalPostCreateIntent | CanonicalPostEditIntent;
 
@@ -253,9 +264,13 @@ export function toAttachmentMediaHints(
     url: attachment.url ?? null,
     cid: attachment.cid ?? null,
     byteSize: attachment.byteSize ?? null,
+    duration: attachment.duration ?? null,
+    digestMultibase: attachment.digestMultibase ?? null,
     alt: attachment.alt ?? null,
     width: attachment.width ?? null,
     height: attachment.height ?? null,
+    focalPoint: attachment.focalPoint ?? null,
+    blurhash: attachment.blurhash ?? null,
   }));
 }
 
@@ -284,6 +299,77 @@ export function parseAtUri(
   return {
     collection: match[2]!,
     rkey: match[3]!,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ATProto gate record builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an `app.bsky.feed.threadgate` record that encodes the canonical reply
+ * policy.  Returns `null` when the policy is default ("everyone"), so callers
+ * can skip emitting the companion record.
+ *
+ * Lexicon:
+ *   allow: []                                          → nobody
+ *   allow: [{$type: "app.bsky.feed.threadgate#followingRule"}] → followers
+ *   allow: [{$type: "app.bsky.feed.threadgate#mentionRule"}]   → mentioned
+ */
+export function buildThreadgateRecord(
+  policy: CanonicalInteractionPolicy | null | undefined,
+  postAtUri: string,
+  createdAt: string,
+): Record<string, unknown> | null {
+  const canReply = policy?.canReply ?? "everyone";
+  if (canReply === "everyone") {
+    return null; // no gate needed for the default
+  }
+
+  let allow: Array<Record<string, unknown>>;
+  switch (canReply) {
+    case "followers":
+      allow = [{ $type: "app.bsky.feed.threadgate#followingRule" }];
+      break;
+    case "mentioned":
+      allow = [{ $type: "app.bsky.feed.threadgate#mentionRule" }];
+      break;
+    case "nobody":
+      allow = [];
+      break;
+  }
+
+  return {
+    $type: "app.bsky.feed.threadgate",
+    post: postAtUri,
+    allow,
+    createdAt,
+  };
+}
+
+/**
+ * Build an `app.bsky.feed.postgate` record that encodes the canonical quote
+ * policy.  Returns `null` when the policy is default ("everyone"), so callers
+ * can skip emitting the companion record.
+ *
+ * Lexicon:
+ *   embeddingRules: [{$type: "app.bsky.feed.postgate#disableRule"}] → nobody can quote
+ */
+export function buildPostgateRecord(
+  policy: CanonicalInteractionPolicy | null | undefined,
+  postAtUri: string,
+  createdAt: string,
+): Record<string, unknown> | null {
+  const canQuote = policy?.canQuote ?? "everyone";
+  if (canQuote === "everyone") {
+    return null; // no gate needed for the default
+  }
+
+  return {
+    $type: "app.bsky.feed.postgate",
+    post: postAtUri,
+    embeddingRules: [{ $type: "app.bsky.feed.postgate#disableRule" }],
+    createdAt,
   };
 }
 
