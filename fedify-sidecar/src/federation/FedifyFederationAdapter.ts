@@ -50,7 +50,6 @@ import {
   type Federation,
   type InboxContext,
   type KvStore,
-  type Actor,
 } from "@fedify/fedify";
 import {
   Activity,
@@ -768,7 +767,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     // Fedify 2.x: path param is {identifier}, not the removed {handle}.
     federation.setActorDispatcher(
       "/users/{identifier}",
-      async (ctx: Context<SidecarContext>, identifier: string): Promise<Actor | null> => {
+      async (ctx: Context<SidecarContext>, identifier: string) => {
         // Guard against path-traversal or injection before interpolating
         // the identifier into the ActivityPods internal API URL.
         if (!IDENTIFIER_PATTERN.test(identifier)) {
@@ -1048,7 +1047,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     federation.setNodeInfoDispatcher("/nodeinfo/2.1", async (_ctx) => ({
       software: {
         name: "mastopod-federation-sidecar",
-        version: { major: 6, minor: 5, patch: 0 },
+        version: "6.5.0",
         homepage: new URL("https://github.com/activitypods/mastopod"),
       },
       protocols: ["activitypub"],
