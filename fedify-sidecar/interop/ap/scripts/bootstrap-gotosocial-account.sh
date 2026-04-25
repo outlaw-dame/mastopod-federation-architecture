@@ -46,6 +46,10 @@ normalize_runtime_permissions() {
   fi
 
   chmod -R u+rwX,go+rwX "${RUNTIME_DIR}" >/dev/null 2>&1 || true
+  docker compose -f "${COMPOSE_FILE}" exec -T -u 0 gotosocial-app \
+    /bin/sh -lc "chmod -R u+rwX,go+rwX /gotosocial/storage" >/dev/null 2>&1 || true
+  docker compose -f "${COMPOSE_FILE}" run --rm --no-deps -u 0 --entrypoint /bin/sh gotosocial-app \
+    -lc "chmod -R u+rwX,go+rwX /gotosocial/storage" >/dev/null 2>&1 || true
 }
 
 wait_for_gotosocial() {
