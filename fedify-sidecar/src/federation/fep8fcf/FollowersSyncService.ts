@@ -63,6 +63,18 @@ export interface FollowersSyncServiceConfig {
    * ActivityPods to pick up new followers/unfollows.
    */
   digestCacheTtlSeconds?: number;
+  /**
+   * Called when reconciliation finds that the remote collection claims a local
+   * actor follows the sender, but ActivityPods has no record of that follow.
+   *
+   * Per FEP-8fcf §3.3, the implementation SHOULD send an Undo Follow back to
+   * the remote actor to clean up its followers list.  Errors thrown by this
+   * callback are caught and logged; they never affect normal inbox processing.
+   *
+   * @param localActorUri  The local actor URI claimed by the remote collection.
+   * @param remoteActorUri The remote actor whose collection was being synced.
+   */
+  onStaleRemoteEntry?: (localActorUri: string, remoteActorUri: string) => Promise<void>;
 }
 
 // ============================================================================
@@ -85,6 +97,7 @@ export class FollowersSyncService {
   private readonly digestCacheTtlSeconds: number;
   private readonly requestTimeoutMs: number;
   private readonly userAgent: string;
+  private readonly onStaleRemoteEntry?: (localActorUri: string, remoteActorUri: string) => Promise<void>;
 
   constructor(config: FollowersSyncServiceConfig) {
     this.domain = config.domain;
@@ -92,6 +105,7 @@ export class FollowersSyncService {
     this.userAgent = config.userAgent ?? "Fedify-Sidecar/5.0 (ActivityPods)";
     this.redis = config.redisCache ?? null;
     this.digestCacheTtlSeconds = config.digestCacheTtlSeconds ?? 300;
+    this.onStaleRemoteEntry = config.onStaleRemoteEntry;
     this.apClient = new FollowersSyncActivityPodsClient({
       activityPodsUrl: config.activityPodsUrl,
       activityPodsToken: config.activityPodsToken,
@@ -388,8 +402,8 @@ export class FollowersSyncService {
    * so they're no longer a follower on the remote side.
    *
    * For #2 (remote claims a local actor follows, but we have no record), we
-   * log the discrepancy.  A future enhancement can enqueue an Undo Follow
-   * outbound activity to clean up the remote's state.
+   * log the discrepancy and optionally invoke `onStaleRemoteEntry` so the
+   * caller can enqueue an Undo Follow to clean up the remote's state.
    */
   private async reconcile(
     senderActorUri: string,
@@ -407,6 +421,7 @@ export class FollowersSyncService {
 
     let removedCount = 0;
     let staleCount = 0;
+    const staleCleanupTasks: Promise<void>[] = [];
 
     // 1. Local actors not listed in remote → remove from local follow graph.
     for (const [actorUri, record] of localMap) {
@@ -422,7 +437,9 @@ export class FollowersSyncService {
       }
     }
 
-    // 2. Remote entries not known locally → log discrepancy.
+    // 2. Remote entries not known locally → log and optionally send Undo Follow
+    //    (FEP-8fcf §3.3 SHOULD).  Errors from the callback are swallowed so
+    //    they never affect normal inbox processing.
     for (const uri of remoteLocalUris) {
       if (!localMap.has(uri)) {
         staleCount++;
@@ -430,10 +447,19 @@ export class FollowersSyncService {
           senderActorUri,
           unknownLocalFollower: uri,
         });
-        // TODO: enqueue an outbound Undo Follow activity for `uri` acting as
-        // the local actor so the remote cleans its followers list.
+        if (this.onStaleRemoteEntry) {
+          staleCleanupTasks.push(this.onStaleRemoteEntry(uri, senderActorUri).catch((err) => {
+            logger.error("[fep8fcf] reconcile: onStaleRemoteEntry callback failed", {
+              senderActorUri,
+              unknownLocalFollower: uri,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }));
+        }
       }
     }
+
+    await Promise.all(staleCleanupTasks);
 
     logger.info("[fep8fcf] reconcile: done", {
       senderActorUri,

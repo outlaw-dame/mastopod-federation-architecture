@@ -926,6 +926,17 @@ async function main() {
           digestCacheTtlSeconds: Number.parseInt(
             process.env["FOLLOWERS_SYNC_DIGEST_TTL_SECONDS"] || "300", 10,
           ),
+          onStaleRemoteEntry: async (localActorUri, remoteActorUri) => {
+            // FEP-8fcf §3.3 case 2: remote collection claims a local actor follows
+            // the sender, but ActivityPods has no record of it.  Log structured
+            // context for operator visibility.  Sending an Undo Follow outbound
+            // is deferred pending per-user signing infrastructure.
+            logger.warn("[fep8fcf] stale remote follower entry detected — manual review recommended", {
+              domain: config.domain,
+              localActorUri,
+              remoteActorUri,
+            });
+          },
         })
       : undefined;
     if (followersSyncService) {
