@@ -854,6 +854,72 @@ async function handleActorStatusHistoryRequest(
 }
 
 // ---------------------------------------------------------------------------
+// Actor alias handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a `GET aliasPath` route that serves the Fedify actor document for
+ * `canonicalPath` directly — without issuing a redirect.
+ *
+ * Use this for instance-actor compatibility aliases (e.g. `GET /actor` →
+ * `/users/provider`) where strict AP implementations that do not follow
+ * redirects still need to receive the actor JSON document.
+ *
+ * The response Content-Type and status are forwarded from Fedify unchanged so
+ * content negotiation (e.g. `Accept: application/activity+json`) continues to
+ * work correctly.
+ */
+export function registerFedifyActorAlias(
+  app: FastifyInstance,
+  adapter: FedifyFederationAdapter,
+  aliasPath: string,
+  canonicalPath: string,
+): void {
+  app.get(aliasPath, async (request: FastifyRequest, reply: FastifyReply) => {
+    const origin = resolveExternalOrigin(adapter, request);
+    const canonicalUrl = `${origin}${canonicalPath}`;
+
+    const webRequest = new Request(canonicalUrl, {
+      method: "GET",
+      headers: request.headers as HeadersInit,
+    });
+
+    const contextData = adapter.buildContext(request);
+    const federation = adapter.getFederation();
+
+    let response: Response;
+    try {
+      response = await federation.fetch(webRequest, { contextData });
+    } catch (err: unknown) {
+      logger.error(
+        {
+          aliasPath,
+          canonicalPath,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        "Fedify actor alias handler failed",
+      );
+      reply.status(500).send({ error: "Federation handler error" });
+      return;
+    }
+
+    if (response.status === 404) {
+      reply.status(404).send({ error: "Not Found" });
+      return;
+    }
+
+    reply.status(response.status);
+    response.headers.forEach((value: string, key: string) => {
+      if (key.toLowerCase() === "content-length") return;
+      reply.header(key, value);
+    });
+
+    const body = await response.text();
+    reply.send(body);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Public registration function
 // ---------------------------------------------------------------------------
 

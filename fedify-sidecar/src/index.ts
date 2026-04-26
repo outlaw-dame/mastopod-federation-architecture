@@ -181,7 +181,7 @@ import { registerAtIdentityObservabilityFastifyRoutes } from "./admin/at-observa
 // Fedify runtime integration (feature-flagged: ENABLE_FEDIFY_RUNTIME_INTEGRATION=true)
 import { FedifyKvAdapter } from "./federation/FedifyKvAdapter.js";
 import { createFedifyAdapter, type FedifyFederationAdapter } from "./federation/FedifyFederationAdapter.js";
-import { registerFedifyRoutes } from "./federation/FedifyFastifyBridge.js";
+import { registerFedifyRoutes, registerFedifyActorAlias } from "./federation/FedifyFastifyBridge.js";
 import { FollowersSyncService } from "./federation/fep8fcf/FollowersSyncService.js";
 import { registerFollowersSyncRoutes } from "./federation/fep8fcf/FollowersSyncFastifyBridge.js";
 import { registerBlockedCollectionRoutes } from "./federation/fep-c648/BlockedCollectionFastifyBridge.js";
@@ -207,6 +207,7 @@ import {
   buildModerationActorUri,
   buildProviderActorUriSet,
   PROVIDER_ACTOR_IDENTIFIER,
+  PROVIDER_ACTOR_LEGACY_IDENTIFIERS,
   ALL_PROVIDER_ACTOR_IDENTIFIERS,
   PROVIDER_ACTOR_INBOX_PATHS,
 } from "./admin/moderation/ActivityPubReportForwardingService.js";
@@ -1109,7 +1110,12 @@ async function main() {
       localSigningRedis.on("error", (err: Error) =>
         logger.error("Local signing Redis error", { error: err.message }),
       );
-      const localSigningService = new SidecarLocalSigningService(localSigningRedis);
+      const providerActorKeyAliases = new Map<string, string>(
+        PROVIDER_ACTOR_LEGACY_IDENTIFIERS.map((id) => [id, PROVIDER_ACTOR_IDENTIFIER]),
+      );
+      const localSigningService = new SidecarLocalSigningService(localSigningRedis, {
+        keyAliases: providerActorKeyAliases,
+      });
       const sidecarServiceActors = ["relay"];
       if (config.enableProviderActor) {
         // Register canonical "provider" and legacy "moderation" so the actor
@@ -2210,11 +2216,21 @@ async function main() {
     // /actor path is not accidentally captured by that wildcard.
     if (config.enableProviderActor) {
       // GET /actor — Mastodon instance-actor compatibility alias.
-      // 301 permanent: /users/provider is the canonical URL; caches and clients
-      // should follow the redirect and use the canonical path thereafter.
-      app.get("/actor", async (_request, reply) => {
-        reply.redirect(`/users/${PROVIDER_ACTOR_IDENTIFIER}`, 301);
-      });
+      // Served directly (not via redirect) so strict AP implementations that
+      // do not follow redirects on actor fetches still receive the document.
+      // The actor id field always points to the canonical /users/provider URI.
+      // When Fedify is not active, fall back to a 301 redirect (same semantics
+      // as before; the adapter is always present in production when the provider
+      // actor is enabled, because enableProviderActor requires either
+      // ENABLE_MODERATION_BRIDGE_API or ENABLE_MRF_ADMIN_API which in turn
+      // require the Fedify runtime).
+      if (fedifyAdapter) {
+        registerFedifyActorAlias(app, fedifyAdapter, "/actor", `/users/${PROVIDER_ACTOR_IDENTIFIER}`);
+      } else {
+        app.get("/actor", async (_request, reply) => {
+          reply.redirect(`/users/${PROVIDER_ACTOR_IDENTIFIER}`, 301);
+        });
+      }
 
       // POST /actor/inbox — explicit route for POST /actor/inbox.
       // Some servers may construct the inbox URL from /actor directly rather
