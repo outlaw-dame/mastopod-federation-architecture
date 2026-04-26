@@ -200,10 +200,15 @@ import { registerMrfAdminIntegration } from "./admin/mrf/integration.js";
 import { registerModerationBridgeIntegration } from "./admin/moderation/integration.js";
 import type { ModerationBridgeStore } from "./admin/moderation/types.js";
 import { ActivityPodsModerationCaseStore } from "./admin/moderation/activitypods-case-store.js";
+import { ActivityPodsProviderInboxEventClient } from "./admin/moderation/ActivityPodsProviderInboxEventClient.js";
 import {
   ActivityPubReportForwardingService,
   DEFAULT_MODERATION_ACTOR_IDENTIFIER,
   buildModerationActorUri,
+  buildProviderActorUriSet,
+  PROVIDER_ACTOR_IDENTIFIER,
+  ALL_PROVIDER_ACTOR_IDENTIFIERS,
+  PROVIDER_ACTOR_INBOX_PATHS,
 } from "./admin/moderation/ActivityPubReportForwardingService.js";
 import { CanonicalActivityPubReportForwarder } from "./admin/moderation/CanonicalActivityPubReportForwarder.js";
 import { AtprotoReportForwardingService } from "./admin/moderation/AtprotoReportForwardingService.js";
@@ -358,6 +363,14 @@ const config = {
       || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
   enableAtprotoReportForwarder:
     process.env["ENABLE_ATPROTO_REPORT_FORWARDER"] !== "false" &&
+    (process.env["ENABLE_MODERATION_BRIDGE_API"] === "true"
+      || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
+  // Provider actor exists whenever the moderation bridge API is on, regardless
+  // of whether outbound AP report forwarding is also enabled.  Serves the
+  // actor document, inbox, and outbox independently of the forwarding pipeline.
+  // Set ENABLE_PROVIDER_ACTOR=false to disable explicitly.
+  enableProviderActor:
+    process.env["ENABLE_PROVIDER_ACTOR"] !== "false" &&
     (process.env["ENABLE_MODERATION_BRIDGE_API"] === "true"
       || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
   moderationBridgeRedisPrefix:
@@ -952,10 +965,17 @@ async function main() {
       logger.info("Origin reconciliation service enabled");
     }
 
-    const moderationActorUri = config.enableActivityPubReportForwarder
-      ? buildModerationActorUri(config.domain, DEFAULT_MODERATION_ACTOR_IDENTIFIER)
+    // Provider actor URI — built whenever the provider actor is enabled,
+    // independent of whether outbound AP report forwarding is also enabled.
+    // The provider actor serves an inbox, outbox, and actor document regardless
+    // of the forwarding pipeline being active.
+    const providerActorUri = config.enableProviderActor
+      ? buildModerationActorUri(config.domain, PROVIDER_ACTOR_IDENTIFIER)
       : null;
-    const moderationActorPath = moderationActorUri ? new URL(moderationActorUri).pathname : null;
+
+    // Alias used by downstream blocks that reference moderationActorUri
+    // (logger, onModerationReportFailed callback).  Always equals providerActorUri.
+    const moderationActorUri = providerActorUri;
     const moderationReportCaseStore =
       (config.enableActivityPubReportForwarder || config.enableAtprotoReportForwarder)
       && process.env["ACTIVITYPODS_URL"]
@@ -982,7 +1002,7 @@ async function main() {
         moderationReportCaseStore,
         {
           domain: config.domain,
-          moderationActorIdentifier: DEFAULT_MODERATION_ACTOR_IDENTIFIER,
+          moderationActorIdentifier: PROVIDER_ACTOR_IDENTIFIER,
           userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
           fetchTimeoutMs: Number.parseInt(
             process.env["ACTIVITYPUB_REPORT_FETCH_TIMEOUT_MS"] || "10000",
@@ -1091,8 +1111,14 @@ async function main() {
       );
       const localSigningService = new SidecarLocalSigningService(localSigningRedis);
       const sidecarServiceActors = ["relay"];
-      if (activityPubReportForwardingService && moderationActorUri) {
-        sidecarServiceActors.push(DEFAULT_MODERATION_ACTOR_IDENTIFIER);
+      if (config.enableProviderActor) {
+        // Register canonical "provider" and legacy "moderation" so the actor
+        // dispatcher serves both /users/provider and /users/moderation with
+        // locally-managed key pairs, independent of whether outbound forwarding
+        // is also enabled.
+        for (const id of ALL_PROVIDER_ACTOR_IDENTIFIERS) {
+          sidecarServiceActors.push(id);
+        }
       }
 
       fedifyAdapter = createFedifyAdapter(
@@ -1323,8 +1349,14 @@ async function main() {
       if (relayLocalActorPath) {
         sidecarActorPaths.add(relayLocalActorPath);
       }
-      if (moderationActorPath) {
-        sidecarActorPaths.add(moderationActorPath);
+      if (config.enableProviderActor) {
+        // Register sender-URI paths for all provider actor identifiers.
+        // The inbound worker uses these to detect activities whose *sender*
+        // is a provider actor (e.g. relay-reflected or loopback) and fast-path
+        // them to Stream2 without forwarding to ActivityPods.
+        for (const id of ALL_PROVIDER_ACTOR_IDENTIFIERS) {
+          sidecarActorPaths.add(`/users/${id}`);
+        }
       }
 
       // Durable Redis idempotency guard — one dedicated connection so its
@@ -1344,6 +1376,26 @@ async function main() {
       );
       const announceAggregator = new ProviderAnnounceGuard(announceAggregatorRedis);
       logger.info("Provider-level Announce aggregator initialized");
+
+      // Provider inbox event client — forwards non-Flag provider-directed AP
+      // activities (Undo{Flag}, Accept, Reject, generic) to ActivityPods so the
+      // operator can act on incoming federation signals.  Only active when the
+      // provider actor is enabled and ACTIVITYPODS_URL + ACTIVITYPODS_TOKEN are set.
+      const providerInboxEventClient = config.enableProviderActor &&
+        process.env["ACTIVITYPODS_URL"] && process.env["ACTIVITYPODS_TOKEN"]
+        ? new ActivityPodsProviderInboxEventClient({
+            baseUrl: process.env["ACTIVITYPODS_URL"],
+            bearerToken: process.env["ACTIVITYPODS_TOKEN"],
+          })
+        : undefined;
+
+      if (providerInboxEventClient) {
+        logger.info("Provider inbox event client initialized");
+      }
+
+      const providerActorUriSet = config.enableProviderActor
+        ? buildProviderActorUriSet(config.domain)
+        : undefined;
 
       inboundWorker = createInboundWorker(queue, redpanda, {
         capabilityGate,
@@ -1370,6 +1422,11 @@ async function main() {
         } : {}),
         ...(repliesBackfillService ? { repliesBackfillService } : {}),
         ...(originReconciliationService ? { originReconciliationService } : {}),
+        ...(providerActorUriSet ? {
+          providerActorUris: providerActorUriSet,
+          providerActorInboxPaths: PROVIDER_ACTOR_INBOX_PATHS,
+        } : {}),
+        ...(providerInboxEventClient ? { providerInboxEventClient } : {}),
       });
       startupTasks.push({
         name: "start inbound worker",
@@ -2147,6 +2204,28 @@ async function main() {
         `/${username}/inbox`,
       );
     });
+
+    // ── Provider actor well-known paths ────────────────────────────────────────
+    // Registered BEFORE the legacy /:username/inbox wildcard so that the literal
+    // /actor path is not accidentally captured by that wildcard.
+    if (config.enableProviderActor) {
+      // GET /actor — Mastodon instance-actor compatibility alias.
+      // 301 permanent: /users/provider is the canonical URL; caches and clients
+      // should follow the redirect and use the canonical path thereafter.
+      app.get("/actor", async (_request, reply) => {
+        reply.redirect(`/users/${PROVIDER_ACTOR_IDENTIFIER}`, 301);
+      });
+
+      // POST /actor/inbox — explicit route for POST /actor/inbox.
+      // Some servers may construct the inbox URL from /actor directly rather
+      // than following the canonical /users/provider document.  Normalises to
+      // /actor/inbox in the queue so the inbound worker can classify it via
+      // PROVIDER_ACTOR_INBOX_PATHS.
+      app.post("/actor/inbox", async (request, reply) => {
+        await enqueueRawInboundRequest(request, reply, "/actor/inbox");
+      });
+    }
+    // ───────────────────────────────────────────────────────────────────────────
 
     // Legacy compatibility alias. Canonical actor documents advertise
     // /users/:identifier/inbox, but we keep this fallback route to avoid

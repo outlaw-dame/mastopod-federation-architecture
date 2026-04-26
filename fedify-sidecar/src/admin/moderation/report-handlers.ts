@@ -277,6 +277,7 @@ function buildRetryCanonicalEvent(
     kind: "ReportCreate",
     sourceProtocol: "activitypods",
     sourceEventId: `activitypods:report:${caseRecord.id}`,
+    visibility: "direct",
     actor,
     report: {
       subjectKind: caseRecord.subject.kind,
