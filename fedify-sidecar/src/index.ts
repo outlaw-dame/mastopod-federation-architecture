@@ -14,6 +14,8 @@
  * - ActivityPods: Signing API (keys never leave), inbox forwarding
  */
 
+process.env["KAFKAJS_NO_PARTITIONER_WARNING"] ??= "1";
+
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { Redis } from "ioredis";
 import {
@@ -42,6 +44,7 @@ import { createOutboundWorker, OutboundWorker } from "./delivery/outbound-worker
 import { createInboundWorker, InboundWorker } from "./delivery/inbound-worker.js";
 import { InboundIdempotencyGuard } from "./delivery/InboundIdempotencyGuard.js";
 import { ProviderAnnounceGuard } from "./delivery/ProviderAnnounceGuard.js";
+import { ContentFingerprintGuard } from "./delivery/ContentFingerprintGuard.js";
 import { RemoteSharedInboxCache } from "./delivery/RemoteSharedInboxCache.js";
 import {
   createOutboxIntentWorker,
@@ -1394,6 +1397,13 @@ async function main() {
       const announceAggregator = new ProviderAnnounceGuard(announceAggregatorRedis);
       logger.info("Provider-level Announce aggregator initialized");
 
+      const contentFingerprintRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      contentFingerprintRedis.on("error", (err: Error) =>
+        logger.error("Content fingerprint Redis error", { error: err.message }),
+      );
+      const contentFingerprintStore = new ContentFingerprintGuard(contentFingerprintRedis);
+      logger.info("Content fingerprint spam guard initialized");
+
       // Provider inbox event client — forwards non-Flag provider-directed AP
       // activities (Undo{Flag}, Accept, Reject, generic) to ActivityPods so the
       // operator can act on incoming federation signals.  Only active when the
@@ -1421,6 +1431,7 @@ async function main() {
         ...(sidecarActorPaths.size > 0 ? { sidecarActorPaths } : {}),
         inboundIdempotencyGuard,
         announceAggregator,
+        contentFingerprintStore,
         ...(process.env["MEMORY_AP_WEBHOOK_URL"] ? {
           apRemoteWebhookUrl: process.env["MEMORY_AP_WEBHOOK_URL"],
           apRemoteWebhookSecret: process.env["AP_BRIDGE_SECRET"] ?? "",
@@ -3546,6 +3557,24 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("Canonical ATProto report forwarder stopped");
     }
 
+    if (atFirehoseRuntime) {
+      await atFirehoseRuntime.stop();
+      atFirehoseRuntime = null;
+      logger.info("AT firehose runtime stopped");
+    }
+
+    if (atExternalFirehoseRuntime) {
+      await atExternalFirehoseRuntime.stop();
+      atExternalFirehoseRuntime = null;
+      logger.info("External AT firehose runtime stopped");
+    }
+
+    if (protocolBridgeRuntime) {
+      await protocolBridgeRuntime.stop();
+      protocolBridgeRuntime = null;
+      logger.info("Protocol bridge runtime stopped");
+    }
+
     // Stop workers first
     if (outboxIntentWorker) {
       await outboxIntentWorker.stop();
@@ -3594,24 +3623,6 @@ async function shutdown(signal: string): Promise<void> {
       await identityWarmupService.stop();
       identityWarmupService = null;
       logger.info("Identity warmup service stopped");
-    }
-
-    if (atFirehoseRuntime) {
-      await atFirehoseRuntime.stop();
-      atFirehoseRuntime = null;
-      logger.info("AT firehose runtime stopped");
-    }
-
-    if (atExternalFirehoseRuntime) {
-      await atExternalFirehoseRuntime.stop();
-      atExternalFirehoseRuntime = null;
-      logger.info("External AT firehose runtime stopped");
-    }
-
-    if (protocolBridgeRuntime) {
-      await protocolBridgeRuntime.stop();
-      protocolBridgeRuntime = null;
-      logger.info("Protocol bridge runtime stopped");
     }
 
     if (searchIndexerRedis) {

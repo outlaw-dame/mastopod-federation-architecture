@@ -40,6 +40,9 @@ import type { ModerationBridgeStore } from "../admin/moderation/types.js";
 import { createCanonicalReportCreateIntent } from "../admin/moderation/reporting.js";
 import type { ActivityPodsProviderInboxEventClient } from "../admin/moderation/ActivityPodsProviderInboxEventClient.js";
 import { evaluateActivityPubSubjectPolicy } from "../mrf/ActivityPubSubjectPolicy.js";
+import { evaluateActorReputation } from "../mrf/ActorReputationPolicy.js";
+import { evaluateContentFingerprint } from "../mrf/ContentFingerprintPolicy.js";
+import type { ContentFingerprintStore } from "./ContentFingerprintGuard.js";
 import {
   resolvePublicSearchConsent,
   isPublicSearchIndexable,
@@ -140,6 +143,12 @@ export interface InboundWorkerConfig {
    * integration finishes bootstrapping.
    */
   getMrfAdminStore?: () => MRFAdminStore | null;
+  /**
+   * Optional store for content fingerprint spam detection.
+   * When present, inbound activities with text content are fingerprinted and
+   * compared against recent sightings from other actors.
+   */
+  contentFingerprintStore?: ContentFingerprintStore;
   /**
    * Optional getter for the moderation bridge store so verified inbound Flag
    * activities can be captured as moderation cases without depending on the
@@ -1189,6 +1198,83 @@ export class InboundWorker {
             matchedOn: subjectPolicyDecision.matchedOn,
             matchedValue: subjectPolicyDecision.matchedValue,
             traceId: subjectPolicyDecision.traceId,
+          });
+          return;
+        }
+      }
+
+      // Step 3.62: Actor reputation spam detection (AntiLinkSpam + HellThread patterns).
+      {
+        const actorDoc = await this.fetchActorDocument(verifiedActorUri).catch(() => null);
+        const actorReputationDecision = await evaluateActorReputation(
+          this.config.getMrfAdminStore?.() ?? null,
+          {
+            activityId: typeof activity.id === "string" ? activity.id : envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            actorDocument: actorDoc,
+            activity: activity as Record<string, unknown>,
+            originHost: extractDomain(verifiedActorUri) ?? undefined,
+            visibility: this.determineVisibility(activity),
+          },
+          { requestId: envelope.envelopeId },
+        );
+
+        if (
+          actorReputationDecision &&
+          (actorReputationDecision.appliedAction === "filter" || actorReputationDecision.appliedAction === "reject")
+        ) {
+          metrics.inboundActivityPubActivities.inc({
+            stage: actorReputationDecision.appliedAction === "reject"
+              ? "actor_reputation_reject"
+              : "actor_reputation_filter",
+            activity_type: activityType,
+          });
+          await this.queue.ack("inbound", messageId);
+          logger.info("Inbound activity discarded by actor reputation check", {
+            envelopeId: envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            action: actorReputationDecision.appliedAction,
+            signals: actorReputationDecision.signals,
+            signalCount: actorReputationDecision.signalCount,
+            traceId: actorReputationDecision.traceId,
+          });
+          return;
+        }
+      }
+
+      // Step 3.63: Content fingerprint spam detection — copy-paste spam across actors.
+      {
+        const cfpDecision = await evaluateContentFingerprint(
+          this.config.getMrfAdminStore?.() ?? null,
+          this.config.contentFingerprintStore ?? null,
+          {
+            activityId: typeof activity.id === "string" ? activity.id : envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            activity: activity as Record<string, unknown>,
+            originHost: extractDomain(verifiedActorUri) ?? undefined,
+            visibility: this.determineVisibility(activity),
+          },
+          { requestId: envelope.envelopeId },
+        );
+
+        if (
+          cfpDecision &&
+          (cfpDecision.appliedAction === "filter" || cfpDecision.appliedAction === "reject")
+        ) {
+          metrics.inboundActivityPubActivities.inc({
+            stage: cfpDecision.appliedAction === "reject"
+              ? "content_fingerprint_reject"
+              : "content_fingerprint_filter",
+            activity_type: activityType,
+          });
+          await this.queue.ack("inbound", messageId);
+          logger.info("Inbound activity discarded by content fingerprint check", {
+            envelopeId: envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            action: cfpDecision.appliedAction,
+            contentHash: cfpDecision.contentHash,
+            distinctActorCount: cfpDecision.distinctActorCount,
+            traceId: cfpDecision.traceId,
           });
           return;
         }
