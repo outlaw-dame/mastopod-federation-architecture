@@ -45,6 +45,9 @@ import { createInboundWorker, InboundWorker } from "./delivery/inbound-worker.js
 import { InboundIdempotencyGuard } from "./delivery/InboundIdempotencyGuard.js";
 import { ProviderAnnounceGuard } from "./delivery/ProviderAnnounceGuard.js";
 import { ContentFingerprintGuard } from "./delivery/ContentFingerprintGuard.js";
+import { RedisDomainReputationStore } from "./delivery/DomainReputationStore.js";
+import { SpamEvaluator } from "./mrf/SpamEvaluator.js";
+import { registerSpamDomainAdminRoutes } from "./admin/spam/fastify-routes.js";
 import { RemoteSharedInboxCache } from "./delivery/RemoteSharedInboxCache.js";
 import {
   createOutboxIntentWorker,
@@ -653,6 +656,8 @@ let mediaAssetSyncConsumer: MediaAssetSyncConsumer | null = null;
 let searchIndexerRedis: Redis | null = null;
 let mrfAdminRedisClient: Redis | null = null;
 let mrfAdminStore: MRFAdminStore | null = null;
+let domainReputationStore: RedisDomainReputationStore | null = null;
+let spamEvaluator: SpamEvaluator | null = null;
 let moderationBridgeRedisClient: Redis | null = null;
 let moderationBridgeStore: ModerationBridgeStore | null = null;
 let identityRepo: RedisIdentityBindingRepository | null = null;
@@ -1404,6 +1409,19 @@ async function main() {
       const contentFingerprintStore = new ContentFingerprintGuard(contentFingerprintRedis);
       logger.info("Content fingerprint spam guard initialized");
 
+      const domainReputationRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      domainReputationRedis.on("error", (err: Error) =>
+        logger.error("Domain reputation Redis error", { error: err.message }),
+      );
+      domainReputationStore = new RedisDomainReputationStore(domainReputationRedis);
+      logger.info("Domain reputation store initialized");
+
+      spamEvaluator = new SpamEvaluator(
+        () => mrfAdminStore,
+        contentFingerprintStore,
+        domainReputationStore,
+      );
+
       // Provider inbox event client — forwards non-Flag provider-directed AP
       // activities (Undo{Flag}, Accept, Reject, generic) to ActivityPods so the
       // operator can act on incoming federation signals.  Only active when the
@@ -1431,7 +1449,7 @@ async function main() {
         ...(sidecarActorPaths.size > 0 ? { sidecarActorPaths } : {}),
         inboundIdempotencyGuard,
         announceAggregator,
-        contentFingerprintStore,
+        ...(spamEvaluator ? { spamEvaluator } : {}),
         ...(process.env["MEMORY_AP_WEBHOOK_URL"] ? {
           apRemoteWebhookUrl: process.env["MEMORY_AP_WEBHOOK_URL"],
           apRemoteWebhookSecret: process.env["AP_BRIDGE_SECRET"] ?? "",
@@ -2007,6 +2025,12 @@ async function main() {
       });
       mrfAdminRedisClient = registration.redisClient;
       mrfAdminStore = registration.store;
+    }
+
+    // Domain reputation admin routes — registered independently of MRF admin so
+    // the domain blocklist is always manageable even when MRF is in dry-run mode.
+    if (config.mrfAdminToken && domainReputationStore) {
+      registerSpamDomainAdminRoutes(app, domainReputationStore, config.mrfAdminToken);
     }
 
     // Shared inbox endpoint
@@ -3304,6 +3328,7 @@ async function main() {
                     timeoutMs: config.externalPdsTimeoutMs,
                     maxAttempts: config.externalPdsMaxAttempts,
                   },
+                  ...(spamEvaluator ? { spamEvaluator } : {}),
                 });
 
                 if (externalIngressBootstrap.kind === "ready") {

@@ -6,6 +6,7 @@ import { mediaPolicyRegistration } from "./modules/media-policy.js";
 import { activityPubSubjectPolicyRegistration } from "./modules/activitypub-subject-policy.js";
 import { actorReputationRegistration } from "./modules/actor-reputation.js";
 import { contentFingerprintRegistration } from "./modules/content-fingerprint.js";
+import { domainReputationRegistration } from "./modules/domain-reputation.js";
 
 export * from "./types.js";
 export * from "./descriptor.js";
@@ -38,6 +39,10 @@ const registrations = new Map<string, ModuleRegistration<Record<string, unknown>
   [
     contentFingerprintRegistration.manifest.id,
     contentFingerprintRegistration as unknown as ModuleRegistration<Record<string, unknown>>,
+  ],
+  [
+    domainReputationRegistration.manifest.id,
+    domainReputationRegistration as unknown as ModuleRegistration<Record<string, unknown>>,
   ],
 ]);
 

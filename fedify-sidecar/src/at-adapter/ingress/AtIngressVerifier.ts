@@ -33,6 +33,8 @@ import { AtFirehoseDecoder, FirehoseDecodeError } from './AtFirehoseDecoder.js';
 import { AtIngressEventClassifier } from './AtIngressEventClassifier.js';
 import { AtIngressAuditPublisher } from './AtIngressAuditPublisher.js';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
+import type { SpamEvaluator } from '../../mrf/SpamEvaluator.js';
+import { buildEnvelopeFromAT } from '../../mrf/MRFActivityEnvelope.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -102,6 +104,7 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
     private readonly commitVerifier: AtCommitVerifier,
     private readonly identityResolver: AtIdentityResolver,
     private readonly syncRebuilder: AtSyncRebuilder,
+    private readonly spamEvaluator?: SpamEvaluator,
   ) {}
 
   async handleRawEvent(envelope: AtFirehoseRawEnvelope): Promise<boolean> {
@@ -213,6 +216,37 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
     // Emit a trusted event for each operation in the commit
     if (result.ops) {
       for (const op of result.ops) {
+        // Spam evaluation: only check post creates — deletes/updates are benign.
+        if (
+          this.spamEvaluator &&
+          op.action === 'create' &&
+          op.collection === 'app.bsky.feed.post' &&
+          op.record
+        ) {
+          const envelope_ = buildEnvelopeFromAT({
+            did,
+            collection: op.collection,
+            rkey: op.rkey,
+            record: op.record,
+          });
+          if (envelope_) {
+            let spamDecision: import('../../mrf/SpamEvaluator.js').SpamDecision | null = null;
+            try {
+              spamDecision = await this.spamEvaluator.evaluateAt(envelope_);
+            } catch (err) {
+              // Fail-open: spam check errors must not drop legitimate content.
+              console.warn(`[AtIngressVerifier] Spam evaluation error for ${did}/${op.rkey}:`, err);
+            }
+            if (spamDecision && (spamDecision.appliedAction === 'filter' || spamDecision.appliedAction === 'reject')) {
+              console.info(
+                `[AtIngressVerifier] AT post suppressed by spam evaluator`,
+                { did, rkey: op.rkey, moduleId: spamDecision.moduleId, action: spamDecision.appliedAction },
+              );
+              continue;
+            }
+          }
+        }
+
         const ingressEvent: AtIngressEvent = {
           seq: envelope.seq,
           did,
