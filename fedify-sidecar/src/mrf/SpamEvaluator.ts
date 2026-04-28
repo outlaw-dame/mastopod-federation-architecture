@@ -6,11 +6,13 @@
  * For ActivityPub activities (evaluateAp):
  *   1. Actor reputation  — new accounts, link density, hashtag flood, etc.
  *   2. Content fingerprint — copy-paste spam across distinct actors.
- *   3. Domain reputation — blocked domains in content URLs.
+ *   3. Keyword filter — administrator-configured keyword/phrase rules.
+ *   4. Domain reputation — blocked domains in content URLs.
  *
  * For ATProto posts (evaluateAt):
  *   1. Content fingerprint — same hash algorithm, synthetic activity wrapper.
- *   2. Domain reputation — URLs extracted from ATProto facets.
+ *   2. Keyword filter — same rules applied to plain-text post body.
+ *   3. Domain reputation — URLs extracted from ATProto facets.
  *   (Actor reputation is skipped — actor metadata requires expensive external fetches.)
  *
  * Returns the first blocking decision (filter or reject) and stops.
@@ -28,6 +30,7 @@ import type { MRFActivityEnvelope } from "./MRFActivityEnvelope.js";
 import { buildEnvelopeFromAP } from "./MRFActivityEnvelope.js";
 import { evaluateActorReputation } from "./ActorReputationPolicy.js";
 import { evaluateContentFingerprint } from "./ContentFingerprintPolicy.js";
+import { evaluateKeywordFilter } from "./KeywordFilterPolicy.js";
 import { evaluateDomainReputation } from "./DomainReputationPolicy.js";
 
 // ---------------------------------------------------------------------------
@@ -47,6 +50,15 @@ export interface SpamDecision {
 
 function isBlocking(action: string): boolean {
   return action === "filter" || action === "reject";
+}
+
+function toSpamDecision(d: {
+  moduleId: string;
+  traceId: string;
+  appliedAction: "accept" | "label" | "filter" | "reject";
+  reason?: string;
+}): SpamDecision {
+  return { moduleId: d.moduleId, traceId: d.traceId, appliedAction: d.appliedAction, reason: d.reason };
 }
 
 // Build a minimal synthetic activity so evaluateContentFingerprint can extract
@@ -71,8 +83,9 @@ export class SpamEvaluator {
 
   /**
    * Evaluate an ActivityPub inbound activity.
-   * Calls all three evaluators in priority order using the original data structures
-   * (no re-parsing) and returns the first blocking decision, or null if clean.
+   * Calls all four evaluators in priority order and returns the first blocking
+   * decision, or null if clean. The AP envelope is built once and shared between
+   * the keyword-filter (text) and domain-reputation (domains) steps.
    */
   async evaluateAp(opts: {
     activityId: string;
@@ -112,12 +125,7 @@ export class SpamEvaluator {
       sharedOpts,
     );
     if (arDecision && isBlocking(arDecision.appliedAction)) {
-      return {
-        moduleId: arDecision.moduleId,
-        traceId: arDecision.traceId,
-        appliedAction: arDecision.appliedAction,
-        reason: arDecision.reason,
-      };
+      return toSpamDecision(arDecision);
     }
 
     // 2. Content fingerprint
@@ -129,25 +137,25 @@ export class SpamEvaluator {
         sharedOpts,
       );
       if (cfpDecision && isBlocking(cfpDecision.appliedAction)) {
-        return {
-          moduleId: cfpDecision.moduleId,
-          traceId: cfpDecision.traceId,
-          appliedAction: cfpDecision.appliedAction,
-          reason: cfpDecision.reason,
-        };
+        return toSpamDecision(cfpDecision);
       }
     }
 
-    // 3. Domain reputation — build envelope only to extract domains; no actor fetch.
+    // Build the envelope once — shared by keyword-filter (text) and domain-reputation (domains).
+    const envelope = buildEnvelopeFromAP({ activityId, actorUri, actorDocument, activity, visibility, requestId });
+
+    // 3. Keyword filter
+    const kwDecision = await evaluateKeywordFilter(
+      mrfStore,
+      { activityId, actorUri, text: envelope.content.text, ...inputMeta },
+      sharedOpts,
+    );
+    if (kwDecision && isBlocking(kwDecision.appliedAction)) {
+      return toSpamDecision(kwDecision);
+    }
+
+    // 4. Domain reputation
     if (this.domainReputationStore) {
-      const envelope = buildEnvelopeFromAP({
-        activityId,
-        actorUri,
-        actorDocument,
-        activity,
-        visibility,
-        requestId,
-      });
       const domDecision = await evaluateDomainReputation(
         mrfStore,
         this.domainReputationStore,
@@ -155,18 +163,12 @@ export class SpamEvaluator {
           activityId,
           actorUri,
           domains: envelope.content.domains,
-          originHost,
-          visibility,
+          ...inputMeta,
         },
         sharedOpts,
       );
       if (domDecision && isBlocking(domDecision.appliedAction)) {
-        return {
-          moduleId: domDecision.moduleId,
-          traceId: domDecision.traceId,
-          appliedAction: domDecision.appliedAction,
-          reason: domDecision.reason,
-        };
+        return toSpamDecision(domDecision);
       }
     }
 
@@ -188,6 +190,10 @@ export class SpamEvaluator {
       return null;
     }
     const sharedOpts = { requestId: envelope.requestId, now: opts?.now };
+    const inputMeta = {
+      originHost: envelope.originHost ?? undefined,
+      visibility: envelope.visibility === "unknown" ? undefined : envelope.visibility,
+    } as const;
 
     // 1. Content fingerprint — wrap plain text as synthetic AP object
     if (this.contentFingerprintStore) {
@@ -199,22 +205,31 @@ export class SpamEvaluator {
           activityId: envelope.activityId,
           actorUri: envelope.actorId,
           activity: syntheticActivity,
-          originHost: envelope.originHost ?? undefined,
-          visibility: envelope.visibility === "unknown" ? undefined : envelope.visibility,
+          ...inputMeta,
         },
         sharedOpts,
       );
       if (cfpDecision && isBlocking(cfpDecision.appliedAction)) {
-        return {
-          moduleId: cfpDecision.moduleId,
-          traceId: cfpDecision.traceId,
-          appliedAction: cfpDecision.appliedAction,
-          reason: cfpDecision.reason,
-        };
+        return toSpamDecision(cfpDecision);
       }
     }
 
-    // 2. Domain reputation
+    // 2. Keyword filter
+    const kwDecision = await evaluateKeywordFilter(
+      mrfStore,
+      {
+        activityId: envelope.activityId,
+        actorUri: envelope.actorId,
+        text: envelope.content.text,
+        ...inputMeta,
+      },
+      sharedOpts,
+    );
+    if (kwDecision && isBlocking(kwDecision.appliedAction)) {
+      return toSpamDecision(kwDecision);
+    }
+
+    // 3. Domain reputation
     if (this.domainReputationStore) {
       const domDecision = await evaluateDomainReputation(
         mrfStore,
@@ -223,18 +238,12 @@ export class SpamEvaluator {
           activityId: envelope.activityId,
           actorUri: envelope.actorId,
           domains: envelope.content.domains,
-          originHost: envelope.originHost ?? undefined,
-          visibility: envelope.visibility === "unknown" ? undefined : envelope.visibility,
+          ...inputMeta,
         },
         sharedOpts,
       );
       if (domDecision && isBlocking(domDecision.appliedAction)) {
-        return {
-          moduleId: domDecision.moduleId,
-          traceId: domDecision.traceId,
-          appliedAction: domDecision.appliedAction,
-          reason: domDecision.reason,
-        };
+        return toSpamDecision(domDecision);
       }
     }
 
