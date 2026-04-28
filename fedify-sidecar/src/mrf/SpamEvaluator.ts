@@ -95,7 +95,13 @@ export class SpamEvaluator {
       now,
     } = opts;
 
-    const mrfStore = this.getMrfAdminStore();
+    let mrfStore: ReturnType<typeof this.getMrfAdminStore>;
+    try {
+      mrfStore = this.getMrfAdminStore();
+    } catch {
+      // Fail-open: store unavailable must not block content.
+      return null;
+    }
     const sharedOpts = { requestId, now };
     const inputMeta = { originHost, visibility };
 
@@ -175,7 +181,12 @@ export class SpamEvaluator {
     envelope: MRFActivityEnvelope,
     opts?: { now?: () => string },
   ): Promise<SpamDecision | null> {
-    const mrfStore = this.getMrfAdminStore();
+    let mrfStore: ReturnType<typeof this.getMrfAdminStore>;
+    try {
+      mrfStore = this.getMrfAdminStore();
+    } catch {
+      return null;
+    }
     const sharedOpts = { requestId: envelope.requestId, now: opts?.now };
 
     // 1. Content fingerprint — wrap plain text as synthetic AP object

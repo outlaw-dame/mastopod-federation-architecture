@@ -31,6 +31,27 @@ export interface ContentFingerprintStore {
   ): Promise<number>;
 }
 
+export class InMemoryContentFingerprintStore implements ContentFingerprintStore {
+  // map of hash → Map<actorUri, timestampMs>
+  private readonly data = new Map<string, Map<string, number>>();
+
+  async recordAndCount(
+    hash: string,
+    actorUri: string,
+    windowStartMs: number,
+    _ttlSeconds: number,
+  ): Promise<number> {
+    if (!this.data.has(hash)) this.data.set(hash, new Map());
+    const actors = this.data.get(hash)!;
+    actors.set(actorUri, Date.now());
+    let count = 0;
+    for (const ts of actors.values()) {
+      if (ts >= windowStartMs) count++;
+    }
+    return count;
+  }
+}
+
 export class ContentFingerprintGuard implements ContentFingerprintStore {
   private readonly redis: Redis;
 

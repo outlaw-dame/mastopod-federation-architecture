@@ -68,6 +68,47 @@ export function sanitizeDomain(raw: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// In-memory implementation (tests and dry-run bootstrap)
+// ---------------------------------------------------------------------------
+
+export class InMemoryDomainReputationStore implements DomainReputationStore {
+  private readonly exact = new Set<string>();
+  private readonly sub = new Set<string>();
+
+  async isDomainBlocked(domain: string): Promise<boolean> {
+    const d = sanitizeDomain(domain);
+    if (!d) return false;
+    if (this.exact.has(d)) return true;
+    const parts = d.split(".");
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (this.sub.has(parts.slice(i).join("."))) return true;
+    }
+    return false;
+  }
+
+  async listDomains(): Promise<DomainEntry[]> {
+    const entries: DomainEntry[] = [
+      ...[...this.exact].map((domain) => ({ domain, subdomainMatch: false })),
+      ...[...this.sub].map((domain) => ({ domain, subdomainMatch: true })),
+    ];
+    entries.sort((a, b) => a.domain.localeCompare(b.domain));
+    return entries;
+  }
+
+  async addDomain(domain: string, subdomainMatch: boolean): Promise<void> {
+    const d = sanitizeDomain(domain);
+    if (!d) throw new Error(`Invalid domain: "${domain}"`);
+    (subdomainMatch ? this.sub : this.exact).add(d);
+  }
+
+  async removeDomain(domain: string, subdomainMatch: boolean): Promise<void> {
+    const d = sanitizeDomain(domain);
+    if (!d) throw new Error(`Invalid domain: "${domain}"`);
+    (subdomainMatch ? this.sub : this.exact).delete(d);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Redis implementation
 // ---------------------------------------------------------------------------
 

@@ -74,14 +74,16 @@ function extractDomainsFromUrls(urls: string[]): string[] {
 }
 
 function extractOriginHost(actorId: string): string | null {
+  // did:web URIs encode the host as the first colon-separated path component.
+  // Check before URL parsing because new URL() won't throw on "did:web:..." —
+  // it just gives an empty hostname.
+  if (actorId.startsWith("did:web:")) {
+    const part = actorId.slice("did:web:".length).split(":")[0] ?? "";
+    return part || null;
+  }
   try {
     return new URL(actorId).hostname || null;
   } catch {
-    // did:web:hostname → extract manually
-    if (actorId.startsWith("did:web:")) {
-      const part = actorId.slice("did:web:".length).split(":")[0] ?? "";
-      return part || null;
-    }
     return null;
   }
 }
