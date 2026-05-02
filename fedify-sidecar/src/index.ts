@@ -48,6 +48,8 @@ import { ContentFingerprintGuard } from "./delivery/ContentFingerprintGuard.js";
 import { RedisDomainReputationStore } from "./delivery/DomainReputationStore.js";
 import { SpamEvaluator } from "./mrf/SpamEvaluator.js";
 import { registerSpamDomainAdminRoutes } from "./admin/spam/fastify-routes.js";
+import { registerKeywordRulesAdminRoutes } from "./admin/spam/keyword-rules-routes.js";
+import { prewarmEmbeddingModel } from "./mrf/embedding/EmbeddingModel.js";
 import { RemoteSharedInboxCache } from "./delivery/RemoteSharedInboxCache.js";
 import {
   createOutboxIntentWorker,
@@ -2031,6 +2033,31 @@ async function main() {
     // the domain blocklist is always manageable even when MRF is in dry-run mode.
     if (config.mrfAdminToken && domainReputationStore) {
       registerSpamDomainAdminRoutes(app, domainReputationStore, config.mrfAdminToken);
+    }
+
+    // Keyword rules admin routes — CRUD over the keyword-filter module's rules list.
+    if (config.mrfAdminToken && mrfAdminStore) {
+      registerKeywordRulesAdminRoutes(app, mrfAdminStore, config.mrfAdminToken);
+    }
+
+    // Prewarm MiniLM-L6 embedding model in the background if any semantic keyword
+    // rules are active, so the first inbound message does not pay the cold-load cost.
+    // Best-effort: failure only means the first semantic evaluation incurs the delay.
+    if (mrfAdminStore) {
+      void mrfAdminStore.getModuleConfig("keyword-filter")
+        .then((cfg) => {
+          if (!cfg?.enabled) return;
+          const rules = (cfg.config as { rules?: Array<{ semantic?: boolean }> }).rules ?? [];
+          if (rules.some((r) => r.semantic === true)) {
+            prewarmEmbeddingModel();
+            logger.info("Prewarming MiniLM-L6 embedding model (semantic keyword rules active)");
+          }
+        })
+        .catch((err: unknown) => {
+          logger.warn("Could not inspect keyword-filter config during startup prewarm", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
     }
 
     // Shared inbox endpoint
