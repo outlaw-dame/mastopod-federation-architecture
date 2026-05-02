@@ -1,3 +1,5 @@
+import { buildInternalIdentityProjectionPathsByCanonicalAccountId } from '../identity/InternalIdentityApi.js';
+
 type Json = any;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_ACCOUNT_CREATE_TIMEOUT_MS = 420_000;
@@ -94,28 +96,37 @@ async function waitForBackendIdentityReady(
   delayMs = 1000
 ): Promise<{ ready: boolean; attempts: number; status: number; authUnavailable?: boolean }> {
   let status = 0;
+  const paths = buildInternalIdentityProjectionPathsByCanonicalAccountId(canonicalAccountId);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const res = await requestJson(
-      `${backendBase}/api/internal/identity/by-canonical-account-id?canonicalAccountId=${encodeURIComponent(canonicalAccountId)}`,
-      {
+    let sawNotFound = false;
+
+    for (const path of paths) {
+      const res = await requestJson(`${backendBase.replace(/\/$/, '')}${path}`, {
         method: 'GET',
         headers: {
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
         }
+      });
+
+      status = res.status;
+      if (res.status === 200) {
+        return { ready: true, attempts: attempt, status };
       }
-    );
 
-    status = res.status;
-    if (res.status === 200) {
-      return { ready: true, attempts: attempt, status };
+      if (res.status === 401) {
+        return { ready: false, attempts: attempt, status, authUnavailable: true };
+      }
+
+      if (res.status === 404) {
+        sawNotFound = true;
+        continue;
+      }
+
+      break;
     }
 
-    if (res.status === 401) {
-      return { ready: false, attempts: attempt, status, authUnavailable: true };
-    }
-
-    if (attempt < maxAttempts) {
+    if (sawNotFound && attempt < maxAttempts) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }

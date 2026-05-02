@@ -1,8 +1,8 @@
 export interface IdentitySyncLogger {
-  debug(message: string, meta?: Record<string, unknown>): void;
-  info(message: string, meta?: Record<string, unknown>): void;
-  warn(message: string, meta?: Record<string, unknown>): void;
-  error(message: string, meta?: Record<string, unknown>): void;
+  debug(metaOrMessage: Record<string, unknown> | string, message?: string): void;
+  info(metaOrMessage: Record<string, unknown> | string, message?: string): void;
+  warn(metaOrMessage: Record<string, unknown> | string, message?: string): void;
+  error(metaOrMessage: Record<string, unknown> | string, message?: string): void;
 }
 
 export function isIdentitySyncTraceEnabled(): boolean {
@@ -19,7 +19,7 @@ export function traceIdentitySync(
   if (!logger) return;
 
   if (meta && Object.keys(meta).length > 0) {
-    logger[level](`[identity-sync] ${message}`, { ...meta });
+    logger[level]({ ...meta }, `[identity-sync] ${message}`);
     return;
   }
 

@@ -1,5 +1,6 @@
 import { Redis } from 'ioredis';
 import { HttpIdentityBindingSyncService } from '../identity/IdentityBindingSyncService.js';
+import { buildInternalIdentityProjectionPathsByCanonicalAccountId } from '../identity/InternalIdentityApi.js';
 import { RedisIdentityBindingRepository } from '../../core-domain/identity/RedisIdentityBindingRepository.js';
 import { RedisAtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
 
@@ -43,14 +44,24 @@ async function main() {
 
   try {
     // 1. Prove backend identity endpoint responds with expected auth.
-    const endpoint =
-      `${backendBase.replace(/\/$/, '')}` +
-      `/api/internal/identity/by-canonical-account-id?canonicalAccountId=${encodeURIComponent(canonicalAccountId)}`;
-    const backendRes = await fetch(endpoint, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const backendBody = await asJson(backendRes);
-    assert(backendRes.status === 200, `backend endpoint failed: ${backendRes.status} ${JSON.stringify(backendBody)}`);
+    let backendRes: Response | null = null;
+    let backendBody: unknown = null;
+
+    for (const path of buildInternalIdentityProjectionPathsByCanonicalAccountId(canonicalAccountId)) {
+      backendRes = await fetch(`${backendBase.replace(/\/$/, '')}${path}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      backendBody = await asJson(backendRes);
+      if (backendRes.status !== 404) {
+        break;
+      }
+    }
+
+    assert(backendRes, 'backend identity endpoint did not return a response');
+    assert(
+      backendRes.status === 200,
+      `backend endpoint failed: ${backendRes.status} ${JSON.stringify(backendBody)}`
+    );
     const backendProjection = backendBody as {
       atprotoDid?: string;
       repo?: { initialized?: boolean; rootCid?: string | null; rev?: string | null };
