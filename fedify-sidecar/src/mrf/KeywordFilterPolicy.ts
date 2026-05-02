@@ -6,6 +6,12 @@ import {
   type KeywordFilterConfig,
   type KeywordRule,
 } from "../admin/mrf/registry/modules/keyword-filter.js";
+import { tryEmbed } from "./embedding/EmbeddingModel.js";
+import {
+  cosineSimilarity,
+  getCachedPatternEmbedding,
+  setCachedPatternEmbedding,
+} from "./embedding/cosineSimilarity.js";
 
 export interface KeywordFilterInput {
   activityId: string;
@@ -23,11 +29,13 @@ export interface KeywordFilterDecision {
   desiredAction: "label" | "filter" | "reject";
   appliedAction: "accept" | "label" | "filter" | "reject";
   matchedPattern: string;
+  /** Set for semantic matches. */
+  similarity?: number;
   reason?: string;
 }
 
 // ---------------------------------------------------------------------------
-// Internals
+// Literal matching
 // ---------------------------------------------------------------------------
 
 const ESCAPE_RE = /[.*+?^${}()|[\]\\]/g;
@@ -38,12 +46,53 @@ function buildRuleRegex(rule: KeywordRule): RegExp {
   return new RegExp(body, rule.caseSensitive ? "" : "i");
 }
 
-function findFirstMatch(rules: KeywordRule[], text: string): string | null {
+// ---------------------------------------------------------------------------
+// Semantic matching helpers
+// ---------------------------------------------------------------------------
+
+async function getPatternEmbedding(pattern: string): Promise<Float32Array | null> {
+  const cached = getCachedPatternEmbedding(pattern);
+  if (cached) return cached;
+  const embedding = await tryEmbed(pattern);
+  if (embedding) setCachedPatternEmbedding(pattern, embedding);
+  return embedding;
+}
+
+// ---------------------------------------------------------------------------
+// Ordered evaluation — literal and semantic rules interleaved
+// ---------------------------------------------------------------------------
+
+interface MatchResult {
+  pattern: string;
+  similarity?: number;
+}
+
+async function findFirstMatch(rules: KeywordRule[], text: string): Promise<MatchResult | null> {
+  // Content embedding is computed at most once per evaluation call, lazily on
+  // the first semantic rule encountered. undefined = not yet attempted,
+  // null = model unavailable (fail-open for all subsequent semantic rules).
+  let contentEmb: Float32Array | null | undefined;
+
   for (const rule of rules) {
-    try {
-      if (buildRuleRegex(rule).test(text)) return rule.pattern;
-    } catch {
-      // Malformed pattern after escaping (e.g. trailing \b on non-word chars) — skip.
+    if (!rule.semantic) {
+      // --- Literal path ---
+      try {
+        if (buildRuleRegex(rule).test(text)) return { pattern: rule.pattern };
+      } catch {
+        // Malformed pattern after escaping — skip (fail-open).
+      }
+    } else {
+      // --- Semantic path ---
+      if (contentEmb === undefined) {
+        contentEmb = await tryEmbed(text); // null if model unavailable
+      }
+      if (!contentEmb) continue; // Model unavailable — skip semantic rules (fail-open).
+
+      const patternEmb = await getPatternEmbedding(rule.pattern);
+      if (!patternEmb) continue;
+
+      const sim = cosineSimilarity(patternEmb, contentEmb);
+      if (sim >= rule.similarityThreshold) return { pattern: rule.pattern, similarity: sim };
     }
   }
   return null;
@@ -73,8 +122,8 @@ export async function evaluateKeywordFilter(
   if (config.rules.length === 0) return null;
   if (input.text.length < config.minContentLength) return null;
 
-  const matchedPattern = findFirstMatch(config.rules, input.text);
-  if (!matchedPattern) return null;
+  const match = await findFirstMatch(config.rules, input.text);
+  if (!match) return null;
 
   const nowFn = options?.now ?? (() => new Date().toISOString());
   const timestamp = nowFn();
@@ -82,9 +131,13 @@ export async function evaluateKeywordFilter(
   const traceId = randomUUID();
   const desiredAction = config.action;
   const appliedAction = moduleConfig.mode === "enforce" ? desiredAction : "accept";
-  const reason = config.traceReasons
-    ? `Keyword filter: content matched pattern "${matchedPattern}"`
-    : undefined;
+
+  let reason: string | undefined;
+  if (config.traceReasons) {
+    reason = match.similarity !== undefined
+      ? `Keyword filter: content semantically matched pattern "${match.pattern}" (similarity ${match.similarity.toFixed(3)})`
+      : `Keyword filter: content matched pattern "${match.pattern}"`;
+  }
 
   await mrfStore.appendTrace({
     traceId,
@@ -107,7 +160,8 @@ export async function evaluateKeywordFilter(
     mode: moduleConfig.mode,
     desiredAction,
     appliedAction,
-    matchedPattern,
+    matchedPattern: match.pattern,
+    similarity: match.similarity,
     reason,
   };
 }
