@@ -59,7 +59,8 @@ export type CanonicalIntentKind =
   | "FollowRemove"
   | "ProfileUpdate"
   | "AccountState"
-  | "ReportCreate";
+  | "ReportCreate"
+  | "DirectMessage";
 
 export interface CanonicalPostCreateIntent extends CanonicalIntentBase {
   kind: "PostCreate";
@@ -294,6 +295,39 @@ export type CanonicalReportSubject =
       authoritativeProtocol?: "local" | "ap" | "at";
     };
 
+// ---------------------------------------------------------------------------
+// Direct message intent (Germ Network / AT Protocol chat.bsky.convo)
+// ---------------------------------------------------------------------------
+
+/**
+ * A private direct message addressed to a single recipient.
+ *
+ * Produced by:
+ *   - ActivityPub: `Create(Note)` with a single non-public `to` recipient
+ *     (translated by `DirectMessageTranslator`).
+ *   - AT Protocol: `chat.bsky.convo.sendMessage` operations.
+ *
+ * The `sender` and `recipient` fields carry the cross-protocol actor refs so
+ * downstream handlers can route the message regardless of originating protocol.
+ *
+ * `messageId` is a stable external identifier for deduplication.  For AP
+ * inbound messages this is the `id` of the AP object; for AT messages it is
+ * the `chat_messages.id` UUID.
+ */
+export interface CanonicalDirectMessageIntent extends CanonicalIntentBase {
+  kind: "DirectMessage";
+  /** The actor sending the message. */
+  sender: CanonicalActorRef;
+  /** The intended recipient. */
+  recipient: CanonicalActorRef;
+  /** Plain-text (or HTML) message body, sanitised at translation time. */
+  text: string;
+  /** Stable external message ID for deduplication. */
+  messageId: string;
+  /** ISO-8601 timestamp of the original message. */
+  timestamp: string;
+}
+
 export interface CanonicalReportCreateIntent extends CanonicalIntentBase {
   kind: "ReportCreate";
   reporterWebId?: string | null;
@@ -327,6 +361,7 @@ export type CanonicalIntent =
   | CanonicalFollowRemoveIntent
   | CanonicalProfileUpdateIntent
   | CanonicalAccountStateIntent
+  | CanonicalDirectMessageIntent
   | CanonicalReportCreateIntent;
 
 export function isCanonicalPostCreateIntent(intent: CanonicalIntent): intent is CanonicalPostCreateIntent {

@@ -51,6 +51,14 @@ function normalizedTarget(intent: CanonicalIntentDraft | CanonicalIntent): strin
     case "ProfileUpdate":
     case "AccountState":
       return canonicalActorIdentityKey(intent.sourceAccountRef);
+    case "DirectMessage":
+      return createHash("sha256")
+        .update(`${canonicalActorIdentityKey(intent.sourceAccountRef)}:${intent.messageId}`)
+        .digest("hex");
+    default: {
+      const _exhaustive: never = intent;
+      return createHash("sha256").update(JSON.stringify(_exhaustive)).digest("hex");
+    }
   }
 }
 
@@ -149,6 +157,14 @@ function normalizedContentDigest(intent: CanonicalIntentDraft | CanonicalIntent)
         .digest("hex");
     case "AccountState":
       return intent.state;
+    case "DirectMessage":
+      return createHash("sha256")
+        .update(stableStringify({ messageId: intent.messageId, text: intent.text }))
+        .digest("hex");
+    default: {
+      const _exhaustive: never = intent;
+      return createHash("sha256").update(JSON.stringify(_exhaustive)).digest("hex");
+    }
   }
 }
 

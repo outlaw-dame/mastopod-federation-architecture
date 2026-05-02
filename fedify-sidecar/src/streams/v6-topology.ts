@@ -261,7 +261,8 @@ export interface CanonicalV1Event {
     | "FollowRemove"
     | "ProfileUpdate"
     | "AccountState"
-    | "ReportCreate";
+    | "ReportCreate"
+    | "DirectMessage";
   /** Protocol the event originated from. */
   sourceProtocol: "activitypub" | "atproto" | "activitypods";
   /** Original event ID in the source protocol. */

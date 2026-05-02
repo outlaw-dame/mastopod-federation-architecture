@@ -4,6 +4,7 @@ import { CreateNoteTranslator } from "./translators/CreateNoteTranslator.js";
 import { CreateQuestionTranslator } from "./translators/CreateQuestionTranslator.js";
 import { DeleteQuestionTranslator } from "./translators/DeleteQuestionTranslator.js";
 import { DeleteTranslator } from "./translators/DeleteTranslator.js";
+import { DirectMessageTranslator } from "./translators/DirectMessageTranslator.js";
 import { EmojiReactionTranslator } from "./translators/EmojiReactionTranslator.js";
 import { FollowTranslator } from "./translators/FollowTranslator.js";
 import { LikeTranslator } from "./translators/LikeTranslator.js";
@@ -20,8 +21,11 @@ export class ActivityPubToCanonicalTranslator extends TranslatorRegistry<unknown
     super([
       // Question/poll translators — before Note translators to prevent overlap.
       // VoteTranslator must precede CreateNoteTranslator (both match Create{Note}).
+      // DirectMessageTranslator must also precede CreateNoteTranslator: it
+      // matches the same Create{Note} shape but with a single-recipient guard.
       new CreateQuestionTranslator(),
       new VoteTranslator(),
+      new DirectMessageTranslator(),
       new CreateNoteTranslator(),
       new CreateArticleTranslator(),
       new UpdateQuestionTranslator(),
