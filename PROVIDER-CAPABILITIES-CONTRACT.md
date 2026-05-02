@@ -58,6 +58,18 @@ Clients MUST NOT infer capability support from the mere existence of unrelated r
   },
   "capabilities": [
     {
+      "id": "provider.account.provisioning",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": [],
+      "limits": {
+        "approvedAppsRequired": true,
+        "requiresUserVerification": true,
+        "maxAccountsPerAppPerDay": 250,
+        "supportedProtocolSet": "solid,activitypub,atproto"
+      }
+    },
+    {
       "id": "ap.federation.ingress",
       "version": "1.0.0",
       "status": "enabled",
@@ -140,6 +152,10 @@ Clients MUST NOT infer capability support from the mere existence of unrelated r
 
 ## Standard Capability IDs (Initial Set)
 
+### Provider / Account Lifecycle
+
+- `provider.account.provisioning`
+
 ### ActivityPub Core/Scale
 
 - `ap.federation.ingress`
@@ -179,6 +195,10 @@ Disabled:
 
 - `at.*`
 
+Provider-specific account provisioning may be enabled or disabled independently
+of ATProto support. Apps MUST check `provider.account.provisioning` rather than
+assuming provider-hosted signup is available through app surfaces.
+
 ### `ap-scale` (AP-only advanced)
 
 Enabled:
@@ -199,6 +219,8 @@ Enabled:
 
 - all `ap-scale` capabilities
 - selected `at.*` capabilities for identity/repo/XRPC
+- `provider.account.provisioning` when the provider permits approved apps to
+  create accounts and pods on behalf of users
 
 ## Error Contract for Disabled Features
 

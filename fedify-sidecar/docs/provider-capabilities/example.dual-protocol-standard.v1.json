@@ -23,6 +23,18 @@
   },
   "capabilities": [
     {
+      "id": "provider.account.provisioning",
+      "version": "1.0.0",
+      "status": "enabled",
+      "dependencies": [],
+      "limits": {
+        "approvedAppsRequired": true,
+        "requiresUserVerification": true,
+        "maxAccountsPerAppPerDay": 250,
+        "supportedProtocolSet": "solid,activitypub,atproto"
+      }
+    },
+    {
       "id": "ap.federation.ingress",
       "version": "1.0.0",
       "status": "enabled",

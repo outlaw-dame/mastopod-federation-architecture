@@ -94,6 +94,10 @@ export interface ProviderCapabilitiesBuildInput {
   atprotoEnabled: boolean;
   firehoseRetentionDays: number;
   includeAtDisabledEntries: boolean;
+  /** Whether approved apps may initiate provider-owned account provisioning. */
+  enableAccountProvisioning?: boolean;
+  /** Daily account creation limit advertised for each approved app. */
+  accountProvisioningMaxAccountsPerAppPerDay?: number;
   /** Whether the canonical event log Kafka topic is active. */
   enableCanonicalEventLog?: boolean;
   /** Whether the in-process unified fan-out stream is active. */

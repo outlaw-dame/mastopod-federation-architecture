@@ -24,6 +24,8 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { FedifyFederationAdapter } from "./FedifyFederationAdapter.js";
 import { injectBlockedProperty } from "./fep-c648/BlockedCollectionFastifyBridge.js";
 import { injectMutedProperty } from "./MutedCollectionFastifyBridge.js";
+import { injectKeyPackagesProperty } from "./mls/KeyPackagesFastifyBridge.js";
+import { injectMessagesProperty } from "./mls/MlsMessagesFastifyBridge.js";
 import {
   buildActorStatusHistoryCollection,
   withActorStatusProperties,
@@ -130,6 +132,8 @@ async function fedifyHandler(
     if (typeof baseContext.domain === "string" && baseContext.domain.length > 0) {
       body = injectBlockedProperty(request.url, body, baseContext.domain);
       body = injectMutedProperty(request.url, body, baseContext.domain);
+      body = injectKeyPackagesProperty(request.url, body, baseContext.domain);
+      body = injectMessagesProperty(request.url, body, baseContext.domain);
     }
 
     body = await maybeInjectActorStatus(adapter, request, body);
@@ -166,9 +170,62 @@ async function fedifyHandler(
         );
       }
     }
+
+    maybeApplyActorRobotsHeader(request, reply, body);
   }
 
   reply.send(body);
+}
+
+function parseBooleanFlag(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return null;
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "false" || normalized === "0" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+  return null;
+}
+
+function actorRequestsNoIndex(body: string): boolean {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return false;
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const noindex = parseBooleanFlag(record["noindex"]);
+  if (noindex === true) {
+    return true;
+  }
+
+  const indexable = parseBooleanFlag(record["indexable"]);
+  return indexable === false;
+}
+
+function maybeApplyActorRobotsHeader(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  body: string,
+): void {
+  const requestPath = request.url.split("?")[0] ?? request.url;
+  if (request.method !== "GET" || !LOCAL_ACTOR_PATH_RE.test(requestPath)) {
+    return;
+  }
+
+  if (actorRequestsNoIndex(body)) {
+    reply.header("x-robots-tag", "noindex, nofollow");
+  }
 }
 
 function extractLocalIdentifier(path: string, pattern: RegExp): string | null {

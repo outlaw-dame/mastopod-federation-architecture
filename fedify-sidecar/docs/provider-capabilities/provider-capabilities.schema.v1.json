@@ -152,12 +152,12 @@
       "additionalProperties": false,
       "required": ["id", "version", "status", "dependencies", "limits"],
       "properties": {
-        "id": { "type": "string", "pattern": "^(ap|at|protocol)\\.[a-z0-9.-]+$" },
+        "id": { "type": "string", "pattern": "^(provider|ap|at|protocol)\\.[a-z0-9.-]+$" },
         "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
         "status": { "type": "string", "enum": ["enabled", "disabled", "beta", "deprecated"] },
         "dependencies": {
           "type": "array",
-          "items": { "type": "string", "pattern": "^(ap|at|protocol)\\.[a-z0-9.-]+$" }
+          "items": { "type": "string", "pattern": "^(provider|ap|at|protocol)\\.[a-z0-9.-]+$" }
         },
         "limits": {
           "type": "object",
@@ -178,7 +178,7 @@
       "additionalProperties": false,
       "required": ["capabilityId", "type", "field", "value"],
       "properties": {
-        "capabilityId": { "type": "string", "pattern": "^(ap|at|protocol)\\.[a-z0-9.-]+$" },
+        "capabilityId": { "type": "string", "pattern": "^(provider|ap|at|protocol)\\.[a-z0-9.-]+$" },
         "type": { "type": "string", "enum": ["limit", "enable", "disable"] },
         "field": { "type": "string", "minLength": 1 },
         "value": {

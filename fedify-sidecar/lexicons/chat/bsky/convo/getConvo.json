@@ -1,0 +1,32 @@
+{
+  "lexicon": 1,
+  "id": "chat.bsky.convo.getConvo",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get a conversation by ID",
+      "parameters": {
+        "type": "params",
+        "required": ["convoId"],
+        "properties": {
+          "convoId": {
+            "type": "string",
+            "description": "The ID of the conversation to retrieve"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "ref",
+          "ref": "defs#convoView"
+        }
+      },
+      "errors": [
+        {
+          "name": "InvalidConvo"
+        }
+      ]
+    }
+  }
+}

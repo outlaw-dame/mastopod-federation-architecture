@@ -194,6 +194,8 @@ import { FollowersSyncService } from "./federation/fep8fcf/FollowersSyncService.
 import { registerFollowersSyncRoutes } from "./federation/fep8fcf/FollowersSyncFastifyBridge.js";
 import { registerBlockedCollectionRoutes } from "./federation/fep-c648/BlockedCollectionFastifyBridge.js";
 import { registerMutedCollectionRoutes } from "./federation/MutedCollectionFastifyBridge.js";
+import { registerKeyPackagesRoutes } from "./federation/mls/KeyPackagesFastifyBridge.js";
+import { registerMlsMessagesRoutes } from "./federation/mls/MlsMessagesFastifyBridge.js";
 import { registerHashtagRoutes } from "./federation/HashtagFastifyBridge.js";
 import { RepliesBackfillService } from "./federation/replies-backfill/RepliesBackfillService.js";
 import { OriginReconciliationService } from "./federation/origin-reconciliation/OriginReconciliationService.js";
@@ -257,6 +259,16 @@ import { evaluateCapabilityGate } from "./capabilities/gates.js";
 import { validateProviderCapabilitiesConfig } from "./capabilities/startup-validator.js";
 import { buildEntitlementOverridesFromEnv, checkCapabilityLimit } from "./capabilities/entitlement.js";
 import type { ProviderProfile } from "./capabilities/types.js";
+import { AccountBundleVerifier } from "./entryway/AccountBundleVerifier.js";
+import { ActivityPodsAppBootstrapClient } from "./entryway/ActivityPodsAppBootstrapClient.js";
+import { ActivityPodsProvisioningClient } from "./entryway/ActivityPodsProvisioningClient.js";
+import { RedisAccountRouteStore } from "./entryway/AccountRouteStore.js";
+import { buildEntrywayProvidersFromEnv } from "./entryway/config.js";
+import { EntrywayProvisioningService } from "./entryway/EntrywayProvisioningService.js";
+import { EntrywayRecoveryWorker } from "./entryway/EntrywayRecoveryWorker.js";
+import { registerEntrywayFastifyRoutes } from "./entryway/fastify-routes.js";
+import { ProviderCapabilitiesPreflight } from "./entryway/ProviderPreflight.js";
+import { StaticEntrywayProviderRouter } from "./entryway/ProviderRouter.js";
 import { MediaAssetSyncConsumer } from "./media/MediaAssetSyncConsumer.js";
 import { evaluateMediaSignalPolicy } from "./media/MediaSignalPolicy.js";
 import type { MRFAdminStore } from "./admin/mrf/store.js";
@@ -329,6 +341,31 @@ const config = {
   providerRegion: process.env["PROVIDER_REGION"] || "unknown",
   enableProviderCapabilitiesEndpoint:
     process.env["ENABLE_PROVIDER_CAPABILITIES_ENDPOINT"] !== "false",
+  enableAccountProvisioning:
+    process.env["ENABLE_ACCOUNT_PROVISIONING"] === "true",
+  enableEntryway:
+    process.env["ENABLE_ENTRYWAY"] === "true",
+  entrywayToken: process.env["ENTRYWAY_TOKEN"] || "",
+  entrywayFingerprintSecret: process.env["ENTRYWAY_FINGERPRINT_SECRET"] || "",
+  entrywayRedisUrl: process.env["ENTRYWAY_REDIS_URL"] || process.env["REDIS_URL"] || "redis://localhost:6379",
+  entrywayRedisPrefix: process.env["ENTRYWAY_REDIS_PREFIX"] || "entryway:accounts",
+  entrywayPublicResolve: process.env["ENTRYWAY_PUBLIC_RESOLVE"] === "true",
+  entrywayRequestTimeoutMs: Number.parseInt(process.env["ENTRYWAY_REQUEST_TIMEOUT_MS"] || "10000", 10),
+  entrywayRequestMaxAttempts: Number.parseInt(process.env["ENTRYWAY_REQUEST_MAX_ATTEMPTS"] || "4", 10),
+  entrywayVerificationTimeoutMs: Number.parseInt(process.env["ENTRYWAY_VERIFICATION_TIMEOUT_MS"] || "8000", 10),
+  entrywayVerificationMaxAttempts: Number.parseInt(process.env["ENTRYWAY_VERIFICATION_MAX_ATTEMPTS"] || "3", 10),
+  entrywayVerificationStrict: process.env["ENTRYWAY_VERIFICATION_STRICT"] !== "false",
+  entrywayStaleProvisioningAfterMs: Number.parseInt(
+    process.env["ENTRYWAY_STALE_PROVISIONING_AFTER_MS"] || `${10 * 60 * 1000}`,
+    10,
+  ),
+  entrywayRecoveryIntervalMs: Number.parseInt(process.env["ENTRYWAY_RECOVERY_INTERVAL_MS"] || `${5 * 60 * 1000}`, 10),
+  entrywayRecoveryInitialDelayMs: Number.parseInt(process.env["ENTRYWAY_RECOVERY_INITIAL_DELAY_MS"] || `${60 * 1000}`, 10),
+  entrywayRecoveryBatchLimit: Number.parseInt(process.env["ENTRYWAY_RECOVERY_BATCH_LIMIT"] || "25", 10),
+  entrywayAppBootstrapTimeoutMs: Number.parseInt(process.env["ENTRYWAY_APP_BOOTSTRAP_TIMEOUT_MS"] || "10000", 10),
+  entrywayAppBootstrapMaxAttempts: Number.parseInt(process.env["ENTRYWAY_APP_BOOTSTRAP_MAX_ATTEMPTS"] || "4", 10),
+  accountProvisioningMaxAccountsPerAppPerDay:
+    Number.parseInt(process.env["ACCOUNT_PROVISIONING_MAX_ACCOUNTS_PER_APP_PER_DAY"] || "0", 10),
   enableMediaAssetSync:
     process.env["ENABLE_MEDIA_ASSET_SYNC"] !== "false",
   mediaAssetTopic: process.env["MEDIA_ASSET_TOPIC"] || "media.asset.created.v1",
@@ -674,6 +711,8 @@ let streamSubscriptionService: DurableStreamSubscriptionService | null = null;
 let feedStreamKafkaConsumer: FeedStreamKafkaConsumer | null = null;
 let unifiedFeedBridge: UnifiedFeedBridge | null = null;
 let fep3ab2Runtime: Fep3ab2Runtime | null = null;
+let entrywayRedisClient: Redis | null = null;
+let entrywayRecoveryWorker: EntrywayRecoveryWorker | null = null;
 let isShuttingDown = false;
 const startupState: StartupState = {
   mode: config.startupMode,
@@ -787,6 +826,12 @@ async function main() {
     atprotoEnabled: config.enableXrpcServer,
     firehoseRetentionDays: Number.parseInt(process.env["FIREHOSE_RETENTION_DAYS"] || "30", 10),
     includeAtDisabledEntries: true,
+    enableAccountProvisioning: config.enableAccountProvisioning,
+    accountProvisioningMaxAccountsPerAppPerDay:
+      Number.isFinite(config.accountProvisioningMaxAccountsPerAppPerDay) &&
+      config.accountProvisioningMaxAccountsPerAppPerDay > 0
+        ? config.accountProvisioningMaxAccountsPerAppPerDay
+        : undefined,
     enableCanonicalEventLog: config.enableCanonicalEventLog,
     enableUnifiedFeed: true,
   });
@@ -860,6 +905,18 @@ async function main() {
     }
     if (!process.env["EXTERNAL_AT_SESSION_KEY_HEX"]) {
       throw new Error("ENABLE_XRPC_SERVER requires EXTERNAL_AT_SESSION_KEY_HEX when AT_LOCAL_FIXTURE is false");
+    }
+  }
+
+  if (config.enableEntryway) {
+    if (!config.enableAccountProvisioning) {
+      throw new Error("ENABLE_ENTRYWAY requires ENABLE_ACCOUNT_PROVISIONING=true");
+    }
+    if (!config.entrywayToken) {
+      throw new Error("ENABLE_ENTRYWAY requires ENTRYWAY_TOKEN");
+    }
+    if (config.entrywayFingerprintSecret.length < 32) {
+      throw new Error("ENABLE_ENTRYWAY requires ENTRYWAY_FINGERPRINT_SECRET with at least 32 characters");
     }
   }
 
@@ -1583,6 +1640,89 @@ async function main() {
         reply.header("cache-control", "public, max-age=60, stale-while-revalidate=300");
         reply.header("etag", currentEtag);
         return reply.send(providerCapabilitiesResponse.body);
+      });
+    }
+
+    if (config.enableEntryway) {
+      const entrywayProviders = buildEntrywayProvidersFromEnv(process.env, {
+        activityPodsUrl: process.env["ACTIVITYPODS_URL"],
+        activityPodsToken: process.env["ACTIVITYPODS_TOKEN"],
+        appClientId: process.env["ENTRYWAY_APP_CLIENT_ID"],
+        origin: process.env["ENTRYWAY_APP_ORIGIN"] || `https://${config.domain}`,
+        redirectUri: process.env["ENTRYWAY_REDIRECT_URI"],
+      });
+
+      if (entrywayProviders.length === 0) {
+        throw new Error("ENABLE_ENTRYWAY requires at least one configured Entryway provider");
+      }
+
+      entrywayRedisClient = new Redis(config.entrywayRedisUrl);
+      entrywayRedisClient.on("error", (err: Error) =>
+        logger.error("Entryway Redis error", { error: err.message }),
+      );
+
+      const entrywayProviderClient = new ActivityPodsProvisioningClient({
+        timeoutMs: config.entrywayRequestTimeoutMs,
+        retryPolicy: {
+          maxAttempts: config.entrywayRequestMaxAttempts,
+          baseDelayMs: 150,
+          maxDelayMs: 3_000,
+        },
+        userAgent: process.env["USER_AGENT"] || "ActivityPods-Entryway/1.0",
+      });
+      const entrywayService = new EntrywayProvisioningService({
+        store: new RedisAccountRouteStore(entrywayRedisClient, config.entrywayRedisPrefix),
+        providerRouter: new StaticEntrywayProviderRouter(entrywayProviders),
+        providerClient: entrywayProviderClient,
+        providerPreflight: new ProviderCapabilitiesPreflight(entrywayProviderClient),
+        appBootstrapper: new ActivityPodsAppBootstrapClient({
+          timeoutMs: config.entrywayAppBootstrapTimeoutMs,
+          retryPolicy: {
+            maxAttempts: config.entrywayAppBootstrapMaxAttempts,
+            baseDelayMs: 150,
+            maxDelayMs: 3_000,
+          },
+          userAgent: process.env["USER_AGENT"] || "ActivityPods-Entryway/1.0",
+        }),
+        verifier: new AccountBundleVerifier({
+          timeoutMs: config.entrywayVerificationTimeoutMs,
+          retryPolicy: {
+            maxAttempts: config.entrywayVerificationMaxAttempts,
+            baseDelayMs: 150,
+            maxDelayMs: 2_500,
+          },
+          strict: config.entrywayVerificationStrict,
+        }),
+        fingerprintSecret: config.entrywayFingerprintSecret,
+        staleProvisioningAfterMs: config.entrywayStaleProvisioningAfterMs,
+      });
+
+      registerEntrywayFastifyRoutes(app, {
+        service: entrywayService,
+        entrywayToken: config.entrywayToken,
+        allowPublicResolve: config.entrywayPublicResolve,
+      });
+
+      entrywayRecoveryWorker = new EntrywayRecoveryWorker(
+        entrywayService,
+        {
+          intervalMs: config.entrywayRecoveryIntervalMs,
+          initialDelayMs: config.entrywayRecoveryInitialDelayMs,
+          batchLimit: config.entrywayRecoveryBatchLimit,
+        },
+        {
+          info: (message, meta) => logger.info(meta || {}, message),
+          warn: (message, meta) => logger.warn(meta || {}, message),
+          error: (message, meta) => logger.error(meta || {}, message),
+        },
+      );
+      entrywayRecoveryWorker.start();
+
+      logger.info("Entryway routes enabled", {
+        providers: entrywayProviders.map((provider) => provider.providerId),
+        publicResolve: config.entrywayPublicResolve,
+        strictVerification: config.entrywayVerificationStrict,
+        recoveryIntervalMs: config.entrywayRecoveryIntervalMs,
       });
     }
 
@@ -2537,6 +2677,24 @@ async function main() {
       requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
     });
     logger.info("Muted collection endpoint registered");
+
+    registerKeyPackagesRoutes(app, {
+      activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://activitypods:3000",
+      activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+      domain: config.domain,
+      userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+      requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    });
+    logger.info("AP E2EE MLS key packages endpoint registered");
+
+    registerMlsMessagesRoutes(app, {
+      activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://activitypods:3000",
+      activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+      domain: config.domain,
+      userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+      requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    });
+    logger.info("AP E2EE MLS messages endpoint registered");
 
     if (fedifyAdapter) {
       registerFedifyRoutes(app, fedifyAdapter);
@@ -3494,6 +3652,7 @@ async function main() {
       enableInboundWorker: config.enableInboundWorker,
       enableOpenSearchIndexer: config.enableOpenSearchIndexer,
       enableMediaAssetSync: config.enableMediaAssetSync,
+      enableEntryway: config.enableEntryway,
     });
 
     if (config.startupMode === "background") {
@@ -3590,6 +3749,18 @@ async function shutdown(signal: string): Promise<void> {
     if (fep3ab2Runtime) {
       await fep3ab2Runtime.shutdown();
       logger.info("FEP-3ab2 runtime stopped");
+    }
+
+    if (entrywayRecoveryWorker) {
+      await entrywayRecoveryWorker.stop();
+      entrywayRecoveryWorker = null;
+      logger.info("Entryway recovery worker stopped");
+    }
+
+    if (entrywayRedisClient) {
+      await entrywayRedisClient.quit().catch(() => entrywayRedisClient!.disconnect());
+      entrywayRedisClient = null;
+      logger.info("Entryway Redis client disconnected");
     }
 
     if (atJetstreamService) {

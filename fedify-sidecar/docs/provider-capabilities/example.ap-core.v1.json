@@ -23,6 +23,14 @@
   },
   "capabilities": [
     {
+      "id": "provider.account.provisioning",
+      "version": "1.0.0",
+      "status": "disabled",
+      "dependencies": [],
+      "limits": {},
+      "disabledReason": "provider_policy"
+    },
+    {
       "id": "ap.federation.ingress",
       "version": "1.0.0",
       "status": "enabled",
