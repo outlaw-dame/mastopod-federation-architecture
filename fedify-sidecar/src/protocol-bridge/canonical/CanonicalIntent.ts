@@ -1,5 +1,5 @@
 import type { CanonicalActorRef } from "./CanonicalActorRef.js";
-import type { CanonicalContent, CanonicalCustomEmoji, CanonicalPollOption } from "./CanonicalContent.js";
+import type { CanonicalAttachment, CanonicalContent, CanonicalCustomEmoji, CanonicalFacet, CanonicalLinkPreview, CanonicalPollOption } from "./CanonicalContent.js";
 import type { CanonicalIntentBase } from "./CanonicalEnvelope.js";
 import type { CanonicalObjectRef } from "./CanonicalObjectRef.js";
 import { canonicalActorIdentityKey } from "./CanonicalActorRef.js";
@@ -318,14 +318,34 @@ export interface CanonicalDirectMessageIntent extends CanonicalIntentBase {
   kind: "DirectMessage";
   /** The actor sending the message. */
   sender: CanonicalActorRef;
-  /** The intended recipient. */
+  /** Primary recipient (for single DMs; first recipient for group DMs). */
   recipient: CanonicalActorRef;
-  /** Plain-text (or HTML) message body, sanitised at translation time. */
+  /**
+   * All additional recipients beyond the primary one.
+   * Non-empty for group DMs (2+ additional participants).
+   * Empty for classic 1-to-1 DMs.
+   */
+  additionalRecipients: CanonicalActorRef[];
+  /** Plain-text message body, sanitised at translation time. */
   text: string;
   /** Stable external message ID for deduplication. */
   messageId: string;
   /** ISO-8601 timestamp of the original message. */
   timestamp: string;
+  /** Inline facets: mentions (scoped to participants), private hashtags, links. */
+  facets: CanonicalFacet[];
+  /** Media attachments (audio, image, video, GIF, document). */
+  attachments: CanonicalAttachment[];
+  /** Custom emoji appearing in the message body. */
+  customEmojis: CanonicalCustomEmoji[];
+  /** Pre-fetched OpenGraph link preview for the primary URL, if any. */
+  linkPreview?: CanonicalLinkPreview | null;
+  /** Message this is a direct reply to (thread support). */
+  inReplyTo?: CanonicalObjectRef | null;
+  /** Root of the reply thread (for thread grouping). */
+  replyRoot?: CanonicalObjectRef | null;
+  /** Message being quoted (quote-post within DM). */
+  quoteOf?: CanonicalObjectRef | null;
 }
 
 export interface CanonicalReportCreateIntent extends CanonicalIntentBase {

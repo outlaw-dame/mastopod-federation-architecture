@@ -320,6 +320,90 @@ function resolveProviderProfile(raw: string | undefined, enableXrpcServer: boole
   return inferProviderProfile(enableXrpcServer);
 }
 
+// ATProto handle / hostname syntax (RFC-1035, ≥2 labels, TLD does not start
+// with a digit). See https://atproto.com/specs/handle
+const AT_HANDLE_HOSTNAME_RE =
+  /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+// TLDs reserved for testing/development per RFC 6761 / atproto handle spec.
+// Handles using these TLDs cannot resolve in real-world environments.
+const AT_RESERVED_DEV_TLDS = new Set([
+  "test",
+  "localhost",
+  "local",
+  "invalid",
+  "example",
+  "internal",
+  "alt",
+  "arpa",
+  "onion",
+]);
+
+/**
+ * Validate the PDS hostname advertised by `com.atproto.server.describeServer`
+ * (and used as the available-user-domain). Hard-fails in production on
+ * obvious misconfigurations so traffic never reaches a broken server.
+ *
+ *   • In production: reject reserved dev TLDs and bare "localhost".
+ *   • Always: warn on syntactically invalid hostnames.
+ *
+ * Note: this is the SIDECAR side of the alignment with the backend's
+ * APODS_ATPROTO_LOCAL_PDS_BASE_URL. The two must agree on the public
+ * host that fronts /xrpc/* for federation to work.
+ */
+function assertAtPdsHostnameValid(
+  hostname: string,
+  log: { warn: (msg: string) => void; info: (msg: string) => void }
+): void {
+  const isProd = (process.env["NODE_ENV"] || "development") === "production";
+  const lower = String(hostname || "").trim().toLowerCase();
+
+  log.info(
+    `[at-xrpc] effective AT_PDS_HOSTNAME = "${lower}" (NODE_ENV=${process.env["NODE_ENV"] || "development"})`
+  );
+
+  if (!lower) {
+    throw new Error("AT_PDS_HOSTNAME is empty; refusing to start XRPC server.");
+  }
+
+  // Bare hostnames without a dot are only valid for local dev (e.g.
+  // "localhost"). Anything else with no dot is rejected outright.
+  if (!lower.includes(".") && lower !== "localhost") {
+    throw new Error(
+      `AT_PDS_HOSTNAME "${lower}" is not a valid hostname (no TLD).`
+    );
+  }
+
+  if (lower === "localhost") {
+    if (isProd) {
+      throw new Error(
+        `AT_PDS_HOSTNAME = "localhost" is not allowed in production. Set AT_PDS_HOSTNAME (and APODS_ATPROTO_LOCAL_PDS_BASE_URL on the backend) to the public XRPC host.`
+      );
+    }
+    return;
+  }
+
+  if (!AT_HANDLE_HOSTNAME_RE.test(lower)) {
+    if (isProd) {
+      throw new Error(
+        `AT_PDS_HOSTNAME "${lower}" does not match atproto hostname syntax.`
+      );
+    }
+    log.warn(`AT_PDS_HOSTNAME "${lower}" does not match atproto hostname syntax (allowed in dev).`);
+    return;
+  }
+
+  const tld = lower.split(".").pop()!;
+  if (AT_RESERVED_DEV_TLDS.has(tld)) {
+    if (isProd) {
+      throw new Error(
+        `AT_PDS_HOSTNAME "${lower}" uses reserved dev TLD ".${tld}"; not allowed in production.`
+      );
+    }
+    log.warn(`AT_PDS_HOSTNAME "${lower}" uses reserved dev TLD ".${tld}" (dev only).`);
+  }
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -3317,6 +3401,11 @@ async function main() {
         });
 
         // ---- Assemble XRPC server ----
+        // Deployment alignment self-check: surface obvious misconfigs of
+        // the PDS hostname advertised in com.atproto.server.describeServer
+        // before the server starts taking traffic.
+        assertAtPdsHostnameValid(config.atPdsHostname, logger);
+
         const xrpcServer = new DefaultAtXrpcServer({
           recordReader,
           carExporter,
