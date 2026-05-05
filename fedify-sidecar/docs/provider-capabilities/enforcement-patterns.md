@@ -34,7 +34,12 @@ export interface EffectiveCapabilityContext {
 export interface CapabilityGateResult {
   allowed: boolean;
   capabilityId: string;
-  reasonCode?: 'feature_disabled' | 'limit_exceeded' | 'protocol_disabled';
+  reasonCode?:
+    | 'feature_disabled'
+    | 'limit_exceeded'
+    | 'protocol_disabled'
+    | 'unauthorized_app'
+    | 'user_verification_required';
   message?: string;
   retryable?: boolean;
 }
@@ -172,6 +177,22 @@ export function evaluateCapabilityGate(
     };
   }
 
+  if (capabilityId === 'provider.account.provisioning') {
+    const approvedApp = runtimeInput.approvedApp === true;
+    const verifiedUser = runtimeInput.verifiedUser === true;
+    if (!approvedApp || !verifiedUser) {
+      return {
+        allowed: false,
+        capabilityId,
+        reasonCode: approvedApp ? 'user_verification_required' : 'unauthorized_app',
+        message: approvedApp
+          ? 'Account provisioning requires user verification'
+          : 'Account provisioning is only available to approved applications',
+        retryable: approvedApp,
+      };
+    }
+  }
+
   const limitIssue = evaluateLimits(capability, runtimeInput);
   if (limitIssue) {
     return {
@@ -201,3 +222,5 @@ Every denial should emit:
 2. AT worker job types are either not scheduled or moved to DLQ with explicit reason.
 3. AT event subscriptions denied deterministically.
 4. AP routes and workers continue operating normally under `ap-core`/`ap-scale`.
+5. App-mediated signup is evaluated through `provider.account.provisioning`, not
+   through AT capability gates.

@@ -1376,7 +1376,7 @@ function isHttpsOrHttpUrl(value: string): boolean {
   }
 }
 
-function mergeFacets(primary: CanonicalFacet[], secondary: CanonicalFacet[]): CanonicalFacet[] {
+export function mergeFacets(primary: CanonicalFacet[], secondary: CanonicalFacet[]): CanonicalFacet[] {
   const merged = [...primary];
   const seen = new Set(primary.map((facet) => facetKey(facet)));
 

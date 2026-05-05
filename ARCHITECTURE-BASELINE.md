@@ -54,6 +54,9 @@ The current repo should be understood this way:
 - Owns canonical account lifecycle and authoritative local inbox handling.
 - Owns the trust boundary for internal write surfaces.
 - Emits or serves the identity projections that the sidecar syncs for runtime use.
+- Owns app-mediated account provisioning decisions. Approved apps may initiate
+  signup, but ActivityPods remains the issuer of accounts, Pods, WebIDs, actors,
+  grants, and managed protocol keys.
 
 ### Fedify Sidecar
 
@@ -101,6 +104,9 @@ OpenSearch is a public-query projection. It is never an authority for identity, 
 ## Identity Baseline
 
 - `IdentityBinding` is the canonical dual-protocol model.
+- `canonicalAccountId` is the stable internal account subject. Current WebID,
+  ActivityPub actor URI, ATProto DID, and ATProto handle are identity surfaces
+  bound to that subject, not substitutes for it.
 - `did:plc` is the primary managed ATProto identity method.
 - `did:web` is supported where operationally appropriate.
 - Managed ATProto identities use three separate key slots:
@@ -118,6 +124,9 @@ OpenSearch is a public-query projection. It is never an authority for identity, 
 - The sidecar is pluggable at the ActivityPods core layer, not tied to any one app.
 - The protocol bridge is internal parity infrastructure, not permission authority.
 - Account links and `alsoKnownAs` values are discovery and verification inputs only, never authorization primitives.
+- App-mediated signup must be capability-gated through
+  `provider.account.provisioning`; apps never call internal provisioning or
+  signing routes directly.
 - ATProto support is native in the runtime even when AP/AT parity uses canonical projection internally.
 - Same-provider authoritative flows should stay on trusted internal routes whenever possible; public HTTP surfaces exist for federation, not for replacing internal authority.
 

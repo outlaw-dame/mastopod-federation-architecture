@@ -6,6 +6,7 @@ import {
   type BackendIdentityProjection,
   type RepoRegistryWarmTarget,
 } from './IdentityBindingSyncService.js';
+import { buildInternalIdentityChangesPath } from './InternalIdentityApi.js';
 import { traceIdentitySync, type IdentitySyncLogger } from './IdentitySyncTrace.js';
 
 export interface IdentityWarmCursorStore {
@@ -208,13 +209,10 @@ export class IdentityWarmupService {
   }
 
   private async fetchChanges(since: string | null): Promise<BackendIdentityChangesResponse> {
-    const query = new URLSearchParams();
-    query.set('limit', String(this.batchLimit));
-    if (since) {
-      query.set('since', since);
-    }
-
-    const path = `/api/internal/identity/changes?${query.toString()}`;
+    const path = buildInternalIdentityChangesPath({
+      since,
+      limit: this.batchLimit,
+    });
     const res = await request(`${this.backendBaseUrl}${path}`, {
       method: 'GET',
       headers: {

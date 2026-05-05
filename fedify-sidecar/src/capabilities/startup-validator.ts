@@ -77,6 +77,17 @@ export function validateProviderCapabilitiesConfig(
     pushFatal(issues, "INF-004", "cap_infra_missing", "ap.signing.batch requires signing endpoint and token");
   }
 
+  if (isEnabled(document, "provider.account.provisioning")) {
+    if (!options.hasActivityPodsUrl || !options.hasActivityPodsToken) {
+      pushFatal(
+        issues,
+        "INF-006",
+        "cap_infra_missing",
+        "provider.account.provisioning requires ActivityPods URL/token and provider-side provisioning policy services",
+      );
+    }
+  }
+
   if (isEnabled(document, "ap.media.pipeline")) {
     if (!isEnabled(document, "ap.streams")) {
       pushFatal(issues, "DEP-007", "cap_dependency_missing", "ap.media.pipeline requires ap.streams");
@@ -85,7 +96,7 @@ export function validateProviderCapabilitiesConfig(
     if (!options.hasActivityPodsUrl || !options.hasActivityPodsToken) {
       pushFatal(
         issues,
-        "INF-006",
+        "INF-007",
         "cap_infra_missing",
         "ap.media.pipeline requires ActivityPods URL and token for internal media synchronization",
       );
@@ -120,7 +131,7 @@ export function validateProviderCapabilitiesConfig(
   if (isEnabled(document, "ap.feeds.realtime") && !options.hasRedisUrl) {
     issues.push({
       severity: "warning",
-      ruleId: "INF-007",
+      ruleId: "INF-008",
       code: "cap_infra_advisory",
       message:
         "ap.feeds.realtime is enabled but no Redis URL was detected.  " +

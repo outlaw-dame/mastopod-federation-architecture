@@ -120,9 +120,9 @@ async function queryVerificationRow(proof: AttachmentProof): Promise<Verificatio
     case "gotosocial":
       return querySqliteProof(GOTOSOCIAL_DB_FILE, proof);
     case "mastodon":
-      return queryPostgresProof("mastodon-db", "mastodon_production", proof);
+      return queryPostgresProof("mastodon-db", "mastodon_production", buildMastodonSql(proof));
     case "akkoma":
-      return queryPostgresProof("akkoma-db", "akkoma", proof);
+      return queryPostgresProof("akkoma-db", "akkoma", buildAkkomaSql(proof));
     default:
       throw new Error(`Unsupported AP interop target '${TARGET}'`);
   }
@@ -138,7 +138,7 @@ async function querySqliteProof(
     "-tabs",
     "-noheader",
     `file:${resolvePath(dbFile)}?mode=ro`,
-    buildProofSql(proof),
+    buildGotoSocialSql(proof),
   ]);
   return parseVerificationRow(stdout);
 }
@@ -146,7 +146,7 @@ async function querySqliteProof(
 async function queryPostgresProof(
   service: string,
   database: string,
-  proof: AttachmentProof,
+  sql: string,
 ): Promise<VerificationRow | null> {
   if (COMPOSE_FILE.length === 0) {
     throw new Error("AP_INTEROP_COMPOSE_FILE is required for PostgreSQL-backed targets");
@@ -156,12 +156,13 @@ async function queryPostgresProof(
     `docker compose -f ${shellQuote(resolvePath(COMPOSE_FILE))}`
     + ` exec -T ${shellQuote(service)}`
     + ` env PGPASSWORD=postgres psql -U postgres -d ${shellQuote(database)}`
-    + ` -At -F '\\t' -c ${shellQuote(buildProofSql(proof))}`;
+    + ` -At -F "$(printf '\\t')" -c ${shellQuote(sql)}`;
   const { stdout } = await runShellCommand(command);
   return parseVerificationRow(stdout);
 }
 
-function buildProofSql(proof: AttachmentProof): string {
+// GoToSocial: SQLite, statuses table has s.content (HTML rendered body)
+function buildGotoSocialSql(proof: AttachmentProof): string {
   const activityId = sqlLiteral(proof.mediaActivityId);
   const objectId = sqlLiteral(proof.mediaObjectId);
   const marker = likeLiteral(proof.contentMarker);
@@ -187,6 +188,108 @@ function buildProofSql(proof: AttachmentProof): string {
        OR COALESCE(ma.remote_url, '') = ${fixtureUrl}
     GROUP BY s.id, s.uri, s.url, s.text, s.content, s.created_at
     ORDER BY s.created_at DESC
+    LIMIT 1;
+  `;
+}
+
+// Mastodon: PostgreSQL, statuses table has s.text but no s.content column
+function buildMastodonSql(proof: AttachmentProof): string {
+  const activityId = sqlLiteral(proof.mediaActivityId);
+  const objectId = sqlLiteral(proof.mediaObjectId);
+  const marker = likeLiteral(proof.contentMarker);
+  const fixtureUrl = sqlLiteral(proof.fixtureUrl);
+
+  return `
+    SELECT
+      s.id,
+      COALESCE(s.uri, ''),
+      COALESCE(s.url, ''),
+      COALESCE(s.text, ''),
+      COALESCE(s.spoiler_text, ''),
+      COUNT(ma.id),
+      COALESCE(MAX(ma.remote_url), ''),
+      COALESCE(MAX(ma.file_content_type), ''),
+      COALESCE(CAST(s.created_at AS TEXT), '')
+    FROM statuses s
+    LEFT JOIN media_attachments ma ON ma.status_id = s.id
+    WHERE COALESCE(s.uri, '') IN (${activityId}, ${objectId})
+       OR COALESCE(s.url, '') IN (${activityId}, ${objectId})
+       OR COALESCE(s.text, '') LIKE ${marker}
+       OR COALESCE(s.spoiler_text, '') LIKE ${marker}
+       OR COALESCE(ma.remote_url, '') = ${fixtureUrl}
+    GROUP BY s.id, s.uri, s.url, s.text, s.spoiler_text, s.created_at
+    ORDER BY s.created_at DESC
+    LIMIT 1;
+  `;
+}
+
+// Akkoma: PostgreSQL, stores ActivityPub objects in an objects JSONB table
+function buildAkkomaSql(proof: AttachmentProof): string {
+  const activityId = sqlLiteral(proof.mediaActivityId);
+  const objectId = sqlLiteral(proof.mediaObjectId);
+  const marker = likeLiteral(proof.contentMarker);
+  const fixtureUrl = sqlLiteral(proof.fixtureUrl);
+
+  return `
+    WITH matching_objects AS (
+      SELECT
+        o.id,
+        COALESCE(o.data->>'id', '') AS object_uri,
+        COALESCE(o.data->>'url', '') AS object_url,
+        COALESCE(o.data->>'content', '') AS object_content,
+        COALESCE(jsonb_array_length(COALESCE(o.data->'attachment', '[]'::jsonb)), 0) AS attachment_count,
+        COALESCE(
+          MAX(
+            CASE
+              WHEN jsonb_typeof(att.value->'url') = 'array' THEN att.value->'url'->0->>'href'
+              WHEN jsonb_typeof(att.value->'url') = 'object' THEN att.value->'url'->>'href'
+              ELSE NULL
+            END
+          ),
+          ''
+        ) AS remote_url,
+        COALESCE(
+          MAX(
+            COALESCE(
+              CASE
+                WHEN jsonb_typeof(att.value->'url') = 'array' THEN att.value->'url'->0->>'mediaType'
+                WHEN jsonb_typeof(att.value->'url') = 'object' THEN att.value->'url'->>'mediaType'
+                ELSE NULL
+              END,
+              att.value->>'mediaType'
+            )
+          ),
+          ''
+        ) AS file_content_type,
+        COALESCE(CAST(o.inserted_at AS TEXT), '') AS created_at
+      FROM objects o
+      LEFT JOIN LATERAL jsonb_array_elements(COALESCE(o.data->'attachment', '[]'::jsonb)) AS att(value) ON TRUE
+      WHERE COALESCE(o.data->>'id', '') IN (${activityId}, ${objectId})
+         OR COALESCE(o.data->>'url', '') IN (${activityId}, ${objectId})
+         OR COALESCE(o.data->>'content', '') LIKE ${marker}
+         OR EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(COALESCE(o.data->'attachment', '[]'::jsonb)) AS attachment(value)
+           WHERE CASE
+             WHEN jsonb_typeof(attachment.value->'url') = 'array' THEN attachment.value->'url'->0->>'href'
+             WHEN jsonb_typeof(attachment.value->'url') = 'object' THEN attachment.value->'url'->>'href'
+             ELSE ''
+           END = ${fixtureUrl}
+         )
+      GROUP BY o.id, o.data, o.inserted_at
+    )
+    SELECT
+      id,
+      object_uri,
+      object_url,
+      object_content,
+      object_content,
+      attachment_count,
+      remote_url,
+      file_content_type,
+      created_at
+    FROM matching_objects
+    ORDER BY created_at DESC
     LIMIT 1;
   `;
 }

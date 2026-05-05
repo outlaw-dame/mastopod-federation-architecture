@@ -1,0 +1,45 @@
+{
+  "lexicon": 1,
+  "id": "chat.bsky.convo.listConvos",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List all conversations for the authenticated user",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50,
+            "description": "The number of conversations to return"
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Optional cursor for pagination"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["convos"],
+          "properties": {
+            "convos": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "defs#convoView"
+              }
+            },
+            "cursor": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

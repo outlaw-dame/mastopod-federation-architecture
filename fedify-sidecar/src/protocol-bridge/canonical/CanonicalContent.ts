@@ -19,7 +19,7 @@ export type CanonicalBlock =
 
 export type CanonicalFacet =
   | { type: "mention"; label: string; target: CanonicalActorRef; start: number; end: number }
-  | { type: "tag"; tag: string; start: number; end: number }
+  | { type: "tag"; tag: string; start: number; end: number; private?: boolean }
   | { type: "link"; url: string; start: number; end: number };
 
 export type CanonicalAttachmentRole = "avatar" | "banner";

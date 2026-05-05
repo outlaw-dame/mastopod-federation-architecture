@@ -1,0 +1,67 @@
+{
+  "lexicon": 1,
+  "id": "chat.bsky.convo.defs",
+  "defs": {
+    "convoView": {
+      "type": "object",
+      "required": ["id", "rev", "members", "opened"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The ID of the conversation"
+        },
+        "rev": {
+          "type": "string",
+          "description": "The rev of the most recent message in the conversation"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "com.atproto.actor.defs#profileViewBasic"
+          },
+          "description": "Members of the conversation"
+        },
+        "lastMessage": {
+          "type": "ref",
+          "ref": "#messageView",
+          "description": "The last message in the conversation"
+        },
+        "opened": {
+          "type": "string",
+          "format": "datetime",
+          "description": "When the conversation was opened"
+        }
+      }
+    },
+    "messageView": {
+      "type": "object",
+      "required": ["id", "rev", "sender", "text", "sentAt"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The ID of the message"
+        },
+        "rev": {
+          "type": "string",
+          "description": "The rev of the message"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 10000,
+          "description": "The text content of the message"
+        },
+        "sender": {
+          "type": "ref",
+          "ref": "com.atproto.actor.defs#profileViewBasic",
+          "description": "The sender of the message"
+        },
+        "sentAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "When the message was sent"
+        }
+      }
+    }
+  }
+}

@@ -223,14 +223,12 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
   }
 
   async start(): Promise<void> {
-    // TODO: Wire into a real HTTP/WebSocket server (Fastify, Express, or raw
-    // Node http.createServer + ws library).  The handleRequest method below
-    // provides the request-dispatch logic independently of the transport layer.
-    console.log('[AtXrpcServer] Server started (stub — wire to HTTP transport)');
+    // Transport is owned by AtXrpcFastifyBridge, which mounts routes directly
+    // onto the Fastify instance.  This lifecycle method intentionally does nothing.
   }
 
   async stop(): Promise<void> {
-    console.log('[AtXrpcServer] Server stopped');
+    // No transport-level teardown needed; Fastify handles graceful shutdown.
   }
 
   // ---------------------------------------------------------------------------

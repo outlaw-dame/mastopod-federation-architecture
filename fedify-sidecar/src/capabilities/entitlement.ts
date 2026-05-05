@@ -49,6 +49,7 @@ type PlanLimitsMap = Record<PlanName, Record<string, EntitlementLimits>>;
  */
 const PLAN_LIMITS: PlanLimitsMap = {
   basic: {
+    "provider.account.provisioning": { maxAccountsPerAppPerDay: 25 },
     "ap.federation.ingress": { requestsPerMinute: 600 },
     "ap.federation.egress": { maxConcurrentPerDomain: 2, maxAttempts: 5 },
     "ap.signing.batch": { batchSize: 50, timeoutMs: 5_000 },
@@ -59,6 +60,7 @@ const PLAN_LIMITS: PlanLimitsMap = {
     "at.xrpc.repo": { maxWritesPerMinute: 120 },
   },
   standard: {
+    "provider.account.provisioning": { maxAccountsPerAppPerDay: 100 },
     "ap.federation.ingress": { requestsPerMinute: 1_200 },
     "ap.federation.egress": { maxConcurrentPerDomain: 4, maxAttempts: 8 },
     "ap.signing.batch": { batchSize: 100, timeoutMs: 5_000 },
@@ -69,6 +71,7 @@ const PLAN_LIMITS: PlanLimitsMap = {
     "at.xrpc.repo": { maxWritesPerMinute: 300 },
   },
   pro: {
+    "provider.account.provisioning": { maxAccountsPerAppPerDay: 250 },
     "ap.federation.ingress": { requestsPerMinute: 3_000 },
     "ap.federation.egress": { maxConcurrentPerDomain: 8, maxAttempts: 10 },
     "ap.signing.batch": { batchSize: 200, timeoutMs: 5_000 },
@@ -79,6 +82,7 @@ const PLAN_LIMITS: PlanLimitsMap = {
     "at.xrpc.repo": { maxWritesPerMinute: 600 },
   },
   enterprise: {
+    "provider.account.provisioning": { maxAccountsPerAppPerDay: 1_000 },
     "ap.federation.ingress": { requestsPerMinute: 10_000 },
     "ap.federation.egress": { maxConcurrentPerDomain: 20, maxAttempts: 12 },
     "ap.signing.batch": { batchSize: 500, timeoutMs: 5_000 },

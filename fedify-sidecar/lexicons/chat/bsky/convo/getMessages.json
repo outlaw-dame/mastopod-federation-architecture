@@ -1,0 +1,56 @@
+{
+  "lexicon": 1,
+  "id": "chat.bsky.convo.getMessages",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get messages from a conversation. Supports pagination",
+      "parameters": {
+        "type": "params",
+        "required": ["convoId"],
+        "properties": {
+          "convoId": {
+            "type": "string",
+            "description": "The ID of the conversation to get messages from"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50,
+            "description": "The number of messages to return"
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Optional cursor to paginate through messages"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["messages"],
+          "properties": {
+            "messages": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "defs#messageView"
+              }
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Optional cursor to continue pagination"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "InvalidConvo"
+        }
+      ]
+    }
+  }
+}

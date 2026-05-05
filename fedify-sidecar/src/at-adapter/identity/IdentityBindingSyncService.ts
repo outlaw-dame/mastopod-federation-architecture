@@ -1,6 +1,11 @@
 import { request } from 'undici';
 import type { IdentityBinding } from '../../core-domain/identity/IdentityBinding.js';
 import type { IdentityBindingRepository } from '../../core-domain/identity/IdentityBindingRepository.js';
+import {
+  buildInternalIdentityProjectionPathByDid,
+  buildInternalIdentityProjectionPathByHandle,
+  buildInternalIdentityProjectionPathsByCanonicalAccountId,
+} from './InternalIdentityApi.js';
 import { traceIdentitySync, type IdentitySyncLogger } from './IdentitySyncTrace.js';
 
 export interface BackendRepoProjection {
@@ -123,19 +128,18 @@ export class HttpIdentityBindingSyncService implements IdentityBindingSyncServic
       canonicalAccountId,
     });
 
-    const path =
-      '/api/internal/identity/by-canonical-account-id?canonicalAccountId=' +
-      encodeURIComponent(canonicalAccountId);
-    return this.fetchAndUpsert(path, {
-      syncType: 'canonicalAccountId',
-      canonicalAccountId,
-    });
+    return this.fetchAndUpsert(
+      buildInternalIdentityProjectionPathsByCanonicalAccountId(canonicalAccountId),
+      {
+        syncType: 'canonicalAccountId',
+        canonicalAccountId,
+      }
+    );
   }
 
   async syncByDid(did: string): Promise<boolean> {
     traceIdentitySync(this.logger, 'debug', 'syncByDid:start', { did });
-    const path = '/api/internal/identity/by-did?did=' + encodeURIComponent(did);
-    return this.fetchAndUpsert(path, {
+    return this.fetchAndUpsert([buildInternalIdentityProjectionPathByDid(did)], {
       syncType: 'did',
       did,
     });
@@ -143,8 +147,7 @@ export class HttpIdentityBindingSyncService implements IdentityBindingSyncServic
 
   async syncByHandle(handle: string): Promise<boolean> {
     traceIdentitySync(this.logger, 'debug', 'syncByHandle:start', { handle });
-    const path = '/api/internal/identity/by-handle?handle=' + encodeURIComponent(handle.toLowerCase());
-    return this.fetchAndUpsert(path, {
+    return this.fetchAndUpsert([buildInternalIdentityProjectionPathByHandle(handle)], {
       syncType: 'handle',
       handle,
     });
@@ -166,66 +169,70 @@ export class HttpIdentityBindingSyncService implements IdentityBindingSyncServic
   }
 
   private async fetchAndUpsert(
-    path: string,
+    paths: string[],
     meta: Record<string, unknown>
   ): Promise<boolean> {
-    traceIdentitySync(this.logger, 'debug', 'fetch:start', {
-      ...meta,
-      path,
-    });
-
-    const res = await request(`${this.backendBaseUrl}${path}`, {
-      method: 'GET',
-      headers: {
-        authorization: `Bearer ${this.bearerToken}`,
-      },
-      bodyTimeout: this.timeoutMs,
-      headersTimeout: this.timeoutMs,
-    });
-
-    if (res.statusCode === 404) {
-      traceIdentitySync(this.logger, 'info', 'fetch:not-found', {
-        ...meta,
-        path,
-        status: res.statusCode,
-      });
-      return false;
-    }
-
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      const body = await res.body.text();
-      traceIdentitySync(this.logger, 'warn', 'fetch:failed', {
-        ...meta,
-        path,
-        status: res.statusCode,
-        body,
-      });
-      throw new Error(`Identity sync failed (${res.statusCode}): ${body}`);
-    }
-
-    const payload = (await res.body.json()) as BackendIdentityProjection | null;
-    if (!payload) {
-      traceIdentitySync(this.logger, 'warn', 'fetch:empty-payload', {
+    for (const path of paths) {
+      traceIdentitySync(this.logger, 'debug', 'fetch:start', {
         ...meta,
         path,
       });
-      return false;
+
+      const res = await request(`${this.backendBaseUrl}${path}`, {
+        method: 'GET',
+        headers: {
+          authorization: `Bearer ${this.bearerToken}`,
+        },
+        bodyTimeout: this.timeoutMs,
+        headersTimeout: this.timeoutMs,
+      });
+
+      if (res.statusCode === 404) {
+        traceIdentitySync(this.logger, 'info', 'fetch:not-found', {
+          ...meta,
+          path,
+          status: res.statusCode,
+        });
+        continue;
+      }
+
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        const body = await res.body.text();
+        traceIdentitySync(this.logger, 'warn', 'fetch:failed', {
+          ...meta,
+          path,
+          status: res.statusCode,
+          body,
+        });
+        throw new Error(`Identity sync failed (${res.statusCode}): ${body}`);
+      }
+
+      const payload = (await res.body.json()) as BackendIdentityProjection | null;
+      if (!payload) {
+        traceIdentitySync(this.logger, 'warn', 'fetch:empty-payload', {
+          ...meta,
+          path,
+        });
+        return false;
+      }
+
+      traceIdentitySync(this.logger, 'info', 'fetch:success', {
+        ...meta,
+        canonicalAccountId: payload.canonicalAccountId,
+        did: payload.atprotoDid,
+        handle: payload.atprotoHandle,
+        repoInitialized: payload.repo?.initialized ?? false,
+        atprotoSource: payload.atprotoSource ?? 'local',
+        atprotoManaged:
+          typeof payload.atprotoManaged === 'boolean' ? payload.atprotoManaged : true,
+      });
+
+      await this.applyProjection(payload, meta);
+
+      return true;
     }
 
-    traceIdentitySync(this.logger, 'info', 'fetch:success', {
-      ...meta,
-      canonicalAccountId: payload.canonicalAccountId,
-      did: payload.atprotoDid,
-      handle: payload.atprotoHandle,
-      repoInitialized: payload.repo?.initialized ?? false,
-      atprotoSource: payload.atprotoSource ?? 'local',
-      atprotoManaged:
-        typeof payload.atprotoManaged === 'boolean' ? payload.atprotoManaged : true,
-    });
-
-    await this.applyProjection(payload, meta);
-
-    return true;
+    return false;
   }
 }
 

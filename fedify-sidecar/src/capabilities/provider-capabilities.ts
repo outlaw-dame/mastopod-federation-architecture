@@ -43,6 +43,18 @@ export function buildProviderCapabilities(
 ): ProviderCapabilitiesDocument {
   const caps: CapabilityEntry[] = [];
 
+  if (input.enableAccountProvisioning !== false) {
+    caps.push(enabledCapability("provider.account.provisioning", [], {
+      approvedAppsRequired: true,
+      requiresUserVerification: true,
+      maxAccountsPerAppPerDay: input.accountProvisioningMaxAccountsPerAppPerDay
+        ?? (input.profile === "dual-protocol-standard" ? 250 : 100),
+      supportedProtocolSet: input.atprotoEnabled
+        ? "solid,activitypub,atproto"
+        : "solid,activitypub",
+    }));
+  }
+
   if (input.enableInboundWorker) {
     caps.push(enabledCapability("ap.federation.ingress", [], {
       maxPayloadBytes: 1048576,

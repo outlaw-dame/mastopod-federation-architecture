@@ -24,10 +24,44 @@ describe("provider capabilities conformance", () => {
 
     const atEnabled = doc.capabilities.some((entry) => entry.id.startsWith("at.") && entry.status === "enabled");
     expect(atEnabled).toBe(false);
+    expect(doc.capabilities.find((entry) => entry.id === "provider.account.provisioning")?.status).toBe("enabled");
 
     const gate = evaluateCapabilityGate(doc, "at.xrpc.repo");
     expect(gate.allowed).toBe(false);
     expect(gate.reasonCode).toBe("feature_disabled");
+  });
+
+  it("requires approved app and user verification for account provisioning execution", () => {
+    const doc = buildProviderCapabilities({
+      providerId: "pods.example",
+      providerDisplayName: "Example Pods",
+      providerRegion: "us-east-1",
+      profile: "dual-protocol-standard",
+      plan: "enterprise",
+      enableInboundWorker: true,
+      enableOutboundWorker: true,
+      enableOpenSearchIndexer: false,
+      enableXrpcServer: true,
+      enableMediaPipeline: false,
+      enableMrf: false,
+      atprotoEnabled: true,
+      firehoseRetentionDays: 30,
+      includeAtDisabledEntries: true,
+    });
+
+    expect(evaluateCapabilityGate(doc, "provider.account.provisioning").reasonCode).toBe("unauthorized_app");
+    expect(
+      evaluateCapabilityGate(doc, "provider.account.provisioning", {
+        approvedApp: true,
+        verifiedUser: false,
+      }).reasonCode,
+    ).toBe("user_verification_required");
+    expect(
+      evaluateCapabilityGate(doc, "provider.account.provisioning", {
+        approvedApp: true,
+        verifiedUser: true,
+      }).allowed,
+    ).toBe(true);
   });
 
   it("dual-protocol profile passes startup validator when dependencies and infra are present", () => {

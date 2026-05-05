@@ -50,6 +50,9 @@ const POST_FOLLOW_SETTLE_MS = Number.parseInt(
 const FOLLOW_ACTIVITY_ID =
   process.env["AP_INTEROP_FOLLOW_ACTIVITY_ID"]
   || `${SIDECAR_ACTOR_URI.replace(/\/+$/, "")}/activities/follow-${randomUUID()}`;
+const PROVIDER_ACTOR_URI = "https://sidecar/users/provider";
+const PROVIDER_ACTOR_ALIAS_URI = "https://sidecar/actor";
+const LEGACY_PROVIDER_ACTOR_URI = "https://sidecar/users/moderation";
 
 function resolveTargetHost(target: string): string {
   switch (target) {
@@ -150,6 +153,11 @@ async function main(): Promise<void> {
       await sleep(POST_FOLLOW_SETTLE_MS);
     }
 
+    const providerActorProof = await verifyProviderActorSurface({
+      deadline,
+      remoteActorUri: remoteTarget.actorId,
+    });
+
     const attachmentProof = ATTACHMENT_PROOF_ENABLED
       ? await runAttachmentProof({
           deadline,
@@ -167,6 +175,7 @@ async function main(): Promise<void> {
       inboundMessageId: inboundAccept.messageId,
       inboundReceivedAt: inboundAccept.receivedAt,
       verification: inboundAccept.verification,
+      providerActorProof,
       ...(attachmentProof ? { attachmentProof } : {}),
     };
 
@@ -175,6 +184,116 @@ async function main(): Promise<void> {
   } finally {
     await redis.quit().catch(() => redis.disconnect());
   }
+}
+
+async function verifyProviderActorSurface(params: {
+  deadline: number;
+  remoteActorUri: string;
+}): Promise<{
+  canonicalActorId: string;
+  actorAliasId: string;
+  legacyActorId: string;
+  canonicalInbox: string;
+  actorInboxPostStatus: number;
+}> {
+  const canonicalActor = await withBackoff(
+    () => fetchActivityPubJson(PROVIDER_ACTOR_URI, {
+      localActorUri: SIDECAR_ACTOR_URI,
+      signingClient: new SigningClient({
+        baseUrl: ACTIVITYPODS_URL,
+        token: ACTIVITYPODS_TOKEN,
+        maxBatchSize: 25,
+        maxBodyBytes: 1024 * 1024,
+        timeoutMs: 10_000,
+        maxRetries: 3,
+        retryDelayMs: 250,
+      }),
+    }),
+    {
+      deadline: params.deadline,
+      label: "fetch canonical provider actor",
+    },
+  ) as Record<string, unknown>;
+
+  const actorAlias = await fetchActivityPubJson(PROVIDER_ACTOR_ALIAS_URI, {
+    localActorUri: SIDECAR_ACTOR_URI,
+    signingClient: new SigningClient({
+      baseUrl: ACTIVITYPODS_URL,
+      token: ACTIVITYPODS_TOKEN,
+      maxBatchSize: 25,
+      maxBodyBytes: 1024 * 1024,
+      timeoutMs: 10_000,
+      maxRetries: 3,
+      retryDelayMs: 250,
+    }),
+  }) as Record<string, unknown>;
+
+  const legacyActor = await fetchActivityPubJson(LEGACY_PROVIDER_ACTOR_URI, {
+    localActorUri: SIDECAR_ACTOR_URI,
+    signingClient: new SigningClient({
+      baseUrl: ACTIVITYPODS_URL,
+      token: ACTIVITYPODS_TOKEN,
+      maxBatchSize: 25,
+      maxBodyBytes: 1024 * 1024,
+      timeoutMs: 10_000,
+      maxRetries: 3,
+      retryDelayMs: 250,
+    }),
+  }) as Record<string, unknown>;
+
+  const canonicalActorId = requireString(canonicalActor["id"], "canonical provider actor id");
+  const actorAliasId = requireString(actorAlias["id"], "provider actor alias id");
+  const legacyActorId = requireString(legacyActor["id"], "legacy provider actor id");
+  const canonicalInbox = requireString(canonicalActor["inbox"], "canonical provider inbox");
+
+  if (canonicalActorId !== PROVIDER_ACTOR_URI) {
+    throw new Error(`Expected provider actor id ${PROVIDER_ACTOR_URI}, got ${canonicalActorId}`);
+  }
+  if (actorAliasId !== PROVIDER_ACTOR_URI) {
+    throw new Error(`Expected /actor alias to serve canonical id ${PROVIDER_ACTOR_URI}, got ${actorAliasId}`);
+  }
+  if (legacyActorId !== LEGACY_PROVIDER_ACTOR_URI) {
+    throw new Error(`Expected legacy provider actor id ${LEGACY_PROVIDER_ACTOR_URI}, got ${legacyActorId}`);
+  }
+  if (canonicalInbox !== `${PROVIDER_ACTOR_URI}/inbox`) {
+    throw new Error(`Expected provider inbox ${PROVIDER_ACTOR_URI}/inbox, got ${canonicalInbox}`);
+  }
+
+  const inboxProbe = {
+    "@context": "https://www.w3.org/ns/activitystreams",
+    id: `https://sidecar/interop/provider-inbox-probe/${randomUUID()}`,
+    type: "Accept",
+    actor: params.remoteActorUri,
+    object: FOLLOW_ACTIVITY_ID,
+    to: [PROVIDER_ACTOR_URI],
+  };
+  const inboxResponse = await fetch(`${PROVIDER_ACTOR_ALIAS_URI}/inbox`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/activity+json",
+    },
+    body: JSON.stringify(inboxProbe),
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (inboxResponse.status !== 202) {
+    throw new Error(`POST /actor/inbox returned ${inboxResponse.status}: ${await readBodySnippet(inboxResponse)}`);
+  }
+
+  return {
+    canonicalActorId,
+    actorAliasId,
+    legacyActorId,
+    canonicalInbox,
+    actorInboxPostStatus: inboxResponse.status,
+  };
+}
+
+function requireString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Expected ${label} to be a non-empty string`);
+  }
+  return value;
 }
 
 async function fetchJson(url: string, headers: Record<string, string>): Promise<unknown> {

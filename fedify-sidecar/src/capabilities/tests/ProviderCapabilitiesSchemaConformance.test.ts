@@ -1,13 +1,16 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { buildProviderCapabilities, renderCapabilitiesResponse } from "../provider-capabilities.js";
+
+const thisDir = dirname(fileURLToPath(import.meta.url));
 
 describe("provider capabilities schema conformance", () => {
   it("rendered endpoint payload conforms to provider-capabilities.schema.v1.json", async () => {
     const schemaPath = resolve(
-      process.cwd(),
-      "docs/provider-capabilities/provider-capabilities.schema.v1.json",
+      thisDir,
+      "../../../docs/provider-capabilities/provider-capabilities.schema.v1.json",
     );
     const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
 

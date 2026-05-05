@@ -14,6 +14,8 @@
  * - ActivityPods: Signing API (keys never leave), inbox forwarding
  */
 
+process.env["KAFKAJS_NO_PARTITIONER_WARNING"] ??= "1";
+
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { Redis } from "ioredis";
 import {
@@ -42,6 +44,12 @@ import { createOutboundWorker, OutboundWorker } from "./delivery/outbound-worker
 import { createInboundWorker, InboundWorker } from "./delivery/inbound-worker.js";
 import { InboundIdempotencyGuard } from "./delivery/InboundIdempotencyGuard.js";
 import { ProviderAnnounceGuard } from "./delivery/ProviderAnnounceGuard.js";
+import { ContentFingerprintGuard } from "./delivery/ContentFingerprintGuard.js";
+import { RedisDomainReputationStore } from "./delivery/DomainReputationStore.js";
+import { SpamEvaluator } from "./mrf/SpamEvaluator.js";
+import { registerSpamDomainAdminRoutes } from "./admin/spam/fastify-routes.js";
+import { registerKeywordRulesAdminRoutes } from "./admin/spam/keyword-rules-routes.js";
+import { prewarmEmbeddingModel } from "./mrf/embedding/EmbeddingModel.js";
 import { RemoteSharedInboxCache } from "./delivery/RemoteSharedInboxCache.js";
 import {
   createOutboxIntentWorker,
@@ -181,11 +189,13 @@ import { registerAtIdentityObservabilityFastifyRoutes } from "./admin/at-observa
 // Fedify runtime integration (feature-flagged: ENABLE_FEDIFY_RUNTIME_INTEGRATION=true)
 import { FedifyKvAdapter } from "./federation/FedifyKvAdapter.js";
 import { createFedifyAdapter, type FedifyFederationAdapter } from "./federation/FedifyFederationAdapter.js";
-import { registerFedifyRoutes } from "./federation/FedifyFastifyBridge.js";
+import { registerFedifyRoutes, registerFedifyActorAlias } from "./federation/FedifyFastifyBridge.js";
 import { FollowersSyncService } from "./federation/fep8fcf/FollowersSyncService.js";
 import { registerFollowersSyncRoutes } from "./federation/fep8fcf/FollowersSyncFastifyBridge.js";
 import { registerBlockedCollectionRoutes } from "./federation/fep-c648/BlockedCollectionFastifyBridge.js";
 import { registerMutedCollectionRoutes } from "./federation/MutedCollectionFastifyBridge.js";
+import { registerKeyPackagesRoutes } from "./federation/mls/KeyPackagesFastifyBridge.js";
+import { registerMlsMessagesRoutes } from "./federation/mls/MlsMessagesFastifyBridge.js";
 import { registerHashtagRoutes } from "./federation/HashtagFastifyBridge.js";
 import { RepliesBackfillService } from "./federation/replies-backfill/RepliesBackfillService.js";
 import { OriginReconciliationService } from "./federation/origin-reconciliation/OriginReconciliationService.js";
@@ -200,10 +210,16 @@ import { registerMrfAdminIntegration } from "./admin/mrf/integration.js";
 import { registerModerationBridgeIntegration } from "./admin/moderation/integration.js";
 import type { ModerationBridgeStore } from "./admin/moderation/types.js";
 import { ActivityPodsModerationCaseStore } from "./admin/moderation/activitypods-case-store.js";
+import { ActivityPodsProviderInboxEventClient } from "./admin/moderation/ActivityPodsProviderInboxEventClient.js";
 import {
   ActivityPubReportForwardingService,
   DEFAULT_MODERATION_ACTOR_IDENTIFIER,
   buildModerationActorUri,
+  buildProviderActorUriSet,
+  PROVIDER_ACTOR_IDENTIFIER,
+  PROVIDER_ACTOR_LEGACY_IDENTIFIERS,
+  ALL_PROVIDER_ACTOR_IDENTIFIERS,
+  PROVIDER_ACTOR_INBOX_PATHS,
 } from "./admin/moderation/ActivityPubReportForwardingService.js";
 import { CanonicalActivityPubReportForwarder } from "./admin/moderation/CanonicalActivityPubReportForwarder.js";
 import { AtprotoReportForwardingService } from "./admin/moderation/AtprotoReportForwardingService.js";
@@ -243,6 +259,16 @@ import { evaluateCapabilityGate } from "./capabilities/gates.js";
 import { validateProviderCapabilitiesConfig } from "./capabilities/startup-validator.js";
 import { buildEntitlementOverridesFromEnv, checkCapabilityLimit } from "./capabilities/entitlement.js";
 import type { ProviderProfile } from "./capabilities/types.js";
+import { AccountBundleVerifier } from "./entryway/AccountBundleVerifier.js";
+import { ActivityPodsAppBootstrapClient } from "./entryway/ActivityPodsAppBootstrapClient.js";
+import { ActivityPodsProvisioningClient } from "./entryway/ActivityPodsProvisioningClient.js";
+import { RedisAccountRouteStore } from "./entryway/AccountRouteStore.js";
+import { buildEntrywayProvidersFromEnv } from "./entryway/config.js";
+import { EntrywayProvisioningService } from "./entryway/EntrywayProvisioningService.js";
+import { EntrywayRecoveryWorker } from "./entryway/EntrywayRecoveryWorker.js";
+import { registerEntrywayFastifyRoutes } from "./entryway/fastify-routes.js";
+import { ProviderCapabilitiesPreflight } from "./entryway/ProviderPreflight.js";
+import { StaticEntrywayProviderRouter } from "./entryway/ProviderRouter.js";
 import { MediaAssetSyncConsumer } from "./media/MediaAssetSyncConsumer.js";
 import { evaluateMediaSignalPolicy } from "./media/MediaSignalPolicy.js";
 import type { MRFAdminStore } from "./admin/mrf/store.js";
@@ -294,6 +320,90 @@ function resolveProviderProfile(raw: string | undefined, enableXrpcServer: boole
   return inferProviderProfile(enableXrpcServer);
 }
 
+// ATProto handle / hostname syntax (RFC-1035, ≥2 labels, TLD does not start
+// with a digit). See https://atproto.com/specs/handle
+const AT_HANDLE_HOSTNAME_RE =
+  /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+// TLDs reserved for testing/development per RFC 6761 / atproto handle spec.
+// Handles using these TLDs cannot resolve in real-world environments.
+const AT_RESERVED_DEV_TLDS = new Set([
+  "test",
+  "localhost",
+  "local",
+  "invalid",
+  "example",
+  "internal",
+  "alt",
+  "arpa",
+  "onion",
+]);
+
+/**
+ * Validate the PDS hostname advertised by `com.atproto.server.describeServer`
+ * (and used as the available-user-domain). Hard-fails in production on
+ * obvious misconfigurations so traffic never reaches a broken server.
+ *
+ *   • In production: reject reserved dev TLDs and bare "localhost".
+ *   • Always: warn on syntactically invalid hostnames.
+ *
+ * Note: this is the SIDECAR side of the alignment with the backend's
+ * APODS_ATPROTO_LOCAL_PDS_BASE_URL. The two must agree on the public
+ * host that fronts /xrpc/* for federation to work.
+ */
+function assertAtPdsHostnameValid(
+  hostname: string,
+  log: { warn: (msg: string) => void; info: (msg: string) => void }
+): void {
+  const isProd = (process.env["NODE_ENV"] || "development") === "production";
+  const lower = String(hostname || "").trim().toLowerCase();
+
+  log.info(
+    `[at-xrpc] effective AT_PDS_HOSTNAME = "${lower}" (NODE_ENV=${process.env["NODE_ENV"] || "development"})`
+  );
+
+  if (!lower) {
+    throw new Error("AT_PDS_HOSTNAME is empty; refusing to start XRPC server.");
+  }
+
+  // Bare hostnames without a dot are only valid for local dev (e.g.
+  // "localhost"). Anything else with no dot is rejected outright.
+  if (!lower.includes(".") && lower !== "localhost") {
+    throw new Error(
+      `AT_PDS_HOSTNAME "${lower}" is not a valid hostname (no TLD).`
+    );
+  }
+
+  if (lower === "localhost") {
+    if (isProd) {
+      throw new Error(
+        `AT_PDS_HOSTNAME = "localhost" is not allowed in production. Set AT_PDS_HOSTNAME (and APODS_ATPROTO_LOCAL_PDS_BASE_URL on the backend) to the public XRPC host.`
+      );
+    }
+    return;
+  }
+
+  if (!AT_HANDLE_HOSTNAME_RE.test(lower)) {
+    if (isProd) {
+      throw new Error(
+        `AT_PDS_HOSTNAME "${lower}" does not match atproto hostname syntax.`
+      );
+    }
+    log.warn(`AT_PDS_HOSTNAME "${lower}" does not match atproto hostname syntax (allowed in dev).`);
+    return;
+  }
+
+  const tld = lower.split(".").pop()!;
+  if (AT_RESERVED_DEV_TLDS.has(tld)) {
+    if (isProd) {
+      throw new Error(
+        `AT_PDS_HOSTNAME "${lower}" uses reserved dev TLD ".${tld}"; not allowed in production.`
+      );
+    }
+    log.warn(`AT_PDS_HOSTNAME "${lower}" uses reserved dev TLD ".${tld}" (dev only).`);
+  }
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -315,6 +425,31 @@ const config = {
   providerRegion: process.env["PROVIDER_REGION"] || "unknown",
   enableProviderCapabilitiesEndpoint:
     process.env["ENABLE_PROVIDER_CAPABILITIES_ENDPOINT"] !== "false",
+  enableAccountProvisioning:
+    process.env["ENABLE_ACCOUNT_PROVISIONING"] === "true",
+  enableEntryway:
+    process.env["ENABLE_ENTRYWAY"] === "true",
+  entrywayToken: process.env["ENTRYWAY_TOKEN"] || "",
+  entrywayFingerprintSecret: process.env["ENTRYWAY_FINGERPRINT_SECRET"] || "",
+  entrywayRedisUrl: process.env["ENTRYWAY_REDIS_URL"] || process.env["REDIS_URL"] || "redis://localhost:6379",
+  entrywayRedisPrefix: process.env["ENTRYWAY_REDIS_PREFIX"] || "entryway:accounts",
+  entrywayPublicResolve: process.env["ENTRYWAY_PUBLIC_RESOLVE"] === "true",
+  entrywayRequestTimeoutMs: Number.parseInt(process.env["ENTRYWAY_REQUEST_TIMEOUT_MS"] || "10000", 10),
+  entrywayRequestMaxAttempts: Number.parseInt(process.env["ENTRYWAY_REQUEST_MAX_ATTEMPTS"] || "4", 10),
+  entrywayVerificationTimeoutMs: Number.parseInt(process.env["ENTRYWAY_VERIFICATION_TIMEOUT_MS"] || "8000", 10),
+  entrywayVerificationMaxAttempts: Number.parseInt(process.env["ENTRYWAY_VERIFICATION_MAX_ATTEMPTS"] || "3", 10),
+  entrywayVerificationStrict: process.env["ENTRYWAY_VERIFICATION_STRICT"] !== "false",
+  entrywayStaleProvisioningAfterMs: Number.parseInt(
+    process.env["ENTRYWAY_STALE_PROVISIONING_AFTER_MS"] || `${10 * 60 * 1000}`,
+    10,
+  ),
+  entrywayRecoveryIntervalMs: Number.parseInt(process.env["ENTRYWAY_RECOVERY_INTERVAL_MS"] || `${5 * 60 * 1000}`, 10),
+  entrywayRecoveryInitialDelayMs: Number.parseInt(process.env["ENTRYWAY_RECOVERY_INITIAL_DELAY_MS"] || `${60 * 1000}`, 10),
+  entrywayRecoveryBatchLimit: Number.parseInt(process.env["ENTRYWAY_RECOVERY_BATCH_LIMIT"] || "25", 10),
+  entrywayAppBootstrapTimeoutMs: Number.parseInt(process.env["ENTRYWAY_APP_BOOTSTRAP_TIMEOUT_MS"] || "10000", 10),
+  entrywayAppBootstrapMaxAttempts: Number.parseInt(process.env["ENTRYWAY_APP_BOOTSTRAP_MAX_ATTEMPTS"] || "4", 10),
+  accountProvisioningMaxAccountsPerAppPerDay:
+    Number.parseInt(process.env["ACCOUNT_PROVISIONING_MAX_ACCOUNTS_PER_APP_PER_DAY"] || "0", 10),
   enableMediaAssetSync:
     process.env["ENABLE_MEDIA_ASSET_SYNC"] !== "false",
   mediaAssetTopic: process.env["MEDIA_ASSET_TOPIC"] || "media.asset.created.v1",
@@ -358,6 +493,14 @@ const config = {
       || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
   enableAtprotoReportForwarder:
     process.env["ENABLE_ATPROTO_REPORT_FORWARDER"] !== "false" &&
+    (process.env["ENABLE_MODERATION_BRIDGE_API"] === "true"
+      || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
+  // Provider actor exists whenever the moderation bridge API is on, regardless
+  // of whether outbound AP report forwarding is also enabled.  Serves the
+  // actor document, inbox, and outbox independently of the forwarding pipeline.
+  // Set ENABLE_PROVIDER_ACTOR=false to disable explicitly.
+  enableProviderActor:
+    process.env["ENABLE_PROVIDER_ACTOR"] !== "false" &&
     (process.env["ENABLE_MODERATION_BRIDGE_API"] === "true"
       || process.env["ENABLE_MRF_ADMIN_API"] === "true"),
   moderationBridgeRedisPrefix:
@@ -636,6 +779,8 @@ let mediaAssetSyncConsumer: MediaAssetSyncConsumer | null = null;
 let searchIndexerRedis: Redis | null = null;
 let mrfAdminRedisClient: Redis | null = null;
 let mrfAdminStore: MRFAdminStore | null = null;
+let domainReputationStore: RedisDomainReputationStore | null = null;
+let spamEvaluator: SpamEvaluator | null = null;
 let moderationBridgeRedisClient: Redis | null = null;
 let moderationBridgeStore: ModerationBridgeStore | null = null;
 let identityRepo: RedisIdentityBindingRepository | null = null;
@@ -650,6 +795,8 @@ let streamSubscriptionService: DurableStreamSubscriptionService | null = null;
 let feedStreamKafkaConsumer: FeedStreamKafkaConsumer | null = null;
 let unifiedFeedBridge: UnifiedFeedBridge | null = null;
 let fep3ab2Runtime: Fep3ab2Runtime | null = null;
+let entrywayRedisClient: Redis | null = null;
+let entrywayRecoveryWorker: EntrywayRecoveryWorker | null = null;
 let isShuttingDown = false;
 const startupState: StartupState = {
   mode: config.startupMode,
@@ -763,6 +910,12 @@ async function main() {
     atprotoEnabled: config.enableXrpcServer,
     firehoseRetentionDays: Number.parseInt(process.env["FIREHOSE_RETENTION_DAYS"] || "30", 10),
     includeAtDisabledEntries: true,
+    enableAccountProvisioning: config.enableAccountProvisioning,
+    accountProvisioningMaxAccountsPerAppPerDay:
+      Number.isFinite(config.accountProvisioningMaxAccountsPerAppPerDay) &&
+      config.accountProvisioningMaxAccountsPerAppPerDay > 0
+        ? config.accountProvisioningMaxAccountsPerAppPerDay
+        : undefined,
     enableCanonicalEventLog: config.enableCanonicalEventLog,
     enableUnifiedFeed: true,
   });
@@ -839,6 +992,18 @@ async function main() {
     }
   }
 
+  if (config.enableEntryway) {
+    if (!config.enableAccountProvisioning) {
+      throw new Error("ENABLE_ENTRYWAY requires ENABLE_ACCOUNT_PROVISIONING=true");
+    }
+    if (!config.entrywayToken) {
+      throw new Error("ENABLE_ENTRYWAY requires ENTRYWAY_TOKEN");
+    }
+    if (config.entrywayFingerprintSecret.length < 32) {
+      throw new Error("ENABLE_ENTRYWAY requires ENTRYWAY_FINGERPRINT_SECRET with at least 32 characters");
+    }
+  }
+
   // Fixture mode banner — unmistakable, fires before any service connections
   if (config.atLocalFixture) {
     let fixtureAccountIds: string[] = [];
@@ -912,6 +1077,17 @@ async function main() {
           digestCacheTtlSeconds: Number.parseInt(
             process.env["FOLLOWERS_SYNC_DIGEST_TTL_SECONDS"] || "300", 10,
           ),
+          onStaleRemoteEntry: async (localActorUri, remoteActorUri) => {
+            // FEP-8fcf §3.3 case 2: remote collection claims a local actor follows
+            // the sender, but ActivityPods has no record of it.  Log structured
+            // context for operator visibility.  Sending an Undo Follow outbound
+            // is deferred pending per-user signing infrastructure.
+            logger.warn("[fep8fcf] stale remote follower entry detected — manual review recommended", {
+              domain: config.domain,
+              localActorUri,
+              remoteActorUri,
+            });
+          },
         })
       : undefined;
     if (followersSyncService) {
@@ -952,10 +1128,17 @@ async function main() {
       logger.info("Origin reconciliation service enabled");
     }
 
-    const moderationActorUri = config.enableActivityPubReportForwarder
-      ? buildModerationActorUri(config.domain, DEFAULT_MODERATION_ACTOR_IDENTIFIER)
+    // Provider actor URI — built whenever the provider actor is enabled,
+    // independent of whether outbound AP report forwarding is also enabled.
+    // The provider actor serves an inbox, outbox, and actor document regardless
+    // of the forwarding pipeline being active.
+    const providerActorUri = config.enableProviderActor
+      ? buildModerationActorUri(config.domain, PROVIDER_ACTOR_IDENTIFIER)
       : null;
-    const moderationActorPath = moderationActorUri ? new URL(moderationActorUri).pathname : null;
+
+    // Alias used by downstream blocks that reference moderationActorUri
+    // (logger, onModerationReportFailed callback).  Always equals providerActorUri.
+    const moderationActorUri = providerActorUri;
     const moderationReportCaseStore =
       (config.enableActivityPubReportForwarder || config.enableAtprotoReportForwarder)
       && process.env["ACTIVITYPODS_URL"]
@@ -982,7 +1165,7 @@ async function main() {
         moderationReportCaseStore,
         {
           domain: config.domain,
-          moderationActorIdentifier: DEFAULT_MODERATION_ACTOR_IDENTIFIER,
+          moderationActorIdentifier: PROVIDER_ACTOR_IDENTIFIER,
           userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
           fetchTimeoutMs: Number.parseInt(
             process.env["ACTIVITYPUB_REPORT_FETCH_TIMEOUT_MS"] || "10000",
@@ -1089,10 +1272,21 @@ async function main() {
       localSigningRedis.on("error", (err: Error) =>
         logger.error("Local signing Redis error", { error: err.message }),
       );
-      const localSigningService = new SidecarLocalSigningService(localSigningRedis);
+      const providerActorKeyAliases = new Map<string, string>(
+        PROVIDER_ACTOR_LEGACY_IDENTIFIERS.map((id) => [id, PROVIDER_ACTOR_IDENTIFIER]),
+      );
+      const localSigningService = new SidecarLocalSigningService(localSigningRedis, {
+        keyAliases: providerActorKeyAliases,
+      });
       const sidecarServiceActors = ["relay"];
-      if (activityPubReportForwardingService && moderationActorUri) {
-        sidecarServiceActors.push(DEFAULT_MODERATION_ACTOR_IDENTIFIER);
+      if (config.enableProviderActor) {
+        // Register canonical "provider" and legacy "moderation" so the actor
+        // dispatcher serves both /users/provider and /users/moderation with
+        // locally-managed key pairs, independent of whether outbound forwarding
+        // is also enabled.
+        for (const id of ALL_PROVIDER_ACTOR_IDENTIFIERS) {
+          sidecarServiceActors.push(id);
+        }
       }
 
       fedifyAdapter = createFedifyAdapter(
@@ -1323,8 +1517,14 @@ async function main() {
       if (relayLocalActorPath) {
         sidecarActorPaths.add(relayLocalActorPath);
       }
-      if (moderationActorPath) {
-        sidecarActorPaths.add(moderationActorPath);
+      if (config.enableProviderActor) {
+        // Register sender-URI paths for all provider actor identifiers.
+        // The inbound worker uses these to detect activities whose *sender*
+        // is a provider actor (e.g. relay-reflected or loopback) and fast-path
+        // them to Stream2 without forwarding to ActivityPods.
+        for (const id of ALL_PROVIDER_ACTOR_IDENTIFIERS) {
+          sidecarActorPaths.add(`/users/${id}`);
+        }
       }
 
       // Durable Redis idempotency guard — one dedicated connection so its
@@ -1345,6 +1545,46 @@ async function main() {
       const announceAggregator = new ProviderAnnounceGuard(announceAggregatorRedis);
       logger.info("Provider-level Announce aggregator initialized");
 
+      const contentFingerprintRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      contentFingerprintRedis.on("error", (err: Error) =>
+        logger.error("Content fingerprint Redis error", { error: err.message }),
+      );
+      const contentFingerprintStore = new ContentFingerprintGuard(contentFingerprintRedis);
+      logger.info("Content fingerprint spam guard initialized");
+
+      const domainReputationRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+      domainReputationRedis.on("error", (err: Error) =>
+        logger.error("Domain reputation Redis error", { error: err.message }),
+      );
+      domainReputationStore = new RedisDomainReputationStore(domainReputationRedis);
+      logger.info("Domain reputation store initialized");
+
+      spamEvaluator = new SpamEvaluator(
+        () => mrfAdminStore,
+        contentFingerprintStore,
+        domainReputationStore,
+      );
+
+      // Provider inbox event client — forwards non-Flag provider-directed AP
+      // activities (Undo{Flag}, Accept, Reject, generic) to ActivityPods so the
+      // operator can act on incoming federation signals.  Only active when the
+      // provider actor is enabled and ACTIVITYPODS_URL + ACTIVITYPODS_TOKEN are set.
+      const providerInboxEventClient = config.enableProviderActor &&
+        process.env["ACTIVITYPODS_URL"] && process.env["ACTIVITYPODS_TOKEN"]
+        ? new ActivityPodsProviderInboxEventClient({
+            baseUrl: process.env["ACTIVITYPODS_URL"],
+            bearerToken: process.env["ACTIVITYPODS_TOKEN"],
+          })
+        : undefined;
+
+      if (providerInboxEventClient) {
+        logger.info("Provider inbox event client initialized");
+      }
+
+      const providerActorUriSet = config.enableProviderActor
+        ? buildProviderActorUriSet(config.domain)
+        : undefined;
+
       inboundWorker = createInboundWorker(queue, redpanda, {
         capabilityGate,
         fedifyRuntimeIntegrationEnabled: config.enableFedifyRuntimeIntegration,
@@ -1352,6 +1592,7 @@ async function main() {
         ...(sidecarActorPaths.size > 0 ? { sidecarActorPaths } : {}),
         inboundIdempotencyGuard,
         announceAggregator,
+        ...(spamEvaluator ? { spamEvaluator } : {}),
         ...(process.env["MEMORY_AP_WEBHOOK_URL"] ? {
           apRemoteWebhookUrl: process.env["MEMORY_AP_WEBHOOK_URL"],
           apRemoteWebhookSecret: process.env["AP_BRIDGE_SECRET"] ?? "",
@@ -1370,6 +1611,11 @@ async function main() {
         } : {}),
         ...(repliesBackfillService ? { repliesBackfillService } : {}),
         ...(originReconciliationService ? { originReconciliationService } : {}),
+        ...(providerActorUriSet ? {
+          providerActorUris: providerActorUriSet,
+          providerActorInboxPaths: PROVIDER_ACTOR_INBOX_PATHS,
+        } : {}),
+        ...(providerInboxEventClient ? { providerInboxEventClient } : {}),
       });
       startupTasks.push({
         name: "start inbound worker",
@@ -1478,6 +1724,89 @@ async function main() {
         reply.header("cache-control", "public, max-age=60, stale-while-revalidate=300");
         reply.header("etag", currentEtag);
         return reply.send(providerCapabilitiesResponse.body);
+      });
+    }
+
+    if (config.enableEntryway) {
+      const entrywayProviders = buildEntrywayProvidersFromEnv(process.env, {
+        activityPodsUrl: process.env["ACTIVITYPODS_URL"],
+        activityPodsToken: process.env["ACTIVITYPODS_TOKEN"],
+        appClientId: process.env["ENTRYWAY_APP_CLIENT_ID"],
+        origin: process.env["ENTRYWAY_APP_ORIGIN"] || `https://${config.domain}`,
+        redirectUri: process.env["ENTRYWAY_REDIRECT_URI"],
+      });
+
+      if (entrywayProviders.length === 0) {
+        throw new Error("ENABLE_ENTRYWAY requires at least one configured Entryway provider");
+      }
+
+      entrywayRedisClient = new Redis(config.entrywayRedisUrl);
+      entrywayRedisClient.on("error", (err: Error) =>
+        logger.error("Entryway Redis error", { error: err.message }),
+      );
+
+      const entrywayProviderClient = new ActivityPodsProvisioningClient({
+        timeoutMs: config.entrywayRequestTimeoutMs,
+        retryPolicy: {
+          maxAttempts: config.entrywayRequestMaxAttempts,
+          baseDelayMs: 150,
+          maxDelayMs: 3_000,
+        },
+        userAgent: process.env["USER_AGENT"] || "ActivityPods-Entryway/1.0",
+      });
+      const entrywayService = new EntrywayProvisioningService({
+        store: new RedisAccountRouteStore(entrywayRedisClient, config.entrywayRedisPrefix),
+        providerRouter: new StaticEntrywayProviderRouter(entrywayProviders),
+        providerClient: entrywayProviderClient,
+        providerPreflight: new ProviderCapabilitiesPreflight(entrywayProviderClient),
+        appBootstrapper: new ActivityPodsAppBootstrapClient({
+          timeoutMs: config.entrywayAppBootstrapTimeoutMs,
+          retryPolicy: {
+            maxAttempts: config.entrywayAppBootstrapMaxAttempts,
+            baseDelayMs: 150,
+            maxDelayMs: 3_000,
+          },
+          userAgent: process.env["USER_AGENT"] || "ActivityPods-Entryway/1.0",
+        }),
+        verifier: new AccountBundleVerifier({
+          timeoutMs: config.entrywayVerificationTimeoutMs,
+          retryPolicy: {
+            maxAttempts: config.entrywayVerificationMaxAttempts,
+            baseDelayMs: 150,
+            maxDelayMs: 2_500,
+          },
+          strict: config.entrywayVerificationStrict,
+        }),
+        fingerprintSecret: config.entrywayFingerprintSecret,
+        staleProvisioningAfterMs: config.entrywayStaleProvisioningAfterMs,
+      });
+
+      registerEntrywayFastifyRoutes(app, {
+        service: entrywayService,
+        entrywayToken: config.entrywayToken,
+        allowPublicResolve: config.entrywayPublicResolve,
+      });
+
+      entrywayRecoveryWorker = new EntrywayRecoveryWorker(
+        entrywayService,
+        {
+          intervalMs: config.entrywayRecoveryIntervalMs,
+          initialDelayMs: config.entrywayRecoveryInitialDelayMs,
+          batchLimit: config.entrywayRecoveryBatchLimit,
+        },
+        {
+          info: (message, meta) => logger.info(meta || {}, message),
+          warn: (message, meta) => logger.warn(meta || {}, message),
+          error: (message, meta) => logger.error(meta || {}, message),
+        },
+      );
+      entrywayRecoveryWorker.start();
+
+      logger.info("Entryway routes enabled", {
+        providers: entrywayProviders.map((provider) => provider.providerId),
+        publicResolve: config.entrywayPublicResolve,
+        strictVerification: config.entrywayVerificationStrict,
+        recoveryIntervalMs: config.entrywayRecoveryIntervalMs,
       });
     }
 
@@ -1924,6 +2253,37 @@ async function main() {
       mrfAdminStore = registration.store;
     }
 
+    // Domain reputation admin routes — registered independently of MRF admin so
+    // the domain blocklist is always manageable even when MRF is in dry-run mode.
+    if (config.mrfAdminToken && domainReputationStore) {
+      registerSpamDomainAdminRoutes(app, domainReputationStore, config.mrfAdminToken);
+    }
+
+    // Keyword rules admin routes — CRUD over the keyword-filter module's rules list.
+    if (config.mrfAdminToken && mrfAdminStore) {
+      registerKeywordRulesAdminRoutes(app, mrfAdminStore, config.mrfAdminToken);
+    }
+
+    // Prewarm MiniLM-L6 embedding model in the background if any semantic keyword
+    // rules are active, so the first inbound message does not pay the cold-load cost.
+    // Best-effort: failure only means the first semantic evaluation incurs the delay.
+    if (mrfAdminStore) {
+      void mrfAdminStore.getModuleConfig("keyword-filter")
+        .then((cfg) => {
+          if (!cfg?.enabled) return;
+          const rules = (cfg.config as { rules?: Array<{ semantic?: boolean }> }).rules ?? [];
+          if (rules.some((r) => r.semantic === true)) {
+            prewarmEmbeddingModel();
+            logger.info("Prewarming MiniLM-L6 embedding model (semantic keyword rules active)");
+          }
+        })
+        .catch((err: unknown) => {
+          logger.warn("Could not inspect keyword-filter config during startup prewarm", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    }
+
     // Shared inbox endpoint
     const enqueueRawInboundRequest = async (
       request: FastifyRequest,
@@ -2148,6 +2508,38 @@ async function main() {
       );
     });
 
+    // ── Provider actor well-known paths ────────────────────────────────────────
+    // Registered BEFORE the legacy /:username/inbox wildcard so that the literal
+    // /actor path is not accidentally captured by that wildcard.
+    if (config.enableProviderActor) {
+      // GET /actor — Mastodon instance-actor compatibility alias.
+      // Served directly (not via redirect) so strict AP implementations that
+      // do not follow redirects on actor fetches still receive the document.
+      // The actor id field always points to the canonical /users/provider URI.
+      // When Fedify is not active, fall back to a 301 redirect (same semantics
+      // as before; the adapter is always present in production when the provider
+      // actor is enabled, because enableProviderActor requires either
+      // ENABLE_MODERATION_BRIDGE_API or ENABLE_MRF_ADMIN_API which in turn
+      // require the Fedify runtime).
+      if (fedifyAdapter) {
+        registerFedifyActorAlias(app, fedifyAdapter, "/actor", `/users/${PROVIDER_ACTOR_IDENTIFIER}`);
+      } else {
+        app.get("/actor", async (_request, reply) => {
+          reply.redirect(`/users/${PROVIDER_ACTOR_IDENTIFIER}`, 301);
+        });
+      }
+
+      // POST /actor/inbox — explicit route for POST /actor/inbox.
+      // Some servers may construct the inbox URL from /actor directly rather
+      // than following the canonical /users/provider document.  Normalises to
+      // /actor/inbox in the queue so the inbound worker can classify it via
+      // PROVIDER_ACTOR_INBOX_PATHS.
+      app.post("/actor/inbox", async (request, reply) => {
+        await enqueueRawInboundRequest(request, reply, "/actor/inbox");
+      });
+    }
+    // ───────────────────────────────────────────────────────────────────────────
+
     // Legacy compatibility alias. Canonical actor documents advertise
     // /users/:identifier/inbox, but we keep this fallback route to avoid
     // breaking older callers during the Fedify ingress migration.
@@ -2369,6 +2761,24 @@ async function main() {
       requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
     });
     logger.info("Muted collection endpoint registered");
+
+    registerKeyPackagesRoutes(app, {
+      activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://activitypods:3000",
+      activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+      domain: config.domain,
+      userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+      requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    });
+    logger.info("AP E2EE MLS key packages endpoint registered");
+
+    registerMlsMessagesRoutes(app, {
+      activityPodsUrl: process.env["ACTIVITYPODS_URL"] ?? "http://activitypods:3000",
+      activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] ?? "",
+      domain: config.domain,
+      userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
+      requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+    });
+    logger.info("AP E2EE MLS messages endpoint registered");
 
     if (fedifyAdapter) {
       registerFedifyRoutes(app, fedifyAdapter);
@@ -2991,6 +3401,11 @@ async function main() {
         });
 
         // ---- Assemble XRPC server ----
+        // Deployment alignment self-check: surface obvious misconfigs of
+        // the PDS hostname advertised in com.atproto.server.describeServer
+        // before the server starts taking traffic.
+        assertAtPdsHostnameValid(config.atPdsHostname, logger);
+
         const xrpcServer = new DefaultAtXrpcServer({
           recordReader,
           carExporter,
@@ -3187,6 +3602,7 @@ async function main() {
                     timeoutMs: config.externalPdsTimeoutMs,
                     maxAttempts: config.externalPdsMaxAttempts,
                   },
+                  ...(spamEvaluator ? { spamEvaluator } : {}),
                 });
 
                 if (externalIngressBootstrap.kind === "ready") {
@@ -3325,6 +3741,7 @@ async function main() {
       enableInboundWorker: config.enableInboundWorker,
       enableOpenSearchIndexer: config.enableOpenSearchIndexer,
       enableMediaAssetSync: config.enableMediaAssetSync,
+      enableEntryway: config.enableEntryway,
     });
 
     if (config.startupMode === "background") {
@@ -3423,6 +3840,18 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("FEP-3ab2 runtime stopped");
     }
 
+    if (entrywayRecoveryWorker) {
+      await entrywayRecoveryWorker.stop();
+      entrywayRecoveryWorker = null;
+      logger.info("Entryway recovery worker stopped");
+    }
+
+    if (entrywayRedisClient) {
+      await entrywayRedisClient.quit().catch(() => entrywayRedisClient!.disconnect());
+      entrywayRedisClient = null;
+      logger.info("Entryway Redis client disconnected");
+    }
+
     if (atJetstreamService) {
       atJetstreamService.shutdown();
       logger.info("AT Jetstream service stopped");
@@ -3438,6 +3867,24 @@ async function shutdown(signal: string): Promise<void> {
       await canonicalAtprotoReportForwarder.stop();
       canonicalAtprotoReportForwarder = null;
       logger.info("Canonical ATProto report forwarder stopped");
+    }
+
+    if (atFirehoseRuntime) {
+      await atFirehoseRuntime.stop();
+      atFirehoseRuntime = null;
+      logger.info("AT firehose runtime stopped");
+    }
+
+    if (atExternalFirehoseRuntime) {
+      await atExternalFirehoseRuntime.stop();
+      atExternalFirehoseRuntime = null;
+      logger.info("External AT firehose runtime stopped");
+    }
+
+    if (protocolBridgeRuntime) {
+      await protocolBridgeRuntime.stop();
+      protocolBridgeRuntime = null;
+      logger.info("Protocol bridge runtime stopped");
     }
 
     // Stop workers first
@@ -3488,24 +3935,6 @@ async function shutdown(signal: string): Promise<void> {
       await identityWarmupService.stop();
       identityWarmupService = null;
       logger.info("Identity warmup service stopped");
-    }
-
-    if (atFirehoseRuntime) {
-      await atFirehoseRuntime.stop();
-      atFirehoseRuntime = null;
-      logger.info("AT firehose runtime stopped");
-    }
-
-    if (atExternalFirehoseRuntime) {
-      await atExternalFirehoseRuntime.stop();
-      atExternalFirehoseRuntime = null;
-      logger.info("External AT firehose runtime stopped");
-    }
-
-    if (protocolBridgeRuntime) {
-      await protocolBridgeRuntime.stop();
-      protocolBridgeRuntime = null;
-      logger.info("Protocol bridge runtime stopped");
     }
 
     if (searchIndexerRedis) {

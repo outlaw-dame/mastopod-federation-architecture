@@ -42,6 +42,15 @@ export interface SignRequestParams {
   body: string;
 }
 
+export interface SidecarLocalSigningServiceOptions {
+  /**
+   * Maps actor identifiers to the canonical identifier that owns their key
+   * material. This lets compatibility aliases expose distinct actor URIs while
+   * sharing one persisted key pair.
+   */
+  keyAliases?: ReadonlyMap<string, string> | Record<string, string>;
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -49,14 +58,28 @@ export interface SignRequestParams {
 const REDIS_KEY_PREFIX = "sidecar:local:keypair:";
 
 export class SidecarLocalSigningService {
-  constructor(private readonly redis: Redis) {}
+  private readonly keyAliases: Map<string, string>;
+
+  constructor(
+    private readonly redis: Redis,
+    options: SidecarLocalSigningServiceOptions = {},
+  ) {
+    this.keyAliases = options.keyAliases instanceof Map
+      ? new Map(options.keyAliases)
+      : new Map(Object.entries(options.keyAliases ?? {}));
+  }
+
+  private resolveKeyIdentifier(identifier: string): string {
+    return this.keyAliases.get(identifier) ?? identifier;
+  }
 
   /**
    * Returns the key pair for `identifier`, creating and persisting it if it
    * does not yet exist.
    */
   async getOrCreateKeyPair(identifier: string): Promise<LocalKeyPair> {
-    const redisKey = `${REDIS_KEY_PREFIX}${identifier}`;
+    const keyIdentifier = this.resolveKeyIdentifier(identifier);
+    const redisKey = `${REDIS_KEY_PREFIX}${keyIdentifier}`;
     const stored = await this.redis.hgetall(redisKey);
 
     if (

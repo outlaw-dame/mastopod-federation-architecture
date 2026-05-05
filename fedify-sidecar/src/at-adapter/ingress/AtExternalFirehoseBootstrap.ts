@@ -11,6 +11,7 @@ import {
   DefaultAtIngressVerifier,
   type AtCommitVerifier,
 } from "./AtIngressVerifier.js";
+import type { SpamEvaluator } from "../../mrf/SpamEvaluator.js";
 import { AtIngressRuntime, type AtIngressRuntimeConfig, type AtIngressRuntimeLogger } from "./AtIngressRuntime.js";
 import { HttpAtIdentityResolver, type HttpAtIdentityResolverOptions } from "./HttpAtIdentityResolver.js";
 import { HttpAtSyncRebuilder, type HttpAtSyncRebuilderOptions } from "./HttpAtSyncRebuilder.js";
@@ -29,6 +30,7 @@ export interface AtExternalFirehoseBootstrapOptions {
   logger?: AtIngressRuntimeLogger;
   identityResolverOptions?: HttpAtIdentityResolverOptions;
   syncRebuilderOptions?: Omit<HttpAtSyncRebuilderOptions, "repoRegistry" | "identityResolver">;
+  spamEvaluator?: SpamEvaluator;
 }
 
 export type AtExternalFirehoseBootstrapResult =
@@ -95,6 +97,7 @@ export function buildAtExternalFirehoseBootstrap(
     options.commitVerifier,
     identityResolver,
     syncRebuilder,
+    options.spamEvaluator,
   );
   const runtime = new AtIngressRuntime({
     config: options.runtimeConfig,

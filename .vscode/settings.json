@@ -4,6 +4,8 @@
     },
     "python.terminal.useEnvFile": true,
     "files.associations": {
-        "**/memory/api/drizzle/*.sql": "postgres"
-    }
+        "**/memory/api/drizzle/*.sql": "plaintext",
+        "**/drizzle/*.sql": "plaintext"
+    },
+    "mssql.intelliSense.enableErrorChecking": false
 }

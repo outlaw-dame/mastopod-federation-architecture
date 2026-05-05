@@ -23,6 +23,61 @@ const MAX_ACTIVITY_OBJECTS = 20;
 const MAX_REASON_LENGTH = 2_000;
 export const DEFAULT_MODERATION_ACTOR_IDENTIFIER = "moderation";
 
+// ---------------------------------------------------------------------------
+// Provider actor identity — canonical rename of the moderation actor
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical identifier for the sidecar-owned provider actor.
+ * Replaces the legacy "moderation" identifier going forward.
+ * Actor document is served at /users/provider; inbox at /users/provider/inbox.
+ */
+export const PROVIDER_ACTOR_IDENTIFIER = "provider";
+
+/**
+ * Legacy identifiers kept for backward compatibility with existing federations
+ * that know the provider actor as /users/moderation.
+ * The actor dispatcher serves all of these with the same key pair.
+ */
+export const PROVIDER_ACTOR_LEGACY_IDENTIFIERS = ["moderation"] as const;
+
+/**
+ * All identifiers (canonical + legacy) that the actor dispatcher must register
+ * as sidecar-owned service actors.
+ */
+export const ALL_PROVIDER_ACTOR_IDENTIFIERS = [
+  PROVIDER_ACTOR_IDENTIFIER,
+  ...PROVIDER_ACTOR_LEGACY_IDENTIFIERS,
+] as const;
+
+/**
+ * Returns the complete set of URIs under which the provider actor is reachable:
+ *   https://domain/users/provider  (canonical)
+ *   https://domain/actor           (Mastodon instance-actor compat)
+ *   https://domain/users/moderation (legacy alias)
+ *
+ * Used by the inbound worker to classify shared-inbox activities that are
+ * addressed to the provider actor when inspecting to/cc/audience fields.
+ */
+export function buildProviderActorUriSet(domain: string): Set<string> {
+  return new Set([
+    `https://${domain}/users/${PROVIDER_ACTOR_IDENTIFIER}`,
+    `https://${domain}/actor`,
+    ...PROVIDER_ACTOR_LEGACY_IDENTIFIERS.map((id) => `https://${domain}/users/${id}`),
+  ]);
+}
+
+/**
+ * Inbox paths that are exclusively owned by the provider actor.
+ * Excludes /inbox (shared inbox) — shared-inbox provider-directed traffic
+ * is classified by inspecting the activity's to/cc/audience/object fields.
+ */
+export const PROVIDER_ACTOR_INBOX_PATHS: ReadonlySet<string> = new Set([
+  `/users/${PROVIDER_ACTOR_IDENTIFIER}/inbox`,
+  "/actor/inbox",
+  ...PROVIDER_ACTOR_LEGACY_IDENTIFIERS.map((id) => `/users/${id}/inbox`),
+]);
+
 export interface ActivityPubReportForwardingLogger {
   info(message: string, meta?: Record<string, unknown>): void;
   warn(message: string, meta?: Record<string, unknown>): void;

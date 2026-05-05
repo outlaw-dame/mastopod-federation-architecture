@@ -17,9 +17,11 @@
  */
 
 import type { CanonicalIntent } from "./CanonicalIntent.js";
+import type { CanonicalFacet } from "./CanonicalContent.js";
 import type { CanonicalV1Event, CanonicalV1ActorRef, CanonicalV1ObjectRef } from "../../streams/v6-topology.js";
 
 export const CANONICAL_V1_TOPIC = "canonical.v1";
+const MAX_CANONICAL_CONTENT_TEXT_LENGTH = 1_000;
 
 // Minimal structural publisher interface — satisfied by RedpandaEventPublisher.
 export interface CanonicalRawPublisher {
@@ -80,6 +82,7 @@ function serializeIntent(intent: CanonicalIntent): CanonicalV1Event {
     kind: intent.kind,
     sourceProtocol: intent.sourceProtocol,
     sourceEventId: intent.sourceEventId,
+    visibility: intent.visibility,
     actor,
     createdAt: intent.createdAt,
     observedAt: intent.observedAt,
@@ -186,6 +189,11 @@ function serializeIntent(intent: CanonicalIntent): CanonicalV1Event {
     }
   }
 
+  const content = buildContentSummary(intent);
+  if (content) {
+    base.content = content;
+  }
+
   return base;
 }
 
@@ -196,4 +204,97 @@ function resolvePartitionKey(intent: CanonicalIntent): string {
     intent.sourceAccountRef.canonicalAccountId ??
     intent.canonicalIntentId
   );
+}
+
+function buildContentSummary(intent: CanonicalIntent): CanonicalV1Event["content"] | undefined {
+  if (
+    intent.kind === "PostCreate" ||
+    intent.kind === "PostEdit" ||
+    intent.kind === "ProfileUpdate"
+  ) {
+    const tags = extractTagCandidates(intent.content.facets);
+    const links = extractLinkCandidates(intent.content.facets);
+    const linkPreviewUrl = normalizeOptionalUrl(intent.content.linkPreview?.uri);
+    const externalUrl = normalizeOptionalUrl(intent.content.externalUrl);
+
+    return compactContentSummary({
+      kind: intent.content.kind,
+      title: normalizeOptionalText(intent.content.title),
+      summary: truncateOptionalText(intent.content.summary, MAX_CANONICAL_CONTENT_TEXT_LENGTH),
+      plaintext: truncateOptionalText(intent.content.plaintext, MAX_CANONICAL_CONTENT_TEXT_LENGTH),
+      language: normalizeOptionalText(intent.content.language),
+      ...(tags.length > 0 ? { tags } : {}),
+      ...(links.length > 0 ? { links } : {}),
+      ...(externalUrl ? { externalUrl } : {}),
+      ...(linkPreviewUrl ? { linkPreviewUrl } : {}),
+    });
+  }
+
+  if (intent.kind === "PollCreate" || intent.kind === "PollEdit") {
+    return compactContentSummary({
+      kind: "poll",
+      plaintext: truncateOptionalText(intent.question, MAX_CANONICAL_CONTENT_TEXT_LENGTH),
+    });
+  }
+
+  return undefined;
+}
+
+function compactContentSummary(summary: NonNullable<CanonicalV1Event["content"]>): CanonicalV1Event["content"] {
+  const out: NonNullable<CanonicalV1Event["content"]> = { kind: summary.kind };
+  if (summary.title) out.title = summary.title;
+  if (summary.summary) out.summary = summary.summary;
+  if (summary.plaintext) out.plaintext = summary.plaintext;
+  if (summary.language) out.language = summary.language;
+  if (summary.tags && summary.tags.length > 0) out.tags = summary.tags;
+  if (summary.links && summary.links.length > 0) out.links = summary.links;
+  if (summary.externalUrl) out.externalUrl = summary.externalUrl;
+  if (summary.linkPreviewUrl) out.linkPreviewUrl = summary.linkPreviewUrl;
+  return out;
+}
+
+function extractTagCandidates(facets: readonly CanonicalFacet[]): string[] {
+  return uniqueStrings(
+    facets
+      .filter((facet): facet is Extract<CanonicalFacet, { type: "tag" }> => facet.type === "tag")
+      .map((facet) => facet.tag.trim().replace(/^#/, ""))
+      .filter((tag) => tag.length > 0),
+  );
+}
+
+function extractLinkCandidates(facets: readonly CanonicalFacet[]): string[] {
+  return uniqueStrings(
+    facets
+      .filter((facet): facet is Extract<CanonicalFacet, { type: "link" }> => facet.type === "link")
+      .map((facet) => normalizeOptionalUrl(facet.url))
+      .filter((url): url is string => Boolean(url)),
+  );
+}
+
+function uniqueStrings(values: Iterable<string>): string[] {
+  return [...new Set([...values])].slice(0, 50);
+}
+
+function normalizeOptionalText(value: string | null | undefined): string | null {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function truncateOptionalText(value: string | null | undefined, maxLength: number): string | null {
+  const normalized = normalizeOptionalText(value);
+  if (!normalized) return null;
+  return normalized.length > maxLength ? normalized.slice(0, maxLength) : normalized;
+}
+
+function normalizeOptionalUrl(value: string | null | undefined): string | null {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
 }

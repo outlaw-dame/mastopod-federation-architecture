@@ -1,3 +1,4 @@
+import { DirectMessageToApProjector } from "./activitypub/DirectMessageToApProjector.js";
 import { FollowAddToApProjector } from "./activitypub/FollowAddToApProjector.js";
 import { FollowRemoveToApProjector } from "./activitypub/FollowRemoveToApProjector.js";
 import { PollCreateToApProjector } from "./activitypub/PollCreateToApProjector.js";
@@ -35,6 +36,7 @@ export class CanonicalToActivityPubProjector extends ProjectorRegistry<ActivityP
       new ShareRemoveToApProjector(),
       new FollowAddToApProjector(),
       new FollowRemoveToApProjector(),
+      new DirectMessageToApProjector(),
     ]);
   }
 }

@@ -35,6 +35,7 @@ Goal: fail fast before serving traffic when provider configuration is inconsiste
 | INF-003 | `ap.search.opensearch` | OpenSearch URL + auth (if required) | fatal | `cap_infra_missing` |
 | INF-004 | `ap.signing.batch` | ActivityPods signing endpoint + token | fatal | `cap_infra_missing` |
 | INF-005 | `ap.mrf` | MRF policy module load succeeds | fatal | `cap_module_load_failed` |
+| INF-006 | `provider.account.provisioning` | account orchestrator, approved-app registry, user verification provider, idempotency store | fatal | `cap_infra_missing` |
 
 ## AP-Only Profile Rules
 

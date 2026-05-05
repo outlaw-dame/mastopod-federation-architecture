@@ -207,6 +207,18 @@ export interface CanonicalV1ObjectRef {
   canonicalUrl?: string | null;
 }
 
+export interface CanonicalV1ContentSummary {
+  kind: "note" | "article" | "profile" | "reaction" | "follow" | "share" | "poll";
+  title?: string | null;
+  summary?: string | null;
+  plaintext?: string | null;
+  language?: string | null;
+  tags?: string[];
+  links?: string[];
+  externalUrl?: string | null;
+  linkPreviewUrl?: string | null;
+}
+
 export interface CanonicalV1ReportPayload {
   subjectKind: "account" | "object";
   authoritativeProtocol?: "local" | "ap" | "at";
@@ -249,11 +261,19 @@ export interface CanonicalV1Event {
     | "FollowRemove"
     | "ProfileUpdate"
     | "AccountState"
-    | "ReportCreate";
+    | "ReportCreate"
+    | "DirectMessage";
   /** Protocol the event originated from. */
   sourceProtocol: "activitypub" | "atproto" | "activitypods";
   /** Original event ID in the source protocol. */
   sourceEventId: string;
+  /**
+   * Protocol-neutral visibility/admissibility signal. Public trend/search
+   * consumers must still join against their own public-indexing policy, but this
+   * prevents them from treating direct/followers-only canonical events as public
+   * by omission.
+   */
+  visibility: "public" | "unlisted" | "followers" | "direct" | "unknown";
   /** Actor who performed the action. */
   actor: CanonicalV1ActorRef;
   /**
@@ -274,6 +294,12 @@ export interface CanonicalV1Event {
    * Used by the notification consumer to fan-out mention notifications.
    */
   mentions?: string[];
+  /**
+   * Bounded candidate extraction surface for downstream search/feed/trend
+   * consumers. This intentionally excludes full HTML and attachments; consumers
+   * that need full documents should hydrate from the public content index.
+   */
+  content?: CanonicalV1ContentSummary;
   /**
    * Additional report metadata for ReportCreate.
    * The reported account/object still uses the top-level `subject`/`object`

@@ -802,8 +802,9 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
               preferredUsername: identifier,
               inbox: new URL(`https://${ctx.data.domain}/users/${identifier}/inbox`),
               outbox: new URL(`https://${ctx.data.domain}/users/${identifier}/outbox`),
-              followers: new URL(`https://${ctx.data.domain}/users/${identifier}/followers`),
-              following: new URL(`https://${ctx.data.domain}/users/${identifier}/following`),
+              // followers/following are user-social constructs not meaningful for
+              // sidecar service actors (relay, provider).  Omitting them prevents
+              // advertising collection endpoints that contain no real data.
               url: new URL(actorId),
               ...(publicKey != null ? { publicKey } : {}),
             });
@@ -925,6 +926,16 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         identifier: identifier.slice(0, 64),
       });
       return null;
+    }
+
+    // Sidecar-owned service actors (relay, provider, moderation legacy alias)
+    // have no record in ActivityPods.  Calling fetchActivityPodsActorDocument
+    // returns null → 404, so all their collection endpoints would fail.
+    // Return a valid empty collection directly — the outbox carries no sensitive
+    // report data by default; followers/following are not meaningful for service
+    // actors.  Actual outbox content exposure is a separate privacy decision.
+    if (this.sidecarServiceActors.has(identifier)) {
+      return { items: [] };
     }
 
     const actor = await this.fetchActivityPodsActorDocument(ctx, identifier);

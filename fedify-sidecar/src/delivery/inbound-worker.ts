@@ -38,7 +38,9 @@ import type { OriginReconciliationService } from "../federation/origin-reconcili
 import type { MRFAdminStore } from "../admin/mrf/store.js";
 import type { ModerationBridgeStore } from "../admin/moderation/types.js";
 import { createCanonicalReportCreateIntent } from "../admin/moderation/reporting.js";
+import type { ActivityPodsProviderInboxEventClient } from "../admin/moderation/ActivityPodsProviderInboxEventClient.js";
 import { evaluateActivityPubSubjectPolicy } from "../mrf/ActivityPubSubjectPolicy.js";
+import type { SpamEvaluator } from "../mrf/SpamEvaluator.js";
 import {
   resolvePublicSearchConsent,
   isPublicSearchIndexable,
@@ -140,6 +142,11 @@ export interface InboundWorkerConfig {
    */
   getMrfAdminStore?: () => MRFAdminStore | null;
   /**
+   * Unified spam evaluator — runs actor reputation, content fingerprint, and
+   * domain reputation checks in order. Replaces the previous per-module calls.
+   */
+  spamEvaluator?: SpamEvaluator;
+  /**
    * Optional getter for the moderation bridge store so verified inbound Flag
    * activities can be captured as moderation cases without depending on the
    * ActivityPods bridge path.
@@ -181,6 +188,34 @@ export interface InboundWorkerConfig {
   announceAggregator?: {
     claimIfNew(actorUri: string, objectId: string): Promise<boolean>;
   };
+  /**
+   * Full set of provider actor URIs (canonical + aliases, e.g.
+   * "https://example.com/users/provider", "https://example.com/actor",
+   * "https://example.com/users/moderation").
+   *
+   * Used alongside providerActorInboxPaths to classify whether an inbound
+   * activity is provider-directed before forwarding to the provider inbox
+   * event client.  When absent, provider inbox routing is disabled.
+   */
+  providerActorUris?: ReadonlySet<string>;
+  /**
+   * Set of inbox path suffixes that belong to provider actors (e.g.
+   * "/users/provider/inbox", "/actor/inbox", "/users/moderation/inbox").
+   *
+   * When an envelope path is in this set the activity bypasses the normal
+   * ActivityPods forwarding path and is routed to providerInboxEventClient
+   * instead (unless it is a Flag, which is already handled by Step 3.75).
+   */
+  providerActorInboxPaths?: ReadonlySet<string>;
+  /**
+   * HTTP client for notifying ActivityPods of non-Flag provider inbox events
+   * (Undo{Flag}, Accept, Reject, or generic activities addressed to the
+   * provider actor).
+   *
+   * When absent, provider inbox routing falls through to the normal
+   * ActivityPods forwarding path.
+   */
+  providerInboxEventClient?: ActivityPodsProviderInboxEventClient;
 }
 
 export interface VerificationResult {
@@ -358,6 +393,45 @@ function coerceStringArray(value: unknown): string[] {
   return values
     .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
     .map((entry) => entry.trim());
+}
+
+/**
+ * Extract the full set of addressee URIs from an AP activity, inspecting
+ * to/cc/bto/bcc/audience on the top-level activity AND on the nested object
+ * (needed to classify Undo{Flag} where the inner object carries the original
+ * Flag's recipients).
+ *
+ * Public-collection sentinel URIs are excluded — they are visibility signals,
+ * not deliverable inboxes.
+ */
+function extractActivityRecipients(activity: unknown): Set<string> {
+  const uris = new Set<string>();
+  const publicSentinels = new Set([
+    "https://www.w3.org/ns/activitystreams#Public",
+    "as:Public",
+    "Public",
+  ]);
+
+  function collectFrom(node: unknown): void {
+    if (!isRecord(node)) return;
+    for (const field of ["to", "cc", "bto", "bcc", "audience"]) {
+      const val = node[field];
+      const items = Array.isArray(val) ? val : val !== undefined && val !== null ? [val] : [];
+      for (const item of items) {
+        if (typeof item === "string" && item.length > 0 && !publicSentinels.has(item)) {
+          uris.add(item);
+        }
+      }
+    }
+  }
+
+  collectFrom(activity);
+  // Also inspect the nested object for Undo correlation.
+  if (isRecord(activity) && activity["object"] !== undefined) {
+    collectFrom(activity["object"]);
+  }
+
+  return uris;
 }
 
 /**
@@ -592,6 +666,137 @@ export class InboundWorker {
 
   private isFlagActivity(activity: unknown): activity is Record<string, unknown> {
     return this.normalizeActivityType((activity as Record<string, unknown> | null)?.["type"]) === "Flag";
+  }
+
+  /**
+   * Returns true when the activity is an Undo wrapping a Flag object.
+   * Checks both the string form ("Undo" + object.type "Flag") and the
+   * case where the nested object is only referenced by URI (unresolved).
+   */
+  private isUndoOfFlagActivity(activity: unknown): boolean {
+    if (!isRecord(activity)) return false;
+    if (this.normalizeActivityType(activity["type"]) !== "Undo") return false;
+
+    const obj = activity["object"];
+    // Inline object with explicit type
+    if (isRecord(obj)) {
+      return this.normalizeActivityType(obj["type"]) === "Flag";
+    }
+    // URI-only reference: we cannot know for certain — treat as generic Undo.
+    // The ActivityPods backend will correlate by originalFlagId lookup anyway
+    // when eventType is "UndoFlag", but we only claim it's an UndoFlag when
+    // we can confirm the wrapped object type here.
+    return false;
+  }
+
+  /**
+   * Returns true when the activity type is Accept or Reject.
+   */
+  private isAcceptOrRejectActivity(activity: unknown): activity is Record<string, unknown> {
+    if (!isRecord(activity)) return false;
+    const t = this.normalizeActivityType(activity["type"]);
+    return t === "Accept" || t === "Reject";
+  }
+
+  /**
+   * Returns true when the inbound activity is directed at the provider actor —
+   * either because the envelope arrived on a provider inbox path, or because
+   * the activity's addressing fields contain a known provider actor URI.
+   *
+   * Classification inspects to/cc/bto/bcc/audience on both the top-level
+   * activity and the nested object (for Undo{Flag} correlation).
+   */
+  private isProviderDirectedActivity(activity: unknown, envelopePath: string): boolean {
+    const { providerActorInboxPaths, providerActorUris } = this.config;
+    if (!providerActorInboxPaths && !providerActorUris) return false;
+
+    // Fast path: envelope was delivered directly to a provider inbox path.
+    if (providerActorInboxPaths?.has(envelopePath)) return true;
+
+    // Slow path: shared inbox delivery — classify by recipient URIs.
+    if (providerActorUris && providerActorUris.size > 0) {
+      const recipients = extractActivityRecipients(activity);
+      for (const uri of recipients) {
+        if (providerActorUris.has(uri)) return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Extract the object URI from an Undo activity for Undo{Flag} correlation.
+   * Returns null when the object field is absent or not a string/record-with-id.
+   */
+  private extractUndoObjectId(activity: Record<string, unknown>): string | null {
+    const obj = activity["object"];
+    if (typeof obj === "string" && obj.trim().length > 0) return obj.trim();
+    if (isRecord(obj) && typeof obj["id"] === "string" && obj["id"].trim().length > 0) {
+      return obj["id"].trim();
+    }
+    return null;
+  }
+
+  /**
+   * Forward a non-Flag provider-directed activity to ActivityPods via the
+   * provider inbox event client.
+   *
+   * Returns true when ActivityPods accepted (or permanently rejected) the
+   * event — the caller should ACK the message.
+   * Returns false when a transient error occurred — the caller must NOT ACK
+   * so XAUTOCLAIM retries the message.
+   */
+  private async forwardProviderInboxEvent(
+    activity: Record<string, unknown>,
+    verifiedActorUri: string,
+    envelopePath: string,
+    receivedAt: string,
+  ): Promise<boolean> {
+    const client = this.config.providerInboxEventClient;
+    if (!client) return false;
+
+    const activityId = typeof activity["id"] === "string" && activity["id"].trim().length > 0
+      ? activity["id"].trim()
+      : null;
+    const activityType = this.normalizeActivityType(activity["type"]);
+
+    if (this.isUndoOfFlagActivity(activity)) {
+      const originalFlagId = this.extractUndoObjectId(activity);
+      return client.sendUndoFlag({
+        activityId: activityId ?? "",
+        actorUri: verifiedActorUri,
+        originalFlagId: originalFlagId ?? "",
+        envelopePath,
+        receivedAt,
+        rawActivity: activity,
+      });
+    }
+
+    if (this.isAcceptOrRejectActivity(activity)) {
+      const objectId =
+        typeof activity["object"] === "string" ? activity["object"].trim() :
+        isRecord(activity["object"]) && typeof activity["object"]["id"] === "string"
+          ? activity["object"]["id"].trim()
+          : null;
+      return client.sendAcceptReject({
+        activityId: activityId ?? "",
+        actorUri: verifiedActorUri,
+        activityType: activityType as "Accept" | "Reject",
+        objectId: objectId || null,
+        envelopePath,
+        receivedAt,
+        rawActivity: activity,
+      });
+    }
+
+    return client.sendGenericEvent({
+      activityId,
+      actorUri: verifiedActorUri,
+      activityType,
+      envelopePath,
+      receivedAt,
+      rawActivity: activity,
+    });
   }
 
   private buildFlagModerationCaseDedupeKey(
@@ -995,6 +1200,39 @@ export class InboundWorker {
         }
       }
 
+      // Step 3.62: Spam detection — actor reputation, content fingerprint, domain reputation.
+      if (this.config.spamEvaluator) {
+        const actorDoc = await this.fetchActorDocument(verifiedActorUri).catch(() => null);
+        const spamDecision = await this.config.spamEvaluator.evaluateAp({
+          activityId: typeof activity.id === "string" ? activity.id : envelope.envelopeId,
+          actorUri: verifiedActorUri,
+          actorDocument: actorDoc,
+          activity: activity as Record<string, unknown>,
+          originHost: extractDomain(verifiedActorUri) ?? undefined,
+          visibility: this.determineVisibility(activity),
+          requestId: envelope.envelopeId,
+        });
+
+        if (
+          spamDecision &&
+          (spamDecision.appliedAction === "filter" || spamDecision.appliedAction === "reject")
+        ) {
+          metrics.inboundActivityPubActivities.inc({
+            stage: spamDecision.appliedAction === "reject" ? "spam_reject" : "spam_filter",
+            activity_type: activityType,
+          });
+          await this.queue.ack("inbound", messageId);
+          logger.info("Inbound activity discarded by spam evaluator", {
+            envelopeId: envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            moduleId: spamDecision.moduleId,
+            action: spamDecision.appliedAction,
+            traceId: spamDecision.traceId,
+          });
+          return;
+        }
+      }
+
       // Step 3.75: Flag activities → moderation store (own dedup); all others →
       // durable Redis idempotency guard, then in-process Set (tests only).
       if (this.isFlagActivity(activity)) {
@@ -1011,6 +1249,59 @@ export class InboundWorker {
           actorUri: verifiedActorUri,
           caseId: moderationCase?.caseId ?? null,
           deduped: moderationCase?.deduped ?? false,
+        });
+        return;
+      }
+
+      // Step 3.76: Non-Flag provider-directed activities.
+      //
+      // Runs BEFORE the Redis idempotency guard so that a transient ActivityPods
+      // failure (return false from forwardProviderInboxEvent) does NOT ACK the
+      // message.  If ActivityPods is down and we had claimed the activityId first,
+      // the subsequent XAUTOCLAIM retry would be silently dropped as a duplicate.
+      //
+      // The client itself is idempotent on the ActivityPods side (keyed by
+      // activityId), so duplicate delivery on retry is safe.
+      if (
+        this.config.providerInboxEventClient &&
+        this.isProviderDirectedActivity(activity, envelope.path)
+      ) {
+        const receivedAt =
+          typeof envelope.receivedAt === "string"
+            ? envelope.receivedAt
+            : new Date(envelope.receivedAt as number).toISOString();
+
+        const accepted = await this.forwardProviderInboxEvent(
+          activity,
+          verifiedActorUri,
+          envelope.path,
+          receivedAt,
+        );
+
+        if (!accepted) {
+          // Transient failure — do NOT ACK; XAUTOCLAIM will retry the message.
+          metrics.inboundActivityPubActivities.inc({
+            stage: "provider_inbox_event_retry",
+            activity_type: activityType,
+          });
+          logger.warn("Provider inbox event forward failed (transient) — message will retry", {
+            envelopeId: envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            activityType,
+          });
+          return;
+        }
+
+        metrics.inboundActivityPubActivities.inc({
+          stage: "provider_inbox_event_forwarded",
+          activity_type: activityType,
+        });
+        await this.queue.ack("inbound", messageId);
+        logger.info("Inbound provider-directed activity forwarded to ActivityPods", {
+          envelopeId: envelope.envelopeId,
+          actorUri: verifiedActorUri,
+          activityType,
+          path: envelope.path,
         });
         return;
       }

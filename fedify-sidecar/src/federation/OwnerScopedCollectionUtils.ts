@@ -100,6 +100,7 @@ export async function verifyOwnerHttpSignature(
   domain: string,
   userAgent: string,
   timeoutMs: number,
+  rawBody?: string | Buffer,
 ): Promise<{ status: number; error: string } | null> {
   const rawSignature = req.headers["signature"];
   if (typeof rawSignature !== "string" || rawSignature.length === 0) {
@@ -137,14 +138,17 @@ export async function verifyOwnerHttpSignature(
 
   const digestHeader = req.headers["digest"];
   if (typeof digestHeader === "string") {
-    const expectedDigest = `SHA-256=${createHash("sha256").update("").digest("base64")}`;
+    const bodyBytes = rawBody
+      ? (Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody, "utf8"))
+      : Buffer.alloc(0);
+    const expectedDigest = `SHA-256=${createHash("sha256").update(bodyBytes).digest("base64")}`;
     if (digestHeader !== expectedDigest) {
       return { status: 401, error: "Digest mismatch" };
     }
   }
 
   const rawHeaders = req.headers as Record<string, string | string[] | undefined>;
-  const signingString = buildSigningString("GET", req.url, rawHeaders, signedHeadersRaw.split(" "));
+  const signingString = buildSigningString(req.method, req.url, rawHeaders, signedHeadersRaw.split(" "));
 
   try {
     const verifier = createVerify("RSA-SHA256");
@@ -158,6 +162,142 @@ export async function verifyOwnerHttpSignature(
   }
 
   return null;
+}
+
+/**
+ * Verify an HTTP Signature from any valid AP actor (not just the collection
+ * owner). Used for POST endpoints that accept messages from remote peers.
+ * Returns the sender's base actor URI on success.
+ */
+export async function verifyAnyActorHttpSignature(
+  req: FastifyRequest,
+  rawBody: string | Buffer,
+  userAgent: string,
+  timeoutMs: number,
+): Promise<{ ok: false; status: number; error: string } | { ok: true; senderUri: string }> {
+  const rawSignature = req.headers["signature"];
+  if (typeof rawSignature !== "string" || rawSignature.length === 0) {
+    return { ok: false, status: 401, error: "HTTP Signature required" };
+  }
+
+  const sigParams = parseSignatureHeader(rawSignature);
+  const keyId = sigParams["keyId"];
+  const signatureB64 = sigParams["signature"];
+  const signedHeadersRaw = sigParams["headers"];
+
+  if (
+    typeof keyId !== "string" || keyId.length === 0 ||
+    typeof signatureB64 !== "string" ||
+    typeof signedHeadersRaw !== "string"
+  ) {
+    return { ok: false, status: 401, error: "Malformed HTTP Signature" };
+  }
+
+  const actorDoc = await fetchActorDocumentForKey(keyId, userAgent, timeoutMs);
+  if (!actorDoc) {
+    return { ok: false, status: 401, error: "Could not fetch signing key document" };
+  }
+
+  const publicKeyPem = extractPublicKeyPem(actorDoc);
+  if (!publicKeyPem) {
+    return { ok: false, status: 401, error: "No public key in key document" };
+  }
+
+  const digestHeader = req.headers["digest"];
+  if (typeof digestHeader === "string") {
+    const bodyBytes = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody, "utf8");
+    const expectedDigest = `SHA-256=${createHash("sha256").update(bodyBytes).digest("base64")}`;
+    if (digestHeader !== expectedDigest) {
+      return { ok: false, status: 401, error: "Digest mismatch" };
+    }
+  }
+
+  const rawHeaders = req.headers as Record<string, string | string[] | undefined>;
+  const signingString = buildSigningString("POST", req.url, rawHeaders, signedHeadersRaw.split(" "));
+
+  try {
+    const verifier = createVerify("RSA-SHA256");
+    verifier.update(signingString);
+    const isValid = verifier.verify(publicKeyPem, signatureB64, "base64");
+    if (!isValid) {
+      return { ok: false, status: 401, error: "Signature verification failed" };
+    }
+  } catch {
+    return { ok: false, status: 401, error: "Signature verification error" };
+  }
+
+  const senderUri = keyId.includes("#") ? keyId.split("#")[0]! : keyId;
+  return { ok: true, senderUri };
+}
+
+/**
+ * POST to an internal ActivityPods API endpoint with a JSON body.
+ * Returns the HTTP status code and parsed response body.
+ * Retries on transient server errors (5xx, 408, 429).
+ */
+export async function postInternalActivityPodsBody<T>(input: {
+  label: string;
+  url: string;
+  identifier: string;
+  activityPodsToken: string;
+  timeoutMs: number;
+  body: unknown;
+}): Promise<{ statusCode: number; data: T | null }> {
+  const serialized = JSON.stringify(input.body);
+
+  for (let attempt = 1; attempt <= INTERNAL_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await request(input.url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${input.activityPodsToken}`,
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: serialized,
+        bodyTimeout: input.timeoutMs,
+        headersTimeout: input.timeoutMs,
+      });
+
+      const statusCode = response.statusCode;
+
+      if (statusCode >= 200 && statusCode < 300) {
+        const data = await response.body.json() as T;
+        return { statusCode, data };
+      }
+
+      // Surface 4xx directly — these are not retryable
+      if (statusCode >= 400 && statusCode < 500) {
+        let data: T | null = null;
+        try { data = await response.body.json() as T; } catch { await response.body.text().catch(() => {}); }
+        return { statusCode, data };
+      }
+
+      await response.body.text().catch(() => {});
+      const retryable = isRetryableInternalStatus(statusCode);
+      if (!retryable || attempt === INTERNAL_MAX_ATTEMPTS) {
+        logger.warn("[internal-post] ActivityPods returned unexpected status", {
+          label: input.label,
+          identifier: input.identifier,
+          status: statusCode,
+        });
+        return { statusCode, data: null };
+      }
+    } catch (error: unknown) {
+      if (attempt === INTERNAL_MAX_ATTEMPTS) {
+        logger.warn("[internal-post] ActivityPods request failed", {
+          label: input.label,
+          identifier: input.identifier,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return { statusCode: 503, data: null };
+      }
+    }
+
+    await wait(nextBackoffDelayMs(attempt));
+  }
+
+  return { statusCode: 503, data: null };
 }
 
 export async function fetchInternalActivityPodsBody<T>(input: {
