@@ -32,6 +32,7 @@
     "topics:bootstrap": "tsx scripts/bootstrap-redpanda-topics.ts",
     "topics:verify": "REDPANDA_TOPIC_GOVERNANCE_MODE=verify tsx scripts/bootstrap-redpanda-topics.ts",
     "inspect:identity-redis": "tsx src/at-adapter/tests/IdentityRedisInspector.ts",
+    "trace:identity-sync": "bash scripts/trace-identity-sync.sh",
     "smoke:phase7:primary": "tsx src/at-adapter/tests/Phase7PrimarySmoke.ts",
     "smoke:ap:outbound-topic": "tsx src/protocol-bridge/tests/ApOutboundTopicSmokeProof.ts",
     "proof:ap:interop": "tsx src/interop/ap/ApInteropHarnessProof.ts",
