@@ -21,6 +21,7 @@ import { logger } from "../utils/logger.js";
 export interface OutboxIntentWorkerConfig {
   concurrency: number;
   outboundJobMaxAttempts: number;
+  maxTargetsPerIntent?: number;
   activityPubOutboundDeliveryPolicy: ActivityPubOutboundDeliveryPolicy;
   /**
    * Optional sidecar-side remote sharedInbox discovery cache.
@@ -49,7 +50,7 @@ class OutboxIntentProcessingError extends Error {
 export class OutboxIntentWorker {
   private readonly queue: RedisStreamsQueue;
   private readonly redpanda: RedPandaProducer | null;
-  private readonly config: OutboxIntentWorkerConfig;
+  private readonly config: OutboxIntentWorkerConfig & { maxTargetsPerIntent: number };
   private readonly sharedInboxCache: RemoteSharedInboxCache | null;
   private isRunning = false;
   private activeJobs = 0;
@@ -61,7 +62,10 @@ export class OutboxIntentWorker {
   ) {
     this.queue = queue;
     this.redpanda = redpanda;
-    this.config = config;
+    this.config = {
+      ...config,
+      maxTargetsPerIntent: Math.max(1, config.maxTargetsPerIntent ?? 5000),
+    };
     this.sharedInboxCache = config.sharedInboxCache ?? null;
   }
 
@@ -147,7 +151,7 @@ export class OutboxIntentWorker {
 
       const normalizedTargets = normalizeAndDedupeOutboundTargets(
         enrichedTargets,
-        { maxTargetsPerRequest: Math.max(enrichedTargets.length, 1) },
+        { maxTargetsPerRequest: this.config.maxTargetsPerIntent },
       );
       if (normalizedTargets.targets.length === 0) {
         throw new OutboxIntentProcessingError(
@@ -324,12 +328,184 @@ export class OutboxIntentWorker {
     });
   }
 
+  /**
+   * Option B hardening: Validate that outbound delivery targets conform to
+   * the activity's declared audience scope.
+   *
+   * Checks:
+   * - If activity is followers-only (has followers collection, no as:Public),
+   *   delivery is restricted to followers inbox + actor's local followers.
+   * - If activity is direct-scoped (no public, no followers), delivery is
+   *   restricted to named addressees in to/cc.
+   *
+   * Warning-level violations are logged and counted but don't block delivery
+   * (to avoid false positives). Future work could make violations fatal.
+   */
+  private validateTargetConformance(
+    activity: Record<string, unknown>,
+    targets: Array<{ deliveryUrl: string; targetDomain: string }>,
+    intentId: string,
+  ): void {
+    const audienceScope = this.getActivityAudienceScope(activity);
+
+    if (audienceScope === "public") {
+      // No restrictions — any target is acceptable
+      return;
+    }
+
+    if (audienceScope === "followers") {
+      // Followers-only: delivery to followers collections + actor inbox is OK.
+      // Direct addressing to arbitrary actors should be flagged.
+      const toUris = this.extractAddressingUris(activity, "to");
+      const ccUris = this.extractAddressingUris(activity, "cc");
+      const addressed = new Set([...toUris, ...ccUris]);
+
+      const suspiciousTargets = targets.filter((t) => {
+        // followers/inbox URLs are acceptable
+        if (t.deliveryUrl.includes("/followers") || t.deliveryUrl.includes("/inbox")) {
+          return false;
+        }
+        // Check if target matches a directly-addressed URI
+        return !addressed.has(t.deliveryUrl);
+      });
+
+      if (suspiciousTargets.length > 0) {
+        metrics.queueMessagesProcessed.inc({
+          topic: "outbox_intent",
+          status: "conformance_warn",
+        });
+        logger.warn("Followers-only activity delivered to non-followers/inbox targets (conformance check)", {
+          intentId,
+          targetCount: suspiciousTargets.length,
+          examples: suspiciousTargets.slice(0, 2).map((t) => t.deliveryUrl),
+        });
+      }
+      return;
+    }
+
+    if (audienceScope === "direct") {
+      // Direct scope: delivery should only go to explicitly addressed recipients
+      const addressed = this.extractAddressingUris(activity, "to", "cc", "bto", "bcc");
+
+      const offScopeTargets = targets.filter((t) => !addressed.has(t.deliveryUrl));
+
+      if (offScopeTargets.length > 0) {
+        metrics.queueMessagesProcessed.inc({
+          topic: "outbox_intent",
+          status: "conformance_warn",
+        });
+        logger.warn("Direct-scoped activity delivered beyond explicitly-addressed targets (conformance check)", {
+          intentId,
+          addressedCount: addressed.size,
+          targetCount: targets.length,
+          offScopeCount: offScopeTargets.length,
+        });
+      }
+      return;
+    }
+
+    // "local" scope: Akkoma local-only posts should NOT be delivered externally
+    // This should have been caught by inbound guard, but double-check anyway
+    if (audienceScope === "local") {
+      logger.warn("Local-scope activity reached outbound — should have been dropped inbound", {
+        intentId,
+        targetCount: targets.length,
+      });
+    }
+  }
+
+  /**
+   * Determine the canonical audience scope of an activity:
+   * "public" | "followers" | "direct" | "local"
+   */
+  private getActivityAudienceScope(
+    activity: Record<string, unknown>,
+  ): "public" | "followers" | "direct" | "local" {
+    // Check for as:Public
+    if (this.hasPublicAddressing(activity)) {
+      return "public";
+    }
+
+    // Check for Akkoma local-scope
+    if (this.isLocalScopeOnly(activity)) {
+      return "local";
+    }
+
+    // Check for followers-only
+    if (this.hasFollowersAddressing(activity)) {
+      return "followers";
+    }
+
+    // Default to direct
+    return "direct";
+  }
+
+  /** Check if activity has public addressing (as:Public, as:Public alias, etc.) */
+  private hasPublicAddressing(activity: Record<string, unknown>): boolean {
+    const publicAliases = [
+      "https://www.w3.org/ns/activitystreams#Public",
+      "as:Public",
+      "Public",
+    ];
+
+    const checkField = (field: unknown): boolean => {
+      if (!field) return false;
+      const entries = Array.isArray(field) ? field : [field];
+      return entries.some((e) => publicAliases.includes(e));
+    };
+
+    return checkField(activity["to"]) || checkField(activity["cc"]);
+  }
+
+  /** Check if activity is Akkoma local-scope-only */
+  private isLocalScopeOnly(activity: Record<string, unknown>): boolean {
+    if (this.hasPublicAddressing(activity)) return false;
+
+    const toEntries = this.extractAddressingUris(activity, "to");
+    return Array.from(toEntries).some(
+      (uri) => uri.includes("/#Public") && !uri.includes("http://") && uri.endsWith("/#Public"),
+    );
+  }
+
+  /** Check if activity is followers-only addressing */
+  private hasFollowersAddressing(activity: Record<string, unknown>): boolean {
+    const toUris = this.extractAddressingUris(activity, "to");
+    const ccUris = this.extractAddressingUris(activity, "cc");
+    return Array.from(toUris).some((uri) => uri.includes("/followers")) ||
+           Array.from(ccUris).some((uri) => uri.includes("/followers"));
+  }
+
+  /** Extract all addressing URIs from specified fields */
+  private extractAddressingUris(activity: Record<string, unknown>, ...fields: string[]): Set<string> {
+    const uris = new Set<string>();
+    for (const field of fields) {
+      const value = activity[field];
+      if (!value) continue;
+
+      const entries = Array.isArray(value) ? value : [value];
+      for (const entry of entries) {
+        if (typeof entry === "string" && entry.trim()) {
+          uris.add(entry.trim());
+        } else if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+          const id = (entry as Record<string, unknown>)["id"];
+          if (typeof id === "string" && id.trim()) {
+            uris.add(id.trim());
+          }
+        }
+      }
+    }
+    return uris;
+  }
+
   private buildOutboundJobs(
     intent: OutboxIntent,
     activity: Record<string, unknown>,
     normalizedTargets: Array<{ deliveryUrl: string; targetDomain: string }>,
   ): OutboundJob[] {
     const bridgeHints = this.normalizeBridgeHints(intent.bridgeHints);
+
+    // Option B hardening: validate conformance (logs warnings but doesn't block)
+    this.validateTargetConformance(activity, normalizedTargets, intent.intentId);
 
     return normalizedTargets.map((target) => ({
       jobId: `${intent.activityId}::${target.deliveryUrl}`,
@@ -406,8 +582,16 @@ export function createOutboxIntentWorker(
   const config: OutboxIntentWorkerConfig = {
     concurrency: parseInt(process.env["OUTBOX_INTENT_CONCURRENCY"] || "8", 10),
     outboundJobMaxAttempts: parseInt(process.env["OUTBOUND_MAX_ATTEMPTS"] || "10", 10),
+    maxTargetsPerIntent: parsePositiveIntEnv("OUTBOX_INTENT_MAX_TARGETS", 5000),
     ...overrides,
   };
 
   return new OutboxIntentWorker(queue, redpanda, config);
+}
+
+function parsePositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }

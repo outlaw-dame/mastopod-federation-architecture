@@ -1099,6 +1099,10 @@ async function main() {
         ? new RepliesBackfillService(signingClient, queue, {
             signerActorUri: config.apRelayLocalActorUri || `https://${config.domain}/users/relay`,
             requestTimeoutMs: Number.parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
+            maxConcurrentFetches: Number.parseInt(
+              process.env["REPLIES_BACKFILL_MAX_CONCURRENT_FETCHES"] || "12",
+              10,
+            ),
             userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/5.0 (ActivityPods)",
           })
         : undefined;

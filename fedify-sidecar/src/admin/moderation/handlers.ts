@@ -10,9 +10,11 @@ import {
   ACTION_TO_AT_LABEL,
   AT_GLOBAL_LABELS,
 } from "./types.js";
+import { sanitizeDomain } from "../../delivery/DomainReputationStore.js";
 import type {
   AtLabel,
   AtLabelPage,
+  DomainBlockSeverity,
   ModerationAction,
   ModerationBridgeDeps,
   ModerationCasePage,
@@ -26,10 +28,15 @@ import type {
 // ---------------------------------------------------------------------------
 
 const VALID_ACTIONS = new Set<ModerationAction>(["label", "warn", "filter", "block", "suspend"]);
+const DOMAIN_BLOCK_SEVERITIES = new Set<DomainBlockSeverity>(["noop", "silence", "suspend"]);
 const SUBJECT_POLICY_MODULE_ID = "activitypub-subject-policy";
 const AP_RULE_ACTION_BY_DECISION: Partial<Record<ModerationAction, "filter" | "reject">> = {
   filter: "filter",
   block: "reject",
+  suspend: "reject",
+};
+const AP_RULE_ACTION_BY_DOMAIN_SEVERITY: Partial<Record<DomainBlockSeverity, "filter" | "reject">> = {
+  silence: "filter",
   suspend: "reject",
 };
 
@@ -100,6 +107,36 @@ function validateTargetActorUri(value: string | undefined): string | undefined {
   }
 }
 
+function validateTargetDomain(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = sanitizeDomain(value);
+  if (!normalized) {
+    throw badRequest("targetDomain must be a valid hostname");
+  }
+  return normalized;
+}
+
+function validateDomainBlockSeverity(value: unknown): DomainBlockSeverity | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") throw badRequest("domainBlockSeverity must be a string");
+  const normalized = value.trim().toLowerCase();
+  if (!DOMAIN_BLOCK_SEVERITIES.has(normalized as DomainBlockSeverity)) {
+    throw badRequest(`domainBlockSeverity must be one of: ${[...DOMAIN_BLOCK_SEVERITIES].join(", ")}`);
+  }
+  return normalized as DomainBlockSeverity;
+}
+
+function validateBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  throw badRequest(`${field} must be a boolean`);
+}
+
 async function retry<T>(
   operation: () => Promise<T>,
   options: { retries?: number; baseDelayMs?: number; maxDelayMs?: number } = {},
@@ -131,17 +168,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function buildSubjectPolicyRule(params: {
   decisionId: string;
   action: ModerationAction;
+  domainBlockSeverity?: DomainBlockSeverity;
   targetActorUri?: string;
   targetWebId?: string;
+  targetDomain?: string;
   reason?: string;
   actor: string;
   createdAt: string;
 }): ActivityPubSubjectRule | null {
-  const apAction = AP_RULE_ACTION_BY_DECISION[params.action];
+  const apAction = params.targetDomain && params.domainBlockSeverity
+    ? AP_RULE_ACTION_BY_DOMAIN_SEVERITY[params.domainBlockSeverity]
+    : AP_RULE_ACTION_BY_DECISION[params.action];
   if (!apAction) {
     return null;
   }
-  if (!params.targetActorUri && !params.targetWebId) {
+  if (!params.targetActorUri && !params.targetWebId && !params.targetDomain) {
     return null;
   }
 
@@ -150,6 +191,7 @@ function buildSubjectPolicyRule(params: {
     action: apAction,
     ...(params.targetActorUri ? { actorUri: params.targetActorUri } : {}),
     ...(params.targetWebId ? { webId: params.targetWebId } : {}),
+    ...(params.targetDomain ? { domain: params.targetDomain } : {}),
     ...(params.reason ? { reason: params.reason } : {}),
     createdAt: params.createdAt,
     createdBy: params.actor,
@@ -271,6 +313,15 @@ interface ApplyDecisionBody {
   targetActorUri?: string;
   targetAtDid?: string;
   targetHandle?: string;
+  targetDomain?: string;
+  domainBlockSeverity?: string;
+  targetDomainSeverity?: string;
+  severity?: string;
+  rejectMedia?: boolean | string;
+  rejectReports?: boolean | string;
+  privateComment?: string;
+  publicComment?: string;
+  obfuscate?: boolean | string;
   sourceCaseId?: string;
   action: ModerationAction;
   labels?: string[];
@@ -296,12 +347,23 @@ export async function handleApplyDecision(
   const targetActorUri = validateTargetActorUri(sanitise(body.targetActorUri, "targetActorUri"));
   const targetAtDid = validateTargetAtDid(sanitise(body.targetAtDid, "targetAtDid"));
   const targetHandle = validateTargetHandle(sanitise(body.targetHandle, "targetHandle"));
+  const targetDomain = validateTargetDomain(sanitise(body.targetDomain, "targetDomain"));
+  const domainBlockSeverity = targetDomain
+    ? validateDomainBlockSeverity(body.domainBlockSeverity ?? body.targetDomainSeverity ?? body.severity)
+    : undefined;
+  const rejectMedia = targetDomain ? validateBoolean(body.rejectMedia, "rejectMedia") : undefined;
+  const rejectReports = targetDomain ? validateBoolean(body.rejectReports, "rejectReports") : undefined;
+  const privateComment = targetDomain ? sanitise(body.privateComment, "privateComment", 500) : undefined;
+  const publicComment = targetDomain ? sanitise(body.publicComment, "publicComment", 500) : undefined;
+  const obfuscate = targetDomain ? validateBoolean(body.obfuscate, "obfuscate") : undefined;
   const sourceCaseId = body.sourceCaseId ? sanitiseRecordId(body.sourceCaseId, "case") : undefined;
   const reason = sanitise(body.reason, "reason", 500);
 
   // Must have at least one target identifier
-  if (!targetWebId && !targetActorUri && !targetAtDid && !targetHandle) {
-    throw badRequest("At least one of targetWebId, targetActorUri, targetAtDid, or targetHandle must be provided");
+  if (!targetWebId && !targetActorUri && !targetAtDid && !targetHandle && !targetDomain) {
+    throw badRequest(
+      "At least one of targetWebId, targetActorUri, targetAtDid, targetHandle, or targetDomain must be provided",
+    );
   }
 
   const linkedCase = sourceCaseId ? await deps.store.getCase(sourceCaseId) : null;
@@ -339,6 +401,13 @@ export async function handleApplyDecision(
     targetActorUri: resolvedActorUri,
     targetAtDid: resolvedAtDid,
     targetHandle: targetHandle ?? extractHandleFromTarget(resolvedWebId, resolvedActorUri, resolvedAtDid),
+    targetDomain,
+    ...(domainBlockSeverity ? { domainBlockSeverity } : {}),
+    ...(rejectMedia !== undefined ? { rejectMedia } : {}),
+    ...(rejectReports !== undefined ? { rejectReports } : {}),
+    ...(privateComment ? { privateComment } : {}),
+    ...(publicComment ? { publicComment } : {}),
+    ...(obfuscate !== undefined ? { obfuscate } : {}),
     ...(sourceCaseId ? { sourceCaseId } : {}),
     action: body.action,
     labels: allLabels,
@@ -396,8 +465,10 @@ export async function handleApplyDecision(
   const subjectRule = buildSubjectPolicyRule({
     decisionId: id,
     action: body.action,
+    domainBlockSeverity,
     targetActorUri: resolvedActorUri,
     targetWebId: resolvedWebId,
+    targetDomain,
     reason,
     actor,
     createdAt: now,
@@ -470,6 +541,8 @@ export async function handleListDecisions(
   const targetAtDid = params["targetAtDid"] || undefined;
   const targetWebId = params["targetWebId"] || undefined;
   const targetActorUri = params["targetActorUri"] || undefined;
+  const targetDomain = params["targetDomain"] || undefined;
+  const domainBlockSeverity = validateDomainBlockSeverity(params["domainBlockSeverity"]);
   const includeRevoked = params["includeRevoked"] !== "false";
 
   const page: ModerationDecisionPage = await deps.store.listDecisions({
@@ -479,6 +552,8 @@ export async function handleListDecisions(
     targetAtDid,
     targetWebId,
     targetActorUri,
+    targetDomain,
+    domainBlockSeverity,
     includeRevoked,
   });
 

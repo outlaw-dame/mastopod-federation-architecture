@@ -32,6 +32,9 @@ export type ModerationAction =
 /** Which protocol(s) the decision was propagated to. */
 export type ModerationProtocol = "at" | "ap" | "both" | "none";
 
+/** Mastodon-compatible provider domain block severity. */
+export type DomainBlockSeverity = "noop" | "silence" | "suspend";
+
 /** Source of the moderation decision. */
 export type ModerationDecisionSource =
   | "provider-dashboard"  // Manual decision via provider UI
@@ -139,6 +142,31 @@ export interface ModerationDecision {
 
   /** Human-readable handle or username (AT handle, AP username, etc.) */
   targetHandle?: string;
+
+  /** Remote server domain for provider-level ActivityPub rules, if targeted. */
+  targetDomain?: string;
+
+  /**
+   * Mastodon-compatible provider domain severity.  `silence` is implemented as
+   * an internal AP filter rule; `suspend` is implemented as AP reject; `noop`
+   * records domain metadata without changing delivery.
+   */
+  domainBlockSeverity?: DomainBlockSeverity;
+
+  /** Mastodon-compatible domain block media rejection flag. */
+  rejectMedia?: boolean;
+
+  /** Mastodon-compatible domain block report rejection flag. */
+  rejectReports?: boolean;
+
+  /** Provider-private note for the domain decision. */
+  privateComment?: string;
+
+  /** Optional public note for the domain decision. */
+  publicComment?: string;
+
+  /** Whether public domain displays should be partially censored. */
+  obfuscate?: boolean;
 
   /** Optional moderation case id that triggered this decision. */
   sourceCaseId?: string;
@@ -346,6 +374,8 @@ export interface ModerationDecisionQuery {
   targetAtDid?: string;
   targetWebId?: string;
   targetActorUri?: string;
+  targetDomain?: string;
+  domainBlockSeverity?: DomainBlockSeverity;
   includeRevoked?: boolean;
 }
 

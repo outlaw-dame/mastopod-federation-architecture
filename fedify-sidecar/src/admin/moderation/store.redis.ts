@@ -108,7 +108,17 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
   }
 
   async listDecisions(query: ModerationDecisionQuery = {}): Promise<ModerationDecisionPage> {
-    const { limit = 50, cursor, action, targetAtDid, targetWebId, targetActorUri, includeRevoked = true } = query;
+    const {
+      limit = 50,
+      cursor,
+      action,
+      targetAtDid,
+      targetWebId,
+      targetActorUri,
+      targetDomain,
+      domainBlockSeverity,
+      includeRevoked = true,
+    } = query;
 
     // Walk the index from newest to oldest (rev-range by score)
     let maxScore = "+inf";
@@ -143,6 +153,8 @@ export class RedisModerationBridgeStore implements ModerationBridgeStore {
       if (targetAtDid && decision.targetAtDid !== targetAtDid) continue;
       if (targetWebId && decision.targetWebId !== targetWebId) continue;
       if (targetActorUri && decision.targetActorUri !== targetActorUri) continue;
+      if (targetDomain && decision.targetDomain !== targetDomain) continue;
+      if (domainBlockSeverity && decision.domainBlockSeverity !== domainBlockSeverity) continue;
 
       decisions.push(decision);
       if (decisions.length === limit) {

@@ -47,6 +47,8 @@ export class InMemoryModerationBridgeStore implements ModerationBridgeStore {
       targetAtDid,
       targetWebId,
       targetActorUri,
+      targetDomain,
+      domainBlockSeverity,
       includeRevoked = true,
     } = query;
 
@@ -70,6 +72,8 @@ export class InMemoryModerationBridgeStore implements ModerationBridgeStore {
       if (targetAtDid && decision.targetAtDid !== targetAtDid) continue;
       if (targetWebId && decision.targetWebId !== targetWebId) continue;
       if (targetActorUri && decision.targetActorUri !== targetActorUri) continue;
+      if (targetDomain && decision.targetDomain !== targetDomain) continue;
+      if (domainBlockSeverity && decision.domainBlockSeverity !== domainBlockSeverity) continue;
 
       out.push(decision);
       if (out.length >= limit) {

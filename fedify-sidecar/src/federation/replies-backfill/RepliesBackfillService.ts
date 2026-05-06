@@ -28,6 +28,7 @@
 
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
+import pLimit from "p-limit";
 import type { SigningClient } from "../../signing/signing-client.js";
 import type { RedisStreamsQueue, InboundEnvelope } from "../../queue/sidecar-redis-queue.js";
 import { logger } from "../../utils/logger.js";
@@ -93,6 +94,12 @@ export interface RepliesBackfillConfig {
   /** User-Agent string. */
   userAgent?: string;
 
+  /**
+   * Maximum concurrent outbound fetches performed by replies backfill.
+   * Default: 12
+   */
+  maxConcurrentFetches?: number;
+
   /** Optional Redis for cross-process deduplication cooldown. */
   redisCache?: RepliesBackfillRedisCache;
 }
@@ -111,6 +118,7 @@ interface ResolvedConfig {
   requestRetries: number;
   requestRetryBaseDelayMs: number;
   requestRetryMaxDelayMs: number;
+  maxConcurrentFetches: number;
   userAgent: string;
 }
 
@@ -118,6 +126,9 @@ type CollectionMode = "activities" | "posts";
 
 const TRANSIENT_HTTP_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const MAX_JSON_RESPONSE_BYTES = 2_000_000;
+const DEFAULT_MAX_CONCURRENT_FETCHES = 12;
+const HOST_BACKOFF_BASE_MS = 1_000;
+const HOST_BACKOFF_MAX_MS = 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -136,9 +147,12 @@ export class RepliesBackfillService {
   private readonly queue: RedisStreamsQueue;
   private readonly redis: RepliesBackfillRedisCache | null;
   private readonly cfg: ResolvedConfig;
+  private readonly fetchLimit: ReturnType<typeof pLimit>;
 
   /** In-process cooldown cache (URI → expiry timestamp ms). */
   private readonly localCooldown = new Map<string, number>();
+  private readonly hostBackoffUntil = new Map<string, number>();
+  private readonly hostFailureStreak = new Map<string, number>();
 
   constructor(
     signingClient: SigningClient,
@@ -158,8 +172,10 @@ export class RepliesBackfillService {
       requestRetries: config.requestRetries ?? 3,
       requestRetryBaseDelayMs: config.requestRetryBaseDelayMs ?? 200,
       requestRetryMaxDelayMs: config.requestRetryMaxDelayMs ?? 5_000,
+      maxConcurrentFetches: Math.max(1, config.maxConcurrentFetches ?? DEFAULT_MAX_CONCURRENT_FETCHES),
       userAgent: config.userAgent ?? "Fedify-Sidecar/5.0 (ActivityPods)",
     };
+    this.fetchLimit = pLimit(this.cfg.maxConcurrentFetches);
   }
 
   // ==========================================================================
@@ -445,66 +461,102 @@ export class RepliesBackfillService {
       return null;
     }
 
-    const maxAttempts = Math.max(1, this.cfg.requestRetries + 1);
+    const hostname = this.safeHostname(url);
+    if (hostname && this.isHostBackedOff(hostname)) {
+      logger.debug("[replies-backfill] host is in transient backoff window", { url, hostname });
+      return null;
+    }
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        const signResult = await this.signingClient.signOne({
-          actorUri: this.cfg.signerActorUri,
-          method: "GET",
-          targetUrl: url,
-        });
+    return this.fetchLimit(async () => {
+      const maxAttempts = Math.max(1, this.cfg.requestRetries + 1);
 
-        if (!signResult.ok) {
-          logger.warn("[replies-backfill] signing failed", {
-            url,
-            error: (signResult as { ok: false; error: { message: string } }).error.message,
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          const signResult = await this.signingClient.signOne({
+            actorUri: this.cfg.signerActorUri,
+            method: "GET",
+            targetUrl: url,
           });
-          return null;
-        }
 
-        const { date, signature } = signResult.signedHeaders;
-        const parsedUrl = new URL(url);
+          if (!signResult.ok) {
+            logger.warn("[replies-backfill] signing failed", {
+              url,
+              error: (signResult as { ok: false; error: { message: string } }).error.message,
+            });
+            return null;
+          }
 
-        const resp = await request(url, {
-          method: "GET",
-          headers: {
-            accept: "application/activity+json, application/ld+json",
-            date,
-            signature,
-            host: parsedUrl.host,
-            "user-agent": this.cfg.userAgent,
-          },
-          bodyTimeout: this.cfg.requestTimeoutMs,
-          headersTimeout: this.cfg.requestTimeoutMs,
-          maxRedirections: 0,
-        });
+          const { date, signature } = signResult.signedHeaders;
+          const parsedUrl = new URL(url);
 
-        const contentLengthHeader = resp.headers["content-length"];
-        const contentLength =
-          typeof contentLengthHeader === "string"
-            ? Number.parseInt(contentLengthHeader, 10)
-            : Array.isArray(contentLengthHeader)
-              ? Number.parseInt(contentLengthHeader[0] ?? "", 10)
-              : Number.NaN;
-
-        if (Number.isFinite(contentLength) && contentLength > MAX_JSON_RESPONSE_BYTES) {
-          await resp.body.dump();
-          logger.warn("[replies-backfill] response exceeds size limit", {
-            url,
-            contentLength,
-            maxBytes: MAX_JSON_RESPONSE_BYTES,
+          const resp = await request(url, {
+            method: "GET",
+            headers: {
+              accept: "application/activity+json, application/ld+json",
+              date,
+              signature,
+              host: parsedUrl.host,
+              "user-agent": this.cfg.userAgent,
+            },
+            bodyTimeout: this.cfg.requestTimeoutMs,
+            headersTimeout: this.cfg.requestTimeoutMs,
+            maxRedirections: 0,
           });
-          return null;
-        }
 
-        if (resp.statusCode < 200 || resp.statusCode >= 300) {
-          await resp.body.dump();
+          const contentLengthHeader = resp.headers["content-length"];
+          const contentLength =
+            typeof contentLengthHeader === "string"
+              ? Number.parseInt(contentLengthHeader, 10)
+              : Array.isArray(contentLengthHeader)
+                ? Number.parseInt(contentLengthHeader[0] ?? "", 10)
+                : Number.NaN;
 
-          if (
-            TRANSIENT_HTTP_STATUS_CODES.has(resp.statusCode) &&
-            attempt + 1 < maxAttempts
-          ) {
+          if (Number.isFinite(contentLength) && contentLength > MAX_JSON_RESPONSE_BYTES) {
+            await resp.body.dump();
+            logger.warn("[replies-backfill] response exceeds size limit", {
+              url,
+              contentLength,
+              maxBytes: MAX_JSON_RESPONSE_BYTES,
+            });
+            return null;
+          }
+
+          if (resp.statusCode < 200 || resp.statusCode >= 300) {
+            await resp.body.dump();
+
+            if (TRANSIENT_HTTP_STATUS_CODES.has(resp.statusCode)) {
+              if (hostname) this.markHostTransientFailure(hostname);
+
+              if (attempt + 1 < maxAttempts) {
+                const delayMs = exponentialBackoffMs(
+                  attempt,
+                  this.cfg.requestRetryBaseDelayMs,
+                  this.cfg.requestRetryMaxDelayMs,
+                );
+                await sleep(delayMs);
+                continue;
+              }
+            }
+
+            logger.debug("[replies-backfill] non-OK response", {
+              url,
+              status: resp.statusCode,
+            });
+            return null;
+          }
+
+          const body = await readJsonBodyWithLimit(resp.body, MAX_JSON_RESPONSE_BYTES);
+          if (!body) {
+            logger.debug("[replies-backfill] invalid JSON object payload", { url });
+            return null;
+          }
+
+          if (hostname) this.clearHostBackoff(hostname);
+          return body;
+        } catch (err: any) {
+          if (hostname) this.markHostTransientFailure(hostname);
+
+          if (attempt + 1 < maxAttempts) {
             const delayMs = exponentialBackoffMs(
               attempt,
               this.cfg.requestRetryBaseDelayMs,
@@ -514,39 +566,46 @@ export class RepliesBackfillService {
             continue;
           }
 
-          logger.debug("[replies-backfill] non-OK response", {
+          logger.warn("[replies-backfill] fetchJson error", {
             url,
-            status: resp.statusCode,
+            error: err.message,
           });
           return null;
         }
-
-        const body = await readJsonBodyWithLimit(resp.body, MAX_JSON_RESPONSE_BYTES);
-        if (!body) {
-          logger.debug("[replies-backfill] invalid JSON object payload", { url });
-          return null;
-        }
-        return body;
-      } catch (err: any) {
-        if (attempt + 1 < maxAttempts) {
-          const delayMs = exponentialBackoffMs(
-            attempt,
-            this.cfg.requestRetryBaseDelayMs,
-            this.cfg.requestRetryMaxDelayMs,
-          );
-          await sleep(delayMs);
-          continue;
-        }
-
-        logger.warn("[replies-backfill] fetchJson error", {
-          url,
-          error: err.message,
-        });
-        return null;
       }
-    }
 
-    return null;
+      return null;
+    });
+  }
+
+  private safeHostname(url: string): string | null {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  }
+
+  private isHostBackedOff(hostname: string): boolean {
+    const until = this.hostBackoffUntil.get(hostname);
+    if (!until) return false;
+    if (until <= Date.now()) {
+      this.hostBackoffUntil.delete(hostname);
+      return false;
+    }
+    return true;
+  }
+
+  private markHostTransientFailure(hostname: string): void {
+    const streak = (this.hostFailureStreak.get(hostname) ?? 0) + 1;
+    this.hostFailureStreak.set(hostname, streak);
+    const delay = Math.min(HOST_BACKOFF_MAX_MS, HOST_BACKOFF_BASE_MS * 2 ** Math.max(0, streak - 1));
+    this.hostBackoffUntil.set(hostname, Date.now() + delay);
+  }
+
+  private clearHostBackoff(hostname: string): void {
+    this.hostFailureStreak.delete(hostname);
+    this.hostBackoffUntil.delete(hostname);
   }
 
   private async enqueueCollectionActivity(

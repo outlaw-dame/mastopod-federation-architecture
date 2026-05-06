@@ -300,10 +300,10 @@ export type CanonicalReportSubject =
 // ---------------------------------------------------------------------------
 
 /**
- * A private direct message addressed to a single recipient.
+ * A private direct message addressed to one or more recipients.
  *
  * Produced by:
- *   - ActivityPub: `Create(Note)` with a single non-public `to` recipient
+ *   - ActivityPub: `Create(Note)` with one or more non-public `to` recipients
  *     (translated by `DirectMessageTranslator`).
  *   - AT Protocol: `chat.bsky.convo.sendMessage` operations.
  *

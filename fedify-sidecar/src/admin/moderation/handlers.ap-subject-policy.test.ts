@@ -176,6 +176,128 @@ describe("ActivityPub subject-policy bridge", () => {
     expect(mrfInternalFetch).toHaveBeenCalledTimes(4);
   });
 
+  it("applies a provider server-domain limit as an ActivityPub filter rule", async () => {
+    const mrfInternalFetch = vi.fn()
+      .mockResolvedValueOnce(makeSubjectPolicyModuleResponse(0))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const deps = makeDeps({ mrfInternalFetch });
+
+    const response = await handleApplyDecision(makeApplyRequest({
+      targetDomain: "Remote.Example:443",
+      action: "filter",
+      reason: "limit remote server",
+    }), deps);
+
+    expect(response.status).toBe(201);
+    const payload = await response.json() as { decision: ModerationDecision };
+    expect(payload.decision.targetDomain).toBe("remote.example");
+    expect(payload.decision.protocols).toBe("ap");
+    expect(payload.decision.mrfPatched).toBe(true);
+    expect(payload.decision.atLabelEmitted).toBe(false);
+
+    const patchBody = (mrfInternalFetch.mock.calls[1] ?? [])[0]?.body as Record<string, unknown>;
+    expect(((patchBody?.["config"] as Record<string, unknown> | undefined)?.["rules"]) ).toEqual([
+      expect.objectContaining({
+        id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        action: "filter",
+        domain: "remote.example",
+      }),
+    ]);
+  });
+
+  it("maps Mastodon domain severity silence to the internal ActivityPub filter action", async () => {
+    const mrfInternalFetch = vi.fn()
+      .mockResolvedValueOnce(makeSubjectPolicyModuleResponse(0))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const deps = makeDeps({ mrfInternalFetch });
+
+    const response = await handleApplyDecision(makeApplyRequest({
+      targetDomain: "remote.example",
+      domainBlockSeverity: "silence",
+      action: "label",
+      rejectMedia: true,
+      rejectReports: "false",
+      publicComment: "Limited for spam waves",
+      privateComment: "Imported from provider review",
+      obfuscate: false,
+    }), deps);
+
+    expect(response.status).toBe(201);
+    const payload = await response.json() as { decision: ModerationDecision };
+    expect(payload.decision).toEqual(expect.objectContaining({
+      targetDomain: "remote.example",
+      domainBlockSeverity: "silence",
+      rejectMedia: true,
+      rejectReports: false,
+      publicComment: "Limited for spam waves",
+      privateComment: "Imported from provider review",
+      obfuscate: false,
+      protocols: "ap",
+      mrfPatched: true,
+    }));
+
+    const patchBody = (mrfInternalFetch.mock.calls[1] ?? [])[0]?.body as Record<string, unknown>;
+    expect(((patchBody?.["config"] as Record<string, unknown> | undefined)?.["rules"]) ).toEqual([
+      expect.objectContaining({
+        id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        action: "filter",
+        domain: "remote.example",
+      }),
+    ]);
+  });
+
+  it("maps Mastodon domain severity suspend to the internal ActivityPub reject action", async () => {
+    const mrfInternalFetch = vi.fn()
+      .mockResolvedValueOnce(makeSubjectPolicyModuleResponse(0))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const deps = makeDeps({ mrfInternalFetch });
+
+    const response = await handleApplyDecision(makeApplyRequest({
+      targetDomain: "remote.example",
+      domainBlockSeverity: "suspend",
+      action: "label",
+    }), deps);
+
+    expect(response.status).toBe(201);
+    const patchBody = (mrfInternalFetch.mock.calls[1] ?? [])[0]?.body as Record<string, unknown>;
+    expect(((patchBody?.["config"] as Record<string, unknown> | undefined)?.["rules"]) ).toEqual([
+      expect.objectContaining({
+        action: "reject",
+        domain: "remote.example",
+      }),
+    ]);
+  });
+
+  it("records Mastodon domain severity noop without patching AP subject policy", async () => {
+    const mrfInternalFetch = vi.fn().mockResolvedValue(makeSubjectPolicyModuleResponse(0));
+    const deps = makeDeps({ mrfInternalFetch });
+
+    const response = await handleApplyDecision(makeApplyRequest({
+      targetDomain: "remote.example",
+      domainBlockSeverity: "noop",
+      action: "label",
+    }), deps);
+
+    expect(response.status).toBe(201);
+    const payload = await response.json() as { decision: ModerationDecision };
+    expect(payload.decision).toEqual(expect.objectContaining({
+      targetDomain: "remote.example",
+      domainBlockSeverity: "noop",
+      protocols: "none",
+      mrfPatched: false,
+    }));
+    expect(mrfInternalFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed provider server-domain targets", async () => {
+    const deps = makeDeps();
+
+    await expect(handleApplyDecision(makeApplyRequest({
+      targetDomain: "127.0.0.1",
+      action: "filter",
+    }), deps)).rejects.toMatchObject({ status: 400, code: "BAD_REQUEST" });
+  });
+
   it("removes the exact AP rule by decision id on revoke", async () => {
     const decision: ModerationDecision = {
       id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",

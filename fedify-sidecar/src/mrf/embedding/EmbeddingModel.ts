@@ -2,7 +2,7 @@
  * EmbeddingModel
  *
  * Singleton wrapper around the all-MiniLM-L6-v2 ONNX pipeline (via
- * @xenova/transformers). Embeddings are 384-dimensional, mean-pooled, and
+ * @huggingface/transformers). Embeddings are 384-dimensional, mean-pooled, and
  * L2-normalized — making cosine similarity equivalent to a dot product.
  *
  * The pipeline is loaded lazily on first call to embed() and shared across
@@ -15,7 +15,7 @@
  *                   (default: node_modules/.cache/huggingface)
  */
 
-import { pipeline, env, type FeatureExtractionPipeline } from "@xenova/transformers";
+import { pipeline, env, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
 const MODEL_ID = "Xenova/all-MiniLM-L6-v2";
 export const EMBEDDING_DIM = 384;
@@ -34,7 +34,7 @@ let loadPromise: Promise<FeatureExtractionPipeline> | null = null;
 function getOrLoad(): Promise<FeatureExtractionPipeline> {
   if (!loadPromise) {
     loadPromise = (
-      pipeline("feature-extraction", MODEL_ID, { quantized: true }) as Promise<FeatureExtractionPipeline>
+      pipeline("feature-extraction", MODEL_ID, { dtype: "q8" }) as Promise<FeatureExtractionPipeline>
     ).catch((err: unknown) => {
       // Allow a retry on the next call — don't cache the failure permanently.
       loadPromise = null;

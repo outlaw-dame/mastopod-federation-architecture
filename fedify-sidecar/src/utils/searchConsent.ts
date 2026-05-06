@@ -143,6 +143,57 @@ export function isPublicAddressed(object: unknown): boolean {
   );
 }
 
+/**
+ * Detects whether an AP object carries an Akkoma-style local-scope address.
+ *
+ * Akkoma local posts include `<instanceBaseUrl>/#Public` (e.g.
+ * `https://example.org/#Public`) in `to`.  This is intentionally different
+ * from `as:Public` so that external servers cannot accidentally treat it as
+ * globally public.
+ *
+ * Returns true when ANY entry in `to` matches the `<scheme>://<host>/#Public`
+ * pattern, regardless of whether `as:Public` is also present.
+ *
+ * Spec refs:
+ *   - https://docs.akkoma.dev/stable/development/ap_extensions/#local-post-scope
+ *   - "An implementation creating a new post MUST NOT address both the local
+ *     and general public scope at the same time."
+ *   - "A post addressing the local scope MUST NOT be sent to other instances."
+ */
+export function isAkkomaLocalScopeAddressed(object: unknown): boolean {
+  const record = asRecord(object);
+  if (!record) return false;
+
+  const toEntries = toArray(record["to"]).map((entry) => extractUriFromNode(entry));
+  return toEntries.some(isLocalScopeUri);
+}
+
+/**
+ * Returns true when the object's addressing indicates a local-only scope AND
+ * does NOT include `as:Public` — meaning the activity was intended only for
+ * the origin instance.
+ *
+ * When receiving a remote post that addresses both `<domain>/#Public` AND
+ * `as:Public`, the Akkoma spec says to treat it as a normal public post
+ * (no special local meaning).  This function returns false in that case.
+ */
+export function isLocalScopeOnly(object: unknown): boolean {
+  if (!isAkkomaLocalScopeAddressed(object)) return false;
+  // If as:Public is also present in to or cc, treat as normal public per spec.
+  return !isPublicAddressed(object);
+}
+
+/** Returns true when the URI matches the Akkoma local-scope pattern `<scheme>://<host>/#Public`. */
+export function isLocalScopeUri(uri: string | null | undefined): boolean {
+  if (!uri) return false;
+  try {
+    const parsed = new URL(uri);
+    return parsed.hash === "#Public" && parsed.pathname === "/";
+  } catch {
+    return false;
+  }
+}
+
 function includesPublic(searchableBy: string[]): boolean {
   return searchableBy.includes(AS_PUBLIC);
 }
@@ -271,4 +322,94 @@ export function isPublicSearchIndexable(
     options.consent ?? resolvePublicSearchConsent(object, { attributedToActor: options.attributedToActor });
 
   return isPublicAddressed(object) && consent.isPublic;
+}
+
+/**
+ * Returns true if the object's `to` or `cc` addressing includes a followers collection
+ * but NOT `as:Public`.
+ *
+ * This indicates followers-only scope where only post authors should be able
+ * to Announce the post (to prevent unintended scope escalation).
+ *
+ * Used by Step 3.85 Announce authorization guard to enforce platform conventions.
+ */
+export function isFollowersOnlyAddressing(object: unknown): boolean {
+  const record = asRecord(object);
+  if (!record) return false;
+
+  // Check if as:Public is present in to or cc
+  const isPublic = isPublicAddressed(record);
+  if (isPublic) return false;
+
+  // Check if any to/cc entry looks like a followers collection
+  const toEntries = toArray(record["to"]).map((entry) => extractUriFromNode(entry));
+  const ccEntries = toArray(record["cc"]).map((entry) => extractUriFromNode(entry));
+  const allRecipients = [...toEntries, ...ccEntries].filter((u): u is string => u !== null);
+
+  return allRecipients.some((uri) => {
+    if (!uri) return false;
+    // Match common followers collection patterns:
+    // - /followers or /followers/
+    // - ?type=followers or similar query patterns
+    return uri.includes("/followers") || uri.includes("followers");
+  });
+}
+
+/**
+ * Extracts the canonical audience scope from an activity:
+ * - "public": as:Public is addressed
+ * - "followers": followers collection is addressed but not as:Public
+ * - "direct": only specific actors, no public or followers
+ * - "local": Akkoma local-scope-only addressing
+ *
+ * Helps ensure outbound conformance checks and visibility routing work correctly.
+ */
+export function getAudienceScope(object: unknown): "public" | "followers" | "direct" | "local" {
+  const record = asRecord(object);
+  if (!record) return "direct";
+
+  // Check local-scope first (takes precedence)
+  if (isLocalScopeOnly(record)) return "local";
+
+  // Check public
+  if (isPublicAddressed(record)) return "public";
+
+  // Check followers-only
+  if (isFollowersOnlyAddressing(record)) return "followers";
+
+  // Default to direct messaging scope
+  return "direct";
+}
+
+/**
+ * Extracts audience recipient URIs from `to` and `cc` fields, filtering out
+ * special addressing URIs (as:Public, followers collections, etc).
+ *
+ * Returns Set of unique actor URIs intended as direct recipients.
+ * Useful for conformance checks to ensure delivery targets match declared scope.
+ */
+export function getDirectRecipients(object: unknown): Set<string> {
+  const record = asRecord(object);
+  if (!record) return new Set();
+
+  const toEntries = toArray(record["to"]);
+  const ccEntries = toArray(record["cc"]);
+  const allRecipients = [...toEntries, ...ccEntries];
+
+  const directRecipients = new Set<string>();
+
+  for (const entry of allRecipients) {
+    const uri = extractUriFromNode(entry);
+    if (!uri) continue;
+
+    // Skip special addressing URIs
+    if (AS_PUBLIC_ALIASES.has(uri)) continue;
+    if (isLocalScopeUri(uri)) continue;
+    if (uri.includes("/followers")) continue;
+
+    // Add as direct recipient
+    directRecipients.add(uri);
+  }
+
+  return directRecipients;
 }

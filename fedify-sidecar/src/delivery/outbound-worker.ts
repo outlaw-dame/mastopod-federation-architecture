@@ -40,6 +40,8 @@ import { COLLECTION_SYNC_HEADER } from "../federation/fep8fcf/CollectionSyncHead
 export interface OutboundWorkerConfig {
   concurrency: number;
   maxConcurrentPerDomain: number;
+  domainRateLimitMaxPerWindow?: number;
+  domainRateLimitWindowSeconds?: number;
   requestTimeoutMs: number;
   userAgent: string;
   notReadyMaxRequeues?: number;
@@ -70,6 +72,8 @@ type NormalizedOutboundWorkerConfig = OutboundWorkerConfig & {
   notReadyJitterMs: number;
   queueTelemetryIntervalMs: number;
   heapWarnMb: number;
+  domainRateLimitMaxPerWindow: number;
+  domainRateLimitWindowSeconds: number;
 };
 
 export interface DeliveryResult extends OutboundDeliveryResult {}
@@ -165,6 +169,8 @@ export class OutboundWorker {
       notReadyJitterMs: config.notReadyJitterMs ?? 250,
       queueTelemetryIntervalMs: config.queueTelemetryIntervalMs ?? 15000,
       heapWarnMb: config.heapWarnMb ?? 1024,
+      domainRateLimitMaxPerWindow: config.domainRateLimitMaxPerWindow ?? 100,
+      domainRateLimitWindowSeconds: config.domainRateLimitWindowSeconds ?? 60,
     } as NormalizedOutboundWorkerConfig;
     this.adapter = config.fedifyRuntimeIntegrationEnabled
       ? (config.adapter ?? NoopFederationRuntimeAdapter)
@@ -206,6 +212,8 @@ export class OutboundWorker {
     this.startTelemetryLoop();
     logger.info("Outbound worker started", {
       concurrency: this.config.concurrency,
+      domainRateLimitMaxPerWindow: this.config.domainRateLimitMaxPerWindow,
+      domainRateLimitWindowSeconds: this.config.domainRateLimitWindowSeconds,
       fedifyRuntimeIntegrationEnabled: this.config.fedifyRuntimeIntegrationEnabled,
     });
 
@@ -331,7 +339,11 @@ export class OutboundWorker {
       }
 
       // Step 4: Check domain rate limit
-      if (!await this.queue.checkDomainRateLimit(job.targetDomain)) {
+      if (!await this.queue.checkDomainRateLimit(
+        job.targetDomain,
+        this.config.domainRateLimitMaxPerWindow,
+        this.config.domainRateLimitWindowSeconds,
+      )) {
         // Rate limited - requeue with short delay
         await this.queue.ack("outbound", messageId);
         await this.queue.clearIdempotency(job);  // Clear since we didn't actually send
@@ -776,6 +788,8 @@ export function createOutboundWorker(
   const config: OutboundWorkerConfig = {
     concurrency: parsePositiveIntEnv("OUTBOUND_CONCURRENCY", 64),
     maxConcurrentPerDomain: parsePositiveIntEnv("MAX_CONCURRENT_PER_DOMAIN", 10),
+    domainRateLimitMaxPerWindow: parsePositiveIntEnv("DOMAIN_RATE_LIMIT_MAX_PER_WINDOW", 100),
+    domainRateLimitWindowSeconds: parsePositiveIntEnv("DOMAIN_RATE_LIMIT_WINDOW_SECONDS", 60),
     requestTimeoutMs: parsePositiveIntEnv("REQUEST_TIMEOUT_MS", 30000),
     userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",
     notReadyMaxRequeues: parsePositiveIntEnv("OUTBOUND_NOT_READY_MAX_REQUEUES", 32),

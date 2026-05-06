@@ -179,6 +179,7 @@ export const activityPubSubjectPolicyRegistration: ModuleRegistration<ActivityPu
       supportsEnforce: true,
       supportsStopOnMatch: true,
       warnings: [
+        "Filter rules keep ActivityPods forwarding but suppress public surfacing and bridge projection.",
         "Reject rules stop inbound activities before ActivityPods forwarding and stream publication.",
       ],
     };

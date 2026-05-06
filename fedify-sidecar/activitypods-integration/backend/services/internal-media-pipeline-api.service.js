@@ -29,6 +29,7 @@ const MEDIA_PIPELINE_CONTEXT = {
   apods: APODS,
   as: AS,
   xsd: 'http://www.w3.org/2001/XMLSchema#',
+  'apods:mediaPipelineProcessedAt': { '@type': 'xsd:dateTime' },
   'apods:mediaPipelineSignalsUpdatedAt': { '@type': 'xsd:dateTime' },
   'apods:mediaPipelineModerationUpdatedAt': { '@type': 'xsd:dateTime' },
   'apods:mediaPipelineModerationConfidence': { '@type': 'xsd:double' },
@@ -36,6 +37,16 @@ const MEDIA_PIPELINE_CONTEXT = {
 const MEDIA_PIPELINE_PREDICATES = [
   `${AS}summary`,
   `${AS}sensitive`,
+  `${APODS}mediaPipelineAssetId`,
+  `${APODS}mediaPipelineCanonicalUrl`,
+  `${APODS}mediaPipelineGatewayUrl`,
+  `${APODS}mediaPipelineCid`,
+  `${APODS}mediaPipelineDigestMultibase`,
+  `${APODS}mediaPipelinePreviewUrl`,
+  `${APODS}mediaPipelineThumbnailUrl`,
+  `${APODS}mediaPipelineSourceUrl`,
+  `${APODS}mediaPipelineVariantsJson`,
+  `${APODS}mediaPipelineProcessedAt`,
   `${APODS}mediaPipelineSignalsJson`,
   `${APODS}mediaPipelineSignalLabel`,
   `${APODS}mediaPipelineSignalSource`,
@@ -541,11 +552,46 @@ module.exports = {
       const next = { ...existing };
       const preferredUrl = activityPubBinding?.url || asset.canonicalUrl;
       const preferredMimeType = activityPubBinding?.mediaType || asset.mimeType;
+      const mediaPipelineReferences = this.buildMediaPipelineReferences(asset);
 
       this.ensureMediaPipelineContext(next);
 
       next.url = preferredUrl;
       next.mediaType = preferredMimeType;
+      next.mediaPipeline = mediaPipelineReferences;
+      next.mediaPipelineAssetId = mediaPipelineReferences.assetId;
+      next.mediaPipelineCanonicalUrl = mediaPipelineReferences.canonicalUrl;
+      next['apods:mediaPipelineAssetId'] = mediaPipelineReferences.assetId;
+      next['apods:mediaPipelineCanonicalUrl'] = mediaPipelineReferences.canonicalUrl;
+      next['apods:mediaPipelineProcessedAt'] = mediaPipelineReferences.processedAt;
+
+      if (mediaPipelineReferences.gatewayUrl) {
+        next.mediaPipelineGatewayUrl = mediaPipelineReferences.gatewayUrl;
+        next['apods:mediaPipelineGatewayUrl'] = mediaPipelineReferences.gatewayUrl;
+      }
+      if (mediaPipelineReferences.cid) {
+        next.mediaPipelineCid = mediaPipelineReferences.cid;
+        next['apods:mediaPipelineCid'] = mediaPipelineReferences.cid;
+      }
+      if (mediaPipelineReferences.digestMultibase) {
+        next.mediaPipelineDigestMultibase = mediaPipelineReferences.digestMultibase;
+        next['apods:mediaPipelineDigestMultibase'] = mediaPipelineReferences.digestMultibase;
+      }
+      if (mediaPipelineReferences.previewUrl) {
+        next.mediaPipelinePreviewUrl = mediaPipelineReferences.previewUrl;
+        next['apods:mediaPipelinePreviewUrl'] = mediaPipelineReferences.previewUrl;
+      }
+      if (mediaPipelineReferences.thumbnailUrl) {
+        next.mediaPipelineThumbnailUrl = mediaPipelineReferences.thumbnailUrl;
+        next['apods:mediaPipelineThumbnailUrl'] = mediaPipelineReferences.thumbnailUrl;
+      }
+      if (mediaPipelineReferences.sourceUrl) {
+        next.mediaPipelineSourceUrl = mediaPipelineReferences.sourceUrl;
+        next['apods:mediaPipelineSourceUrl'] = mediaPipelineReferences.sourceUrl;
+      }
+      if (mediaPipelineReferences.variantsJson) {
+        next['apods:mediaPipelineVariantsJson'] = mediaPipelineReferences.variantsJson;
+      }
 
       if (!next.name && typeof asset.alt === 'string' && asset.alt.trim()) {
         next.name = asset.alt.trim();
@@ -671,6 +717,18 @@ module.exports = {
         '@context': ['https://www.w3.org/ns/activitystreams', MEDIA_PIPELINE_CONTEXT],
         id: resourceUri,
       };
+      const mediaPipelineReferences = this.buildMediaPipelineReferences(asset);
+
+      metadata['apods:mediaPipelineAssetId'] = mediaPipelineReferences.assetId;
+      metadata['apods:mediaPipelineCanonicalUrl'] = mediaPipelineReferences.canonicalUrl;
+      metadata['apods:mediaPipelineProcessedAt'] = mediaPipelineReferences.processedAt;
+      if (mediaPipelineReferences.gatewayUrl) metadata['apods:mediaPipelineGatewayUrl'] = mediaPipelineReferences.gatewayUrl;
+      if (mediaPipelineReferences.cid) metadata['apods:mediaPipelineCid'] = mediaPipelineReferences.cid;
+      if (mediaPipelineReferences.digestMultibase) metadata['apods:mediaPipelineDigestMultibase'] = mediaPipelineReferences.digestMultibase;
+      if (mediaPipelineReferences.previewUrl) metadata['apods:mediaPipelinePreviewUrl'] = mediaPipelineReferences.previewUrl;
+      if (mediaPipelineReferences.thumbnailUrl) metadata['apods:mediaPipelineThumbnailUrl'] = mediaPipelineReferences.thumbnailUrl;
+      if (mediaPipelineReferences.sourceUrl) metadata['apods:mediaPipelineSourceUrl'] = mediaPipelineReferences.sourceUrl;
+      if (mediaPipelineReferences.variantsJson) metadata['apods:mediaPipelineVariantsJson'] = mediaPipelineReferences.variantsJson;
 
       if (typeof asset.contentWarning === 'string' && asset.contentWarning.trim()) {
         metadata['as:summary'] = asset.contentWarning.trim();
@@ -720,6 +778,44 @@ module.exports = {
       }
 
       return metadata;
+    },
+
+    buildMediaPipelineReferences(asset) {
+      const variants = asset && typeof asset === 'object' && asset.variants && typeof asset.variants === 'object'
+        ? asset.variants
+        : {};
+      const sourceUrls = Array.isArray(asset?.sourceUrls)
+        ? asset.sourceUrls.filter(value => typeof value === 'string' && this.normalizeHttpUrl(value))
+        : [];
+      const variantsJson = this.serializeCompactJson({
+        original: typeof variants.original === 'string' ? variants.original : undefined,
+        preview: typeof variants.preview === 'string' ? variants.preview : undefined,
+        thumbnail: typeof variants.thumbnail === 'string' ? variants.thumbnail : undefined,
+        playback: Array.isArray(variants.playback) ? variants.playback : undefined,
+        streaming: Array.isArray(variants.streaming) ? variants.streaming : undefined,
+      });
+
+      return {
+        assetId: asset.assetId,
+        canonicalUrl: asset.canonicalUrl,
+        gatewayUrl: typeof asset.gatewayUrl === 'string' && this.normalizeHttpUrl(asset.gatewayUrl) ? asset.gatewayUrl : undefined,
+        cid: typeof asset.cid === 'string' && asset.cid.trim() ? asset.cid.trim() : undefined,
+        digestMultibase: typeof asset.digestMultibase === 'string' && asset.digestMultibase.trim() ? asset.digestMultibase.trim() : undefined,
+        previewUrl: typeof variants.preview === 'string' && this.normalizeHttpUrl(variants.preview) ? variants.preview : undefined,
+        thumbnailUrl: typeof variants.thumbnail === 'string' && this.normalizeHttpUrl(variants.thumbnail) ? variants.thumbnail : undefined,
+        sourceUrl: sourceUrls[0],
+        variantsJson,
+        processedAt: new Date().toISOString(),
+      };
+    },
+
+    serializeCompactJson(value) {
+      try {
+        const compact = JSON.parse(JSON.stringify(value));
+        return JSON.stringify(compact);
+      } catch {
+        return undefined;
+      }
     },
 
     quadToSparql(quad) {
