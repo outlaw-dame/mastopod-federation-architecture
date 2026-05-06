@@ -5,7 +5,7 @@ import { parseSafetySignals, runSafetyAdapters, serializeSafetySignals } from '.
 import { config } from '../config/config';
 import { MediaStreams } from '../contracts/MediaStreams';
 import { logger } from '../logger';
-import { renderVideoRenditions } from '../processing/video';
+import { renderVideoRenditions, VideoRenditionResult } from '../processing/video';
 import { enqueue } from '../queue/producer';
 import { runSecureWorker } from '../queue/secureWorker';
 import { buildCanonicalMediaUrl } from '../storage/cdnUrlBuilder';
@@ -40,15 +40,22 @@ runSecureWorker({
       const inputPath = path.join(scratchDir, 'canonical-video.bin');
       await downloadFromFilebaseToPath(originalObjectKey, inputPath);
 
-      let renditions;
+      // Wrap the full rendition pass with an overall job timeout. If the job
+      // exceeds the configured limit we log a warning, use whatever partial
+      // output is already on disk (empty object = no renditions), and
+      // continue to FINALIZE so the asset is never permanently lost.
+      let renditions: VideoRenditionResult;
       try {
-        renditions = await renderVideoRenditions(inputPath, scratchDir, message.mimeType);
+        renditions = await renderWithJobTimeout(inputPath, scratchDir, message.mimeType, message.traceId);
       } catch (error) {
-        logger.warn({
-          traceId: message.traceId || null,
-          originalObjectKey,
-          error: error instanceof Error ? error.message : String(error)
-        }, 'video-rendition-worker-derivatives-failed');
+        logger.warn(
+          {
+            traceId: message.traceId || null,
+            originalObjectKey,
+            error: error instanceof Error ? error.message : String(error)
+          },
+          'video-rendition-worker-derivatives-failed'
+        );
         renditions = {};
       }
 
@@ -82,10 +89,49 @@ runSecureWorker({
         duration: renditions.duration || '',
         width: renditions.width ? String(renditions.width) : '',
         height: renditions.height ? String(renditions.height) : '',
-        signals: serializeSafetySignals([...existingSignals, ...contentSignals], config.maxSignalPayloadBytes)
+        signals: serializeSafetySignals(
+          [...existingSignals, ...contentSignals],
+          config.maxSignalPayloadBytes
+        )
       });
     } finally {
       await cleanupWorkerScratchDir(scratchDir);
     }
   }
 });
+
+/**
+ * Races the full rendition pass against the configured job timeout.
+ * If the timeout fires first, returns an empty rendition set rather than
+ * propagating an error, so FINALIZE still runs and the canonical asset is
+ * surfaced (without playback renditions or streaming manifests).
+ */
+async function renderWithJobTimeout(
+  inputPath: string,
+  outputDir: string,
+  mimeType: string,
+  traceId: string | undefined
+): Promise<VideoRenditionResult> {
+  const jobTimeoutMs = config.videoRenditionJobTimeoutMs;
+
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<VideoRenditionResult>((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      logger.warn(
+        { traceId: traceId || null, jobTimeoutMs },
+        'video-rendition-worker-job-timeout'
+      );
+      resolve({}); // graceful partial result: no renditions, asset still finalizes
+    }, jobTimeoutMs);
+  });
+
+  try {
+    const result = await Promise.race([
+      renderVideoRenditions(inputPath, outputDir, mimeType),
+      timeoutPromise
+    ]);
+    return result;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}

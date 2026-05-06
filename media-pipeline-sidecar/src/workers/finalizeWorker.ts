@@ -3,6 +3,7 @@ import { MediaStreams } from '../contracts/MediaStreams';
 import { CanonicalAsset } from '../contracts/CanonicalAsset';
 import { indexMediaAssets } from '../indexing/openSearchMediaIndexer';
 import { config } from '../config/config';
+import { logger } from '../logger';
 import { parseSafetySignals } from '../adapters/safetySignals';
 import { runSecureWorker } from '../queue/secureWorker';
 import { publishMediaEvent } from '../events/redpandaProducer';
@@ -10,6 +11,7 @@ import { saveAsset } from '../storage/assetStore';
 import { sha256HexToDigestMultibase } from '../utils/digest';
 import { parsePlaybackVariants, parseStreamingManifests } from '../utils/playbackVariants';
 import { projectToActivityPubMedia } from '../projection/activitypubMedia';
+import { deliverAssetToActivityPods } from '../delivery/activityPodsCallback';
 
 /**
  * MEDIA PIPELINE RULE:
@@ -37,13 +39,17 @@ runSecureWorker({
       const indexedAsset = indexedAssets[index];
       try {
         const persistedAsset = await saveAsset(indexedAsset.asset);
-        await publishMediaEvent(MediaEvents.ASSET_CREATED, {
+        const callbackPayload = {
           asset: persistedAsset,
           signals: indexedAsset.signals,
           bindings: {
             activitypub: projectToActivityPubMedia(persistedAsset),
           },
-        });
+        };
+        // Primary delivery: direct HTTP callback to ActivityPods
+        await deliverCallbackSafely(callbackPayload, persistedAsset.assetId);
+        // Supplementary delivery: Redpanda (no-op when disabled)
+        await publishMediaEventSafely(MediaEvents.ASSET_CREATED, callbackPayload, persistedAsset.assetId);
         handledMessageIds.push(messages[index].id);
       } catch {
         failedMessages.push(messages[index]);
@@ -63,13 +69,49 @@ async function persistAndPublish(messages: Array<Record<string, string>>): Promi
 
   for (const indexedAsset of indexedAssets) {
     const persistedAsset = await saveAsset(indexedAsset.asset);
-    await publishMediaEvent(MediaEvents.ASSET_CREATED, {
+    const callbackPayload = {
       asset: persistedAsset,
       signals: indexedAsset.signals,
       bindings: {
         activitypub: projectToActivityPubMedia(persistedAsset),
       },
-    });
+    };
+    // Primary delivery: direct HTTP callback to ActivityPods
+    await deliverCallbackSafely(callbackPayload, persistedAsset.assetId);
+    // Supplementary delivery: Redpanda (no-op when disabled)
+    await publishMediaEventSafely(MediaEvents.ASSET_CREATED, callbackPayload, persistedAsset.assetId);
+  }
+}
+
+async function deliverCallbackSafely(
+  payload: Parameters<typeof deliverAssetToActivityPods>[0],
+  assetId: string
+): Promise<void> {
+  try {
+    await deliverAssetToActivityPods(payload);
+  } catch (err) {
+    logger.error(
+      { assetId, err },
+      'finalize-worker-ap-callback-failed'
+    );
+    // Callback failure does NOT fail the pipeline job. The asset is
+    // persisted and indexed; Redpanda can carry it to other consumers.
+  }
+}
+
+async function publishMediaEventSafely(
+  topic: string,
+  payload: unknown,
+  assetId: string
+): Promise<void> {
+  try {
+    await publishMediaEvent(topic, payload);
+  } catch (err) {
+    logger.error(
+      { assetId, topic, err },
+      'finalize-worker-redpanda-publish-failed'
+    );
+    // Redpanda failure does NOT fail the pipeline job — it is supplementary.
   }
 }
 

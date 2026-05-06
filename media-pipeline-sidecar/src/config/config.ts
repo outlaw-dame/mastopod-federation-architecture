@@ -25,6 +25,17 @@ function parseNonEmptyString(value: string | undefined, fallback: string): strin
   return normalized.length > 0 ? normalized : fallback;
 }
 
+function parseStringList(value: string | undefined): string[] {
+  if (!value || value.trim().length === 0) {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+}
+
 function parsePositiveIntList(value: string | undefined, fallback: number[]): number[] {
   if (!value || value.trim().length === 0) {
     return fallback;
@@ -93,6 +104,7 @@ function loadConfigFromEnv() {
     mediaObjectStoreBackend,
     mediaObjectRoot: process.env.MEDIA_OBJECT_ROOT || join(mediaDataDir, 'object-store'),
     mediaObjectPublicBaseUrl,
+    mediaObjectUploadConcurrency: parsePositiveInt(process.env.MEDIA_OBJECT_UPLOAD_CONCURRENCY, 8),
     workerScratchDir: process.env.WORKER_SCRATCH_DIR || 'tmp',
     workerScratchMaxAgeMs: parsePositiveInt(process.env.WORKER_SCRATCH_MAX_AGE_MS, 6 * 60 * 60 * 1000),
     workerScratchCleanupIntervalMs: parsePositiveInt(process.env.WORKER_SCRATCH_CLEANUP_INTERVAL_MS, 10 * 60 * 1000),
@@ -149,12 +161,32 @@ function loadConfigFromEnv() {
       accessKeyId: process.env.S3_ACCESS_KEY_ID || '',
       secretAccessKey: process.env.S3_SECRET_ACCESS_KEY || '',
       publicBaseUrl: process.env.S3_PUBLIC_BASE_URL || '',
-      forcePathStyle: parseBoolean(process.env.S3_FORCE_PATH_STYLE, true)
+      forcePathStyle: parseBoolean(process.env.S3_FORCE_PATH_STYLE, true),
+      enableObjectTagging: parseBoolean(process.env.S3_ENABLE_OBJECT_TAGGING, false)
     },
     redpanda: {
       brokers: (process.env.REDPANDA_BROKERS || '').split(',').filter(Boolean),
       enabled: process.env.ENABLE_EVENT_PUBLISH === 'true'
-    }
+    },
+    activityPodsCallbackUrl: process.env.ACTIVITYPODS_CALLBACK_URL || '',
+    activityPodsCallbackToken: process.env.ACTIVITYPODS_CALLBACK_TOKEN || '',
+    activityPodsCallbackEnabled: parseBoolean(process.env.ACTIVITYPODS_CALLBACK_ENABLED, true),
+    activityPodsCallbackMaxRetries: parsePositiveInt(process.env.ACTIVITYPODS_CALLBACK_MAX_RETRIES, 4),
+    activityPodsCallbackTimeoutMs: parsePositiveInt(process.env.ACTIVITYPODS_CALLBACK_TIMEOUT_MS, 10000),
+    ingressRateLimitEnabled: parseBoolean(process.env.INGRESS_RATE_LIMIT_ENABLED, true),
+    ingressRateLimitMaxPerMinute: parsePositiveInt(process.env.INGRESS_RATE_LIMIT_MAX_PER_MINUTE, 60),
+    ingressRateLimitWindowMs: parsePositiveInt(process.env.INGRESS_RATE_LIMIT_WINDOW_MS, 60000),
+    ingressDedupEnabled: parseBoolean(process.env.INGRESS_DEDUP_ENABLED, true),
+    ingressDedupTtlSeconds: parsePositiveInt(process.env.INGRESS_DEDUP_TTL_SECONDS, 3600),
+    ingressContentHashDedupEnabled: parseBoolean(process.env.INGRESS_CONTENT_HASH_DEDUP_ENABLED, true),
+    ingressContentHashDedupTtlSeconds: parsePositiveInt(process.env.INGRESS_CONTENT_HASH_DEDUP_TTL_SECONDS, 86400),
+    remoteUrlDomainAllowlist: parseStringList(process.env.REMOTE_URL_DOMAIN_ALLOWLIST),
+    remoteUrlDomainDenylist: parseStringList(process.env.REMOTE_URL_DOMAIN_DENYLIST),
+    dlqAlertWebhookUrl: process.env.DLQ_ALERT_WEBHOOK_URL || '',
+    dlqAlertThreshold: parsePositiveInt(process.env.DLQ_ALERT_THRESHOLD, 10),
+    dlqAlertIntervalMs: parsePositiveInt(process.env.DLQ_ALERT_INTERVAL_MS, 300000),
+    dlqReconcileMaxAgeMs: parsePositiveInt(process.env.DLQ_RECONCILE_MAX_AGE_MS, 86400000),
+    videoRenditionJobTimeoutMs: parsePositiveInt(process.env.VIDEO_RENDITION_JOB_TIMEOUT_MS, 600000)
   };
 }
 
@@ -172,4 +204,5 @@ export function reloadConfigFromEnv(): void {
   Object.assign(currentRedpanda, nextRedpanda);
   config.s3 = currentS3;
   config.redpanda = currentRedpanda;
+  // Flat fields reload automatically via Object.assign above
 }

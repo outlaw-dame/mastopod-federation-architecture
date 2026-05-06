@@ -1,5 +1,6 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import { config } from '../config/config';
 
 const BLOCKED_HOSTNAMES = new Set([
   'localhost',
@@ -45,6 +46,9 @@ export async function assertSafeRemoteUrl(rawUrl: string): Promise<URL> {
     throw new Error(`Blocked internal hostname: ${hostname}`);
   }
 
+  // Domain allowlist — if non-empty, only matching domains are permitted
+  assertDomainPolicy(hostname);
+
   if (net.isIP(hostname)) {
     assertPublicIp(hostname);
     return url;
@@ -59,6 +63,43 @@ export async function assertSafeRemoteUrl(rawUrl: string): Promise<URL> {
   }
 
   return url;
+}
+
+/**
+ * Enforces the configurable domain allowlist and denylist.
+ *
+ * Matching rules (applied to the normalised hostname):
+ *   - Exact match:  'example.com' matches 'example.com'
+ *   - Suffix match: 'example.com' in the list also blocks/allows '*.example.com'
+ *
+ * Allowlist takes precedence if configured: any domain NOT in the allowlist
+ * is rejected regardless of the denylist.
+ */
+export function assertDomainPolicy(hostname: string): void {
+  const { remoteUrlDomainAllowlist, remoteUrlDomainDenylist } = config;
+
+  if (remoteUrlDomainAllowlist.length > 0) {
+    const allowed = domainMatchesAny(hostname, remoteUrlDomainAllowlist);
+    if (!allowed) {
+      throw new Error(`Domain not in allowlist: ${hostname}`);
+    }
+    return; // allowlist match skips denylist
+  }
+
+  if (remoteUrlDomainDenylist.length > 0) {
+    const denied = domainMatchesAny(hostname, remoteUrlDomainDenylist);
+    if (denied) {
+      throw new Error(`Domain is in denylist: ${hostname}`);
+    }
+  }
+}
+
+function domainMatchesAny(hostname: string, patterns: string[]): boolean {
+  for (const pattern of patterns) {
+    if (hostname === pattern) return true;
+    if (hostname.endsWith(`.${pattern}`)) return true;
+  }
+  return false;
 }
 
 function assertPublicIp(ip: string): void {

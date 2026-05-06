@@ -1,4 +1,5 @@
 import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import type { PutObjectCommandInput } from '@aws-sdk/client-s3';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { Readable } from 'node:stream';
@@ -255,16 +256,21 @@ async function putObjectWithRetry(
 ): Promise<void> {
   const policy = buildPutObjectPolicy(key, contentType, objectClass);
   await retryAsync(async () => {
-    await getClient().send(new PutObjectCommand({
+    const input: PutObjectCommandInput = {
       Bucket: config.s3.bucket,
       Key: key,
       Body: bodyFactory(),
       ContentType: contentType,
       CacheControl: policy.cacheControl,
       ContentDisposition: policy.contentDisposition,
-      Metadata: policy.metadata,
-      Tagging: policy.tagging
-    }));
+      Metadata: policy.metadata
+    };
+
+    if (config.s3.enableObjectTagging && policy.tagging) {
+      input.Tagging = policy.tagging;
+    }
+
+    await getClient().send(new PutObjectCommand(input));
   }, {
     retries: 3,
     baseDelayMs: 400,
@@ -278,14 +284,22 @@ function useLocalObjectStore(): boolean {
 
 async function resolveObjectCid(key: string): Promise<string | undefined> {
   try {
-    const head = await getClient().send(new HeadObjectCommand({
-      Bucket: config.s3.bucket,
-      Key: key
-    }));
-    const rawCid = head.Metadata?.cid;
-    if (rawCid && rawCid.trim().length > 0) {
+    return await retryAsync(async () => {
+      const head = await getClient().send(new HeadObjectCommand({
+        Bucket: config.s3.bucket,
+        Key: key
+      }));
+      const rawCid = head.Metadata?.cid;
+      if (!rawCid || rawCid.trim().length === 0) {
+        throw new Error(`CID metadata not available for key: ${key}`);
+      }
+
       return rawCid.trim();
-    }
+    }, {
+      retries: 3,
+      baseDelayMs: 500,
+      maxDelayMs: 4000
+    });
   } catch {
     // CID retrieval is best-effort; the rest of the pipeline continues without it
   }

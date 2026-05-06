@@ -49,6 +49,32 @@ To wire this into the broader Mastopod stack:
 
 This service is not the same thing as the ActivityPub bridge media resolvers used by `fedify-sidecar` for AP->AT projection. Those bridge endpoints fetch bytes synchronously for protocol projection, while `media-pipeline-sidecar` is the asynchronous derivative and analysis pipeline.
 
+## Ingress API
+
+`POST /internal/media/ingest`
+
+Required JSON fields:
+- `sourceUrl`: absolute media URL.
+- `ownerId`: actor/account identifier used for ownership attribution.
+
+Optional JSON fields:
+- `sourceHash`: SHA-256 hex (`64` chars). When present, ingress can short-circuit duplicates by content hash before URL-level dedup.
+- `sourceResolver`: currently supports `activitypods-file`.
+- `sourceToken`: bearer token used when fetching pre-authenticated source URLs.
+- `alt`, `contentWarning`, `isSensitive`.
+
+Example payload:
+
+```json
+{
+	"sourceUrl": "https://example.com/media/abc123.webp",
+	"ownerId": "did:web:example.com:users:alice",
+	"sourceHash": "f6f9ea0e2d3b4fdb20f0d51e0ccf9b2c98d4e83d21f95d6af0f4d9d3c31b5f09",
+	"alt": "Sunset over the bay",
+	"isSensitive": false
+}
+```
+
 ## S3 Provider Compatibility
 
 The storage layer is S3 API-based and can target any provider that supports basic object operations (`PutObject`, `GetObject`, `DeleteObject`).
@@ -59,7 +85,12 @@ Environment controls:
 - `S3_BUCKET`: object bucket.
 - `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`: API credentials.
 - `S3_FORCE_PATH_STYLE`: defaults to `true` for broad S3-compatible support.
+- `S3_ENABLE_OBJECT_TAGGING`: optional object tagging on `PutObject`; defaults to `false` for broad S3-compatible provider support.
 - `S3_PUBLIC_BASE_URL`: optional canonical URL base for public media links.
+- `MEDIA_OBJECT_UPLOAD_CONCURRENCY`: maximum concurrent object uploads per worker process; defaults to `8`.
+- `INGRESS_RATE_LIMIT_ENABLED`, `INGRESS_RATE_LIMIT_MAX_PER_MINUTE`, `INGRESS_RATE_LIMIT_WINDOW_MS`: domain-scoped ingress throttling controls.
+- `INGRESS_DEDUP_ENABLED`, `INGRESS_DEDUP_TTL_SECONDS`: URL-level ingress deduplication controls.
+- `INGRESS_CONTENT_HASH_DEDUP_ENABLED`, `INGRESS_CONTENT_HASH_DEDUP_TTL_SECONDS`: optional SHA-256-based ingress short-circuit deduplication controls for identical bytes arriving via different URLs.
 - `WORKER_SCRATCH_DIR`: local scratch directory used for streamed downloads and rendition staging.
 - `WORKER_MAX_SCHEDULED_RETRIES`, `WORKER_RETRY_BASE_DELAY_MS`, `WORKER_RETRY_MAX_DELAY_MS`: bounded Redis-backed worker retry scheduling before DLQ.
 - `WORKER_SCRATCH_MAX_AGE_MS`, `WORKER_SCRATCH_CLEANUP_INTERVAL_MS`: stale scratch directory self-healing.
@@ -85,9 +116,16 @@ URL priority for externally served media:
 
 Filebase is compatible because it exposes an S3 API for object writes and can additionally expose objects through an IPFS gateway model.
 
+Recommended Filebase settings:
+- `S3_ENDPOINT=https://s3.filebase.com`
+- `S3_REGION=us-east-1` (required for Filebase AWS Signature V4 requests)
+- `S3_FORCE_PATH_STYLE=true`
+- `S3_ENABLE_OBJECT_TAGGING=false` unless object tagging has been explicitly verified for the bucket/account
+- Keep `MEDIA_OBJECT_UPLOAD_CONCURRENCY` comfortably below Filebase's effective 100 RPS S3 API limit; the default `8` is intentionally conservative for video segment bursts.
+
 Operational impact versus plain S3:
 - Object persistence still uses S3 semantics in this service.
-- Optional gateway links are CID-based through `IPFS_GATEWAY_BASE` (with backward compatibility for `FILEBASE_GATEWAY_BASE`).
+- Optional gateway links are CID-based through `IPFS_GATEWAY_BASE` (with backward compatibility for `FILEBASE_GATEWAY_BASE`). CID lookup is best-effort after canonical upload; if Filebase has not exposed CID metadata yet, the asset still finalizes with its canonical S3/CDN URL and can be reconciled later.
 - Gateway-read latency and propagation can differ from direct S3 reads depending on gateway caching/availability.
 - If strict low-latency media delivery is required, prefer CDN/object URL delivery and treat IPFS gateway URLs as secondary access paths.
 
@@ -105,7 +143,7 @@ Operational impact versus plain S3:
 ## Supported media types
 
 Implementation status:
-- Images are normalized into canonical WebP plus preview and thumbnail derivatives.
+- Images are normalized into canonical WebP plus preview and thumbnail derivatives. Animated GIFs are preserved as animated WebP canonical assets, while previews and thumbnails remain static WebP derivatives.
 - Videos now move through a dedicated rendition stage that can extract poster/thumbnail derivatives, metadata, bounded MP4 playback renditions, and HLS plus DASH delivery manifests using `ffmpeg`/`ffprobe`.
 - The video stage preserves the uploaded canonical original and adds delivery-oriented playback and streaming variants rather than replacing the original asset.
 

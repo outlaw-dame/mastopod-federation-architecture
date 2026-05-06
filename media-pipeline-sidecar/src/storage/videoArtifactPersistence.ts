@@ -1,6 +1,8 @@
 import { buildCanonicalMediaUrl } from './cdnUrlBuilder';
 import { uploadFileToFilebase } from './filebaseClient';
+import { config } from '../config/config';
 import type { GeneratedVideoStreamingManifest, VideoRenditionResult } from '../processing/video';
+import { uploadWithLimit } from '../utils/uploadPool';
 
 export async function persistVideoRenditions(
   sha256: string,
@@ -97,12 +99,14 @@ async function persistStreamingManifestSet(
 }> {
   const basePrefix = `${sha256}/${manifest.protocol}`;
 
-  await Promise.all(manifest.artifactFiles.map((artifact) => uploadFileToFilebase({
-    key: `${basePrefix}/${artifact.relativePath}`,
-    filePath: artifact.filePath,
-    contentType: artifact.contentType,
-    objectClass: streamingObjectClassForArtifact(artifact.relativePath, artifact.contentType)
-  })));
+  await uploadWithLimit(manifest.artifactFiles, config.mediaObjectUploadConcurrency, async (artifact) => {
+    await uploadFileToFilebase({
+      key: `${basePrefix}/${artifact.relativePath}`,
+      filePath: artifact.filePath,
+      contentType: artifact.contentType,
+      objectClass: streamingObjectClassForArtifact(artifact.relativePath, artifact.contentType)
+    });
+  });
 
   return {
     protocol: manifest.protocol,

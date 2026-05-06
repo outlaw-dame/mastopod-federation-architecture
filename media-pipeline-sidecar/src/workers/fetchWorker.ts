@@ -10,7 +10,7 @@ import { validateMediaPayload } from '../ingest/mimeValidation';
 import { logger } from '../logger';
 import { enqueue } from '../queue/producer';
 import { runSecureWorker } from '../queue/secureWorker';
-import { assertSafeRemoteUrl } from '../security/ssrfGuard';
+import { assertSafeRemoteUrl, assertDomainPolicy } from '../security/ssrfGuard';
 import { deleteFromFilebase, uploadTransientToFilebase } from '../storage/filebaseClient';
 import { NonRetryableMediaPipelineError, RetryableMediaPipelineError, isLikelyTransientError } from '../utils/errorHandling';
 import { cleanupWorkerScratchDir, createWorkerScratchDir } from '../utils/tempFiles';
@@ -35,14 +35,8 @@ runSecureWorker({
     try {
       let resolvedSourceUrl = normalizeSourceUrl(message.sourceUrl);
       let serializedSignals = '[]';
-      let validatedMedia:
-        | Awaited<ReturnType<typeof validateMediaPayload>>
-        | undefined;
-      let download:
-        | {
-            sniffBuffer: Buffer;
-          }
-        | undefined;
+      let validatedMedia: Awaited<ReturnType<typeof validateMediaPayload>> | undefined;
+      let download: { sniffBuffer: Buffer } | undefined;
 
       if (message.sourceResolver === 'activitypods-file') {
         scratchDir = await createWorkerScratchDir('fetch');
@@ -56,28 +50,41 @@ runSecureWorker({
 
       if (!download || !validatedMedia) {
         const safeUrl = await assertSafeRemoteUrl(message.sourceUrl);
+        // Apply domain allowlist/denylist AFTER SSRF check (hostname is already normalised)
+        assertDomainPolicy(safeUrl.hostname.toLowerCase());
         const urlSignals = await runSafetyAdapters(safetyAdapters, { url: safeUrl.toString() });
-        const res = await retryAsync(async () => {
-          const response = await fetchWithValidatedRedirects(safeUrl, {
-            timeoutMs: config.requestTimeoutMs,
-            maxRedirects: 4
-          });
 
-          if (response.status >= 500 || response.status === 429) {
-            throw new RetryableMediaPipelineError({
-              code: 'FETCH_TRANSIENT_FAILURE',
-              message: `Transient fetch failure: ${response.status}`,
-              statusCode: response.status
+        // sourceToken: optional bearer token for pre-auth of remote DM attachments
+        const sourceToken =
+          typeof message.sourceToken === 'string' && message.sourceToken.length > 0
+            ? message.sourceToken
+            : undefined;
+
+        const res = await retryAsync(
+          async () => {
+            const response = await fetchWithValidatedRedirects(safeUrl, {
+              timeoutMs: config.requestTimeoutMs,
+              maxRedirects: 4,
+              bearerToken: sourceToken
             });
-          }
 
-          return response;
-        }, {
-          retries: 3,
-          baseDelayMs: 400,
-          maxDelayMs: 4000,
-          shouldRetry: isLikelyTransientError
-        });
+            if (response.status >= 500 || response.status === 429) {
+              throw new RetryableMediaPipelineError({
+                code: 'FETCH_TRANSIENT_FAILURE',
+                message: `Transient fetch failure: ${response.status}`,
+                statusCode: response.status
+              });
+            }
+
+            return response;
+          },
+          {
+            retries: 3,
+            baseDelayMs: 400,
+            maxDelayMs: 4000,
+            shouldRetry: isLikelyTransientError
+          }
+        );
 
         if (!res.ok) {
           throw new NonRetryableMediaPipelineError({
@@ -114,16 +121,23 @@ runSecureWorker({
         serializedSignals = serializeSafetySignals(urlSignals, config.maxSignalPayloadBytes);
       }
 
-      const targetStream = validatedMedia.kind === 'video'
-        ? MediaStreams.PROCESS_VIDEO
-        : MediaStreams.PROCESS_IMAGE;
+      // animated-gif routes to the video worker (FFmpeg → animated WebP conversion)
+      const targetStream =
+        validatedMedia.kind === 'video' || validatedMedia.kind === 'animated-gif'
+          ? MediaStreams.PROCESS_VIDEO
+          : MediaStreams.PROCESS_IMAGE;
+
       const spoolPath = path.join(scratchDir!, 'source.bin');
 
-      transientObjectKey = (await uploadTransientToFilebase({
-        filePath: spoolPath,
-        contentType: validatedMedia.mimeType,
-        traceId: message.traceId
-      })).key;
+      transientObjectKey = (
+        await uploadTransientToFilebase({
+          filePath: spoolPath,
+          contentType: validatedMedia.mimeType,
+          traceId: message.traceId
+        })
+      ).key;
+
+      const isAnimatedGif = validatedMedia.kind === 'animated-gif' ? 'true' : 'false';
 
       await enqueue(targetStream, {
         traceId: message.traceId,
@@ -134,8 +148,10 @@ runSecureWorker({
         sourceUrl: resolvedSourceUrl,
         sourceResolver: message.sourceResolver || '',
         mimeType: validatedMedia.mimeType,
+        isAnimatedGif,
         sourceObjectKey: transientObjectKey,
         signals: serializedSignals
+        // sourceToken is intentionally not propagated downstream
       });
     } catch (error) {
       if (transientObjectKey) {
@@ -150,7 +166,7 @@ runSecureWorker({
 
 async function tryResolveTrustedActivityPodsSource(
   message: Record<string, string>,
-  scratchDir: string,
+  scratchDir: string
 ): Promise<{
   sourceUrl: string;
   download: { sniffBuffer: Buffer };
@@ -165,39 +181,39 @@ async function tryResolveTrustedActivityPodsSource(
   const requestBody = JSON.stringify({ sourceUrl });
 
   try {
-    const response = await retryAsync(async () => {
-      const nextResponse = await fetch(endpointUrl, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${config.activityPodsMediaSourceToken}`
-        },
-        body: requestBody,
-        redirect: 'manual',
-        signal: AbortSignal.timeout(config.requestTimeoutMs)
-      });
-
-      if (nextResponse.status === 429 || nextResponse.status >= 500) {
-        throw new RetryableMediaPipelineError({
-          code: 'TRUSTED_SOURCE_TRANSIENT_FAILURE',
-          message: `Trusted media source resolver failed with HTTP ${nextResponse.status}`,
-          statusCode: nextResponse.status
+    const response = await retryAsync(
+      async () => {
+        const nextResponse = await fetch(endpointUrl, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${config.activityPodsMediaSourceToken}`
+          },
+          body: requestBody,
+          redirect: 'manual',
+          signal: AbortSignal.timeout(config.requestTimeoutMs)
         });
-      }
 
-      return nextResponse;
-    }, {
-      retries: 3,
-      baseDelayMs: 400,
-      maxDelayMs: 4000,
-      shouldRetry: isLikelyTransientError
-    });
+        if (nextResponse.status === 429 || nextResponse.status >= 500) {
+          throw new RetryableMediaPipelineError({
+            code: 'TRUSTED_SOURCE_TRANSIENT_FAILURE',
+            message: `Trusted media source resolver failed with HTTP ${nextResponse.status}`,
+            statusCode: nextResponse.status
+          });
+        }
+
+        return nextResponse;
+      },
+      {
+        retries: 3,
+        baseDelayMs: 400,
+        maxDelayMs: 4000,
+        shouldRetry: isLikelyTransientError
+      }
+    );
 
     if ([404, 415, 422, 501].includes(response.status)) {
-      logger.warn({
-        sourceUrl,
-        statusCode: response.status
-      }, 'fetch-worker-trusted-source-fallback');
+      logger.warn({ sourceUrl, statusCode: response.status }, 'fetch-worker-trusted-source-fallback');
       return null;
     }
 
@@ -229,11 +245,7 @@ async function tryResolveTrustedActivityPodsSource(
       declaredMimeType
     });
 
-    return {
-      sourceUrl,
-      download,
-      validatedMedia
-    };
+    return { sourceUrl, download, validatedMedia };
   } catch (error) {
     if (isLikelyTransientError(error)) {
       throw error;
@@ -244,11 +256,10 @@ async function tryResolveTrustedActivityPodsSource(
       error.statusCode !== undefined &&
       [404, 415, 422, 501].includes(error.statusCode)
     ) {
-      logger.warn({
-        sourceUrl,
-        statusCode: error.statusCode,
-        error: error.message
-      }, 'fetch-worker-trusted-source-fallback');
+      logger.warn(
+        { sourceUrl, statusCode: error.statusCode, error: error.message },
+        'fetch-worker-trusted-source-fallback'
+      );
       return null;
     }
 
@@ -258,13 +269,21 @@ async function tryResolveTrustedActivityPodsSource(
 
 async function fetchWithValidatedRedirects(
   initialUrl: URL,
-  options: { timeoutMs: number; maxRedirects: number }
+  options: { timeoutMs: number; maxRedirects: number; bearerToken?: string }
 ): Promise<FetchResponse> {
   let currentUrl = initialUrl;
+  // Only send the bearer token on the first request; never forward on redirects.
+  let isFirstRequest = true;
 
   for (let redirectCount = 0; redirectCount <= options.maxRedirects; redirectCount += 1) {
+    const headers: Record<string, string> = { 'user-agent': 'media-pipeline-sidecar/1.0' };
+    if (isFirstRequest && options.bearerToken) {
+      headers['authorization'] = `Bearer ${options.bearerToken}`;
+    }
+    isFirstRequest = false;
+
     const response = await fetch(currentUrl, {
-      headers: { 'user-agent': 'media-pipeline-sidecar/1.0' },
+      headers,
       redirect: 'manual',
       signal: AbortSignal.timeout(options.timeoutMs)
     });
@@ -313,7 +332,7 @@ function buildTrustedMediaSourceEndpointUrl(): string | null {
 
   return new URL(
     config.activityPodsMediaSourcePath,
-    config.activityPodsMediaSourceBaseUrl,
+    config.activityPodsMediaSourceBaseUrl
   ).toString();
 }
 
@@ -355,7 +374,7 @@ async function readBodyToTempFile(
 
   const reader = body.getReader();
   try {
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -398,10 +417,13 @@ async function deleteTransientObject(key: string, traceId: string | undefined): 
   try {
     await deleteFromFilebase(key);
   } catch (error) {
-    logger.warn({
-      traceId: traceId || null,
-      key,
-      error: error instanceof Error ? error.message : String(error)
-    }, 'fetch-worker-transient-cleanup-failed');
+    logger.warn(
+      {
+        traceId: traceId || null,
+        key,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      'fetch-worker-transient-cleanup-failed'
+    );
   }
 }

@@ -153,6 +153,79 @@ export async function renderVideoRenditions(
   return result;
 }
 
+export interface AnimatedGifResult {
+  webpPath: string;
+  thumbnailPath: string;
+  sha256: string;
+  size: number;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * Converts an animated (or static) GIF to animated WebP using FFmpeg,
+ * and generates a still thumbnail using Sharp from the first frame.
+ * The result is enqueued directly to FINALIZE, skipping the rendition worker.
+ */
+export async function processAnimatedGifToWebP(
+  inputPath: string,
+  outputDir: string
+): Promise<AnimatedGifResult> {
+  await assertVideoToolingReady();
+  const ffmpegBinary = getFfmpegPath();
+  if (!ffmpegBinary) {
+    throw new NonRetryableMediaPipelineError({
+      code: 'VIDEO_TOOLING_UNAVAILABLE',
+      message: 'ffmpeg is required for animated GIF conversion'
+    });
+  }
+
+  const webpPath = path.join(outputDir, 'animated.webp');
+  const thumbPath = path.join(outputDir, 'gif-thumb.webp');
+
+  // Convert GIF → animated WebP. fps=15 cap prevents huge frame counts;
+  // scale limits max width to 720px while preserving aspect ratio.
+  await execFileAsync(ffmpegBinary, [
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-y',
+    '-i', inputPath,
+    '-vf', 'fps=min(15\\,source_fps),scale=min(720\\,iw):-2:flags=lanczos',
+    '-c:v', 'libwebp_anim',
+    '-loop', '0',
+    '-compression_level', '4',
+    '-quality', '82',
+    '-an',
+    webpPath
+  ], { timeout: config.videoRenditionTimeoutMs });
+
+  // Extract first frame for thumbnail using Sharp
+  await sharp(webpPath, { pages: 1 })
+    .resize({ width: config.videoThumbnailWidth, withoutEnlargement: true })
+    .webp({ quality: 70 })
+    .toFile(thumbPath);
+
+  const [fileHash, fileMeta, thumbMeta] = await Promise.all([
+    sha256File(webpPath),
+    stat(webpPath),
+    stat(thumbPath)
+  ]);
+
+  // Read first frame for dimensions
+  const { width, height } = await sharp(webpPath, { pages: 1 }).metadata();
+
+  void thumbMeta; // used implicitly via thumbPath; silence unused warning
+
+  return {
+    webpPath,
+    thumbnailPath: thumbPath,
+    sha256: fileHash,
+    size: fileMeta.size,
+    width,
+    height
+  };
+}
+
 export function videoExtensionForMime(mimeType: string): string {
   switch (mimeType) {
     case 'video/webm':
