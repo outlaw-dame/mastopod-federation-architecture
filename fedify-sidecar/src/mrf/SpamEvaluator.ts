@@ -15,7 +15,7 @@
  *   3. Domain reputation — URLs extracted from ATProto facets.
  *   (Actor reputation is skipped — actor metadata requires expensive external fetches.)
  *
- * Returns the first blocking decision (filter or reject) and stops.
+ * Returns the first action-requiring decision (filter or reject) and stops.
  * Returns null when all checks pass or all checks are disabled.
  *
  * Callers are responsible for building the envelope (buildEnvelopeFromAT) before
@@ -48,7 +48,7 @@ export interface SpamDecision {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function isBlocking(action: string): boolean {
+function requiresCallerAction(action: string): boolean {
   return action === "filter" || action === "reject";
 }
 
@@ -83,8 +83,8 @@ export class SpamEvaluator {
 
   /**
    * Evaluate an ActivityPub inbound activity.
-   * Calls all four evaluators in priority order and returns the first blocking
-   * decision, or null if clean. The AP envelope is built once and shared between
+   * Calls all four evaluators in priority order and returns the first decision
+   * that requires caller action, or null if clean. The AP envelope is built once and shared between
    * the keyword-filter (text) and domain-reputation (domains) steps.
    */
   async evaluateAp(opts: {
@@ -124,7 +124,7 @@ export class SpamEvaluator {
       { activityId, actorUri, actorDocument, activity, ...inputMeta },
       sharedOpts,
     );
-    if (arDecision && isBlocking(arDecision.appliedAction)) {
+    if (arDecision && requiresCallerAction(arDecision.appliedAction)) {
       return toSpamDecision(arDecision);
     }
 
@@ -136,7 +136,7 @@ export class SpamEvaluator {
         { activityId, actorUri, activity, ...inputMeta },
         sharedOpts,
       );
-      if (cfpDecision && isBlocking(cfpDecision.appliedAction)) {
+      if (cfpDecision && requiresCallerAction(cfpDecision.appliedAction)) {
         return toSpamDecision(cfpDecision);
       }
     }
@@ -150,7 +150,7 @@ export class SpamEvaluator {
       { activityId, actorUri, text: envelope.content.text, ...inputMeta },
       sharedOpts,
     );
-    if (kwDecision && isBlocking(kwDecision.appliedAction)) {
+    if (kwDecision && requiresCallerAction(kwDecision.appliedAction)) {
       return toSpamDecision(kwDecision);
     }
 
@@ -167,7 +167,7 @@ export class SpamEvaluator {
         },
         sharedOpts,
       );
-      if (domDecision && isBlocking(domDecision.appliedAction)) {
+      if (domDecision && requiresCallerAction(domDecision.appliedAction)) {
         return toSpamDecision(domDecision);
       }
     }
@@ -209,7 +209,7 @@ export class SpamEvaluator {
         },
         sharedOpts,
       );
-      if (cfpDecision && isBlocking(cfpDecision.appliedAction)) {
+      if (cfpDecision && requiresCallerAction(cfpDecision.appliedAction)) {
         return toSpamDecision(cfpDecision);
       }
     }
@@ -225,7 +225,7 @@ export class SpamEvaluator {
       },
       sharedOpts,
     );
-    if (kwDecision && isBlocking(kwDecision.appliedAction)) {
+    if (kwDecision && requiresCallerAction(kwDecision.appliedAction)) {
       return toSpamDecision(kwDecision);
     }
 
@@ -242,7 +242,7 @@ export class SpamEvaluator {
         },
         sharedOpts,
       );
-      if (domDecision && isBlocking(domDecision.appliedAction)) {
+      if (domDecision && requiresCallerAction(domDecision.appliedAction)) {
         return toSpamDecision(domDecision);
       }
     }

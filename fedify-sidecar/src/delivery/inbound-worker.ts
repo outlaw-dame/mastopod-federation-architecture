@@ -44,6 +44,10 @@ import type { SpamEvaluator } from "../mrf/SpamEvaluator.js";
 import {
   resolvePublicSearchConsent,
   isPublicSearchIndexable,
+  isPublicAddressed,
+  isLocalScopeOnly,
+  isFollowersOnlyAddressing,
+  getAudienceScope,
   type PublicSearchConsentSignal,
 } from "../utils/searchConsent.js";
 
@@ -386,6 +390,68 @@ function extractAnnounceObjectId(activity: Record<string, unknown>): string | nu
     if (typeof id === "string" && id.trim().length > 0) return id.trim();
   }
   return null;
+}
+
+function normalizeActorUriForComparison(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+
+  try {
+    const parsed = new URL(trimmed);
+    const path = parsed.pathname.replace(/\/+$/, "") || "/";
+    return `${parsed.protocol}//${parsed.host}${path}`;
+  } catch {
+    return trimmed.replace(/\/+$/, "");
+  }
+}
+
+function extractActorUrisFromNode(value: unknown): Set<string> {
+  const out = new Set<string>();
+
+  const add = (candidate: unknown) => {
+    if (typeof candidate !== "string") return;
+    const normalized = normalizeActorUriForComparison(candidate);
+    if (normalized) out.add(normalized);
+  };
+
+  if (typeof value === "string") {
+    add(value);
+    return out;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      for (const nested of extractActorUrisFromNode(entry)) {
+        out.add(nested);
+      }
+    }
+    return out;
+  }
+
+  if (isRecord(value)) {
+    add(value["id"]);
+    if (value["actor"] !== undefined) {
+      for (const nested of extractActorUrisFromNode(value["actor"])) {
+        out.add(nested);
+      }
+    }
+    if (value["attributedTo"] !== undefined) {
+      for (const nested of extractActorUrisFromNode(value["attributedTo"])) {
+        out.add(nested);
+      }
+    }
+  }
+
+  return out;
+}
+
+function isFollowersOnlyObjectAddressing(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (isPublicAddressed(value)) return false;
+
+  const to = coerceStringArray(value["to"]);
+  const cc = coerceStringArray(value["cc"]);
+  return [...to, ...cc].some((recipient) => recipient.endsWith("/followers"));
 }
 
 function coerceStringArray(value: unknown): string[] {
@@ -1101,6 +1167,36 @@ export class InboundWorker {
         return;
       }
 
+      // Step 2.5: Akkoma local-scope guard.
+      //
+      // Akkoma local-only posts include `<instanceBaseUrl>/#Public` in `to`
+      // but NOT `as:Public`.  These MUST NOT be sent to other instances per
+      // the Akkoma AP extension spec.  If we receive one anyway (protocol
+      // violation by the remote), discard it silently — do NOT forward to
+      // ActivityPods and do NOT publish to Stream2.
+      //
+      // Note: if a remote post addresses BOTH `<domain>/#Public` AND `as:Public`,
+      // the Akkoma spec says to treat it as a normal public post.  The
+      // isLocalScopeOnly() helper already handles this distinction.
+      //
+      // Ref: https://docs.akkoma.dev/stable/development/ap_extensions/#local-post-scope
+      {
+        const objectToCheck = (activity as Record<string, unknown>)?.["object"];
+        const subjectActivity =
+          objectToCheck && typeof objectToCheck === "object" && !Array.isArray(objectToCheck)
+            ? (objectToCheck as Record<string, unknown>)
+            : (activity as Record<string, unknown>);
+        if (isLocalScopeOnly(subjectActivity) || isLocalScopeOnly(activity)) {
+          metrics.inboundActivityPubActivities.inc({ stage: "local_scope_dropped", activity_type: activityType });
+          await this.queue.ack("inbound", messageId);
+          logger.warn("Inbound activity from remote instance addressed to local scope only — discarded", {
+            envelopeId: envelope.envelopeId,
+            activityType,
+          });
+          return;
+        }
+      }
+
       // Step 3: Resolve the verified actor, trusting only envelopes that were
       // verified by the enabled Fedify ingress path before they entered Redis.
       const verifiedActorUri = await this.resolveVerifiedActorUri(messageId, envelope, activity);
@@ -1159,8 +1255,19 @@ export class InboundWorker {
         }
       }
 
+      let inboundPolicyFilter: null | {
+        source: "activitypub-subject-policy" | "spam-evaluator";
+        moduleId: string;
+        action: "filter";
+        traceId?: string;
+      } = null;
+
       // Step 3.6: Subject-specific ActivityPub policy check. This is the real
       // inbound enforcement path for provider-managed AP moderation rules.
+      // Reject mirrors a Mastodon suspend-style server action: stop delivery.
+      // Filter mirrors a limit/silence-style action: keep the Pod commit path,
+      // but suppress public surfacing, search/firehose projection, and AP→AT
+      // projection later in the pipeline.
       {
         const actorWebId = this.config.resolveWebIdForActorUri
           ? await this.config.resolveWebIdForActorUri(verifiedActorUri).catch(() => null)
@@ -1172,19 +1279,14 @@ export class InboundWorker {
             actorUri: verifiedActorUri,
             actorWebId: actorWebId ?? undefined,
             originHost: extractDomain(verifiedActorUri) ?? undefined,
-            visibility: this.determineVisibility(activity),
+            visibility: (v => v === "local" ? "unknown" : v)(this.determineVisibility(activity)),
           },
           { requestId: envelope.envelopeId },
         );
 
-        if (
-          subjectPolicyDecision &&
-          (subjectPolicyDecision.appliedAction === "filter" || subjectPolicyDecision.appliedAction === "reject")
-        ) {
+        if (subjectPolicyDecision?.appliedAction === "reject") {
           metrics.inboundActivityPubActivities.inc({
-            stage: subjectPolicyDecision.appliedAction === "reject"
-              ? "subject_policy_reject"
-              : "subject_policy_filter",
+            stage: "subject_policy_reject",
             activity_type: activityType,
           });
           await this.queue.ack("inbound", messageId);
@@ -1198,6 +1300,26 @@ export class InboundWorker {
           });
           return;
         }
+
+        if (subjectPolicyDecision?.appliedAction === "filter") {
+          inboundPolicyFilter = {
+            source: "activitypub-subject-policy",
+            moduleId: subjectPolicyDecision.moduleId,
+            action: "filter",
+            traceId: subjectPolicyDecision.traceId,
+          };
+          metrics.inboundActivityPubActivities.inc({
+            stage: "subject_policy_filter",
+            activity_type: activityType,
+          });
+          logger.info("Inbound activity limited by ActivityPub subject policy", {
+            envelopeId: envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            matchedOn: subjectPolicyDecision.matchedOn,
+            matchedValue: subjectPolicyDecision.matchedValue,
+            traceId: subjectPolicyDecision.traceId,
+          });
+        }
       }
 
       // Step 3.62: Spam detection — actor reputation, content fingerprint, domain reputation.
@@ -1209,16 +1331,13 @@ export class InboundWorker {
           actorDocument: actorDoc,
           activity: activity as Record<string, unknown>,
           originHost: extractDomain(verifiedActorUri) ?? undefined,
-          visibility: this.determineVisibility(activity),
+          visibility: (v => v === "local" ? "unknown" : v)(this.determineVisibility(activity)),
           requestId: envelope.envelopeId,
         });
 
-        if (
-          spamDecision &&
-          (spamDecision.appliedAction === "filter" || spamDecision.appliedAction === "reject")
-        ) {
+        if (spamDecision?.appliedAction === "reject") {
           metrics.inboundActivityPubActivities.inc({
-            stage: spamDecision.appliedAction === "reject" ? "spam_reject" : "spam_filter",
+            stage: "spam_reject",
             activity_type: activityType,
           });
           await this.queue.ack("inbound", messageId);
@@ -1230,6 +1349,25 @@ export class InboundWorker {
             traceId: spamDecision.traceId,
           });
           return;
+        }
+
+        if (spamDecision?.appliedAction === "filter") {
+          inboundPolicyFilter ??= {
+            source: "spam-evaluator",
+            moduleId: spamDecision.moduleId,
+            action: "filter",
+            traceId: spamDecision.traceId,
+          };
+          metrics.inboundActivityPubActivities.inc({
+            stage: "spam_filter",
+            activity_type: activityType,
+          });
+          logger.info("Inbound activity limited by spam evaluator", {
+            envelopeId: envelope.envelopeId,
+            actorUri: verifiedActorUri,
+            moduleId: spamDecision.moduleId,
+            traceId: spamDecision.traceId,
+          });
         }
       }
 
@@ -1363,17 +1501,97 @@ export class InboundWorker {
         }
       }
 
+      // Step 3.85: Followers-only Announce authorization guard.
+      //
+      // GoToSocial compatibility: boosts of followers-only objects should be
+      // limited to the original author. Enforce this when the Announce carries
+      // an inline object (where visibility and authorship are inspectable).
+      //
+      // Option A hardening: Also attempt to hydrate URI-only Announce objects
+      // to check followers-only status. If hydration succeeds and the object is
+      // followers-only, apply authorization checks. If hydration fails or timeout,
+      // fall through (conservative: URI-only objects are not rejected without
+      // certain knowledge of their scope).
+      if (activityType === "Announce") {
+        let announcedObject: Record<string, unknown> | null = null;
+        let isFollowersOnly = false;
+
+        if (isRecord(activity["object"])) {
+          // Inline object — check directly
+          announcedObject = activity["object"] as Record<string, unknown>;
+          isFollowersOnly = isFollowersOnlyObjectAddressing(announcedObject);
+        } else if (typeof activity["object"] === "string") {
+          // URI-only object — attempt hydration with timeout
+          const objectUri = activity["object"] as string;
+          try {
+            const hydrateStartMs = Date.now();
+            const hydrated = await Promise.race([
+              this.fetchRemoteAnnounceObject(objectUri),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)), // 3s timeout
+            ]);
+            const hydrateMs = Date.now() - hydrateStartMs;
+
+            if (hydrated && isRecord(hydrated)) {
+              announcedObject = hydrated;
+              isFollowersOnly = isFollowersOnlyObjectAddressing(hydrated);
+              logger.debug("Hydrated URI-only Announce object for scope check", {
+                envelopeId: envelope.envelopeId,
+                objectUri,
+                hydrateMs,
+                isFollowersOnly,
+              });
+            } else if (hydrateMs >= 3000) {
+              logger.debug("Hydration timeout for Announce object URI", { envelopeId: envelope.envelopeId, objectUri });
+            }
+          } catch (err: any) {
+            logger.debug("Failed to hydrate Announce object URI", {
+              envelopeId: envelope.envelopeId,
+              objectUri,
+              error: err.message,
+            });
+          }
+        }
+
+        // Apply authorization check if we determined the object is followers-only
+        if (announcedObject && isFollowersOnly) {
+          const objectAuthors = extractActorUrisFromNode(announcedObject["attributedTo"]);
+          const normalizedAnnouncer = normalizeActorUriForComparison(verifiedActorUri);
+          const isAnnouncerAuthor = objectAuthors.size > 0 && objectAuthors.has(normalizedAnnouncer);
+
+          if (!isAnnouncerAuthor) {
+            metrics.inboundActivityPubActivities.inc({
+              stage: "announce_followers_scope_rejected",
+              activity_type: activityType,
+            });
+            await this.queue.ack("inbound", messageId);
+            logger.warn("Discarded Announce of followers-only object by non-author", {
+              envelopeId: envelope.envelopeId,
+              announcer: verifiedActorUri,
+              objectId: typeof activity["object"] === "string" ? activity["object"] : extractAnnounceObjectId(activity),
+              objectAuthors: [...objectAuthors],
+              hydrated: typeof activity["object"] === "string",
+            });
+            return;
+          }
+        }
+      }
+
       // Step 4: Check if activity is public
       const isPublic = this.isPublicActivity(activity);
-      const searchEventMeta = isPublic
+      const isPolicyFiltered = inboundPolicyFilter !== null;
+      const isPublicForDiscovery = isPublic && !isPolicyFiltered;
+      const searchEventMeta = isPublicForDiscovery
         ? await this.buildPublicSearchEventMeta(activity, verifiedActorUri)
         : undefined;
 
       // Pre-compute recipient counts once for delivery metadata on Stream2 events.
       // Only meaningful for public activities; zero-fill otherwise.
-      const recipientCounts = (isPublic && typeof this.config.domain === "string" && this.config.domain.length > 0)
-        ? countActivityRecipients(activity, this.config.domain)
-        : { total: 0, local: 0 };
+      const recipientCounts =
+        isPublicForDiscovery &&
+        typeof this.config.domain === "string" &&
+        this.config.domain.length > 0
+          ? countActivityRecipients(activity, this.config.domain)
+          : { total: 0, local: 0 };
 
       // Step 4.1: Detect sidecar-managed actors by actor URI path.
       // Sidecar actors (e.g. /users/relay) take the Stream2 fast-path regardless
@@ -1391,7 +1609,7 @@ export class InboundWorker {
       if (isSidecarActor) {
         metrics.inboundActivityPubActivities.inc({ stage: "sidecar_actor_uri", activity_type: activityType });
         await this.queue.ack("inbound", messageId);
-        if (isPublic) {
+        if (isPublicForDiscovery) {
           try {
             await this.redpanda.publishToStream2({
               activity,
@@ -1414,7 +1632,13 @@ export class InboundWorker {
         }
         // Canonical publisher (fault-isolated) for sidecar actor activities
         await this.invokeCanonicalPublisher(
-          { activity, actorUri: verifiedActorUri, isPublic, isPrivate: !isPublic, isLocal: false },
+          {
+            activity,
+            actorUri: verifiedActorUri,
+            isPublic: isPublicForDiscovery,
+            isPrivate: !isPublicForDiscovery,
+            isLocal: false,
+          },
           envelope.envelopeId,
         );
         logger.info("Inbound activity handled for sidecar actor (actor URI path)", {
@@ -1437,7 +1661,7 @@ export class InboundWorker {
       if (isLocalActor) {
         metrics.inboundActivityPubActivities.inc({ stage: "local_actor", activity_type: activityType });
         await this.queue.ack("inbound", messageId);
-        if (isPublic) {
+        if (isPublicForDiscovery) {
           try {
             await this.redpanda.publishToStream1({
               activity,
@@ -1454,7 +1678,9 @@ export class InboundWorker {
           }
         }
         // AT projection + canonical (fault-isolated) for local activities
-        await this.invokeAtProjection(activity, verifiedActorUri, envelope.envelopeId);
+        if (isPublicForDiscovery) {
+          await this.invokeAtProjection(activity, verifiedActorUri, envelope.envelopeId);
+        }
         {
           const kind =
             activityType === "Update"
@@ -1463,7 +1689,14 @@ export class InboundWorker {
                 ? "PostDelete"
                 : undefined;
           await this.invokeCanonicalPublisher(
-            { activity, actorUri: verifiedActorUri, isPublic, isPrivate: !isPublic, isLocal: true, ...(kind ? { kind } : {}) },
+            {
+              activity,
+              actorUri: verifiedActorUri,
+              isPublic: isPublicForDiscovery,
+              isPrivate: !isPublicForDiscovery,
+              isLocal: true,
+              ...(kind ? { kind } : {}),
+            },
             envelope.envelopeId,
           );
         }
@@ -1484,7 +1717,7 @@ export class InboundWorker {
         if (this.config.sidecarActorPaths.has(pathWithoutInbox)) {
           metrics.inboundActivityPubActivities.inc({ stage: "sidecar_actor", activity_type: activityType });
           await this.queue.ack("inbound", messageId);
-          if (isPublic) {
+          if (isPublicForDiscovery) {
             try {
               await this.redpanda.publishToStream2({
                 activity,
@@ -1510,7 +1743,7 @@ export class InboundWorker {
             path: envelope.path,
             activityType,
           });
-          if (this.config.apRemoteWebhookUrl && isPublic) {
+          if (this.config.apRemoteWebhookUrl && isPublicForDiscovery) {
             try {
               await request(this.config.apRemoteWebhookUrl, {
                 method: "POST",
@@ -1596,7 +1829,7 @@ export class InboundWorker {
       }
 
       // Step 6: Publish public activities to Stream2 (remote actors only).
-      if (isPublic) {
+      if (isPublicForDiscovery) {
         try {
           await this.redpanda.publishToStream2({
             activity,
@@ -1648,10 +1881,12 @@ export class InboundWorker {
       }
 
       // Step 6.5: AT projection (fault-isolated — never affects AP routing).
-      await this.invokeAtProjection(activity, verifiedActorUri, envelope.envelopeId);
+      if (isPublicForDiscovery) {
+        await this.invokeAtProjection(activity, verifiedActorUri, envelope.envelopeId);
+      }
 
       // Step 6.7: Canonical event publisher (fault-isolated).
-      {
+      if (!isPolicyFiltered) {
         const kind =
           activityType === "Update"
             ? "PostEdit"
@@ -1659,7 +1894,14 @@ export class InboundWorker {
               ? "PostDelete"
               : undefined;
         await this.invokeCanonicalPublisher(
-          { activity, actorUri: verifiedActorUri, isPublic, isPrivate: !isPublic, isLocal: false, ...(kind ? { kind } : {}) },
+          {
+            activity,
+            actorUri: verifiedActorUri,
+            isPublic: isPublicForDiscovery,
+            isPrivate: !isPublicForDiscovery,
+            isLocal: false,
+            ...(kind ? { kind } : {}),
+          },
           envelope.envelopeId,
         );
       }
@@ -1669,7 +1911,7 @@ export class InboundWorker {
       // recursive fetching of the replies collection from origin servers.
       // This implements the same convention as Mastodon's FetchAllRepliesWorker
       // (merged in PR #32615) to ensure conversation threads are hydrated.
-      if (this.config.repliesBackfillService && isPublic) {
+      if (this.config.repliesBackfillService && isPublicForDiscovery) {
         const noteObject = extractNoteObject(activity);
         if (noteObject) {
           this.config.repliesBackfillService.triggerFromActivity(activity).catch((err: Error) => {
@@ -1681,7 +1923,7 @@ export class InboundWorker {
         }
       }
 
-      if (this.config.originReconciliationService && isPublic) {
+      if (this.config.originReconciliationService && isPublicForDiscovery) {
         const noteObject = extractNoteObject(activity);
         if (noteObject) {
           this.config.originReconciliationService.scheduleFromActivity(activity).catch((err: Error) => {
@@ -1701,7 +1943,7 @@ export class InboundWorker {
         actorUri: verifiedActorUri,
         activityId: activity.id,
         activityType: activity.type,
-        isPublic,
+        isPublic: isPublicForDiscovery,
       });
 
       void forwardedSuccessfully; // used above, silence lint
@@ -1713,7 +1955,8 @@ export class InboundWorker {
         activityId: activity.id,
         type: activity.type,
         actor: verifiedActorUri,
-        isPublic,
+        isPublic: isPublicForDiscovery,
+        limitedBy: inboundPolicyFilter,
       });
 
     } catch (err: any) {
@@ -2004,6 +2247,70 @@ export class InboundWorker {
   }
 
   /**
+   * Fetch a remote ActivityPub object (e.g., Announce target) and hydrate its scope.
+   *
+   * Used by Option A hardening: when an Announce references a URI-only object,
+   * attempt to fetch it to determine if it's followers-only, then apply
+   * authorization checks as if it were inline.
+   *
+   * Returns the fetched object, or null if fetch fails or is not allowed.
+   *
+   * Cache strategy: Uses standard actor doc cache for simplicity; future work
+   * could implement a separate short-lived object cache.
+   */
+  private async fetchRemoteAnnounceObject(objectUri: string): Promise<Record<string, unknown> | null> {
+    // Prevent overly broad fetches
+    if (!objectUri || typeof objectUri !== "string" || objectUri.length > 4096) {
+      return null;
+    }
+
+    try {
+      const url = new URL(objectUri);
+      // Only allow http/https
+      if (!["http:", "https:"].includes(url.protocol)) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+
+    try {
+      const response = await request(objectUri, {
+        method: "GET",
+        headers: {
+          "accept": "application/activity+json, application/ld+json",
+          "user-agent": this.config.userAgent,
+        },
+        bodyTimeout: this.config.requestTimeoutMs,
+        headersTimeout: this.config.requestTimeoutMs,
+        maxRedirections: 2,
+      });
+
+      if (response.statusCode === 404 || response.statusCode === 410) {
+        // Object deleted/not found; treat as inaccessible
+        await response.body.dump();
+        return null;
+      }
+
+      if (response.statusCode !== 200) {
+        await response.body.dump();
+        logger.debug("Failed to fetch Announce object", { objectUri, statusCode: response.statusCode });
+        return null;
+      }
+
+      const obj = await response.body.json();
+      if (!isRecord(obj)) {
+        return null;
+      }
+
+      return obj as Record<string, unknown>;
+    } catch (err: any) {
+      logger.debug("Error fetching Announce object", { objectUri, error: err.message });
+      return null;
+    }
+  }
+
+  /**
    * Derive a local actor URI from an inbox path, e.g.:
    *   "/users/alice/inbox" → "https://example.com/users/alice"
    *   "/inbox"             → null (shared inbox — no single actor)
@@ -2043,7 +2350,7 @@ export class InboundWorker {
     return checkAddressing(activity.to) || checkAddressing(activity.cc);
   }
 
-  private determineVisibility(activity: any): "public" | "unlisted" | "followers" | "direct" {
+  private determineVisibility(activity: any): "public" | "unlisted" | "followers" | "direct" | "local" {
     const checkAddressing = (field: any): string[] => {
       if (!field) return [];
       return Array.isArray(field) ? field : [field];
@@ -2051,6 +2358,11 @@ export class InboundWorker {
 
     const to = checkAddressing(activity?.to);
     const cc = checkAddressing(activity?.cc);
+
+    // Akkoma local-scope: `<instanceBaseUrl>/#Public` in `to` without `as:Public`.
+    if (isLocalScopeOnly(activity)) {
+      return "local";
+    }
 
     if (to.includes("https://www.w3.org/ns/activitystreams#Public") || to.includes("as:Public")) {
       return "public";
@@ -2084,7 +2396,7 @@ export class InboundWorker {
   ): Promise<{
     isPublicActivity: true;
     isPublicIndexable: boolean;
-    visibility: "public" | "unlisted" | "followers" | "direct";
+    visibility: "public" | "unlisted" | "followers" | "direct" | "local";
     searchConsent: PublicSearchConsentSignal;
   } | undefined> {
     const searchableObject = this.extractSearchableObject(activity);

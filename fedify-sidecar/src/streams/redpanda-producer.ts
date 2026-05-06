@@ -42,7 +42,7 @@ export interface ActivityEventMeta {
   isPublicActivity?: boolean;
   isPublicIndexable?: boolean;
   isDeleteOrTombstone?: boolean;
-  visibility?: "public" | "unlisted" | "followers" | "direct";
+  visibility?: "public" | "unlisted" | "followers" | "direct" | "local";
   searchConsent?: PublicSearchConsentSignal;
   /** Hashtags extracted from the object content — pre-parsed to avoid re-HTML-parsing downstream. */
   hashtags?: string[];
