@@ -73,10 +73,7 @@ AP_INTEROP_TARGET_USERNAME="${USERNAME}" \
 AP_INTEROP_RESULT_PATH=/interop/runtime/gotosocial-proof-result.json \
   docker compose -f "${COMPOSE_FILE}" --profile proof run --rm ap-interop-proof
 
-(
-  cd "${SCRIPT_DIR}/../../.."
-  AP_INTEROP_TARGET=gotosocial \
-  AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" \
-  AP_INTEROP_PROOF_RESULT_FILE="${RESULT_FILE}" \
-    sh ./interop/ap/scripts/verify-target-media-proof.sh
-)
+AP_INTEROP_TARGET=gotosocial \
+AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" \
+AP_INTEROP_PROOF_RESULT_FILE="${RESULT_FILE}" \
+  npm exec --prefix "${SCRIPT_DIR}/../../.." -- tsx "${SCRIPT_DIR}/verify-target-media-proof.ts"
