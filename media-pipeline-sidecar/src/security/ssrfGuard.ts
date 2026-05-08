@@ -22,11 +22,27 @@ const PRIVATE_IPV4_RANGES: Array<[string, string]> = [
   ['100.64.0.0', '100.127.255.255'],
   ['169.254.0.0', '169.254.255.255'],
   ['172.16.0.0', '172.31.255.255'],
+  // RFC 6890 IETF protocol assignments / RFC 5736 reserved
+  ['192.0.0.0', '192.0.0.255'],
+  // RFC 5737 documentation ranges
+  ['192.0.2.0', '192.0.2.255'],
+  ['198.51.100.0', '198.51.100.255'],
+  ['203.0.113.0', '203.0.113.255'],
+  // RFC 7526 6to4 anycast (deprecated, but still routed at some ISPs)
+  ['192.88.99.0', '192.88.99.255'],
   ['192.168.0.0', '192.168.255.255'],
   ['198.18.0.0', '198.19.255.255'],
   ['224.0.0.0', '239.255.255.255'],
   ['240.0.0.0', '255.255.255.255']
 ];
+
+// Hostnames that decode to a single decimal/hex/octal integer are an old
+// SSRF bypass: e.g. http://3232235521/ === http://192.168.0.1/, or
+// http://0x7f000001/ === http://127.0.0.1/. node:net.isIP() returns false
+// for these forms, so they slip past assertPublicIp() and reach DNS, where
+// some resolvers (or the kernel inet_aton fallback used by getaddrinfo on
+// Linux/musl) helpfully resolve them. Reject pre-DNS.
+const NUMERIC_HOSTNAME = /^(0x[0-9a-f]+|[0-9]+)$/i;
 
 export async function assertSafeRemoteUrl(rawUrl: string): Promise<URL> {
   const url = new URL(rawUrl);
@@ -44,6 +60,12 @@ export async function assertSafeRemoteUrl(rawUrl: string): Promise<URL> {
 
   if (BLOCKED_HOSTNAMES.has(hostname) || BLOCKED_HOSTNAME_SUFFIXES.some((suffix) => hostname.endsWith(suffix))) {
     throw new Error(`Blocked internal hostname: ${hostname}`);
+  }
+
+  // Reject all-numeric / hex-encoded hostnames that aren't already a valid
+  // IPv4/IPv6 literal. Valid IP literals fall through to assertPublicIp.
+  if (!net.isIP(hostname) && NUMERIC_HOSTNAME.test(hostname)) {
+    throw new Error(`Blocked numeric-encoded hostname: ${hostname}`);
   }
 
   // Domain allowlist — if non-empty, only matching domains are permitted
