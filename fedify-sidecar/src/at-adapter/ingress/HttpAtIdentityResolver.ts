@@ -18,6 +18,8 @@ export interface HttpAtIdentityResolverOptions {
   didDocumentCacheTtlMs?: number;
   didDocumentCacheMaxEntries?: number;
   failedResolutionCacheTtlMs?: number;
+  /** Resolve and verify the DID document's primary handle. Defaults to true. */
+  resolvePrimaryHandle?: boolean;
   /** Optional Redis client for a persistent L2 DID document cache (survives process restarts). */
   redisCache?: DidDocRedisCache;
   /** TTL for Redis DID document cache entries in seconds. Defaults to 300 (5 min). */
@@ -37,6 +39,7 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
   private readonly maxJsonBytes: number;
   private readonly didDocumentCacheTtlMs: number;
   private readonly didDocumentCacheMaxEntries: number;
+  private readonly shouldResolvePrimaryHandle: boolean;
   private readonly didDocumentCache = new Map<string, {
     resolved: ResolvedAtIdentityDocument;
     expiresAt: number;
@@ -66,6 +69,7 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
     this.maxJsonBytes = clampInteger(options.maxJsonBytes ?? 256_000, 8_192, 2_000_000);
     this.didDocumentCacheTtlMs = clampInteger(options.didDocumentCacheTtlMs ?? 30_000, 0, 15 * 60_000);
     this.didDocumentCacheMaxEntries = clampInteger(options.didDocumentCacheMaxEntries ?? 2_000, 1, 50_000);
+    this.shouldResolvePrimaryHandle = options.resolvePrimaryHandle ?? true;
     this.failedResolutionCacheTtlMs = clampInteger(options.failedResolutionCacheTtlMs ?? 15_000, 0, 5 * 60_000);
     this.redisCache = options.redisCache ?? null;
     this.redisCacheTtlSeconds = clampInteger(options.redisCacheTtlSeconds ?? 300, 30, 3_600);
@@ -184,7 +188,9 @@ export class HttpAtIdentityResolver implements AtIdentityResolver {
       throw new Error(`Resolved DID document did not match ${did}`);
     }
 
-    const handle = await this.resolvePrimaryHandle(didDocument, did);
+    const handle = this.shouldResolvePrimaryHandle
+      ? await this.resolvePrimaryHandle(didDocument, did)
+      : null;
     const pdsEndpoint = extractPdsEndpoint(didDocument);
 
     const resolved = {

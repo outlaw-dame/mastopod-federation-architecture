@@ -9,6 +9,7 @@ export interface AtIngressRuntimeConfig {
   consumerGroupId: string;
   rawTopic: string;
   sources: AtFirehoseSource[];
+  batchConcurrency?: number;
 }
 
 export interface AtIngressRuntimeLogger {
@@ -23,6 +24,7 @@ export interface AtIngressRuntimeConsumerLike {
   run(config: {
     autoCommit?: boolean;
     eachBatchAutoResolve?: boolean;
+    partitionsConsumedConcurrently?: number;
     eachBatch(payload: EachBatchPayload): Promise<void>;
   }): Promise<void>;
   stop(): Promise<void>;
@@ -46,6 +48,7 @@ const NOOP_LOGGER: AtIngressRuntimeLogger = {
 export class AtIngressRuntime {
   private readonly logger: AtIngressRuntimeLogger;
   private readonly consumerFactory: (groupId: string) => AtIngressRuntimeConsumerLike;
+  private readonly batchConcurrency: number;
   private consumer: AtIngressRuntimeConsumerLike | null = null;
   private started = false;
   private readonly startedSourceIds = new Set<string>();
@@ -53,6 +56,7 @@ export class AtIngressRuntime {
   public constructor(private readonly options: AtIngressRuntimeOptions) {
     this.logger = options.logger ?? NOOP_LOGGER;
     this.consumerFactory = options.consumerFactory ?? buildKafkaConsumerFactory(options.config);
+    this.batchConcurrency = Math.max(1, Math.floor(options.config.batchConcurrency ?? 1));
   }
 
   public async start(): Promise<void> {
@@ -64,8 +68,17 @@ export class AtIngressRuntime {
     await consumer.connect();
     await consumer.subscribe({ topic: this.options.config.rawTopic });
     await consumer.run({
-      autoCommit: false,
+      // We manually call resolveOffset() per message inside processBatch and
+      // disable kafkajs' end-of-batch auto-resolve. Auto-commit is left ON so
+      // the periodic background committer (default 5 s / 100 messages) flushes
+      // those resolved offsets — with autoCommit:false, commitOffsetsIfNecessary
+      // is a no-op and offsets never advance. See kafkajs Consumer docs.
+      autoCommit: true,
       eachBatchAutoResolve: false,
+      // Process all partitions in parallel; otherwise kafkajs serialises
+      // batches across partitions and a slow batch on one partition blocks
+      // the others (we observed this stalling p0/p2 while p1 drained).
+      partitionsConsumedConcurrently: 3,
       eachBatch: async (payload) => {
         await this.processBatch(payload);
       },
@@ -135,38 +148,95 @@ export class AtIngressRuntime {
       isStale,
     } = payload;
 
-    for (const message of batch.messages) {
+    const results: Array<PromiseSettledResult<void> | undefined> = [];
+    const inFlight = new Set<Promise<void>>();
+    let nextToStart = 0;
+    let nextToResolve = 0;
+    let resolvedSinceCommit = false;
+
+    const startNext = (): void => {
+      if (nextToStart >= batch.messages.length || !isRunning() || isStale()) {
+        return;
+      }
+
+      const resultIndex = nextToStart++;
+      const message = batch.messages[resultIndex];
+      if (!message) {
+        return;
+      }
+      const task = this.processMessage(batch.topic, message)
+        .then(() => {
+          results[resultIndex] = { status: "fulfilled", value: undefined };
+        })
+        .catch((reason: unknown) => {
+          results[resultIndex] = { status: "rejected", reason };
+        })
+        .finally(() => {
+          inFlight.delete(task);
+        });
+      inFlight.add(task);
+    };
+
+    while (nextToResolve < batch.messages.length) {
       if (!isRunning() || isStale()) {
         return;
       }
 
-      const value = readMessageValue(message.value);
-      if (!value) {
-        resolveOffset(message.offset);
-        await commitOffsetsIfNecessary();
+      while (inFlight.size < this.batchConcurrency && nextToStart < batch.messages.length) {
+        startNext();
+      }
+
+      if (!results[nextToResolve]) {
+        if (inFlight.size === 0) {
+          return;
+        }
+        await Promise.race(inFlight);
         await heartbeat();
         continue;
       }
 
-      let handled = true;
-      try {
-        handled = await this.handleRawEnvelope(JSON.parse(value));
-      } catch (error) {
-        this.logger.error("AT ingress runtime failed while handling a raw firehose envelope", {
-          topic: batch.topic,
-          offset: message.offset,
-          error: asErrorMessage(error),
-        });
-        throw error;
+      while (results[nextToResolve]) {
+        const result = results[nextToResolve];
+        const message = batch.messages[nextToResolve];
+        if (!result || !message) {
+          break;
+        }
+        if (result.status === "rejected") {
+          throw result.reason instanceof Error ? result.reason : new Error(String(result.reason));
+        }
+        resolveOffset(message.offset);
+        resolvedSinceCommit = true;
+        nextToResolve++;
       }
 
-      if (!handled) {
-        throw new Error("AT ingress verifier requested a retry");
+      if (resolvedSinceCommit) {
+        await commitOffsetsIfNecessary();
+        resolvedSinceCommit = false;
       }
-
-      resolveOffset(message.offset);
-      await commitOffsetsIfNecessary();
       await heartbeat();
+    }
+  }
+
+  private async processMessage(topic: string, message: { offset: string; value: Buffer | Uint8Array | null }): Promise<void> {
+    const value = readMessageValue(message.value);
+    if (!value) {
+      return;
+    }
+
+    let handled = true;
+    try {
+      handled = await this.handleRawEnvelope(JSON.parse(value));
+    } catch (error) {
+      this.logger.error("AT ingress runtime failed while handling a raw firehose envelope", {
+        topic,
+        offset: message.offset,
+        error: asErrorMessage(error),
+      });
+      throw error;
+    }
+
+    if (!handled) {
+      throw new Error("AT ingress verifier requested a retry");
     }
   }
 }
@@ -187,6 +257,16 @@ function buildKafkaConsumerFactory(
   return (groupId: string) => kafka.consumer({
     groupId,
     allowAutoTopicCreation: false,
+    // Live AT firehose verifier work (CBOR decode + signature verify) can
+    // block the event loop for several seconds on large commits. Give the
+    // group coordinator enough headroom to avoid spurious rebalances that
+    // throw away resolved-but-uncommitted offsets.
+    sessionTimeout: 60_000,
+    heartbeatInterval: 5_000,
+    rebalanceTimeout: 90_000,
+    // Cap per-partition fetch so a single batch doesn't take so long to
+    // process that we miss the heartbeat window or back up other partitions.
+    maxBytesPerPartition: 256 * 1024,
   });
 }
 

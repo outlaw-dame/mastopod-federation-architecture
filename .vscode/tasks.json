@@ -139,6 +139,16 @@
       "problemMatcher": []
     },
     {
+      "label": "debug:fedify:sidecar:public",
+      "type": "shell",
+      "command": "ENABLE_XRPC_SERVER=true sh ./scripts/debug-local.sh 9230",
+      "options": {
+        "cwd": "${workspaceFolder:fedify-sidecar}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
       "label": "debug:media:sidecar",
       "type": "shell",
       "command": "NODE_OPTIONS=--inspect=9231 npm run server:dev",
@@ -209,6 +219,53 @@
       "problemMatcher": []
     },
     {
+      "label": "tunnel:fedify:ngrok",
+      "type": "shell",
+      "command": "ngrok http 8080 --log stdout",
+      "options": {
+        "cwd": "${workspaceFolder:fedify-sidecar}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "tunnel:fedify:cloudflare",
+      "type": "shell",
+      "command": "mkdir -p .tmp && : > .tmp/cloudflared-fedify.log && CLOUDFLARED_LOG_FILE=.tmp/cloudflared-fedify.log cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080 --logfile .tmp/cloudflared-fedify.log",
+      "options": {
+        "cwd": "${workspaceFolder:fedify-sidecar}"
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "smoke:fedify:public:ngrok",
+      "type": "shell",
+      "command": "FEDERATION_BASE_URL=\"$(npm run -s tunnel:url -- --provider ngrok --port 8080)\" FEDERATION_SMOKE_EXPECT_XRPC=true npm run smoke:federation:public",
+      "options": {
+        "cwd": "${workspaceFolder:fedify-sidecar}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "smoke:fedify:public:cloudflare",
+      "type": "shell",
+      "command": "FEDERATION_BASE_URL=\"$(npm run -s tunnel:url -- --provider cloudflare --cloudflare-log-file .tmp/cloudflared-fedify.log)\" FEDERATION_SMOKE_EXPECT_XRPC=true npm run smoke:federation:public",
+      "options": {
+        "cwd": "${workspaceFolder:fedify-sidecar}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "smoke:at-firehose",
+      "type": "shell",
+      "command": "JETSTREAM_MAX_EVENTS=${JETSTREAM_MAX_EVENTS:-1} npm run smoke:at-firehose",
+      "options": {
+        "cwd": "${workspaceFolder:fedify-sidecar}"
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "slice:federation:up",
       "dependsOn": [
         "infra:core:up",
@@ -226,6 +283,30 @@
         "debug:activitypods:backend",
         "debug:activitypods:frontend",
         "debug:fedify:sidecar"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:federation:public:ngrok",
+      "dependsOn": [
+        "infra:core:up",
+        "debug:activitypods:backend",
+        "debug:activitypods:frontend",
+        "debug:fedify:sidecar:public",
+        "tunnel:fedify:ngrok"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "slice:federation:public:cloudflare",
+      "dependsOn": [
+        "infra:core:up",
+        "debug:activitypods:backend",
+        "debug:activitypods:frontend",
+        "debug:fedify:sidecar:public",
+        "tunnel:fedify:cloudflare"
       ],
       "dependsOrder": "sequence",
       "problemMatcher": []

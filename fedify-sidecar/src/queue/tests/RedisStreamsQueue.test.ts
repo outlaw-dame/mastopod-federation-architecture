@@ -73,12 +73,14 @@ describe("RedisStreamsQueue", () => {
     });
     const outboundConsumer = makeClient();
     const outboxIntentConsumer = makeClient();
+    const nonPublicForwardConsumer = makeClient();
     const originReconcileConsumer = makeClient();
     fakeClients.push(
       adminClient,
       inboundConsumer,
       outboundConsumer,
       outboxIntentConsumer,
+      nonPublicForwardConsumer,
       originReconcileConsumer,
     );
 
@@ -110,12 +112,14 @@ describe("RedisStreamsQueue", () => {
     const inboundConsumer = makeClient();
     const outboundConsumer = makeClient();
     const outboxIntentConsumer = makeClient();
+    const nonPublicForwardConsumer = makeClient();
     const originReconcileConsumer = makeClient();
     fakeClients.push(
       adminClient,
       inboundConsumer,
       outboundConsumer,
       outboxIntentConsumer,
+      nonPublicForwardConsumer,
       originReconcileConsumer,
     );
 

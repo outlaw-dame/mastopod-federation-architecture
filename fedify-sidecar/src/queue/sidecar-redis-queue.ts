@@ -31,10 +31,12 @@ export interface QueueConfig {
   inboundStreamKey?: string;
   outboundStreamKey?: string;
   outboxIntentStreamKey?: string;
+  nonPublicForwardStreamKey?: string;
   originReconcileStreamKey?: string;
   inboundDlqStreamKey?: string;
   outboundDlqStreamKey?: string;
   outboxIntentDlqStreamKey?: string;
+  nonPublicForwardDlqStreamKey?: string;
   originReconcileDlqStreamKey?: string;
   maxDlqLength?: number;
   consumerGroup?: string;
@@ -120,6 +122,24 @@ export interface OutboxIntentState {
   jobCount?: number;
 }
 
+export interface NonPublicForwardJob {
+  jobId: string;
+  envelopeId: string;
+  activityId?: string;
+  path: string;
+  headers: Record<string, string>;
+  remoteIp: string;
+  receivedAt: number;
+  verifiedActorUri: string;
+  activity: string;
+  scope: "followers" | "direct" | "local";
+  createdAt: number;
+  attempt: number;
+  maxAttempts: number;
+  notBeforeMs: number;
+  lastError?: string;
+}
+
 export interface OriginReconciliationJob {
   jobId: string;
   originObjectUrl: string;
@@ -141,7 +161,7 @@ export interface DLQEntry {
   id: string;
   reason: string;
   timestamp: number;
-  data: InboundEnvelope | OutboundJob | OutboxIntent | OriginReconciliationJob;
+  data: InboundEnvelope | OutboundJob | OutboxIntent | NonPublicForwardJob | OriginReconciliationJob;
 }
 
 // ============================================================================
@@ -153,14 +173,17 @@ export class RedisStreamsQueue {
   private inboundConsumerRedis: RedisClientType;
   private outboundConsumerRedis: RedisClientType;
   private outboxIntentConsumerRedis: RedisClientType;
+  private nonPublicForwardConsumerRedis: RedisClientType;
   private originReconcileConsumerRedis: RedisClientType;
   private readonly inboundStreamKey: string;
   private readonly outboundStreamKey: string;
   private readonly outboxIntentStreamKey: string;
+  private readonly nonPublicForwardStreamKey: string;
   private readonly originReconcileStreamKey: string;
   private readonly inboundDlqStreamKey: string;
   private readonly outboundDlqStreamKey: string;
   private readonly outboxIntentDlqStreamKey: string;
+  private readonly nonPublicForwardDlqStreamKey: string;
   private readonly originReconcileDlqStreamKey: string;
   private readonly maxDlqLength: number;
   private readonly consumerGroup: string;
@@ -180,15 +203,18 @@ export class RedisStreamsQueue {
     this.inboundConsumerRedis = createClient({ url: redisUrl });
     this.outboundConsumerRedis = createClient({ url: redisUrl });
     this.outboxIntentConsumerRedis = createClient({ url: redisUrl });
+    this.nonPublicForwardConsumerRedis = createClient({ url: redisUrl });
     this.originReconcileConsumerRedis = createClient({ url: redisUrl });
 
     this.inboundStreamKey = config.inboundStreamKey ?? "ap:queue:inbound:v1";
     this.outboundStreamKey = config.outboundStreamKey ?? "ap:queue:outbound:v1";
     this.outboxIntentStreamKey = config.outboxIntentStreamKey ?? "ap:queue:outbox-intent:v1";
+    this.nonPublicForwardStreamKey = config.nonPublicForwardStreamKey ?? "ap:queue:nonpublic-forward:v1";
     this.originReconcileStreamKey = config.originReconcileStreamKey ?? "ap:queue:origin-reconcile:v1";
     this.inboundDlqStreamKey = config.inboundDlqStreamKey ?? "ap:queue:dlq:inbound:v1";
     this.outboundDlqStreamKey = config.outboundDlqStreamKey ?? "ap:queue:dlq:outbound:v1";
     this.outboxIntentDlqStreamKey = config.outboxIntentDlqStreamKey ?? "ap:queue:dlq:outbox-intent:v1";
+    this.nonPublicForwardDlqStreamKey = config.nonPublicForwardDlqStreamKey ?? "ap:queue:dlq:nonpublic-forward:v1";
     this.originReconcileDlqStreamKey = config.originReconcileDlqStreamKey ?? "ap:queue:dlq:origin-reconcile:v1";
     this.maxDlqLength = config.maxDlqLength ?? 10000;
     this.consumerGroup = config.consumerGroup ?? "sidecar-workers";
@@ -215,6 +241,10 @@ export class RedisStreamsQueue {
       logger.error({ error: err.message }, "Redis outbox-intent consumer error");
     });
 
+    this.nonPublicForwardConsumerRedis.on("error", (err) => {
+      logger.error({ error: err.message }, "Redis non-public-forward consumer error");
+    });
+
     this.originReconcileConsumerRedis.on("error", (err) => {
       logger.error({ error: err.message }, "Redis origin-reconcile consumer error");
     });
@@ -232,6 +262,7 @@ export class RedisStreamsQueue {
       this.inboundConsumerRedis.connect(),
       this.outboundConsumerRedis.connect(),
       this.outboxIntentConsumerRedis.connect(),
+      this.nonPublicForwardConsumerRedis.connect(),
       this.originReconcileConsumerRedis.connect(),
     ]);
 
@@ -242,6 +273,7 @@ export class RedisStreamsQueue {
       inboundStream: this.inboundStreamKey,
       outboundStream: this.outboundStreamKey,
       outboxIntentStream: this.outboxIntentStreamKey,
+      nonPublicForwardStream: this.nonPublicForwardStreamKey,
       originReconcileStream: this.originReconcileStreamKey,
       consumerId: this.consumerId,
     });
@@ -255,10 +287,81 @@ export class RedisStreamsQueue {
       this.inboundConsumerRedis.quit(),
       this.outboundConsumerRedis.quit(),
       this.outboxIntentConsumerRedis.quit(),
+      this.nonPublicForwardConsumerRedis.quit(),
       this.originReconcileConsumerRedis.quit(),
     ]);
     this.isConnected = false;
     logger.info("Redis Streams Queue disconnected");
+  }
+
+  // ==========================================================================
+  // Non-Public Forward Queue Operations
+  // ==========================================================================
+
+  async enqueueNonPublicForward(job: NonPublicForwardJob): Promise<string> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+
+    const messageId = await this.redis.xAdd(
+      this.nonPublicForwardStreamKey,
+      "*",
+      this.serializeNonPublicForwardJob(job),
+      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxStreamLength } },
+    );
+
+    logger.debug("Enqueued non-public forward job", {
+      jobId: job.jobId,
+      envelopeId: job.envelopeId,
+      messageId,
+      scope: job.scope,
+    });
+
+    return messageId;
+  }
+
+  async *consumeNonPublicForwards(): AsyncIterable<{ messageId: string; job: NonPublicForwardJob }> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+
+    while (true) {
+      try {
+        const pending = await (this.nonPublicForwardConsumerRedis as any).xAutoClaim(
+          this.nonPublicForwardStreamKey,
+          this.consumerGroup,
+          this.consumerId,
+          this.claimIdleTimeMs,
+          "0-0",
+          { COUNT: this.claimBatchCount },
+        );
+
+        for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
+          const job = this.deserializeNonPublicForwardJob(messageId, fields);
+          yield { messageId, job };
+        }
+
+        const messages = await (this.nonPublicForwardConsumerRedis as any).xReadGroup(
+          this.consumerGroup,
+          this.consumerId,
+          { key: this.nonPublicForwardStreamKey, id: ">" },
+          { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs },
+        );
+
+        if (!messages || messages.length === 0) {
+          continue;
+        }
+
+        for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
+          for (const [messageId, fields] of streamMessages) {
+            const job = this.deserializeNonPublicForwardJob(messageId, fields);
+            yield { messageId, job };
+          }
+        }
+      } catch (err: any) {
+        if (this.isMissingConsumerGroupError(err)) {
+          await this.ensureConsumerGroup(this.nonPublicForwardStreamKey);
+        }
+        logger.error({ error: err.message }, "Error consuming non-public forward messages");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
   }
 
   // ==========================================================================
@@ -638,6 +741,37 @@ export class RedisStreamsQueue {
     };
   }
 
+  private deserializeNonPublicForwardJob(messageId: string, fields: Record<string, string>): NonPublicForwardJob {
+    const rawHeaders = this.requireField(fields, "headers", messageId);
+    const parsedHeaders = JSON.parse(rawHeaders) as unknown;
+    if (!parsedHeaders || typeof parsedHeaders !== "object" || Array.isArray(parsedHeaders)) {
+      throw new Error(`Stream message ${messageId} has invalid non-public forward headers`);
+    }
+
+    const scope = this.requireField(fields, "scope", messageId);
+    if (scope !== "followers" && scope !== "direct" && scope !== "local") {
+      throw new Error(`Stream message ${messageId} has invalid non-public forward scope`);
+    }
+
+    return {
+      jobId: this.requireField(fields, "jobId", messageId),
+      envelopeId: this.requireField(fields, "envelopeId", messageId),
+      activityId: fields["activityId"] || undefined,
+      path: this.requireField(fields, "path", messageId),
+      headers: parsedHeaders as Record<string, string>,
+      remoteIp: this.requireField(fields, "remoteIp", messageId),
+      receivedAt: parseInt(this.requireField(fields, "receivedAt", messageId), 10),
+      verifiedActorUri: this.requireField(fields, "verifiedActorUri", messageId),
+      activity: this.requireField(fields, "activity", messageId),
+      scope,
+      createdAt: parseInt(this.requireField(fields, "createdAt", messageId), 10),
+      attempt: parseInt(this.requireField(fields, "attempt", messageId), 10),
+      maxAttempts: parseInt(this.requireField(fields, "maxAttempts", messageId), 10),
+      notBeforeMs: parseInt(this.requireField(fields, "notBeforeMs", messageId), 10),
+      lastError: fields["lastError"] || undefined,
+    };
+  }
+
   private deserializeOutboundJob(messageId: string, fields: Record<string, string>): OutboundJob {
     return {
       jobId: this.requireField(fields, "jobId", messageId),
@@ -746,7 +880,7 @@ export class RedisStreamsQueue {
   // Message Acknowledgment
   // ==========================================================================
 
-  async ack(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile", messageId: string): Promise<void> {
+  async ack(type: "inbound" | "outbound" | "outbox_intent" | "nonpublic_forward" | "origin_reconcile", messageId: string): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
     const streamKey =
@@ -756,7 +890,9 @@ export class RedisStreamsQueue {
           ? this.outboundStreamKey
           : type === "outbox_intent"
             ? this.outboxIntentStreamKey
-            : this.originReconcileStreamKey;
+            : type === "nonpublic_forward"
+              ? this.nonPublicForwardStreamKey
+              : this.originReconcileStreamKey;
     await this.redis.xAck(streamKey, this.consumerGroup, messageId);
     logger.debug("Message acknowledged", { type, messageId });
   }
@@ -822,7 +958,7 @@ export class RedisStreamsQueue {
     return raw ? JSON.parse(raw) : null;
   }
 
-  async getPendingCount(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile"): Promise<number> {
+  async getPendingCount(type: "inbound" | "outbound" | "outbox_intent" | "nonpublic_forward" | "origin_reconcile"): Promise<number> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
     const streamKey =
@@ -832,7 +968,9 @@ export class RedisStreamsQueue {
           ? this.outboundStreamKey
           : type === "outbox_intent"
             ? this.outboxIntentStreamKey
-            : this.originReconcileStreamKey;
+            : type === "nonpublic_forward"
+              ? this.nonPublicForwardStreamKey
+              : this.originReconcileStreamKey;
     let pending: { pending?: number } | null = null;
     try {
       pending = await (this.redis as any).xPending(streamKey, this.consumerGroup);
@@ -846,7 +984,7 @@ export class RedisStreamsQueue {
     return typeof pending?.pending === "number" ? pending.pending : 0;
   }
 
-  async getStreamLength(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile"): Promise<number> {
+  async getStreamLength(type: "inbound" | "outbound" | "outbox_intent" | "nonpublic_forward" | "origin_reconcile"): Promise<number> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
     const streamKey =
@@ -856,7 +994,9 @@ export class RedisStreamsQueue {
           ? this.outboundStreamKey
           : type === "outbox_intent"
             ? this.outboxIntentStreamKey
-            : this.originReconcileStreamKey;
+            : type === "nonpublic_forward"
+              ? this.nonPublicForwardStreamKey
+              : this.originReconcileStreamKey;
     const length = await this.redis.xLen(streamKey);
     return typeof length === "number" ? length : 0;
   }
@@ -947,8 +1087,8 @@ export class RedisStreamsQueue {
   // ==========================================================================
 
   async moveToDlq(
-    type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile",
-    data: InboundEnvelope | OutboundJob | OutboxIntent | OriginReconciliationJob,
+    type: "inbound" | "outbound" | "outbox_intent" | "nonpublic_forward" | "origin_reconcile",
+    data: InboundEnvelope | OutboundJob | OutboxIntent | NonPublicForwardJob | OriginReconciliationJob,
     reason: string,
   ): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -961,7 +1101,9 @@ export class RedisStreamsQueue {
             ? (data as OutboundJob).jobId
             : type === "outbox_intent"
               ? (data as OutboxIntent).intentId
-              : (data as OriginReconciliationJob).jobId,
+              : type === "nonpublic_forward"
+                ? (data as NonPublicForwardJob).jobId
+                : (data as OriginReconciliationJob).jobId,
       reason,
       timestamp: Date.now(),
       data,
@@ -974,7 +1116,9 @@ export class RedisStreamsQueue {
           ? this.outboundDlqStreamKey
           : type === "outbox_intent"
             ? this.outboxIntentDlqStreamKey
-            : this.originReconcileDlqStreamKey;
+            : type === "nonpublic_forward"
+              ? this.nonPublicForwardDlqStreamKey
+              : this.originReconcileDlqStreamKey;
 
     await this.redis.xAdd(
       dlqKey,
@@ -1002,11 +1146,19 @@ export class RedisStreamsQueue {
     const inboundLen = await this.redis.xLen(this.inboundStreamKey);
     const outboundLen = await this.redis.xLen(this.outboundStreamKey);
     const outboxIntentLen = await this.redis.xLen(this.outboxIntentStreamKey);
+    const nonPublicForwardLen = await this.redis.xLen(this.nonPublicForwardStreamKey);
     const originReconcileLen = await this.redis.xLen(this.originReconcileStreamKey);
-    const [dlqInboundLen, dlqOutboundLen, dlqOutboxIntentLen, dlqOriginReconcileLen] = await Promise.all([
+    const [
+      dlqInboundLen,
+      dlqOutboundLen,
+      dlqOutboxIntentLen,
+      dlqNonPublicForwardLen,
+      dlqOriginReconcileLen,
+    ] = await Promise.all([
       this.redis.xLen(this.inboundDlqStreamKey),
       this.redis.xLen(this.outboundDlqStreamKey),
       this.redis.xLen(this.outboxIntentDlqStreamKey),
+      this.redis.xLen(this.nonPublicForwardDlqStreamKey),
       this.redis.xLen(this.originReconcileDlqStreamKey),
     ]);
 
@@ -1014,15 +1166,17 @@ export class RedisStreamsQueue {
       inboundQueueLength: inboundLen,
       outboundQueueLength: outboundLen,
       outboxIntentQueueLength: outboxIntentLen,
+      nonPublicForwardQueueLength: nonPublicForwardLen,
       originReconcileQueueLength: originReconcileLen,
       dlqInboundLength: dlqInboundLen,
       dlqOutboundLength: dlqOutboundLen,
       dlqOutboxIntentLength: dlqOutboxIntentLen,
+      dlqNonPublicForwardLength: dlqNonPublicForwardLen,
       dlqOriginReconcileLength: dlqOriginReconcileLen,
     };
   }
 
-  async getDlqLength(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile"): Promise<number> {
+  async getDlqLength(type: "inbound" | "outbound" | "outbox_intent" | "nonpublic_forward" | "origin_reconcile"): Promise<number> {
     if (!this.isConnected) throw new Error("Queue not connected");
     const key =
       type === "inbound"
@@ -1031,7 +1185,9 @@ export class RedisStreamsQueue {
           ? this.outboundDlqStreamKey
           : type === "outbox_intent"
             ? this.outboxIntentDlqStreamKey
-            : this.originReconcileDlqStreamKey;
+            : type === "nonpublic_forward"
+              ? this.nonPublicForwardDlqStreamKey
+              : this.originReconcileDlqStreamKey;
     return this.redis.xLen(key);
   }
 
@@ -1044,6 +1200,7 @@ export class RedisStreamsQueue {
       this.inboundStreamKey,
       this.outboundStreamKey,
       this.outboxIntentStreamKey,
+      this.nonPublicForwardStreamKey,
       this.originReconcileStreamKey,
     ]) {
       await this.ensureConsumerGroup(streamKey);
@@ -1096,6 +1253,26 @@ export class RedisStreamsQueue {
       lastError: intent.lastError ?? "",
       meta: intent.meta ? JSON.stringify(intent.meta) : "",
       bridgeHints: intent.bridgeHints ? JSON.stringify(intent.bridgeHints) : "",
+    };
+  }
+
+  private serializeNonPublicForwardJob(job: NonPublicForwardJob): Record<string, string> {
+    return {
+      jobId: job.jobId,
+      envelopeId: job.envelopeId,
+      activityId: job.activityId ?? "",
+      path: job.path,
+      headers: JSON.stringify(job.headers),
+      remoteIp: job.remoteIp,
+      receivedAt: job.receivedAt.toString(),
+      verifiedActorUri: job.verifiedActorUri,
+      activity: job.activity,
+      scope: job.scope,
+      createdAt: job.createdAt.toString(),
+      attempt: job.attempt.toString(),
+      maxAttempts: job.maxAttempts.toString(),
+      notBeforeMs: job.notBeforeMs.toString(),
+      lastError: job.lastError ?? "",
     };
   }
 
@@ -1252,11 +1429,15 @@ export function createDefaultConfig(): QueueConfig {
     outboundStreamKey: process.env["OUTBOUND_STREAM_KEY"] || "ap:queue:outbound:v1",
     outboxIntentStreamKey:
       process.env["OUTBOX_INTENT_STREAM_KEY"] || "ap:queue:outbox-intent:v1",
+    nonPublicForwardStreamKey:
+      process.env["NONPUBLIC_FORWARD_STREAM_KEY"] || "ap:queue:nonpublic-forward:v1",
     originReconcileStreamKey:
       process.env["ORIGIN_RECONCILE_STREAM_KEY"] || "ap:queue:origin-reconcile:v1",
     inboundDlqStreamKey: process.env["DLQ_INBOUND_STREAM_KEY"] || "ap:queue:dlq:inbound:v1",
     outboundDlqStreamKey: process.env["DLQ_OUTBOUND_STREAM_KEY"] || "ap:queue:dlq:outbound:v1",
     outboxIntentDlqStreamKey: process.env["DLQ_OUTBOX_INTENT_STREAM_KEY"] || "ap:queue:dlq:outbox-intent:v1",
+    nonPublicForwardDlqStreamKey:
+      process.env["DLQ_NONPUBLIC_FORWARD_STREAM_KEY"] || "ap:queue:dlq:nonpublic-forward:v1",
     originReconcileDlqStreamKey:
       process.env["DLQ_ORIGIN_RECONCILE_STREAM_KEY"] || "ap:queue:dlq:origin-reconcile:v1",
     maxDlqLength: parseInt(process.env["MAX_DLQ_LENGTH"] || "10000", 10),

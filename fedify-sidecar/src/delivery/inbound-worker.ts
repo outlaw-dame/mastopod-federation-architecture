@@ -20,6 +20,7 @@ import {
   RedisStreamsQueue,
   InboundEnvelope,
   InboundEnvelopeVerification,
+  type NonPublicForwardJob,
   backoffMs,
 } from "../queue/sidecar-redis-queue.js";
 import { RedPandaProducer } from "../streams/redpanda-producer.js";
@@ -168,6 +169,12 @@ export interface InboundWorkerConfig {
   apRemoteWebhookUrl?: string;
   /** Shared secret sent as X-Bridge-Secret header on AP webhook calls. */
   apRemoteWebhookSecret?: string;
+  /** Optional durable queue used for async non-public forwarding. */
+  nonPublicForwardQueue?: {
+    enqueueNonPublicForward(job: NonPublicForwardJob): Promise<string>;
+  };
+  /** Max attempts for non-public forward jobs processed by async worker. */
+  nonPublicForwardMaxAttempts?: number;
   /**
    * Durable Redis-based idempotency guard.
    * When present, each inbound activity ID is claimed atomically in Redis
@@ -1768,45 +1775,96 @@ export class InboundWorker {
       }
 
       // Step 5: Forward to ActivityPods (via injectable bridge or HTTP).
+      // OPTIMIZATION: Public activities forward synchronously (to ensure immediate Stream2/firehose)
+      // Non-public forward asynchronously via DLQ (faster processing, doesn't block firehose)
       let forwardedSuccessfully = false;
-      if (this.config.activityPodsBridge) {
-        try {
-          await this.config.activityPodsBridge.forwardInboundActivity(
-            { path: envelope.path, headers: envelope.headers },
-            activity,
-            verifiedActorUri,
-          );
+
+      if (isPublicForDiscovery) {
+        // PUBLIC: Synchronous forwarding (critical path for firehose)
+        if (this.config.activityPodsBridge) {
+          try {
+            await this.config.activityPodsBridge.forwardInboundActivity(
+              { path: envelope.path, headers: envelope.headers },
+              activity,
+              verifiedActorUri,
+            );
+            forwardedSuccessfully = true;
+          } catch (err: any) {
+            metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
+            await this.queue.ack("inbound", messageId);
+            await this.queue.moveToDlq("inbound", envelope, `Bridge forward failed: ${err.message}`);
+            logger.warn("Injectable bridge forward failed", {
+              envelopeId: envelope.envelopeId,
+              error: err.message,
+            });
+            return;
+          }
+        } else {
+          const forwardResult = await this.forwardToActivityPods(envelope, activity, verifiedActorUri);
+
+          if (!forwardResult.success) {
+            metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
+            await this.queue.ack("inbound", messageId);
+
+            if (forwardResult.permanent || envelope.attempt >= MAX_INBOUND_ATTEMPTS) {
+              await this.queue.moveToDlq(
+                "inbound",
+                envelope,
+                forwardResult.permanent
+                  ? (forwardResult.error || "Forward failed (permanent)")
+                  : `Exhausted ${MAX_INBOUND_ATTEMPTS} attempts: ${forwardResult.error}`,
+              );
+              logger.warn("Inbound envelope moved to DLQ", {
+                envelopeId: envelope.envelopeId,
+                attempt: envelope.attempt,
+                permanent: forwardResult.permanent,
+                error: forwardResult.error,
+              });
+            } else {
+              const nextAttempt = envelope.attempt + 1;
+              const delay = backoffMs(nextAttempt);
+              await this.queue.enqueueInbound({
+                ...envelope,
+                attempt: nextAttempt,
+                notBeforeMs: Date.now() + delay,
+              });
+              logger.warn("Inbound envelope requeued with backoff", {
+                envelopeId: envelope.envelopeId,
+                attempt: nextAttempt,
+                retryAt: new Date(Date.now() + delay).toISOString(),
+                error: forwardResult.error,
+              });
+            }
+            return;
+          }
           forwardedSuccessfully = true;
-        } catch (err: any) {
-          metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
-          await this.queue.ack("inbound", messageId);
-          await this.queue.moveToDlq("inbound", envelope, `Bridge forward failed: ${err.message}`);
-          logger.warn("Injectable bridge forward failed", {
-            envelopeId: envelope.envelopeId,
-            error: err.message,
-          });
-          return;
         }
       } else {
-        const forwardResult = await this.forwardToActivityPods(envelope, activity, verifiedActorUri);
+        // NON-PUBLIC: enqueue for async delivery. On enqueue failure, fail-safe
+        // to the synchronous forwarding path so messages are not dropped.
+        const asyncForwardResult = await this.forwardNonPublicToActivityPods(
+          envelope,
+          activity,
+          verifiedActorUri,
+        );
 
-        if (!forwardResult.success) {
+        if (!asyncForwardResult.success) {
           metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
           await this.queue.ack("inbound", messageId);
 
-          if (forwardResult.permanent || envelope.attempt >= MAX_INBOUND_ATTEMPTS) {
+          if (asyncForwardResult.permanent || envelope.attempt >= MAX_INBOUND_ATTEMPTS) {
             await this.queue.moveToDlq(
               "inbound",
               envelope,
-              forwardResult.permanent
-                ? (forwardResult.error || "Forward failed (permanent)")
-                : `Exhausted ${MAX_INBOUND_ATTEMPTS} attempts: ${forwardResult.error}`,
+              asyncForwardResult.permanent
+                ? (asyncForwardResult.error || "Forward failed (permanent)")
+                : `Exhausted ${MAX_INBOUND_ATTEMPTS} attempts: ${asyncForwardResult.error}`,
             );
             logger.warn("Inbound envelope moved to DLQ", {
               envelopeId: envelope.envelopeId,
               attempt: envelope.attempt,
-              permanent: forwardResult.permanent,
-              error: forwardResult.error,
+              permanent: asyncForwardResult.permanent,
+              error: asyncForwardResult.error,
             });
           } else {
             const nextAttempt = envelope.attempt + 1;
@@ -1820,11 +1878,12 @@ export class InboundWorker {
               envelopeId: envelope.envelopeId,
               attempt: nextAttempt,
               retryAt: new Date(Date.now() + delay).toISOString(),
-              error: forwardResult.error,
+              error: asyncForwardResult.error,
             });
           }
           return;
         }
+
         forwardedSuccessfully = true;
       }
 
@@ -2482,6 +2541,91 @@ export class InboundWorker {
         permanent: false, 
         error: `Network error: ${err.message}` 
       };
+    }
+  }
+
+  /**
+   * Forward non-public content through the async non-public queue when present.
+   * Falls back to synchronous bridge or HTTP forwarding when:
+   *   - the activity is actually public (e.g. policy-filtered) — avoid touching the queue;
+   *   - the queue is not configured (in-process bridge tests, rollback);
+   *   - enqueue itself fails (fail-safe so we never lose private activities).
+   */
+  private async forwardNonPublicToActivityPods(
+    envelope: InboundEnvelope,
+    activity: any,
+    verifiedActorUri: string,
+  ): Promise<{ success: boolean; permanent?: boolean; error?: string }> {
+    const scope = getAudienceScope(activity);
+
+    const forwardSync = async (): Promise<{ success: boolean; permanent?: boolean; error?: string }> => {
+      if (this.config.activityPodsBridge) {
+        try {
+          await this.config.activityPodsBridge.forwardInboundActivity(
+            { path: envelope.path, headers: envelope.headers },
+            activity,
+            verifiedActorUri,
+          );
+          return { success: true };
+        } catch (err: any) {
+          return {
+            success: false,
+            permanent: true,
+            error: `Bridge forward failed: ${err.message}`,
+          };
+        }
+      }
+      return this.forwardToActivityPods(envelope, activity, verifiedActorUri);
+    };
+
+    // Public-scope activities (including policy-filtered ones reaching this branch
+    // because isPublicForDiscovery=false) must not be enqueued on the private
+    // forward stream. Forward synchronously to preserve existing semantics.
+    if (scope === "public") {
+      return forwardSync();
+    }
+
+    if (!this.config.nonPublicForwardQueue) {
+      logger.warn("Non-public forward queue unavailable, using synchronous forwarding", {
+        envelopeId: envelope.envelopeId,
+        scope,
+      });
+      return forwardSync();
+    }
+
+    try {
+      const job: NonPublicForwardJob = {
+        jobId: `${envelope.envelopeId}:${Date.now()}`,
+        envelopeId: envelope.envelopeId,
+        activityId: typeof activity?.id === "string" ? activity.id : undefined,
+        path: envelope.path,
+        headers: envelope.headers,
+        remoteIp: envelope.remoteIp,
+        receivedAt: envelope.receivedAt,
+        verifiedActorUri,
+        activity: JSON.stringify(activity),
+        scope,
+        createdAt: Date.now(),
+        attempt: 0,
+        maxAttempts: Math.max(1, this.config.nonPublicForwardMaxAttempts ?? 8),
+        notBeforeMs: 0,
+      };
+
+      await this.config.nonPublicForwardQueue.enqueueNonPublicForward(job);
+      metrics.inboundActivityPubActivities.inc({ stage: "forwarded_async_nonpublic", activity_type: String(activity?.type ?? "Unknown") });
+      logger.debug("Non-public activity enqueued for async delivery", {
+        envelopeId: envelope.envelopeId,
+        activityId: job.activityId,
+        scope,
+        actor: verifiedActorUri,
+      });
+      return { success: true };
+    } catch (err: any) {
+      logger.error("Failed to enqueue non-public activity, falling back to synchronous forward", {
+        envelopeId: envelope.envelopeId,
+        error: err.message,
+      });
+      return forwardSync();
     }
   }
 

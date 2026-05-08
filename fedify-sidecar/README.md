@@ -198,6 +198,84 @@ Production startup behavior:
 | `MODERATION_AT_ADMIN_BEARER_TOKEN` | Admin bearer token with `com.atproto.admin.updateSubjectStatus` scope | (optional) |
 | `MODERATION_AT_ADMIN_TIMEOUT_MS` | Timeout (ms) for AT admin XRPC calls | `5000` |
 
+### Operational Runbook: Non-Public Forward Worker & sharedInbox Scope
+
+The sidecar enforces ActivityPub privacy boundaries in two cooperating places:
+
+- The **non-public forward worker** drains private/followers-only activities from a
+  durable Redis Stream, decoupling slow recipient delivery from public-firehose
+  fan-out.
+- The **outbox-intent worker** applies a `sharedInbox` scope policy so that direct
+  (DM) targets are never collapsed onto a recipient's shared endpoint, eliminating
+  inbox-correlation leaks.
+
+#### Environment variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ENABLE_NONPUBLIC_FORWARD_WORKER` | Master switch for the async non-public forward worker. Set to `false` only for emergency rollback to synchronous bridge forwarding. | `true` |
+| `NONPUBLIC_FORWARD_CONCURRENCY` | Max in-flight forwards per sidecar instance. | `16` |
+| `NONPUBLIC_FORWARD_MAX_ATTEMPTS` | Max delivery attempts before DLQ (matches inbound enqueue side). | `8` |
+| `NONPUBLIC_FORWARD_MAX_ACTIVITY_BYTES` | Reject activities larger than this as permanent failures. | `524288` |
+| `NONPUBLIC_FORWARD_MAX_AGE_MS` | Drop jobs whose `createdAt` is older than this to the DLQ. Prevents zombie redelivery of stale private payloads. | `3600000` (1h) |
+| `NONPUBLIC_FORWARD_REQUEST_TIMEOUT_MS` | Per-request timeout for forwards to ActivityPods. Falls back to `REQUEST_TIMEOUT_MS`. | `30000` |
+| `NONPUBLIC_FORWARD_DEFER_SLEEP_CAP_MS` | Max in-process wait when a job's `notBeforeMs` is in the near future. Larger waits re-enqueue (and ack last) so the worker stays responsive. | `1000` |
+| `OUTBOX_SHARED_INBOX_SCOPES` | Comma-separated list of audience scopes allowed to use sharedInbox delivery. Must be a subset of `public,followers,direct,local`. **Never include `direct` in production.** | `public,followers` |
+
+Stream key overrides (advanced; only set when sharing Redis with another deployment):
+
+| Variable | Default |
+|----------|---------|
+| `NONPUBLIC_FORWARD_STREAM_KEY` | `ap:queue:nonpublic-forward:v1` |
+| `DLQ_NONPUBLIC_FORWARD_STREAM_KEY` | `ap:queue:dlq:nonpublic-forward:v1` |
+
+#### Staging canary checklist (sharedInbox scope behavior)
+
+Run these checks against a staging deployment after any change touching
+`OUTBOX_SHARED_INBOX_SCOPES`, the outbox intent worker, or the non-public forward
+worker. All checks should pass before promoting to production.
+
+1. **Public post → sharedInbox.** Publish a public Note from a local actor with
+   multiple remote recipients on the same domain. Confirm `outbound_jobs_enqueued`
+   contains a single job whose `targetInbox` is the remote `sharedInbox`, and the
+   target list is deduped per domain.
+2. **Followers-only post → sharedInbox.** Publish a followers-only Note. Confirm
+   the same sharedInbox collapsing behavior, and that `validateTargetsInBatch`
+   filtered any blocked or moved targets.
+3. **Direct message → per-recipient inbox.** Send a direct activity (`to`/`cc`
+   contains only specific actor URIs, no `as:Public`, no `Followers` collection).
+   Confirm:
+   - Each enqueued outbound job's `targetInbox` equals the recipient's personal
+     inbox URL — **never** their `sharedInbox`.
+   - No bridge enrichment (`enrichTargets`) was invoked for this scope.
+   - The target list size equals the recipient set size (no domain-level dedupe).
+4. **Inbound non-public delivery.** From a remote test instance, deliver a
+   followers-only and a direct activity to a local user. Confirm:
+   - Each lands on the `ap:queue:nonpublic-forward:v1` stream.
+   - The non-public forward worker logs `forwarded_async_nonpublic` with the
+     correct `scope`.
+   - Neither activity appears on Stream2 (remote firehose) nor in the canonical
+     stream — privacy boundary holds.
+5. **Retry & DLQ.** Force ActivityPods to return `503` for one inbox path; confirm
+   `nonpublic_forward{status="retry"}` increments and the job lands on the DLQ
+   after `NONPUBLIC_FORWARD_MAX_ATTEMPTS`. Then return `400` and confirm an
+   immediate DLQ entry (permanent failure path).
+6. **Stale-job drop.** Inject a job with `createdAt = now - 2h` (or set
+   `NONPUBLIC_FORWARD_MAX_AGE_MS=1` temporarily); confirm a single DLQ entry with
+   reason containing `stale` and no outbound HTTP attempt was made.
+7. **Path-traversal safety.** Inject a job with `path = "/../etc/passwd"`;
+   confirm a permanent DLQ entry and zero forward attempts.
+8. **Rollback drill.** Set `ENABLE_NONPUBLIC_FORWARD_WORKER=false` and restart;
+   confirm the inbound worker falls back to synchronous bridge forwarding without
+   message loss, then re-enable.
+
+Watchlist metrics during canary:
+
+- `queue_messages_processed_total{topic="nonpublic_forward",status=~"success|retry|dlq|deferred"}`
+- `queue_processing_latency_seconds{topic="nonpublic_forward"}`
+- `inbound_activitypub_activities_total{stage="forwarded_async_nonpublic"}`
+- DLQ lag: `redis_xlen` of `ap:queue:dlq:nonpublic-forward:v1`
+
 ### Cross-Protocol Moderation Bridge
 
 The bridge provides a single HTTP API (`POST /internal/admin/moderation/decisions`) that

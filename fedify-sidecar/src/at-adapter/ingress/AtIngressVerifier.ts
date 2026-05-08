@@ -108,9 +108,14 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
   ) {}
 
   async handleRawEvent(envelope: AtFirehoseRawEnvelope): Promise<boolean> {
+    const t0 = Date.now();
+    let tDedup = 0, tDecode = 0, tRelevance = 0, tHandle = 0, tMark = 0;
+    let stage = 'start';
     try {
       // 1. Check deduplication
+      stage = 'isDuplicate';
       const isDuplicate = await this.classifier.isDuplicate(envelope.source, envelope.seq);
+      tDedup = Date.now() - t0;
       if (isDuplicate) {
         await this.publishFailure(envelope, 'dedupe_rejected', { reason: 'already processed' });
         return true; // Handled
@@ -118,7 +123,9 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
 
       // 2. Decode full payload
       let decoded: any;
+      const tDecStart = Date.now();
       try {
+        stage = 'decodeFull';
         const frameBytes = Buffer.from(envelope.rawCborBase64, 'base64');
         decoded = this.decoder.decodeFull(frameBytes);
       } catch (err) {
@@ -127,6 +134,7 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
         });
         return true;
       }
+      tDecode = Date.now() - tDecStart;
 
       const { header, body } = decoded;
 
@@ -134,7 +142,9 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
       const did = header.did ?? body?.did ?? body?.repo ?? envelope.did;
 
       // 4. Filter by relevance (Phase 5.5A/B)
+      const tRelStart = Date.now();
       if (did) {
+        stage = 'isRelevantDid';
         const isRelevant = await this.classifier.isRelevantDid(did);
         if (!isRelevant) {
           // Irrelevant DIDs are silently dropped, not logged as failures.
@@ -142,21 +152,27 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
           return true;
         }
       }
+      tRelevance = Date.now() - tRelStart;
 
       // 5. Route to specific verifier based on event type
       const eventType = header.t || envelope.eventType;
+      const tHandleStart = Date.now();
 
       switch (eventType) {
         case '#commit':
+          stage = 'handleCommit';
           await this.handleCommit(envelope, did, body);
           break;
         case '#identity':
+          stage = 'handleIdentity';
           await this.handleIdentity(envelope, did);
           break;
         case '#account':
+          stage = 'handleAccount';
           await this.handleAccount(envelope, did, body);
           break;
         case '#sync':
+          stage = 'handleSync';
           await this.handleSync(envelope, did);
           break;
         case '#info':
@@ -166,15 +182,41 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
           await this.publishFailure(envelope, 'unsupported_event', { eventType });
           break;
       }
+      tHandle = Date.now() - tHandleStart;
+      const tMarkStart = Date.now();
+      // Sample slow events
+      const total = Date.now() - t0;
+      if (total > 200) {
+        // eslint-disable-next-line no-console
+        console.warn(`[AtIngressVerifier perf] type=${eventType} total=${total}ms dedup=${tDedup} decode=${tDecode} relevance=${tRelevance} handle=${tHandle} did=${did}`);
+      }
+      tMark = Date.now() - tMarkStart;
+      void tMark;
 
       // 6. Mark processed to prevent replay
       await this.classifier.markProcessed(envelope.source, envelope.seq);
       return true;
 
     } catch (err) {
+      // Poison-pill protection: a synchronous code error (e.g. malformed body,
+      // serializer rejecting undefined) must NOT cause infinite consumer retries
+      // that pin the partition and crash the consumer group. Record the failure,
+      // mark the seq as processed so we advance, and return true.
       console.error(`[AtIngressVerifier] Unhandled error processing seq ${envelope.seq}:`, err);
-      // Return false to indicate the message should be retried by the consumer group.
-      return false;
+      try {
+        await this.publishFailure(envelope, 'decode_failed', {
+          error: err instanceof Error ? err.message : String(err),
+          stage: 'handleRawEvent',
+        });
+      } catch (publishErr) {
+        console.error(`[AtIngressVerifier] Failed to publish failure for seq ${envelope.seq}:`, publishErr);
+      }
+      try {
+        await this.classifier.markProcessed(envelope.source, envelope.seq);
+      } catch (markErr) {
+        console.error(`[AtIngressVerifier] Failed to mark seq ${envelope.seq} processed:`, markErr);
+      }
+      return true;
     }
   }
 
@@ -307,16 +349,21 @@ export class DefaultAtIngressVerifier implements AtIngressVerifier {
     const active = body.active === true;
     const status = body.status;
 
+    // Omit `status` when undefined: downstream JSON serializers (SafeJson) reject
+    // undefined property values and would turn this record into a poison pill that
+    // blocks the partition forever via infinite retries.
+    const accountPayload: { active: boolean; status?: unknown } = { active };
+    if (status !== undefined) {
+      accountPayload.status = status;
+    }
+
     const ingressEvent: AtIngressEvent = {
       seq: envelope.seq,
       did,
       eventType: '#account',
       verifiedAt: new Date().toISOString(),
       source: envelope.source,
-      account: {
-        active,
-        status,
-      },
+      account: accountPayload as AtIngressEvent['account'],
     };
 
     await this.eventPublisher.publish(INGRESS_TOPIC, ingressEvent as any);

@@ -76,7 +76,10 @@ export class AtFirehoseRuntime {
       await consumer.subscribe({ topic });
     }
     await consumer.run({
-      autoCommit: false,
+      // See AtIngressRuntime: with autoCommit:false, commitOffsetsIfNecessary
+      // is a no-op and offsets never advance. We manually resolveOffset() per
+      // message and let kafkajs' background auto-committer flush them.
+      autoCommit: true,
       eachBatchAutoResolve: false,
       eachBatch: async (payload) => {
         await this.processBatch(payload);

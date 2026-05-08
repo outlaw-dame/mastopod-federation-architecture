@@ -42,6 +42,10 @@ import {
 } from "./streams/redpanda-topic-governance.js";
 import { createOutboundWorker, OutboundWorker } from "./delivery/outbound-worker.js";
 import { createInboundWorker, InboundWorker } from "./delivery/inbound-worker.js";
+import {
+  createNonPublicForwardWorker,
+  NonPublicForwardWorker,
+} from "./delivery/nonpublic-forward-worker.js";
 import { InboundIdempotencyGuard } from "./delivery/InboundIdempotencyGuard.js";
 import { ProviderAnnounceGuard } from "./delivery/ProviderAnnounceGuard.js";
 import { ContentFingerprintGuard } from "./delivery/ContentFingerprintGuard.js";
@@ -162,6 +166,7 @@ import { AtprotoProfileMediaResolver } from "./protocol-bridge/runtime/AtprotoPr
 import { AtprotoLinkPreviewThumbResolver } from "./protocol-bridge/runtime/AtprotoLinkPreviewThumbResolver.js";
 import { AtIngressRuntime } from "./at-adapter/ingress/AtIngressRuntime.js";
 import { buildAtExternalFirehoseBootstrap, parseAtExternalFirehoseSources } from "./at-adapter/ingress/AtExternalFirehoseBootstrap.js";
+import { AtIngressWebhookRuntime } from "./at-adapter/ingress/AtIngressWebhookRuntime.js";
 import {
   isApInteropMediaFixtureEnabled,
   listApInteropMediaFixtureAccesses,
@@ -171,6 +176,8 @@ import {
 } from "./interop/ap/mediaFixtures.js";
 import { HttpAtIdentityResolver } from "./at-adapter/ingress/HttpAtIdentityResolver.js";
 import { ProductionAtCommitVerifier } from "./at-adapter/ingress/ProductionAtCommitVerifier.js";
+import { AtCommitVerifierWorkerPool } from "./at-adapter/ingress/AtCommitVerifierWorkerPool.js";
+import type { AtCommitVerifier } from "./at-adapter/ingress/AtIngressVerifier.js";
 import { normalizeActivityPubNoteLinkPreviewMode } from "./protocol-bridge/projectors/activitypub/ActivityPubProjectionPolicy.js";
 import {
   normalizeActivityPubDomainRuleList,
@@ -457,6 +464,7 @@ const config = {
   // Feature flags
   enableOutboundWorker: process.env["ENABLE_OUTBOUND_WORKER"] !== "false",
   enableInboundWorker: process.env["ENABLE_INBOUND_WORKER"] !== "false",
+  enableNonPublicForwardWorker: process.env["ENABLE_NONPUBLIC_FORWARD_WORKER"] !== "false",
   enableOutboxIntentWorker: process.env["ENABLE_OUTBOX_INTENT_WORKER"] !== "false",
   enableOriginReconciliation:
     process.env["ENABLE_ORIGIN_RECONCILIATION"] !== "false" &&
@@ -705,6 +713,17 @@ const config = {
   atExternalFirehoseRawTopic:
     process.env["AT_EXTERNAL_FIREHOSE_RAW_TOPIC"] || "at.firehose.raw.v1",
   enableAtExternalFirehose: process.env["ENABLE_AT_EXTERNAL_FIREHOSE"] === "true",
+  enableAtIngressWebhookForwarder: process.env["ENABLE_AT_INGRESS_WEBHOOK_FORWARDER"] !== "false",
+  atIngressWebhookTopic: process.env["AT_INGRESS_WEBHOOK_TOPIC"] || "at.ingress.v1",
+  atIngressWebhookConsumerGroupId:
+    process.env["AT_INGRESS_WEBHOOK_CONSUMER_GROUP_ID"] || "fedify-sidecar-at-ingress-webhook",
+  memoryAtWebhookUrl:
+    process.env["MEMORY_AT_WEBHOOK_URL"]
+    || process.env["MEMORY_WEBHOOK_URL"]
+    || "",
+  memoryAtWebhookSecret:
+    process.env["FIREHOSE_BRIDGE_SECRET"]
+    || "",
   protocolBridgeLedgerTtlSec: Number.parseInt(
     process.env["PROTOCOL_BRIDGE_LEDGER_TTL_SEC"] || `${60 * 60 * 24 * 14}`,
     10,
@@ -764,6 +783,7 @@ const outboundWebhookBackpressureConfig = resolveOutboundWebhookBackpressureConf
 let queue: RedisStreamsQueue | null = null;
 let outboundWorker: OutboundWorker | null = null;
 let inboundWorker: InboundWorker | null = null;
+let nonPublicForwardWorker: NonPublicForwardWorker | null = null;
 let outboxIntentWorker: OutboxIntentWorker | null = null;
 let originReconciliationWorker: OriginReconciliationWorker | null = null;
 let opensearchIndexer: SearchIndexerService | null = null;
@@ -774,6 +794,8 @@ let atEventPublisher: RedpandaEventPublisher | null = null;
 let canonicalPublisher: CanonicalIntentPublisher | undefined;
 let atFirehoseRuntime: AtFirehoseRuntime | null = null;
 let atExternalFirehoseRuntime: AtIngressRuntime | null = null;
+let atIngressWebhookRuntime: AtIngressWebhookRuntime | null = null;
+let atCommitVerifierWorkerPool: AtCommitVerifierWorkerPool | null = null;
 let protocolBridgeRuntime: ProtocolBridgeRuntime | null = null;
 let mediaAssetSyncConsumer: MediaAssetSyncConsumer | null = null;
 let searchIndexerRedis: Redis | null = null;
@@ -1500,6 +1522,22 @@ async function main() {
       });
     }
 
+    if (config.enableNonPublicForwardWorker) {
+      nonPublicForwardWorker = createNonPublicForwardWorker(queue, {
+        activityPodsUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+        activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] || "",
+      });
+      startupTasks.push({
+        name: "start non-public forward worker",
+        start: async () => {
+          nonPublicForwardWorker!.start().catch((err) => {
+            logger.error("Non-public forward worker error", { error: err.message });
+          });
+          logger.info("Non-public forward worker started");
+        },
+      });
+    }
+
     if (config.enableOriginReconciliation) {
       originReconciliationWorker = createOriginReconciliationWorker(queue, signingClient, {
         signerActorUri: config.apRelayLocalActorUri || `https://${config.domain}/users/relay`,
@@ -1600,6 +1638,13 @@ async function main() {
         ...(process.env["MEMORY_AP_WEBHOOK_URL"] ? {
           apRemoteWebhookUrl: process.env["MEMORY_AP_WEBHOOK_URL"],
           apRemoteWebhookSecret: process.env["AP_BRIDGE_SECRET"] ?? "",
+        } : {}),
+        ...(config.enableNonPublicForwardWorker ? {
+          nonPublicForwardQueue: queue,
+          nonPublicForwardMaxAttempts: parseInt(
+            process.env["NONPUBLIC_FORWARD_MAX_ATTEMPTS"] || "8",
+            10,
+          ),
         } : {}),
         getMrfAdminStore: () => mrfAdminStore,
         getModerationBridgeStore: () => moderationBridgeStore,
@@ -3566,16 +3611,71 @@ async function main() {
                   fetchImpl: fetch,
                   timeoutMs: config.externalPdsTimeoutMs,
                   maxAttempts: config.externalPdsMaxAttempts,
+                  resolvePrimaryHandle: false,
                   failedResolutionCacheTtlMs: 60_000,
                   ...(atRedisClient ? {
                     redisCache: atRedisClient,
                     redisCacheTtlSeconds: config.didDocCacheTtlSeconds,
                   } : {}),
                 });
-                const externalCommitVerifier = new ProductionAtCommitVerifier({
-                  identityResolver: externalIdentityResolver,
-                  repoRegistry,
-                });
+
+                // Optional CPU-bound verifier worker pool. AT commit
+                // verification (CBOR decode + secp256k1/p256 signature +
+                // MST reconstruction) saturates a single Node thread at
+                // ~30 ev/s. Workers raise that ceiling by ~N× on multi-core
+                // hosts. Default 0 = in-process (no behavior change).
+                const verifierWorkerPoolSize = Math.max(
+                  0,
+                  Number.parseInt(process.env["AT_VERIFIER_WORKER_POOL_SIZE"] ?? "0", 10) || 0,
+                );
+                const verifierWorkerMaxInFlightPerWorker = Math.max(
+                  1,
+                  Number.parseInt(process.env["AT_VERIFIER_WORKER_MAX_IN_FLIGHT_PER_WORKER"] ?? "64", 10) || 64,
+                );
+                const atIngressBatchConcurrency = Math.max(
+                  1,
+                  Number.parseInt(
+                    process.env["AT_INGRESS_BATCH_CONCURRENCY"]
+                      ?? (verifierWorkerPoolSize > 0 ? String(verifierWorkerPoolSize * 32) : "1"),
+                    10,
+                  ) || 1,
+                );
+
+                let externalCommitVerifier: AtCommitVerifier;
+                if (verifierWorkerPoolSize > 0) {
+                  atCommitVerifierWorkerPool = new AtCommitVerifierWorkerPool({
+                    size: verifierWorkerPoolSize,
+                    maxInFlightPerWorker: verifierWorkerMaxInFlightPerWorker,
+                    redisUrl: process.env["REDIS_URL"] ?? "redis://localhost:6379",
+                    didDocCacheTtlSeconds: config.didDocCacheTtlSeconds,
+                    identityResolverOptions: {
+                      timeoutMs: config.externalPdsTimeoutMs,
+                      maxAttempts: config.externalPdsMaxAttempts,
+                      resolvePrimaryHandle: false,
+                      failedResolutionCacheTtlMs: 60_000,
+                    },
+                    verifierOptions: {},
+                    logger: {
+                      info: (message, meta) => logger.info(meta || {}, message),
+                      warn: (message, meta) => logger.warn(meta || {}, message),
+                      error: (message, meta) => logger.error(meta || {}, message),
+                    },
+                  });
+                  externalCommitVerifier = atCommitVerifierWorkerPool;
+                  logger.info(
+                    {
+                      workerPoolSize: verifierWorkerPoolSize,
+                      maxInFlightPerWorker: verifierWorkerMaxInFlightPerWorker,
+                      batchConcurrency: atIngressBatchConcurrency,
+                    },
+                    "AT commit verifier worker pool enabled",
+                  );
+                } else {
+                  externalCommitVerifier = new ProductionAtCommitVerifier({
+                    identityResolver: externalIdentityResolver,
+                    repoRegistry,
+                  });
+                }
                 const externalIngressBootstrap = buildAtExternalFirehoseBootstrap({
                   runtimeConfig: {
                     brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
@@ -3586,6 +3686,7 @@ async function main() {
                     consumerGroupId: config.atExternalFirehoseConsumerGroupId,
                     rawTopic: config.atExternalFirehoseRawTopic,
                     sources: externalFirehoseSources,
+                    batchConcurrency: atIngressBatchConcurrency,
                   },
                   redis: atRedis as any,
                   eventPublisher: eventPublisherAdapter,
@@ -3644,6 +3745,50 @@ async function main() {
                   "External AT firehose intake requested but configuration validation failed",
                 );
               }
+            }
+
+            if (config.enableAtIngressWebhookForwarder && config.memoryAtWebhookUrl) {
+              if (!config.memoryAtWebhookSecret) {
+                logger.warn(
+                  {
+                    memoryAtWebhookUrl: config.memoryAtWebhookUrl,
+                    secretConfigured: false,
+                  },
+                  "AT ingress webhook forwarding skipped because FIREHOSE_BRIDGE_SECRET is missing",
+                );
+              } else {
+                atIngressWebhookRuntime = new AtIngressWebhookRuntime({
+                  brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092")
+                    .split(",")
+                    .map((broker) => broker.trim())
+                    .filter(Boolean),
+                  clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
+                  consumerGroupId: config.atIngressWebhookConsumerGroupId,
+                  ingressTopic: config.atIngressWebhookTopic,
+                  webhookUrl: config.memoryAtWebhookUrl,
+                  webhookSecret: config.memoryAtWebhookSecret,
+                  endpointId: "memory-api",
+                  logger: {
+                    info: (message, meta) => logger.info(meta || {}, message),
+                    warn: (message, meta) => logger.warn(meta || {}, message),
+                    error: (message, meta) => logger.error(meta || {}, message),
+                  },
+                });
+
+                await atIngressWebhookRuntime.start();
+                logger.info("AT ingress webhook forwarding started", {
+                  topic: config.atIngressWebhookTopic,
+                  consumerGroupId: config.atIngressWebhookConsumerGroupId,
+                  memoryAtWebhookUrl: config.memoryAtWebhookUrl,
+                });
+              }
+            } else if (config.enableAtIngressWebhookForwarder) {
+              logger.warn(
+                {
+                  memoryAtWebhookUrl: config.memoryAtWebhookUrl || "",
+                },
+                "AT ingress webhook forwarding enabled but MEMORY_AT_WEBHOOK_URL was not configured",
+              );
             }
 
             if (protocolBridgeRuntime) {
@@ -3885,6 +4030,18 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("External AT firehose runtime stopped");
     }
 
+    if (atIngressWebhookRuntime) {
+      await atIngressWebhookRuntime.stop();
+      atIngressWebhookRuntime = null;
+      logger.info("AT ingress webhook runtime stopped");
+    }
+
+    if (atCommitVerifierWorkerPool) {
+      await atCommitVerifierWorkerPool.shutdown();
+      atCommitVerifierWorkerPool = null;
+      logger.info("AT commit verifier worker pool stopped");
+    }
+
     if (protocolBridgeRuntime) {
       await protocolBridgeRuntime.stop();
       protocolBridgeRuntime = null;
@@ -3895,6 +4052,11 @@ async function shutdown(signal: string): Promise<void> {
     if (outboxIntentWorker) {
       await outboxIntentWorker.stop();
       logger.info("Outbox intent worker stopped");
+    }
+
+    if (nonPublicForwardWorker) {
+      await nonPublicForwardWorker.stop();
+      logger.info("Non-public forward worker stopped");
     }
 
     if (originReconciliationWorker) {

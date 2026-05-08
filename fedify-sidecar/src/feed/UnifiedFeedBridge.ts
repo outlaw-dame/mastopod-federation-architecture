@@ -172,7 +172,12 @@ export class UnifiedFeedBridge {
     await consumer.connect();
     await consumer.subscribe({ topic, fromBeginning: false });
     await consumer.run({
-      autoCommit: false,
+      // We manually call resolveOffset() per message and disable
+      // eachBatchAutoResolve. Auto-commit must stay ON because kafkajs's
+      // commitOffsetsIfNecessary() is a no-op when autoCommit is false; the
+      // background committer (default 5 s / 100 messages) flushes the
+      // resolved offsets. See AtIngressRuntime for the same pattern.
+      autoCommit: true,
       eachBatchAutoResolve: false,
       eachBatch: (payload) => this.processBatch(payload, topic, handler),
     });

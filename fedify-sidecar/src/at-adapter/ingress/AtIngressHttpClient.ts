@@ -59,8 +59,11 @@ export class AtIngressHttpClient {
 
   public constructor(options: AtIngressHttpClientOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = clampInteger(options.timeoutMs ?? 8_000, 1_000, 30_000);
-    this.maxAttempts = clampInteger(options.maxAttempts ?? 3, 1, 6);
+    // Tightened defaults: previous 8s × 3 attempts created 24s+ tail latency
+    // when plc.directory was slow, head-of-line-blocking the partition under
+    // in-order offset commit. New defaults (4s × 2) cap worst case at ~8s.
+    this.timeoutMs = clampInteger(options.timeoutMs ?? 4_000, 1_000, 30_000);
+    this.maxAttempts = clampInteger(options.maxAttempts ?? 2, 1, 6);
     this.baseBackoffMs = clampInteger(options.baseBackoffMs ?? 200, 50, 5_000);
     this.maxBackoffMs = clampInteger(options.maxBackoffMs ?? 5_000, 250, 60_000);
   }

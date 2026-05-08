@@ -50,12 +50,25 @@ function sanitiseDid(did: string): string {
   return did.replace(/[^a-zA-Z0-9:._\-]/g, '_');
 }
 
+/**
+ * Sanitise an arbitrary source identifier (e.g. firehose URL or relay name)
+ * for use as a Redis key segment. Unlike {@link sanitiseDid}, this does not
+ * enforce the `did:` prefix because firehose envelopes carry source URLs
+ * such as `wss://relay1.us-east.bsky.network/`.
+ */
+function sanitiseSourceId(sourceId: string): string {
+  if (!sourceId || sourceId.length > MAX_DID_LENGTH) {
+    throw new ClassifierError(`Invalid source id: ${String(sourceId).slice(0, 64)}`);
+  }
+  return sourceId.replace(/[^a-zA-Z0-9:._\-]/g, '_');
+}
+
 function allowlistKey(did: string): string {
   return `${ALLOWLIST_KEY_PREFIX}${sanitiseDid(did)}`;
 }
 
 function dedupeKey(sourceId: string, seq: number): string {
-  return `${DEDUPE_KEY_PREFIX}${sanitiseDid(sourceId)}:${seq}`;
+  return `${DEDUPE_KEY_PREFIX}${sanitiseSourceId(sourceId)}:${seq}`;
 }
 
 // ---------------------------------------------------------------------------

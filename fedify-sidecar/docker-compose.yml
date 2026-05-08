@@ -133,6 +133,11 @@ services:
       # (e.g. MEMORY_AP_WEBHOOK_URL=http://memory-api:8794/ap/webhook/ingress).
       - MEMORY_AP_WEBHOOK_URL=${MEMORY_AP_WEBHOOK_URL:-http://api:8794/ap/webhook/ingress}
       - AP_BRIDGE_SECRET=${AP_BRIDGE_SECRET:-change-me-ap-secret}
+
+      # Memory API AT ingress webhook (verified at.ingress.v1 forwarding).
+      - ENABLE_AT_INGRESS_WEBHOOK_FORWARDER=${ENABLE_AT_INGRESS_WEBHOOK_FORWARDER:-true}
+      - MEMORY_AT_WEBHOOK_URL=${MEMORY_AT_WEBHOOK_URL:-http://api:8794/at/webhook/ingress}
+      - FIREHOSE_BRIDGE_SECRET=${FIREHOSE_BRIDGE_SECRET:-local-bridge-secret-123}
       
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-info}

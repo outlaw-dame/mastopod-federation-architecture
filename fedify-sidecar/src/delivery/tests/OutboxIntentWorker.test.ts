@@ -27,6 +27,7 @@ function makeIntent(overrides: Partial<OutboxIntent> = {}): OutboxIntent {
       id: "https://example.com/activities/1",
       type: "Create",
       actor: "https://example.com/users/alice",
+      to: ["https://www.w3.org/ns/activitystreams#Public"],
       object: {
         id: "https://example.com/objects/1",
         type: "Note",
@@ -180,5 +181,57 @@ describe("OutboxIntentWorker", () => {
 
     expect(redpanda.publishToStream1).toHaveBeenCalledTimes(1);
     expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not use sharedInbox delivery for direct-scope activities", async () => {
+    const queue = makeQueue();
+    const redpanda = makeRedpanda();
+    const sharedInboxCache = {
+      enrichTargets: vi.fn(async (targets: any[]) => targets),
+    } as any;
+    const worker = new TestOutboxIntentWorker(
+      queue,
+      redpanda,
+      makeConfig({ sharedInboxCache }),
+    );
+
+    const intent = makeIntent({
+      activity: JSON.stringify({
+        id: "https://example.com/activities/dm-1",
+        type: "Create",
+        actor: "https://example.com/users/alice",
+        to: ["https://remote.example/users/bob"],
+        object: {
+          id: "https://example.com/objects/dm-1",
+          type: "Note",
+          content: "private",
+        },
+      }),
+      targets: [
+        {
+          inboxUrl: "https://remote.example/users/bob/inbox",
+          sharedInboxUrl: "https://remote.example/inbox",
+          deliveryUrl: "https://remote.example/inbox",
+          targetDomain: "remote.example",
+        },
+      ],
+      meta: {
+        isPublicActivity: false,
+        isPublicIndexable: false,
+        visibility: "direct",
+      },
+    });
+
+    await worker.runIntent("msg-direct-001", intent);
+
+    expect(sharedInboxCache.enrichTargets).not.toHaveBeenCalled();
+    expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledWith(
+      intent.intentId,
+      expect.arrayContaining([
+        expect.objectContaining({
+          targetInbox: "https://remote.example/users/bob/inbox",
+        }),
+      ]),
+    );
   });
 });
