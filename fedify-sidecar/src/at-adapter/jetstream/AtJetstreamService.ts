@@ -1,13 +1,15 @@
 /**
  * AtJetstreamService
  *
- * Connects to the Bluesky Jetstream WebSocket firehose and publishes
- * normalised AtIngressEvents to the at.ingress.v1 topic.
+ * Connects to the Bluesky Jetstream WebSocket event stream and publishes
+ * normalised AtIngressEvents to the configured topic.
  *
  * Jetstream is a lightweight JSON alternative to the CBOR-based
  * com.atproto.sync.subscribeRepos firehose. Events arrive pre-decoded and
  * do not require CAR/CBOR parsing or cryptographic signature verification,
- * making ingress cheaper to operate.
+ * making thin indexing cheaper to operate. It should be used as a filtered
+ * discovery/cache-invalidation source, not as a replacement for the Bluesky
+ * AppView or the authenticated repository firehose.
  *
  * Public endpoints (round-robin recommended):
  *   wss://jetstream1.us-east.bsky.network/subscribe
@@ -37,6 +39,8 @@ export interface AtJetstreamPublisher {
 // ---------------------------------------------------------------------------
 
 const MAX_FRAME_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_WANTED_COLLECTIONS = 100;
+const MAX_WANTED_DIDS = 10_000;
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -182,8 +186,10 @@ export class AtJetstreamService {
   private scheduleReconnect(): void {
     if (!this.isRunning) return;
     this.reconnectAttempts++;
-    // Exponential backoff: 500ms, 1s, 2s … 30s max
-    const delay = Math.min(500 * Math.pow(2, this.reconnectAttempts - 1), 30_000);
+    const delay = Math.min(
+      500 * Math.pow(2, this.reconnectAttempts - 1) + Math.floor(Math.random() * 250),
+      30_000,
+    );
     this.logger.info("Scheduling Jetstream reconnect", {
       attempt: this.reconnectAttempts,
       delayMs: delay,
@@ -295,7 +301,7 @@ function normalizeOperation(raw: unknown): "create" | "update" | "delete" {
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_JETSTREAM_URL =
-  "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post";
+  "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post&wantedCollections=app.bsky.actor.profile";
 
 /**
  * Parse and validate JETSTREAM_URL env var, falling back to the default.
@@ -308,10 +314,47 @@ export function parseJetstreamUrl(raw: string | undefined): string {
     if (u.protocol !== "wss:" && u.protocol !== "ws:") {
       throw new Error("must use ws:// or wss://");
     }
+    if (u.username || u.password) {
+      throw new Error("must not include credentials");
+    }
+    if (u.pathname !== "/subscribe") {
+      throw new Error("path must be /subscribe");
+    }
+    validateJetstreamFilters(u);
     return u.toString();
   } catch (err) {
     throw new Error(
       `Invalid JETSTREAM_URL "${raw}": ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+function validateJetstreamFilters(url: URL): void {
+  const wantedCollections = url.searchParams.getAll("wantedCollections");
+  const wantedDids = url.searchParams.getAll("wantedDids");
+
+  if (wantedCollections.length === 0 && wantedDids.length === 0) {
+    throw new Error("must include wantedCollections or wantedDids to avoid unbounded full-network intake");
+  }
+  if (wantedCollections.length > MAX_WANTED_COLLECTIONS) {
+    throw new Error(`too many wantedCollections; max ${MAX_WANTED_COLLECTIONS}`);
+  }
+  if (wantedDids.length > MAX_WANTED_DIDS) {
+    throw new Error(`too many wantedDids; max ${MAX_WANTED_DIDS}`);
+  }
+  for (const collection of wantedCollections) {
+    if (!isValidNsidFilter(collection)) {
+      throw new Error(`invalid wantedCollections value: ${collection}`);
+    }
+  }
+}
+
+function isValidNsidFilter(value: string): boolean {
+  if (value.length < 3 || value.length > 253) return false;
+  if (value.endsWith(".*")) return isValidNsid(value.slice(0, -2));
+  return isValidNsid(value);
+}
+
+function isValidNsid(value: string): boolean {
+  return /^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)+$/.test(value);
 }
