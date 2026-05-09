@@ -429,7 +429,7 @@ const config = {
   ),
   port: parseInt(process.env["PORT"] || "8080", 10),
   host: process.env["HOST"] || "0.0.0.0",
-  adminPort: parseInt(process.env["ADMIN_PORT"] || "9090", 10),
+  adminPort: parseInt(process.env["ADMIN_PORT"] || "9091", 10),
   domain: process.env["DOMAIN"] || "localhost",
   sidecarToken: process.env["SIDECAR_TOKEN"] || "",
   providerProfile: process.env["PROVIDER_PROFILE"],
