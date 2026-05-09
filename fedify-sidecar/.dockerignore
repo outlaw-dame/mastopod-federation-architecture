@@ -4,6 +4,10 @@ coverage
 .git
 .DS_Store
 *.log
+# Never bake secrets into the image
+.env*
+*.key
+*.pem
 interop/ap/runtime
 monitoring/grafana
 redpanda-connect

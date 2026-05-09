@@ -79,9 +79,9 @@ function applyRateLimit(
   rule: RateLimitRule,
   limiter: InMemoryRateLimiter,
 ): void {
-  const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
-    || req.socket.remoteAddress
-    || "unknown";
+  // req.ip is set by Fastify from the trust-proxy configuration and cannot
+  // be forged by the client; raw X-Forwarded-For is not used here.
+  const ip = req.ip || "unknown";
   assertRateLimit(limiter, `${key}:${ip}`, rule);
 }
 

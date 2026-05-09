@@ -7,7 +7,8 @@ export type AtRepoCollection =
   | 'app.bsky.graph.follow'
   | 'app.bsky.feed.like'
   | 'app.bsky.feed.repost'
-  | 'org.activitypods.emojiReaction';
+  | 'org.activitypods.emojiReaction'
+  | 'org.activitypods.story.slide';
 
 export interface AtRepoBridgeMetadata {
   canonicalIntentId: string;
@@ -67,7 +68,7 @@ export interface AtCommitV1 {
 export interface AtEgressV1 {
   did: string;
   canonicalAccountId: string;
-  kind: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction';
+  kind: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction' | 'story';
   canonicalRefId: string;
   atUri?: string;
   cid?: string;

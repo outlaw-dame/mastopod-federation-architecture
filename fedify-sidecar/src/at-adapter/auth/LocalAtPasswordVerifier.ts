@@ -26,13 +26,10 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { AtPasswordVerifier, AtSessionContext } from './AtSessionTypes.js';
 
-// ---------------------------------------------------------------------------
-// Default fixture (matches Phase 7 primary smoke test defaults)
-// ---------------------------------------------------------------------------
-
-const DEFAULT_FIXTURE_CREDS: Record<string, string> = {
-  'http://localhost:3000/atproto365133': 'Phase7LivePass123',
-};
+// Default fixture credentials are intentionally empty — callers must provide
+// AT_LOCAL_FIXTURE_CREDS (JSON) to populate this map. Shipping hardcoded
+// credentials risks them being re-used in production deployments.
+const DEFAULT_FIXTURE_CREDS: Record<string, string> = {};
 
 // ---------------------------------------------------------------------------
 // Implementation

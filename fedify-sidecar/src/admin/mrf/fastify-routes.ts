@@ -101,6 +101,7 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   app.get("/internal/admin/mrf/modules", async (req, reply) => {
     const request = toRequest(req);
     try {
+      applyRateLimit(req, "list-modules", registryRule);
       await sendResponse(reply, await handleListModules(request, deps));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -111,6 +112,7 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
     const request = toRequest(req);
     const params = req.params as { id: string };
     try {
+      applyRateLimit(req, "get-module", registryRule);
       await sendResponse(reply, await handleGetModule(request, deps, params.id));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -131,6 +133,7 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   app.get("/internal/admin/mrf/chain", async (req, reply) => {
     const request = toRequest(req);
     try {
+      applyRateLimit(req, "get-chain", registryRule);
       await sendResponse(reply, await handleGetChain(request, deps));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));

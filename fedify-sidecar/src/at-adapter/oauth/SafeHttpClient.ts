@@ -4,15 +4,34 @@ import { isIP } from 'node:net';
 import { OAuthError } from './OAuthErrors.js';
 
 function isPrivateIp(ip: string): boolean {
+  // RFC-1918 / loopback
   if (ip.startsWith('10.') || ip.startsWith('127.') || ip.startsWith('192.168.')) return true;
   if (ip.startsWith('172.')) {
     const second = Number.parseInt(ip.split('.')[1] ?? '-1', 10);
     if (second >= 16 && second <= 31) return true;
   }
+  // Link-local (169.254.x.x) — includes AWS/GCP/Azure IMDS endpoints
+  if (ip.startsWith('169.254.')) return true;
+  // CGNAT (100.64.0.0/10) — RFC 6598
+  if (ip.startsWith('100.')) {
+    const second = Number.parseInt(ip.split('.')[1] ?? '-1', 10);
+    if (second >= 64 && second <= 127) return true;
+  }
+  // Benchmarking (198.18.0.0/15) — RFC 2544
+  if (ip.startsWith('198.')) {
+    const second = Number.parseInt(ip.split('.')[1] ?? '-1', 10);
+    if (second === 18 || second === 19) return true;
+  }
 
   const lower = ip.toLowerCase();
+  // IPv6 private / loopback / link-local
   if (lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80:')) {
     return true;
+  }
+  // IPv4-mapped IPv6 (::ffff:192.168.x.x etc.)
+  if (lower.startsWith('::ffff:')) {
+    const v4 = lower.slice(7);
+    if (isPrivateIp(v4)) return true;
   }
 
   return false;

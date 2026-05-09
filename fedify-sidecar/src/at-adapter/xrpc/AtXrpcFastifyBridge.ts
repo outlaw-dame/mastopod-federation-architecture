@@ -95,6 +95,7 @@ export function registerAtXrpcRoutes(
     '/xrpc/com.atproto.sync.getBlob',
     '/xrpc/com.atproto.repo.getRecord',
     '/xrpc/com.atproto.repo.listRecords',
+    '/xrpc/org.activitypods.story.getStories',
     '/xrpc/com.atproto.identity.resolveHandle',
     '/xrpc/com.atproto.server.describeServer',
     '/xrpc/com.atproto.repo.describeRepo',

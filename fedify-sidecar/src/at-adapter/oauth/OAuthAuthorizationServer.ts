@@ -267,8 +267,17 @@ export class OAuthAuthorizationServer implements OAuthAuthorizationServerContrac
     }
 
     const current = await this.deps.refreshStore.get(refreshTokenId);
-    if (!current || current.revokedAtEpochSec) {
-      throw new OAuthError('invalid_grant', 400, 'refresh_token is revoked or unknown');
+    if (!current) {
+      throw new OAuthError('invalid_grant', 400, 'refresh_token is unknown or expired');
+    }
+    if (current.revokedAtEpochSec) {
+      // Token reuse detected: a previously rotated token is being presented again.
+      // This indicates the token was stolen. Revoke the entire family and the grant
+      // to force the legitimate user to re-authenticate.
+      const now = Math.floor(Date.now() / 1000);
+      const compromisedGrantIds = await this.deps.refreshStore.revokeFamily(current.familyId, now);
+      await Promise.all(compromisedGrantIds.map(grantId => this.deps.grantStore.revoke(grantId, now)));
+      throw new OAuthError('invalid_grant', 400, 'refresh_token reuse detected; session revoked');
     }
     if (current.clientId !== input.client_id) {
       throw new OAuthError('invalid_client', 401, 'client_id does not match refresh token');

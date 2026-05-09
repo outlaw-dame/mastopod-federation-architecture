@@ -1,0 +1,117 @@
+{
+  "lexicon": 1,
+  "id": "org.activitypods.story.getStories",
+  "description": "AppView-style read API that returns active story slides grouped by actor.",
+  "defs": {
+    "main": {
+      "type": "query",
+      "parameters": {
+        "type": "params",
+        "required": ["actors"],
+        "properties": {
+          "actors": {
+            "type": "string",
+            "description": "Comma-separated DIDs or handles to include in the carousel."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 20
+          },
+          "includeExpired": {
+            "type": "boolean",
+            "default": false
+          },
+          "seen": {
+            "type": "string",
+            "description": "Comma-separated at:// story slide URIs already seen by the viewer."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["generatedAt", "stories"],
+          "properties": {
+            "cursor": {
+              "type": "string"
+            },
+            "generatedAt": {
+              "type": "string",
+              "format": "datetime"
+            },
+            "stories": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#storyGroup"
+              }
+            }
+          }
+        }
+      }
+    },
+    "storyGroup": {
+      "type": "object",
+      "required": ["did", "repo", "latestAt", "seen", "items"],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "latestAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "seen": {
+          "type": "boolean"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#storyView"
+          }
+        }
+      }
+    },
+    "storyView": {
+      "type": "object",
+      "required": ["uri", "cid", "createdAt", "expiresAt", "expiresInSeconds", "seen", "value"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "at-uri"
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "expiresInSeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "seen": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": "ref",
+          "ref": "org.activitypods.story.slide"
+        }
+      }
+    }
+  }
+}

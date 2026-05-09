@@ -87,6 +87,8 @@ export class DefaultAtCommitPersistenceService implements AtCommitPersistenceSer
                   ? 'like'
                   : op.collection === 'org.activitypods.emojiReaction'
                     ? 'emojiReaction'
+                  : op.collection === 'org.activitypods.story.slide'
+                    ? 'story'
                   : op.collection === 'app.bsky.feed.repost'
                     ? 'repost'
                     : 'post',

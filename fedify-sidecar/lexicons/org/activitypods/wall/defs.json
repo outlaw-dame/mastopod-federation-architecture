@@ -1,0 +1,96 @@
+{
+  "lexicon": 1,
+  "id": "org.activitypods.wall.defs",
+  "description": "Shared definitions for the ActivityPods profile wall feature. Wall posts are notes written on another actor's profile wall, federated via the ActivityStreams 2.0 `target` property on the enclosing Create activity (following Friendica's AP wall implementation). On the ATProto side they are stored as `org.activitypods.wall.post` records.",
+  "defs": {
+    "wallTargetRef": {
+      "type": "object",
+      "description": "Reference to the actor whose profile wall a post is written on.",
+      "required": ["did"],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "ATProto DID of the wall owner."
+        },
+        "webId": {
+          "type": "string",
+          "format": "uri",
+          "description": "ActivityPods / ActivityPub WebID URI of the wall owner. Present when the post originates from or is bridged to ActivityPub.",
+          "maxLength": 2048
+        },
+        "activityPubUri": {
+          "type": "string",
+          "format": "uri",
+          "description": "ActivityPub actor URI (may differ from webId in some AP implementations).",
+          "maxLength": 2048
+        }
+      }
+    },
+    "bridgeSource": {
+      "type": "object",
+      "description": "Provenance metadata recorded when a wall post is bridged from ActivityPub. Omitted for posts that originate natively on ATProto.",
+      "required": ["protocol"],
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "knownValues": ["activitypub", "atproto"],
+          "description": "Source protocol of the original post."
+        },
+        "objectUri": {
+          "type": "string",
+          "format": "uri",
+          "description": "ActivityPub object URI of the original Note.",
+          "maxLength": 2048
+        },
+        "activityUri": {
+          "type": "string",
+          "format": "uri",
+          "description": "ActivityPub Create activity URI that carried the `target` property.",
+          "maxLength": 2048
+        }
+      }
+    },
+    "wallPostView": {
+      "type": "object",
+      "description": "A rendered view of a wall post, suitable for display in a profile wall feed.",
+      "required": ["uri", "cid", "author", "record", "wallTarget", "indexedAt"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "AT URI of the wall post record."
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid",
+          "description": "CID of the wall post record."
+        },
+        "author": {
+          "type": "ref",
+          "ref": "app.bsky.actor.defs#profileViewBasic",
+          "description": "The actor who wrote on the wall."
+        },
+        "record": {
+          "type": "unknown",
+          "description": "The raw `org.activitypods.wall.post` record."
+        },
+        "wallTarget": {
+          "type": "ref",
+          "ref": "app.bsky.actor.defs#profileViewBasic",
+          "description": "The actor whose wall the post was written on."
+        },
+        "bridgeSource": {
+          "type": "ref",
+          "ref": "#bridgeSource",
+          "description": "Present if the post was bridged from ActivityPub."
+        },
+        "indexedAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "When the record was indexed by the AppView."
+        }
+      }
+    }
+  }
+}

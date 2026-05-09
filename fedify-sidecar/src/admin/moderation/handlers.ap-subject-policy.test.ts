@@ -352,7 +352,7 @@ describe("ActivityPub subject-policy bridge", () => {
 
   it("marks a linked moderation case resolved when a decision is applied from it", async () => {
     const moderationCase = {
-      id: "case-000000000001",
+      id: "01ARZ3NDEKTSV4RRFFQ69G5FB0",
       source: "activitypub-flag" as const,
       protocol: "ap" as const,
       dedupeKey: "dedupe-1",

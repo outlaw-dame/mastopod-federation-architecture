@@ -808,7 +808,8 @@ function parseQuery(url: string): Record<string, string> {
 function sanitiseRecordId(id: string, kind: "decision" | "case" = "decision"): string {
   const cleaned = id.trim();
   const decisionId = /^[0-9A-Z]{26}$/i.test(cleaned);
-  const caseId = /^[a-z0-9._:-]{16,128}$/i.test(cleaned);
+  // ULID pattern: 26 chars of Crockford base32 (0-9 A-Z, case-insensitive)
+  const caseId = /^[0-9A-HJKMNP-TV-Z]{26}$/i.test(cleaned);
   if (!decisionId && !caseId) {
     throw badRequest(`Invalid ${kind} id format`);
   }

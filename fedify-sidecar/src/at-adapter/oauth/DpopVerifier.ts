@@ -49,7 +49,17 @@ export class DpopVerifier {
       throw new Error('dpop_htu_mismatch');
     }
 
-    if (input.nonce) {
+    if (input.requireNonce) {
+      // Resource-server enforcement: proof must include a nonce valid in the store.
+      if (!nonce) {
+        throw new Error('use_dpop_nonce');
+      }
+      const isValidNonce = await this.nonceStore.verifyNonce(nonce);
+      if (!isValidNonce) {
+        throw new Error('use_dpop_nonce');
+      }
+    } else if (input.nonce) {
+      // Authorization-server mode: proof nonce must equal the specific expected value.
       if (nonce !== input.nonce) {
         throw new Error('use_dpop_nonce');
       }

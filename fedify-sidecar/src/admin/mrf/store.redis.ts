@@ -19,6 +19,22 @@ function safeParse<T>(value: string | null): T | null {
   }
 }
 
+/**
+ * Guards against Redis key injection by rejecting IDs that contain characters
+ * capable of escaping the expected key namespace (colons, whitespace, null bytes).
+ * Limits length to prevent memory exhaustion from oversized keys.
+ */
+function assertSafeId(id: string, field: string): void {
+  if (typeof id !== 'string' || id.length === 0 || id.length > 128) {
+    throw new Error(`Invalid ${field}: must be a non-empty string of at most 128 characters`);
+  }
+  // Disallow characters that could break the colon-delimited key scheme or
+  // inject control characters into Redis commands.
+  if (/[\x00-\x1f\x7f:*?[\]\\]/.test(id)) {
+    throw new Error(`Invalid ${field}: contains disallowed characters`);
+  }
+}
+
 export class RedisMRFAdminStore implements MRFAdminStore {
   private readonly redis: Redis;
   private readonly prefix: string;
@@ -31,6 +47,7 @@ export class RedisMRFAdminStore implements MRFAdminStore {
   }
 
   private moduleConfigKey(moduleId: string): string {
+    assertSafeId(moduleId, 'moduleId');
     return `${this.prefix}:module-config:${moduleId}`;
   }
 
@@ -43,10 +60,12 @@ export class RedisMRFAdminStore implements MRFAdminStore {
   }
 
   private traceKey(traceId: string): string {
+    assertSafeId(traceId, 'traceId');
     return `${this.prefix}:trace:${traceId}`;
   }
 
   private simulationKey(jobId: string): string {
+    assertSafeId(jobId, 'jobId');
     return `${this.prefix}:simulation:${jobId}`;
   }
 

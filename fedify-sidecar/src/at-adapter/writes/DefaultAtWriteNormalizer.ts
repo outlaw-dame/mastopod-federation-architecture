@@ -38,6 +38,7 @@ const CREATE_MUTATION_MAP: Partial<Record<string, CanonicalMutationEnvelope['mut
   'app.bsky.feed.like':     'like_create',
   'org.activitypods.emojiReaction': 'emoji_reaction_create',
   'app.bsky.feed.repost':   'repost_create',
+  'org.activitypods.story.slide':  'story_create',
 };
 
 const DELETE_MUTATION_MAP: Partial<Record<string, CanonicalMutationEnvelope['mutationType']>> = {
@@ -47,6 +48,7 @@ const DELETE_MUTATION_MAP: Partial<Record<string, CanonicalMutationEnvelope['mut
   'app.bsky.feed.like':    'like_delete',
   'org.activitypods.emojiReaction': 'emoji_reaction_delete',
   'app.bsky.feed.repost':  'repost_delete',
+  'org.activitypods.story.slide': 'story_delete',
 };
 
 // ---------------------------------------------------------------------------

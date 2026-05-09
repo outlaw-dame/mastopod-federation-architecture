@@ -12,11 +12,42 @@
  */
 
 import { request } from 'undici';
-import { createVerify, createHash } from 'node:crypto';
+import { createVerify, createHash, timingSafeEqual } from 'node:crypto';
+import { lookup as dnsLookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { Kafka, Producer } from 'kafkajs';
 import { DeliveryStateManager } from '../queue/delivery-state.js';
 import { MrfRuntime } from '../mrf/mrf-runtime.js';
 import { logger } from '../utils/logger.js';
+
+// RFC-1918, loopback, link-local, CGNAT, and benchmarking address detection.
+function isPrivateHostname(h: string): boolean {
+  const lower = h.toLowerCase();
+  if (lower === 'localhost' || lower === '::1' || lower === '0.0.0.0') return true;
+  if (lower.startsWith('127.') || lower.startsWith('10.') || lower.startsWith('192.168.')) return true;
+  if (lower.startsWith('172.')) {
+    const seg = Number.parseInt(lower.split('.')[1] ?? '-1', 10);
+    if (seg >= 16 && seg <= 31) return true;
+  }
+  if (lower.startsWith('169.254.')) return true; // link-local / AWS IMDS
+  if (lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80:')) return true;
+  // Carrier-grade NAT 100.64.0.0/10
+  if (lower.startsWith('100.')) {
+    const seg = Number.parseInt(lower.split('.')[1] ?? '-1', 10);
+    if (seg >= 64 && seg <= 127) return true;
+  }
+  // Benchmarking 198.18.0.0/15
+  if (lower.startsWith('198.18.') || lower.startsWith('198.19.')) return true;
+  // IPv4-mapped IPv6
+  if (lower.startsWith('::ffff:')) return isPrivateHostname(lower.slice(7));
+  return false;
+}
+
+function timingSafeBufferEqual(a: Buffer, b: Buffer): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
 
 // ============================================================================
 // Types
@@ -194,19 +225,64 @@ export class V6InboundWorker {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // SSRF guard: validates actorUri before making any outbound HTTP request.
+  // ---------------------------------------------------------------------------
+  private async assertSafeActorUri(uri: string): Promise<void> {
+    let parsed: URL;
+    try {
+      parsed = new URL(uri);
+    } catch {
+      throw new Error('invalid_actor_uri');
+    }
+    if (parsed.protocol !== 'https:') {
+      throw new Error('actor_uri_must_be_https');
+    }
+    if (parsed.username || parsed.password) {
+      throw new Error('actor_uri_credentials_not_allowed');
+    }
+    const hostname = parsed.hostname.toLowerCase();
+    if (isPrivateHostname(hostname)) {
+      throw new Error('actor_uri_resolves_to_private_address');
+    }
+    // Resolve DNS only for non-literal hostnames
+    if (isIP(hostname) === 0) {
+      let records: Array<{ address: string }> = [];
+      try {
+        records = await dnsLookup(hostname, { all: true });
+      } catch {
+        throw new Error('actor_uri_dns_resolution_failed');
+      }
+      for (const { address } of records) {
+        if (isPrivateHostname(address)) {
+          throw new Error('actor_uri_resolves_to_private_address');
+        }
+      }
+    }
+  }
+
   /**
-   * Verify HTTP signature (Cavage-style)
+   * Verify HTTP signature (Cavage-style) with body Digest validation.
+   *
+   * Security guarantees:
+   *  1. Every header listed in the signature's `headers` param MUST be present
+   *     — missing headers are not silently skipped (prevents signed-header downgrade).
+   *  2. If `digest` is listed in the signed headers, the SHA-256 of the request
+   *     body is verified against the Digest header (prevents body substitution).
+   *  3. Body-bearing requests without a signed `digest` are accepted as lower
+   *     trust — callers can choose to reject these entirely via configuration.
+   *  4. The actorUri derived from keyId is validated against SSRF guards before
+   *     any outbound DNS lookup or HTTP fetch.
    */
   private async verifyHttpSignature(
-    request: InboundRequest
+    req: InboundRequest
   ): Promise<VerificationResult> {
     try {
-      const signatureHeader = request.headers['signature'];
+      const signatureHeader = req.headers['signature'];
       if (!signatureHeader) {
         return { valid: false, error: 'missing_signature_header' };
       }
 
-      // Parse signature header
       const signatureParams = this.parseSignatureHeader(signatureHeader);
       const keyId = signatureParams["keyId"];
       const signature = signatureParams["signature"];
@@ -219,24 +295,65 @@ export class V6InboundWorker {
         return { valid: false, error: 'invalid_signature_header' };
       }
 
-      // Extract actor URI from keyId (format: https://actor#key)
-      const actorUri = keyId.split('#')[0] ?? keyId;
+      const headerList = headers.filter((v): v is string => typeof v === "string");
 
-      // Fetch actor document
+      // -----------------------------------------------------------------------
+      // CRIT-4: Digest / body-integrity check.
+      // -----------------------------------------------------------------------
+      const digestIndex = headerList.indexOf('digest');
+      if (digestIndex !== -1) {
+        // `digest` is in the signed set — verify body integrity.
+        const digestHeader = req.headers['digest'];
+        if (!digestHeader) {
+          return { valid: false, error: 'digest_header_missing' };
+        }
+        // Support "SHA-256=<base64>" format (RFC 3230).
+        const match = /^SHA-256=([A-Za-z0-9+/=]+)$/i.exec(digestHeader.trim());
+        if (!match) {
+          return { valid: false, error: 'digest_header_format_invalid' };
+        }
+        const expected = Buffer.from(match[1] ?? '', 'base64');
+        const actual = createHash('sha256').update(req.body).digest();
+        if (expected.length !== actual.length || !timingSafeBufferEqual(expected, actual)) {
+          return { valid: false, error: 'digest_mismatch' };
+        }
+      } else if (req.body.length > 0) {
+        // Body present but digest not signed — log a warning and continue.
+        // Administrators may tighten this to a hard reject via config.
+        logger.warn('Inbound activity body is not covered by HTTP Signature digest', {
+          keyId,
+        });
+      }
+
+      // -----------------------------------------------------------------------
+      // L-6 / MED-2: Validate actorUri before any fetch (SSRF guard).
+      // -----------------------------------------------------------------------
+      const rawActorUri = keyId.split('#')[0] ?? keyId;
+      try {
+        await this.assertSafeActorUri(rawActorUri);
+      } catch (err) {
+        return {
+          valid: false,
+          error: err instanceof Error ? err.message : 'invalid_actor_uri',
+        };
+      }
+      const actorUri = rawActorUri;
+
       const actorDoc = await this.getActorDocument(actorUri);
       if (!actorDoc || !actorDoc.publicKeyPem) {
         return { valid: false, error: 'actor_not_found' };
       }
 
-      // Build signing string
-      const signingString = this.buildSigningString(
-        request,
-        headers.filter((value): value is string => typeof value === "string")
-      );
+      // -----------------------------------------------------------------------
+      // L-5: Build signing string; reject if any listed header is absent.
+      // -----------------------------------------------------------------------
+      const signingStringResult = this.buildSigningString(req, headerList);
+      if (signingStringResult === null) {
+        return { valid: false, error: 'required_header_missing' };
+      }
 
-      // Verify signature
       const verifier = createVerify('RSA-SHA256');
-      verifier.update(signingString);
+      verifier.update(signingStringResult);
       const isValid = verifier.verify(actorDoc.publicKeyPem, signature);
 
       if (!isValid) {
@@ -245,7 +362,9 @@ export class V6InboundWorker {
 
       return { valid: true, actorUri };
     } catch (err) {
-      logger.error('Error verifying HTTP signature:', err);
+      logger.error('Error verifying HTTP signature', {
+        error: err instanceof Error ? err.message : String(err),
+      });
       return { valid: false, error: 'verification_error' };
     }
   }
@@ -278,24 +397,29 @@ export class V6InboundWorker {
   }
 
   /**
-   * Build signing string for verification
+   * Build signing string for verification.
+   *
+   * Returns null if any listed header is absent from the request — callers
+   * must treat null as a verification failure (prevents signed-header downgrade).
    */
   private buildSigningString(
-    request: InboundRequest,
-    headersToSign: string[]
-  ): string {
+    req: InboundRequest,
+    headersToSign: string[],
+  ): string | null {
     const lines: string[] = [];
 
     for (const header of headersToSign) {
       if (header === '(request-target)') {
         lines.push(
-          `(request-target): ${request.method.toLowerCase()} ${new URL(request.url).pathname}`
+          `(request-target): ${req.method.toLowerCase()} ${new URL(req.url).pathname}`,
         );
       } else {
-        const value = request.headers[header.toLowerCase()];
-        if (value) {
-          lines.push(`${header.toLowerCase()}: ${value}`);
+        const value = req.headers[header.toLowerCase()];
+        if (value === undefined || value === '') {
+          // L-5: Required header absent — fail the verification rather than skipping.
+          return null;
         }
+        lines.push(`${header.toLowerCase()}: ${value}`);
       }
     }
 

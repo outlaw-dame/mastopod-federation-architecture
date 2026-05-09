@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { AtProjectionPolicy, CanonicalProfile, CanonicalPost } from './AtProjectionPolicy.js';
+import { AtProjectionPolicy, CanonicalProfile, CanonicalPost, CanonicalStory } from './AtProjectionPolicy.js';
 import { ProfileRecordSerializer, ProfileMediaResolver } from './serializers/ProfileRecordSerializer.js';
 import { PostRecordSerializer, FacetBuilder, EmbedBuilder } from './serializers/PostRecordSerializer.js';
 import { StandardDocumentRecordSerializer } from './serializers/StandardDocumentRecordSerializer.js';
@@ -30,6 +30,10 @@ import {
   parseActivityPodsEmojiReactionRecord,
   toActivityPodsEmojiDefinition,
 } from '../lexicon/ActivityPodsEmojiLexicon.js';
+import {
+  ACTIVITYPODS_STORY_COLLECTION,
+  type ActivityPodsStoryRecord,
+} from '../lexicon/ActivityPodsStoryLexicon.js';
 
 export interface CoreProfileUpsertedV1 {
   profile: CanonicalProfile;
@@ -69,6 +73,24 @@ export interface CorePostDeletedV1 {
   emittedAt: string;
 }
 
+export interface CoreStoryCreatedV1 {
+  canonicalStory: CanonicalStory;
+  author: any; // CanonicalIdentity
+  record: ActivityPodsStoryRecord;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
+  emittedAt: string;
+}
+
+export interface CoreStoryDeletedV1 {
+  canonicalStoryId: string;
+  canonicalAuthorId: string;
+  atRecord?: AtRecordLocator;
+  bridge?: AtRepoBridgeMetadata;
+  deletedAt: string;
+  emittedAt: string;
+}
+
 import {
   CoreEmojiReactionCreatedV1,
   CoreEmojiReactionDeletedV1,
@@ -91,6 +113,8 @@ export interface AtProjectionWorker {
   onPostCreated(event: CorePostCreatedV1): Promise<void>;
   onPostUpdated(event: CorePostUpdatedV1): Promise<void>;
   onPostDeleted(event: CorePostDeletedV1): Promise<void>;
+  onStoryCreated(event: CoreStoryCreatedV1): Promise<void>;
+  onStoryDeleted(event: CoreStoryDeletedV1): Promise<void>;
   
   onEmojiReactionCreated(event: CoreEmojiReactionCreatedV1): Promise<void>;
   onEmojiReactionDeleted(event: CoreEmojiReactionDeletedV1): Promise<void>;
@@ -472,6 +496,91 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
     if (teaserAlias) {
       await this.aliasStore.markDeleted(teaserAlias.canonicalRefId, event.deletedAt);
     }
+  }
+
+  async onStoryCreated(event: CoreStoryCreatedV1): Promise<void> {
+    const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalStory.authorId);
+    if (!binding) return;
+
+    const decision = this.policy.canProjectStory(event.canonicalStory, binding);
+    if (!decision.allowed) return;
+
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
+    if (!repoState) return;
+
+    const collection = ACTIVITYPODS_STORY_COLLECTION;
+    const rkey = this.getRequestedRkey(event.atRecord, collection)
+      ?? this.rkeyService.postRkey(event.canonicalStory.createdAt);
+    const record = cloneNativeRecord(event.record);
+
+    const op: AtRepoOpV1 = {
+      did: binding.atprotoDid!,
+      canonicalAccountId: binding.canonicalAccountId,
+      opId: `op-${Date.now()}`,
+      opType: 'create',
+      collection,
+      rkey,
+      canonicalRefId: event.canonicalStory.id,
+      record,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
+      emittedAt: new Date().toISOString(),
+    };
+
+    await this.eventPublisher.publish('at.repo.op.v1', op as any);
+    const commitResult = await this.commitBuilder.buildCommit(repoState, [op]);
+
+    const now = new Date().toISOString();
+    await this.aliasStore.put({
+      canonicalRefId: event.canonicalStory.id,
+      canonicalType: 'story',
+      did: binding.atprotoDid!,
+      collection,
+      rkey,
+      atUri: `at://${binding.atprotoDid}/${collection}/${rkey}`,
+      activityPubObjectId: null,
+      record,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    });
+
+    await this.persistAndUpdateRepoState(repoState, commitResult);
+  }
+
+  async onStoryDeleted(event: CoreStoryDeletedV1): Promise<void> {
+    const binding = await this.identityRepo.getByCanonicalAccountId(event.canonicalAuthorId);
+    if (!binding) return;
+
+    const repoState = await this.getOrCreateRepoState(binding.atprotoDid!);
+    if (!repoState) return;
+
+    const alias = await this.ensureAliasForLocator(
+      event.canonicalStoryId,
+      ACTIVITYPODS_STORY_COLLECTION,
+      'story',
+      binding.atprotoDid!,
+      event.atRecord,
+    );
+    if (!alias) return;
+
+    const op: AtRepoOpV1 = {
+      did: binding.atprotoDid!,
+      canonicalAccountId: binding.canonicalAccountId,
+      opId: `op-${Date.now()}`,
+      opType: 'delete',
+      collection: alias.collection,
+      rkey: alias.rkey,
+      canonicalRefId: event.canonicalStoryId,
+      record: null,
+      ...(event.bridge ? { bridge: event.bridge } : {}),
+      emittedAt: new Date().toISOString(),
+    };
+
+    await this.eventPublisher.publish('at.repo.op.v1', op as any);
+    const commitResult = await this.commitBuilder.buildCommit(repoState, [op]);
+
+    await this.persistAndUpdateRepoState(repoState, commitResult);
+    await this.aliasStore.markDeleted(event.canonicalStoryId, event.deletedAt);
   }
 
   // ---------------------------------------------------------------------------
@@ -875,6 +984,8 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
         return 'repost';
       case ACTIVITYPODS_EMOJI_REACTION_COLLECTION:
         return 'emojiReaction';
+      case ACTIVITYPODS_STORY_COLLECTION:
+        return 'story';
       case 'app.bsky.feed.post':
         return 'post';
       default:
@@ -917,6 +1028,7 @@ export class DefaultAtProjectionWorker implements AtProjectionWorker {
       reactionEmoji: existingAlias?.reactionEmoji ?? null,
       canonicalUrl: existingAlias?.canonicalUrl ?? null,
       activityPubObjectId: existingAlias?.activityPubObjectId ?? null,
+      record: existingAlias?.record ?? null,
     };
     await this.aliasStore.put(placeholder);
     return placeholder;

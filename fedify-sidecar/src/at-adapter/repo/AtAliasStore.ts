@@ -24,7 +24,7 @@ export interface AtAliasRecord {
   /**
    * Type of canonical entity
    */
-  canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction';
+  canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction' | 'story';
   
   
   /**
@@ -42,7 +42,8 @@ export interface AtAliasRecord {
     | 'app.bsky.graph.follow'
     | 'app.bsky.feed.like'
     | 'app.bsky.feed.repost'
-    | 'org.activitypods.emojiReaction';
+    | 'org.activitypods.emojiReaction'
+    | 'org.activitypods.story.slide';
   
   /**
    * Record key
@@ -113,6 +114,12 @@ export interface AtAliasRecord {
    * Stable ActivityPub object identifier when known
    */
   activityPubObjectId?: string | null;
+
+  /**
+   * Last projected AT record value. Newer paths populate this so app-view
+   * routes and getRecord/listRecords can return more than a collection shell.
+   */
+  record?: Record<string, unknown> | null;
 }
 
 /**

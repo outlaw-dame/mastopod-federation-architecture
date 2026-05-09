@@ -1,0 +1,57 @@
+{
+  "lexicon": 1,
+  "id": "org.activitypods.wall.post",
+  "description": "A wall post written on another actor's profile wall. On ActivityPub this is a Note whose enclosing Create activity carries an AS2 `target` property pointing to the wall owner's actor URI (Friendica-compatible). On ATProto the record is stored in the author's repo under the `org.activitypods.wall.post` collection.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Write on another actor's profile wall.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["text", "wallTarget", "createdAt"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The text content of the wall post. Plain text; rich-text facets may be supplied in the `facets` field.",
+            "maxGraphemes": 500,
+            "maxLength": 10000
+          },
+          "wallTarget": {
+            "type": "ref",
+            "ref": "org.activitypods.wall.defs#wallTargetRef",
+            "description": "The actor whose profile wall this post is being written on."
+          },
+          "langs": {
+            "type": "array",
+            "description": "BCP-47 language tags for the post text. Should have at most one entry for wall posts.",
+            "items": {
+              "type": "string",
+              "format": "language"
+            },
+            "maxLength": 3
+          },
+          "facets": {
+            "type": "array",
+            "description": "Annotations (mentions, links, hashtags) on ranges of the `text` field, following the `app.bsky.richtext.facet` schema.",
+            "items": {
+              "type": "ref",
+              "ref": "app.bsky.richtext.facet"
+            },
+            "maxLength": 256
+          },
+          "bridgeSource": {
+            "type": "ref",
+            "ref": "org.activitypods.wall.defs#bridgeSource",
+            "description": "Provenance metadata when this record was bridged from ActivityPub. Omitted for natively ATProto-authored wall posts."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Client-declared creation timestamp. Servers should clamp future-dated values to the current time."
+          }
+        }
+      }
+    }
+  }
+}

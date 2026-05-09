@@ -208,7 +208,7 @@ export interface CanonicalV1ObjectRef {
 }
 
 export interface CanonicalV1ContentSummary {
-  kind: "note" | "article" | "profile" | "reaction" | "follow" | "share" | "poll";
+  kind: "note" | "article" | "profile" | "reaction" | "follow" | "share" | "poll" | "story";
   title?: string | null;
   summary?: string | null;
   plaintext?: string | null;
@@ -261,6 +261,8 @@ export interface CanonicalV1Event {
     | "FollowRemove"
     | "ProfileUpdate"
     | "AccountState"
+    | "StoryCreate"
+    | "StoryDelete"
     | "ReportCreate"
     | "DirectMessage";
   /** Protocol the event originated from. */

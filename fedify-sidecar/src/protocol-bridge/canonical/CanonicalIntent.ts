@@ -59,6 +59,8 @@ export type CanonicalIntentKind =
   | "FollowRemove"
   | "ProfileUpdate"
   | "AccountState"
+  | "StoryCreate"
+  | "StoryDelete"
   | "ReportCreate"
   | "DirectMessage";
 
@@ -272,6 +274,57 @@ export interface CanonicalAccountStateIntent extends CanonicalIntentBase {
   state: "active" | "suspended" | "deactivated";
 }
 
+// ---------------------------------------------------------------------------
+// Story intents
+// ---------------------------------------------------------------------------
+
+export interface CanonicalAtBlobRef {
+  $type?: "blob";
+  ref: {
+    $link: string;
+  };
+  mimeType: string;
+  size: number;
+}
+
+export interface CanonicalStoryMedia {
+  kind: "image" | "video";
+  blob: CanonicalAtBlobRef;
+  alt: string;
+  aspectRatio?: {
+    width: number;
+    height: number;
+  };
+  durationMs?: number;
+  preview?: {
+    blob: CanonicalAtBlobRef;
+    alt?: string | null;
+  } | null;
+}
+
+export interface CanonicalStoryLink {
+  uri: string;
+  title?: string | null;
+}
+
+export interface CanonicalStoryCreateIntent extends CanonicalIntentBase {
+  kind: "StoryCreate";
+  object: CanonicalObjectRef;
+  media: CanonicalStoryMedia;
+  text?: string | null;
+  facets?: unknown[];
+  links?: CanonicalStoryLink[];
+  labels?: Array<Record<string, unknown>>;
+  allowReplies?: boolean;
+  langs?: string[];
+  expiresAt: string;
+}
+
+export interface CanonicalStoryDeleteIntent extends CanonicalIntentBase {
+  kind: "StoryDelete";
+  object: CanonicalObjectRef;
+}
+
 export type CanonicalReportReasonType =
   | "spam"
   | "harassment"
@@ -381,6 +434,8 @@ export type CanonicalIntent =
   | CanonicalFollowRemoveIntent
   | CanonicalProfileUpdateIntent
   | CanonicalAccountStateIntent
+  | CanonicalStoryCreateIntent
+  | CanonicalStoryDeleteIntent
   | CanonicalDirectMessageIntent
   | CanonicalReportCreateIntent;
 

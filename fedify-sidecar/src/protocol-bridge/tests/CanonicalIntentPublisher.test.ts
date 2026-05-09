@@ -76,6 +76,60 @@ describe("CanonicalIntentPublisher serialization", () => {
     expect(event.visibility).toBe("direct");
     expect(event.content).toBeUndefined();
   });
+
+  it("serializes story intents with object refs and sanitized story summaries", () => {
+    const intent: CanonicalIntent = {
+      ...baseIntent("StoryCreate"),
+      sourceProtocol: "atproto",
+      sourceEventId: "at://did:plc:alice/org.activitypods.story.slide/3kstory",
+      sourceAccountRef: {
+        canonicalAccountId: "acct-alice",
+        did: "did:plc:alice",
+        handle: "alice.example.com",
+      },
+      object: {
+        canonicalObjectId: "story-1",
+        atUri: "at://did:plc:alice/org.activitypods.story.slide/3kstory",
+      },
+      media: {
+        kind: "image",
+        blob: {
+          $type: "blob",
+          ref: { $link: "bafkreistoryimagecid0002" },
+          mimeType: "image/jpeg",
+          size: 4096,
+        },
+        alt: "Sunset over the water",
+      },
+      text: "A story caption",
+      links: [
+        { uri: "https://example.com/story", title: "Story" },
+        { uri: "javascript:alert(1)", title: "bad" },
+      ],
+      facets: [],
+      labels: [],
+      allowReplies: true,
+      langs: ["en"],
+      expiresAt: "2026-04-26T12:00:00.000Z",
+      warnings: [],
+    };
+
+    const event = serializeCanonicalIntent(intent);
+
+    expect(event.kind).toBe("StoryCreate");
+    expect(event.object).toEqual({
+      canonicalObjectId: "story-1",
+      atUri: "at://did:plc:alice/org.activitypods.story.slide/3kstory",
+      activityPubObjectId: null,
+      canonicalUrl: null,
+    });
+    expect(event.content).toEqual({
+      kind: "story",
+      plaintext: "A story caption",
+      language: "en",
+      links: ["https://example.com/story"],
+    });
+  });
 });
 
 function baseIntent<K extends CanonicalIntent["kind"]>(kind: K): CanonicalIntentBase & { kind: K } {

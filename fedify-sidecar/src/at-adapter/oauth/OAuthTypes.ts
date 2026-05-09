@@ -51,6 +51,7 @@ export interface OAuthGrantRecord {
   scope: string;
   createdAtEpochSec: number;
   updatedAtEpochSec: number;
+  revokedAtEpochSec?: number;
 }
 
 export interface OAuthRefreshTokenRecord {
@@ -122,6 +123,9 @@ export interface OAuthDpopVerifyInput {
   proofJwt: string;
   htm: string;
   htu: string;
+  /** When true, the DPoP proof MUST include a nonce that is valid in the nonceStore. */
+  requireNonce?: boolean;
+  /** Legacy: specific nonce the proof must contain (used at authorization server). */
   nonce?: string;
   accessToken?: string;
 }

@@ -1,0 +1,159 @@
+{
+  "lexicon": 1,
+  "id": "org.activitypods.story.slide",
+  "description": "A short-lived ActivityPods story slide for ATProto apps. Slides are repository records; app views group active slides by actor.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "createdAt",
+          "media"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Expiration timestamp. App views must hide slides after this time; the sidecar caps lifetime at 24 hours."
+          },
+          "visibility": {
+            "type": "string",
+            "knownValues": ["public", "unlisted"],
+            "description": "ATProto repositories are public; this is an app-view hint, not cryptographic privacy."
+          },
+          "media": {
+            "type": "ref",
+            "ref": "#media"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "facets": {
+            "type": "array",
+            "items": {
+              "type": "unknown"
+            },
+            "maxLength": 64
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "type": "ref",
+              "ref": "#link"
+            },
+            "maxLength": 4
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "unknown"
+            },
+            "maxLength": 16
+          },
+          "allowReplies": {
+            "type": "boolean",
+            "default": true
+          },
+          "langs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 35
+            },
+            "maxLength": 8
+          }
+        }
+      }
+    },
+    "media": {
+      "type": "object",
+      "required": [
+        "kind",
+        "blob",
+        "alt"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "knownValues": ["image", "video"]
+        },
+        "blob": {
+          "type": "blob",
+          "accept": ["image/*", "video/*"],
+          "maxSize": 100000000
+        },
+        "alt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "aspectRatio": {
+          "type": "ref",
+          "ref": "#aspectRatio"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        },
+        "preview": {
+          "type": "ref",
+          "ref": "#preview"
+        }
+      }
+    },
+    "preview": {
+      "type": "object",
+      "required": ["blob"],
+      "properties": {
+        "blob": {
+          "type": "blob",
+          "accept": ["image/*"],
+          "maxSize": 5000000
+        },
+        "alt": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      }
+    },
+    "aspectRatio": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "link": {
+      "type": "object",
+      "required": ["uri"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      }
+    }
+  }
+}

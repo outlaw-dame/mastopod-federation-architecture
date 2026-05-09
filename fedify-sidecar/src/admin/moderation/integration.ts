@@ -2,7 +2,7 @@ import { Redis } from "ioredis";
 import { ulid } from "ulid";
 import type { Logger } from "pino";
 import type { IdentityBindingRepository } from "../../core-domain/identity/IdentityBindingRepository.js";
-import { forbidden } from "../mrf/errors.js";
+import { assertBearerToken } from "../mrf/auth.js";
 import type { MRFPermission } from "../mrf/types.js";
 import { registerModerationBridgeFastifyRoutes } from "./fastify-routes.js";
 import { ActivityPodsModerationCaseStore, CompositeModerationBridgeStore } from "./activitypods-case-store.js";
@@ -38,17 +38,6 @@ interface RegisterOptions {
   canonicalPublisher?: CanonicalIntentPublisher;
   activityPubReportForwardingService?: Pick<ActivityPubReportForwardingService, "handleCanonicalEvent">;
   atprotoReportForwardingService?: Pick<AtprotoReportForwardingService, "handleCanonicalEvent">;
-}
-
-function parsePermissions(req: Request): Set<string> {
-  const raw = (req.headers.get("x-provider-permissions") || "").slice(0, 1024);
-  const allowed = new Set<MRFPermission>(["provider:read", "provider:write", "provider:simulate"]);
-  return new Set(
-    raw
-      .split(",")
-      .map((value) => value.trim())
-      .filter((value): value is MRFPermission => allowed.has(value as MRFPermission)),
-  );
 }
 
 function sanitizeActor(raw: string | null): string {
@@ -114,11 +103,10 @@ export async function registerModerationBridgeIntegration(options: RegisterOptio
     now,
     uuid: () => ulid(),
     actorFromRequest: (req: Request) => sanitizeActor(req.headers.get("x-provider-actor")),
-    authorize: (req: Request, permission: MRFPermission) => {
-      const permissions = parsePermissions(req);
-      if (!permissions.has(permission)) {
-        throw forbidden(`Missing required permission: ${permission}`);
-      }
+    authorize: (req: Request, _permission: MRFPermission) => {
+      // Permissions are derived from the bearer token identity, not from the
+      // client-supplied X-Provider-Permissions header (which is untrusted).
+      assertBearerToken(req.headers, options.adminToken);
     },
     resolveAtDid: async (webId: string): Promise<string | null> => {
       const binding = await options.identityBindingRepository.getByWebId(webId);

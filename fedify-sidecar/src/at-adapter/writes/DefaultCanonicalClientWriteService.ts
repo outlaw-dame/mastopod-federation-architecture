@@ -66,11 +66,17 @@ import {
   type ActivityPodsEmojiDefinition,
   parseActivityPodsEmojiReactionRecord,
 } from '../lexicon/ActivityPodsEmojiLexicon.js';
+import {
+  ACTIVITYPODS_STORY_COLLECTION,
+  normalizeActivityPodsStoryRecord,
+} from '../lexicon/ActivityPodsStoryLexicon.js';
 import type {
   CorePostCreatedV1,
   CorePostUpdatedV1,
   CorePostDeletedV1,
   CoreProfileUpsertedV1,
+  CoreStoryCreatedV1,
+  CoreStoryDeletedV1,
 } from '../projection/AtProjectionWorker.js';
 
 // ---------------------------------------------------------------------------
@@ -132,6 +138,9 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
       case 'repost_create':
         canonicalRefId = await this._applyRepostCreate(mutation, now);
         break;
+      case 'story_create':
+        canonicalRefId = await this._applyStoryCreate(mutation, now);
+        break;
       case 'post_delete':
         await this._applyPostDelete(mutation, now);
         break;
@@ -146,6 +155,9 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
         break;
       case 'repost_delete':
         await this._applySocialDelete(mutation, now, 'repost');
+        break;
+      case 'story_delete':
+        await this._applyStoryDelete(mutation, now);
         break;
       default: {
         const _exhaustive: never = mutation.mutationType;
@@ -455,6 +467,40 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     return canonicalRefId;
   }
 
+  private async _applyStoryCreate(
+    mutation: CanonicalMutationEnvelope,
+    now: string,
+  ): Promise<string> {
+    const canonicalRefId = _str(mutation.payload['_bridgeCanonicalRefId']) ?? randomUUID();
+    const nativeRecord = extractNativeRecord(mutation.payload, ACTIVITYPODS_STORY_COLLECTION);
+    const storyRecord = normalizeActivityPodsStoryRecord(nativeRecord, {
+      now,
+      requireActive: true,
+    });
+    if (!storyRecord) {
+      throw new Error('story_create: valid org.activitypods.story.slide record with active 24h-or-less expiresAt is required');
+    }
+
+    const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(mutation.payload);
+    const event: CoreStoryCreatedV1 = {
+      canonicalStory: {
+        id: canonicalRefId,
+        authorId: mutation.canonicalAccountId,
+        createdAt: storyRecord.createdAt!,
+        expiresAt: storyRecord.expiresAt!,
+      },
+      author: { id: mutation.canonicalAccountId },
+      record: storyRecord,
+      ...(atRecord ? { atRecord } : {}),
+      ...(bridge ? { bridge } : {}),
+      emittedAt: now,
+    };
+
+    await this.worker.onStoryCreated(event);
+    return canonicalRefId;
+  }
+
   // --------------------------------------------------------------------------
   // Delete mutations
   // --------------------------------------------------------------------------
@@ -486,6 +532,26 @@ export class DefaultCanonicalClientWriteService implements CanonicalClientWriteS
     if (ownerDid && this.postMediaStore) {
       await this._deleteStoredPostMediaDescriptors(canonicalRefId, ownerDid);
     }
+  }
+
+  private async _applyStoryDelete(
+    mutation: CanonicalMutationEnvelope,
+    now: string,
+  ): Promise<void> {
+    const canonicalRefId = await this._resolveDeleteCanonicalRefId(mutation);
+    if (!canonicalRefId) return;
+    const bridge = asBridgeMetadata(mutation.payload['_bridgeMetadata']);
+    const atRecord = extractAtRecordLocator(mutation.payload);
+
+    const event: CoreStoryDeletedV1 = {
+      canonicalStoryId: canonicalRefId,
+      canonicalAuthorId: mutation.canonicalAccountId,
+      ...(atRecord ? { atRecord } : {}),
+      ...(bridge ? { bridge } : {}),
+      deletedAt: now,
+      emittedAt: now,
+    };
+    await this.worker.onStoryDeleted(event);
   }
 
   private async _applySocialDelete(
@@ -828,6 +894,7 @@ function isAtRepoCollection(value: string): value is AtRepoCollection {
     || value === 'app.bsky.graph.follow'
     || value === 'app.bsky.feed.like'
     || value === ACTIVITYPODS_EMOJI_REACTION_COLLECTION
+    || value === ACTIVITYPODS_STORY_COLLECTION
     || value === 'app.bsky.feed.repost';
 }
 

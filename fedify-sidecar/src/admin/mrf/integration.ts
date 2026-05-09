@@ -8,6 +8,7 @@ import { runSimulationJob } from "./simulator.js";
 import { InMemoryMRFAdminStore } from "./store.memory.js";
 import { RedisMRFAdminStore } from "./store.redis.js";
 import { forbidden } from "./errors.js";
+import { assertBearerToken } from "./auth.js";
 import { withRetry } from "./utils.js";
 import type { MRFAdminDeps, MRFPermission } from "./types.js";
 import type { MRFAdminStore } from "./store.js";
@@ -22,16 +23,6 @@ interface RegisterOptions {
   redisPrefix: string;
 }
 
-function parsePermissions(req: Request): Set<string> {
-  const raw = (req.headers.get("x-provider-permissions") || "").slice(0, 1024);
-  const allowed = new Set<MRFPermission>(["provider:read", "provider:write", "provider:simulate"]);
-  return new Set(
-    raw
-      .split(",")
-      .map((value) => value.trim())
-      .filter((value): value is MRFPermission => allowed.has(value as MRFPermission)),
-  );
-}
 
 function sanitizeActor(value: string | null): string {
   const fallback = "gateway:unknown";
@@ -86,11 +77,12 @@ export async function registerMrfAdminIntegration(options: RegisterOptions): Pro
       const first = forwarded.split(",")[0]?.trim();
       return first || undefined;
     },
-    authorize: (req: Request, permission: MRFPermission) => {
-      const permissions = parsePermissions(req);
-      if (!permissions.has(permission)) {
-        throw forbidden(`Missing required permission: ${permission}`);
-      }
+    authorize: (req: Request, _permission: MRFPermission) => {
+      // Permissions are derived from the bearer token identity, not from the
+      // client-supplied X-Provider-Permissions header (which is untrusted).
+      // The single adminToken grants all MRF permissions; a separate read-only
+      // token can be introduced later as MRF_ADMIN_READ_TOKEN.
+      assertBearerToken(req.headers, options.adminToken);
     },
     enqueueSimulation: async (jobId: string) => {
       setTimeout(() => {

@@ -13,6 +13,8 @@ import { ReactionAddToAtProjector } from "./atproto/ReactionAddToAtProjector.js"
 import { ReactionRemoveToAtProjector } from "./atproto/ReactionRemoveToAtProjector.js";
 import { ShareAddToAtProjector } from "./atproto/ShareAddToAtProjector.js";
 import { ShareRemoveToAtProjector } from "./atproto/ShareRemoveToAtProjector.js";
+import { StoryCreateToAtProjector } from "./atproto/StoryCreateToAtProjector.js";
+import { StoryDeleteToAtProjector } from "./atproto/StoryDeleteToAtProjector.js";
 import { ProjectorRegistry } from "../registry/ProjectorRegistry.js";
 import type { AtProjectionCommand } from "../ports/ProtocolBridgePorts.js";
 
@@ -34,6 +36,8 @@ export class CanonicalToAtprotoProjector extends ProjectorRegistry<AtProjectionC
       new ShareRemoveToAtProjector(),
       new FollowAddToAtProjector(),
       new FollowRemoveToAtProjector(),
+      new StoryCreateToAtProjector(),
+      new StoryDeleteToAtProjector(),
     ]);
   }
 }

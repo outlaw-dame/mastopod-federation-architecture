@@ -55,6 +55,7 @@ import { RepoCreateRecordRoute } from './routes/RepoCreateRecordRoute.js';
 import { RepoPutRecordRoute } from './routes/RepoPutRecordRoute.js';
 import { RepoDeleteRecordRoute } from './routes/RepoDeleteRecordRoute.js';
 import { RepoDescribeRepoRoute } from './routes/RepoDescribeRepoRoute.js';
+import { ActivityPodsGetStoriesRoute } from './routes/ActivityPodsGetStoriesRoute.js';
 import type { AtSessionService, AtAccountResolver, AtPasswordVerifier } from '../auth/AtSessionTypes.js';
 import type { AtWriteGateway } from '../writes/AtWriteTypes.js';
 import type { AtSessionContext } from '../auth/AtSessionTypes.js';
@@ -124,6 +125,7 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
   private readonly putRecordRoute: RepoPutRecordRoute | null;
   private readonly deleteRecordRoute: RepoDeleteRecordRoute | null;
   private readonly describeRepoRoute: RepoDescribeRepoRoute | null;
+  private readonly getStoriesRoute: ActivityPodsGetStoriesRoute;
 
   constructor(private readonly deps: AtXrpcServerDeps) {
     const revLookup = new DefaultRepoRevLookup(deps.repoRegistry);
@@ -166,6 +168,8 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
       deps.identityRepo,
       deps.externalReadGateway
     );
+
+    this.getStoriesRoute = new ActivityPodsGetStoriesRoute(deps.recordReader);
 
     this.resolveHandleRoute = new IdentityResolveHandleRoute(
       deps.handleResolutionReader
@@ -257,6 +261,9 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
       const reverse = query["reverse"] as string | undefined;
       const handle = query["handle"] as string | undefined;
       const limitValue = query["limit"] as string | undefined;
+      const actors = query["actors"] as string | undefined;
+      const includeExpired = query["includeExpired"] as string | undefined;
+      const seen = query["seen"] as string | undefined;
 
       if (method === 'GET' && path === '/xrpc/com.atproto.sync.getRepo') {
         result = await this.getRepoRoute.handle(did as string, since);
@@ -290,6 +297,15 @@ export class DefaultAtXrpcServer implements AtXrpcServer {
           limit,
           cursor,
           reverse === 'true'
+        );
+
+      } else if (method === 'GET' && path === '/xrpc/org.activitypods.story.getStories') {
+        const limit = limitValue ? parseInt(limitValue, 10) : undefined;
+        result = await this.getStoriesRoute.handle(
+          actors,
+          limit,
+          includeExpired === 'true',
+          seen,
         );
 
       } else if (method === 'GET' && path === '/xrpc/com.atproto.identity.resolveHandle') {

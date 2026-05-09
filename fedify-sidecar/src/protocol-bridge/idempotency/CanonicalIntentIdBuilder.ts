@@ -40,6 +40,8 @@ function normalizedTarget(intent: CanonicalIntentDraft | CanonicalIntent): strin
     case "PollEdit":
     case "PollDelete":
     case "PollVoteAdd":
+    case "StoryCreate":
+    case "StoryDelete":
     case "ReactionAdd":
     case "ReactionRemove":
     case "ShareAdd":
@@ -125,7 +127,23 @@ function normalizedContentDigest(intent: CanonicalIntentDraft | CanonicalIntent)
         .digest("hex");
     case "PostDelete":
     case "PollDelete":
+    case "StoryDelete":
       return canonicalObjectIdentityKey(intent.object);
+    case "StoryCreate":
+      return createHash("sha256")
+        .update(
+          stableStringify({
+            media: intent.media,
+            text: intent.text ?? null,
+            facets: intent.facets ?? [],
+            links: intent.links ?? [],
+            labels: intent.labels ?? [],
+            allowReplies: intent.allowReplies ?? true,
+            langs: intent.langs ?? [],
+            expiresAt: intent.expiresAt,
+          }),
+        )
+        .digest("hex");
     case "PollCreate":
     case "PollEdit":
       return createHash("sha256")

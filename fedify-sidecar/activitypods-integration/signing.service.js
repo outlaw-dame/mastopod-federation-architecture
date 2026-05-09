@@ -7,6 +7,15 @@ const crypto = require("crypto");
 const { URL } = require("url");
 const { MoleculerError } = require("moleculer").Errors;
 
+// Fixed zero-key HMAC comparison — provides constant-time equality regardless
+// of string length, eliminating the timing oracle on the bearer token.
+const _HMAC_CMP_KEY = Buffer.alloc(32);
+function safeTokenEqual(a, b) {
+  const ha = crypto.createHmac("sha256", _HMAC_CMP_KEY).update(typeof a === "string" ? a : "").digest();
+  const hb = crypto.createHmac("sha256", _HMAC_CMP_KEY).update(typeof b === "string" ? b : "").digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -597,7 +606,7 @@ module.exports = {
         throw new MoleculerError("Missing bearer token", 401, "AUTH_FAILED");
       }
       const token = String(auth).slice(7);
-      if (!this.settings.auth.bearerToken || token !== this.settings.auth.bearerToken) {
+      if (!this.settings.auth.bearerToken || !safeTokenEqual(token, this.settings.auth.bearerToken)) {
         throw new MoleculerError("Invalid bearer token", 403, "AUTH_FAILED");
       }
     },

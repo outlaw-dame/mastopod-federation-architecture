@@ -23,7 +23,7 @@ export class DefaultAtWriteAliasResolver implements AtWriteAliasResolver {
     rkey: string
   ): Promise<{
     canonicalRefId: string;
-    canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction';
+    canonicalType: 'profile' | 'post' | 'article' | 'follow' | 'like' | 'repost' | 'emojiReaction' | 'story';
   } | null> {
     const aliases = await this.aliasStore.listByDid(repoDid);
     const match = aliases.find(

@@ -75,7 +75,7 @@ export class DefaultAtRecordReader implements AtRecordReader {
       rkey,
       uri: alias.atUri,
       cid: alias.cid,
-      value: { $type: collection },
+      value: alias.record ?? { $type: collection },
       indexedAt: alias.updatedAt
     };
   }
@@ -120,7 +120,7 @@ export class DefaultAtRecordReader implements AtRecordReader {
       rkey: alias.rkey,
       uri: alias.atUri,
       cid: alias.cid ?? 'mock-cid',
-      value: { $type: alias.collection },
+      value: alias.record ?? { $type: alias.collection },
       indexedAt: alias.updatedAt
     }));
 

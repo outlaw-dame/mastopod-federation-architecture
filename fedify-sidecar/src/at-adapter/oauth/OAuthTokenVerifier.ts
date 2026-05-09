@@ -81,6 +81,7 @@ export class OAuthTokenVerifier implements OAuthAccessTokenVerifier {
         htm: method,
         htu,
         accessToken: bearer,
+        requireNonce: true,
       });
       dpopJkt = dpop.jkt;
     } catch (err) {

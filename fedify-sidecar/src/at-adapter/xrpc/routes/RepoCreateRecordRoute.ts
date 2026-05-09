@@ -15,6 +15,7 @@
  *   app.bsky.graph.follow
  *   app.bsky.feed.like
  *   app.bsky.feed.repost
+ *   org.activitypods.story.slide
  *
  * Ref: https://atproto.com/lexicon/com-atproto-repo#comatprotorepocreaterecord
  */

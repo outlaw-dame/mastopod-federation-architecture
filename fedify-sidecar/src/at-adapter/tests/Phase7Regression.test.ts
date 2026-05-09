@@ -513,4 +513,102 @@ describe('Phase 7 regressions', () => {
       value: { $type: 'app.bsky.actor.profile' },
     });
   });
+
+  it('creates AT-native stories and exposes an active story carousel', async () => {
+    const accessJwt = await harness.createAccessJwt();
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.parse(createdAt) + 60 * 60 * 1000).toISOString();
+
+    const createResponse = await harness.app.inject({
+      method: 'POST',
+      url: '/xrpc/com.atproto.repo.createRecord',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${accessJwt}`,
+      },
+      payload: {
+        repo: TEST_DID,
+        collection: 'org.activitypods.story.slide',
+        record: {
+          $type: 'org.activitypods.story.slide',
+          createdAt,
+          expiresAt,
+          media: {
+            kind: 'image',
+            blob: {
+              $type: 'blob',
+              ref: { $link: 'bafkreistoryimagecid0001' },
+              mimeType: 'image/jpeg',
+              size: 12_345,
+            },
+            alt: 'A bright story image',
+            aspectRatio: { width: 1080, height: 1920 },
+          },
+          text: 'A better ephemeral slide',
+          links: [{ uri: 'https://pods.test/stories/alice/1', title: 'Story source' }],
+        },
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(200);
+    const created = jsonBody(createResponse) as { uri: string; cid: string };
+    expect(created.uri.startsWith(`at://${TEST_DID}/org.activitypods.story.slide/`)).toBe(true);
+
+    const rkey = created.uri.split('/').pop();
+    const readResponse = await harness.app.inject({
+      method: 'GET',
+      url:
+        '/xrpc/com.atproto.repo.getRecord' +
+        `?repo=${encodeURIComponent(TEST_DID)}` +
+        `&collection=${encodeURIComponent('org.activitypods.story.slide')}` +
+        `&rkey=${encodeURIComponent(rkey ?? '')}`,
+    });
+
+    expect(readResponse.statusCode).toBe(200);
+    expect(jsonBody(readResponse)).toMatchObject({
+      uri: created.uri,
+      cid: created.cid,
+      value: {
+        $type: 'org.activitypods.story.slide',
+        expiresAt,
+        media: {
+          kind: 'image',
+          alt: 'A bright story image',
+        },
+      },
+    });
+
+    const carouselResponse = await harness.app.inject({
+      method: 'GET',
+      url:
+        '/xrpc/org.activitypods.story.getStories' +
+        `?actors=${encodeURIComponent(TEST_DID)}` +
+        `&seen=${encodeURIComponent(created.uri)}`,
+    });
+
+    expect(carouselResponse.statusCode).toBe(200);
+    expect(jsonBody(carouselResponse)).toMatchObject({
+      stories: [
+        {
+          did: TEST_DID,
+          repo: TEST_DID,
+          seen: true,
+          items: [
+            {
+              uri: created.uri,
+              cid: created.cid,
+              seen: true,
+              value: {
+                $type: 'org.activitypods.story.slide',
+                text: 'A better ephemeral slide',
+                links: [{ uri: 'https://pods.test/stories/alice/1', title: 'Story source' }],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const carouselBody = jsonBody(carouselResponse) as { stories: Array<{ items: Array<{ expiresInSeconds: number }> }> };
+    expect(carouselBody.stories[0]?.items[0]?.expiresInSeconds).toBeGreaterThan(0);
+  });
 });

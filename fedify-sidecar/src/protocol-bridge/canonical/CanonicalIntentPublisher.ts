@@ -99,6 +99,8 @@ function serializeIntent(intent: CanonicalIntent): CanonicalV1Event {
     intent.kind === "PollEdit" ||
     intent.kind === "PollDelete" ||
     intent.kind === "PollVoteAdd" ||
+    intent.kind === "StoryCreate" ||
+    intent.kind === "StoryDelete" ||
     intent.kind === "ReactionAdd" ||
     intent.kind === "ReactionRemove" ||
     intent.kind === "ShareAdd" ||
@@ -234,6 +236,21 @@ function buildContentSummary(intent: CanonicalIntent): CanonicalV1Event["content
     return compactContentSummary({
       kind: "poll",
       plaintext: truncateOptionalText(intent.question, MAX_CANONICAL_CONTENT_TEXT_LENGTH),
+    });
+  }
+
+  if (intent.kind === "StoryCreate") {
+    const links = uniqueStrings(
+      (intent.links ?? [])
+        .map((link) => normalizeOptionalUrl(link.uri))
+        .filter((url): url is string => Boolean(url)),
+    );
+
+    return compactContentSummary({
+      kind: "story",
+      plaintext: truncateOptionalText(intent.text, MAX_CANONICAL_CONTENT_TEXT_LENGTH),
+      language: normalizeOptionalText(intent.langs?.[0]),
+      ...(links.length > 0 ? { links } : {}),
     });
   }
 

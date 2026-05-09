@@ -61,6 +61,10 @@ export class OAuthAuthorizationCodeStore {
   }
 }
 
+// Grants are long-lived but must not accumulate forever. 90-day cap forces
+// periodic re-authorization and bounds Redis memory usage.
+const GRANT_TTL_SEC = 90 * 24 * 60 * 60;
+
 export class OAuthGrantStore {
   constructor(
     private readonly redis: Redis,
@@ -68,11 +72,24 @@ export class OAuthGrantStore {
   ) {}
 
   async put(record: OAuthGrantRecord): Promise<void> {
-    await this.redis.set(`${this.keyPrefix}:${record.grantId}`, JSON.stringify(record));
+    const key = `${this.keyPrefix}:${record.grantId}`;
+    // Preserve remaining TTL on updates; use the cap for new records.
+    const existingTtl = await this.redis.ttl(key);
+    const ttl = existingTtl > 0 ? existingTtl : GRANT_TTL_SEC;
+    await this.redis.set(key, JSON.stringify(record), 'EX', ttl);
   }
 
   async get(grantId: string): Promise<OAuthGrantRecord | null> {
     return parseJson<OAuthGrantRecord>(await this.redis.get(`${this.keyPrefix}:${grantId}`));
+  }
+
+  async revoke(grantId: string, revokedAtEpochSec: number): Promise<void> {
+    const key = `${this.keyPrefix}:${grantId}`;
+    const current = await this.get(grantId);
+    if (!current) return;
+    const existingTtl = await this.redis.ttl(key);
+    const ttl = existingTtl > 0 ? existingTtl : GRANT_TTL_SEC;
+    await this.redis.set(key, JSON.stringify({ ...current, revokedAtEpochSec }), 'EX', ttl);
   }
 
   async createOrUpdate(input: Omit<OAuthGrantRecord, 'grantId' | 'createdAtEpochSec' | 'updatedAtEpochSec'>): Promise<OAuthGrantRecord> {
@@ -124,15 +141,17 @@ export class OAuthRefreshTokenStore {
     await this.redis.set(key, JSON.stringify(next), 'EX', ttlSec);
   }
 
-  async revokeFamily(familyId: string, revokedAtEpochSec: number): Promise<void> {
+  async revokeFamily(familyId: string, revokedAtEpochSec: number): Promise<string[]> {
     const familyKey = `${this.familyPrefix}:${familyId}`;
     const tokenKeys = await this.redis.smembers(familyKey);
-    if (!tokenKeys.length) return;
+    if (!tokenKeys.length) return [];
 
+    const grantIds = new Set<string>();
     for (const tokenKey of tokenKeys) {
       const raw = await this.redis.get(tokenKey);
       const parsed = parseJson<OAuthRefreshTokenRecord>(raw);
       if (!parsed) continue;
+      if (parsed.grantId) grantIds.add(parsed.grantId);
       const ttlSec = Math.max(1, parsed.expiresAtEpochSec - Math.floor(Date.now() / 1000));
       await this.redis.set(
         tokenKey,
@@ -141,6 +160,7 @@ export class OAuthRefreshTokenStore {
         ttlSec,
       );
     }
+    return [...grantIds];
   }
 }
 

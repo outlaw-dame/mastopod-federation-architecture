@@ -145,6 +145,11 @@ import { DefaultAtWriteGateway } from "./at-adapter/writes/DefaultAtWriteGateway
 import { DefaultCanonicalClientWriteService } from "./at-adapter/writes/DefaultCanonicalClientWriteService.js";
 import { RedisAtWriteResultStore } from "./at-adapter/writes/AtWriteResultStore.js";
 import type { AtWriteResultStore } from "./at-adapter/writes/AtWriteResultStore.js";
+import {
+  ACTIVITYPODS_STORY_COLLECTION,
+  normalizeActivityPodsStoryRecord,
+  type ActivityPodsStoryRecord,
+} from "./at-adapter/lexicon/ActivityPodsStoryLexicon.js";
 // Signing + event contracts
 import type { SigningService } from "./core-domain/contracts/SigningContracts.js";
 import type { EventPublisher } from "./core-domain/events/CoreIdentityEvents.js";
@@ -424,6 +429,7 @@ const config = {
   ),
   port: parseInt(process.env["PORT"] || "8080", 10),
   host: process.env["HOST"] || "0.0.0.0",
+  adminPort: parseInt(process.env["ADMIN_PORT"] || "9090", 10),
   domain: process.env["DOMAIN"] || "localhost",
   sidecarToken: process.env["SIDECAR_TOKEN"] || "",
   providerProfile: process.env["PROVIDER_PROFILE"],
@@ -1718,12 +1724,27 @@ async function main() {
       });
     }
 
-    // Create HTTP server
+    // Create HTTP server (public-facing)
     const app = Fastify({
       logger: false,
       trustProxy: true,
       bodyLimit: 1024 * 1024,  // 1MB
     });
+
+    // Create admin HTTP server — bound to 127.0.0.1 only.
+    // All /internal/admin/* and moderation routes are registered here so they
+    // are never reachable from the public internet regardless of firewall config.
+    const adminApp = Fastify({
+      logger: false,
+      trustProxy: false,
+      bodyLimit: 1024 * 1024,
+    });
+    adminApp.addContentTypeParser(
+      ["application/json"],
+      { parseAs: "string" },
+      (req, body, done) => { done(null, body); },
+    );
+
     let xrpcServerForWebSocket: any = null;
 
     app.addHook("onRequest", async (request, reply) => {
@@ -2290,7 +2311,7 @@ async function main() {
 
     if (config.enableMrfAdminApi) {
       const registration = await registerMrfAdminIntegration({
-        app,
+        app: adminApp,
         logger,
         enabled: config.enableMrfAdminApi,
         adminToken: config.mrfAdminToken,
@@ -2305,12 +2326,12 @@ async function main() {
     // Domain reputation admin routes — registered independently of MRF admin so
     // the domain blocklist is always manageable even when MRF is in dry-run mode.
     if (config.mrfAdminToken && domainReputationStore) {
-      registerSpamDomainAdminRoutes(app, domainReputationStore, config.mrfAdminToken);
+      registerSpamDomainAdminRoutes(adminApp, domainReputationStore, config.mrfAdminToken);
     }
 
     // Keyword rules admin routes — CRUD over the keyword-filter module's rules list.
     if (config.mrfAdminToken && mrfAdminStore) {
-      registerKeywordRulesAdminRoutes(app, mrfAdminStore, config.mrfAdminToken);
+      registerKeywordRulesAdminRoutes(adminApp, mrfAdminStore, config.mrfAdminToken);
     }
 
     // Prewarm MiniLM-L6 embedding model in the background if any semantic keyword
@@ -2876,7 +2897,7 @@ async function main() {
         );
 
         if (config.mrfAdminToken) {
-          registerAtIdentityObservabilityFastifyRoutes(app, {
+          registerAtIdentityObservabilityFastifyRoutes(adminApp, {
             adminToken: config.mrfAdminToken,
             store: observedAtIdentityStore,
           });
@@ -3423,7 +3444,7 @@ async function main() {
             return;
           }
 
-          const binding = await identityRepo.getByCanonicalAccountId(canonicalAccountId);
+          const binding = await identityRepo!.getByCanonicalAccountId(canonicalAccountId);
           if (!binding || !binding.atprotoDid || !binding.atprotoHandle) {
             reply.status(404).send({ error: 'ATProto identity binding not found' });
             return;
@@ -3447,6 +3468,120 @@ async function main() {
             did: binding.atprotoDid,
             handle: binding.atprotoHandle,
           });
+        });
+
+        app.post('/api/internal/atproto/stories', async (request, reply) => {
+          const authHeader = (request.headers.authorization as string | undefined) ?? '';
+          const [scheme, token] = authHeader.split(' ');
+          if (scheme !== 'Bearer' || token !== (process.env['ACTIVITYPODS_TOKEN'] || '')) {
+            reply.status(401).send({ error: 'Unauthorized' });
+            return;
+          }
+
+          const rawBody = parseJsonObjectBody(request.body);
+          const canonicalAccountId = typeof rawBody?.['canonicalAccountId'] === 'string'
+            ? rawBody['canonicalAccountId'].trim()
+            : '';
+          const recordInput = rawBody?.['record'];
+          const rkey = typeof rawBody?.['rkey'] === 'string' ? rawBody['rkey'].trim() : undefined;
+
+          if (!canonicalAccountId) {
+            reply.status(400).send({ error: 'canonicalAccountId is required' });
+            return;
+          }
+
+          const binding = await identityRepo!.getByCanonicalAccountId(canonicalAccountId);
+          if (!binding || !binding.atprotoDid || !binding.atprotoHandle) {
+            reply.status(404).send({ error: 'ATProto identity binding not found' });
+            return;
+          }
+          const isExternal = binding.atprotoManaged === false || binding.atprotoSource === 'external';
+          if (isExternal) {
+            reply.status(403).send({ error: 'External accounts require delegated credentials' });
+            return;
+          }
+
+          try {
+            const record = recordInput && typeof recordInput === 'object' && !Array.isArray(recordInput)
+              ? recordInput as Record<string, unknown>
+              : await buildInternalStoryRecord(rawBody ?? {}, binding.atprotoDid, bridgeAttachmentMediaClient, blobUploadService);
+            const result = await writeGateway.createRecord(
+              {
+                repo: binding.atprotoDid,
+                collection: ACTIVITYPODS_STORY_COLLECTION,
+                ...(rkey ? { rkey } : {}),
+                validate: true,
+                record,
+              },
+              {
+                canonicalAccountId,
+                did: binding.atprotoDid,
+                handle: binding.atprotoHandle,
+                scope: 'full',
+              },
+            );
+            reply.status(200).send({ ...result, record });
+          } catch (error) {
+            logger.warn({ error }, 'Internal story create failed');
+            reply.status(400).send({ error: error instanceof Error ? error.message : 'Story create failed' });
+          }
+        });
+
+        app.delete('/api/internal/atproto/stories', async (request, reply) => {
+          const authHeader = (request.headers.authorization as string | undefined) ?? '';
+          const [scheme, token] = authHeader.split(' ');
+          if (scheme !== 'Bearer' || token !== (process.env['ACTIVITYPODS_TOKEN'] || '')) {
+            reply.status(401).send({ error: 'Unauthorized' });
+            return;
+          }
+
+          const rawBody = parseJsonObjectBody(request.body);
+          const canonicalAccountId = typeof rawBody?.['canonicalAccountId'] === 'string'
+            ? rawBody['canonicalAccountId'].trim()
+            : '';
+          const uri = typeof rawBody?.['uri'] === 'string' ? rawBody['uri'].trim() : '';
+          const explicitRkey = typeof rawBody?.['rkey'] === 'string' ? rawBody['rkey'].trim() : '';
+          const rkey = explicitRkey || parseStoryRkeyFromAtUri(uri);
+
+          if (!canonicalAccountId) {
+            reply.status(400).send({ error: 'canonicalAccountId is required' });
+            return;
+          }
+          if (!rkey) {
+            reply.status(400).send({ error: 'uri or rkey is required' });
+            return;
+          }
+
+          const binding = await identityRepo!.getByCanonicalAccountId(canonicalAccountId);
+          if (!binding || !binding.atprotoDid || !binding.atprotoHandle) {
+            reply.status(404).send({ error: 'ATProto identity binding not found' });
+            return;
+          }
+          const isExternal = binding.atprotoManaged === false || binding.atprotoSource === 'external';
+          if (isExternal) {
+            reply.status(403).send({ error: 'External accounts require delegated credentials' });
+            return;
+          }
+
+          try {
+            const result = await writeGateway.deleteRecord(
+              {
+                repo: binding.atprotoDid,
+                collection: ACTIVITYPODS_STORY_COLLECTION,
+                rkey,
+              },
+              {
+                canonicalAccountId,
+                did: binding.atprotoDid,
+                handle: binding.atprotoHandle,
+                scope: 'full',
+              },
+            );
+            reply.status(200).send(result);
+          } catch (error) {
+            logger.warn({ error }, 'Internal story delete failed');
+            reply.status(400).send({ error: error instanceof Error ? error.message : 'Story delete failed' });
+          }
         });
 
         // ---- Assemble XRPC server ----
@@ -3486,7 +3621,7 @@ async function main() {
 
         if (config.enableModerationBridgeApi) {
           const moderationRegistration = await registerModerationBridgeIntegration({
-            app,
+            app: adminApp,
             logger,
             enabled: config.enableModerationBridgeApi,
             adminToken: config.mrfAdminToken,
@@ -3879,8 +4014,10 @@ async function main() {
     }
 
     await app.listen({ port: config.port, host: config.host });
+    await adminApp.listen({ port: config.adminPort, host: "127.0.0.1" });
 
     logger.info(`Fedify Sidecar listening on ${config.host}:${config.port}`);
+    logger.info(`Admin API listening on 127.0.0.1:${config.adminPort}`);
     logger.info(`Metrics available at http://${config.host}:${config.port}/metrics`);
     logger.info("Configuration summary", {
       domain: config.domain,
@@ -3943,6 +4080,252 @@ function normalizeHeaders(headers: Record<string, any>): Record<string, string> 
     }
   }
   return normalized;
+}
+
+function parseJsonObjectBody(body: unknown): Record<string, unknown> | undefined {
+  if (typeof body === 'string') {
+    try {
+      const parsed = JSON.parse(body);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  return body && typeof body === 'object' && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : undefined;
+}
+
+function parseStoryRkeyFromAtUri(uri: string): string | null {
+  if (!uri) return null;
+  const match = uri.match(/^at:\/\/[^/]+\/org\.activitypods\.story\.slide\/([^/]+)$/);
+  return match?.[1] ?? null;
+}
+
+type InternalStoryMediaClient = {
+  resolve(mediaUrl: string): Promise<{
+    mediaUrl?: string;
+    mimeType: string;
+    bytes: Uint8Array;
+    size: number;
+  } | null>;
+};
+
+type InternalStoryBlobUploadService = {
+  ensureBlob(input: {
+    did: string;
+    mediaId: string;
+    mimeType: string;
+    bytes: Uint8Array;
+  }): Promise<unknown>;
+};
+
+async function buildInternalStoryRecord(
+  rawBody: Record<string, unknown>,
+  did: string,
+  mediaClient: InternalStoryMediaClient,
+  blobUploadService: InternalStoryBlobUploadService,
+): Promise<ActivityPodsStoryRecord> {
+  const mediaUrl = readTrimmedString(rawBody["mediaUrl"]);
+  const alt = readTrimmedString(rawBody["alt"]);
+  if (!mediaUrl) {
+    throw new Error("mediaUrl is required");
+  }
+  if (!alt) {
+    throw new Error("alt is required");
+  }
+
+  const resolved = await mediaClient.resolve(mediaUrl);
+  if (!resolved) {
+    throw new Error("story media could not be resolved");
+  }
+
+  const expectedMimeType = readTrimmedString(rawBody["mediaType"]);
+  if (expectedMimeType && !storyMimeMatchesExpected(expectedMimeType, resolved.mimeType)) {
+    throw new Error(`story media MIME mismatch: expected ${expectedMimeType}, got ${resolved.mimeType}`);
+  }
+
+  const kind = resolved.mimeType.startsWith("image/")
+    ? "image"
+    : resolved.mimeType.startsWith("video/")
+      ? "video"
+      : null;
+  if (!kind) {
+    throw new Error("story media must be image/* or video/*");
+  }
+
+  const createdAt = normalizeStoryDate(rawBody["createdAt"]) ?? new Date().toISOString();
+  const expiresAt = normalizeStoryDate(rawBody["expiresAt"])
+    ?? new Date(new Date(createdAt).getTime() + 24 * 60 * 60 * 1000).toISOString();
+  const mediaId =
+    readTrimmedString(rawBody["mediaAttachmentId"]) ||
+    readTrimmedString(rawBody["attachmentId"]) ||
+    `story:${did}:${mediaUrl}`;
+  const blob = await blobUploadService.ensureBlob({
+    did,
+    mediaId,
+    mimeType: resolved.mimeType,
+    bytes: resolved.bytes,
+  });
+
+  const media: Record<string, unknown> = {
+    kind,
+    blob,
+    alt: truncateText(alt, 1_000),
+  };
+  const aspectRatio = normalizeStoryAspectRatio(rawBody["aspectRatio"]);
+  if (aspectRatio) {
+    media["aspectRatio"] = aspectRatio;
+  }
+  const durationMs = normalizePositiveInteger(rawBody["durationMs"], 60_000);
+  if (durationMs) {
+    media["durationMs"] = durationMs;
+  }
+
+  const text = readTrimmedString(rawBody["text"]);
+  const links = normalizeStoryLinks(rawBody["links"]);
+  const langs = normalizeStoryLangs(rawBody["langs"]);
+  const visibility = rawBody["visibility"] === "unlisted" ? "unlisted" : "public";
+  const allowReplies = typeof rawBody["allowReplies"] === "boolean"
+    ? rawBody["allowReplies"]
+    : true;
+
+  const candidate: Record<string, unknown> = {
+    $type: ACTIVITYPODS_STORY_COLLECTION,
+    createdAt,
+    expiresAt,
+    visibility,
+    media,
+    allowReplies,
+  };
+  if (text) {
+    candidate["text"] = truncateText(text, 1_000);
+  }
+  if (links.length > 0) {
+    candidate["links"] = links;
+  }
+  if (langs.length > 0) {
+    candidate["langs"] = langs;
+  }
+
+  const normalized = normalizeActivityPodsStoryRecord(candidate, { requireActive: true });
+  if (!normalized) {
+    throw new Error("story record failed validation");
+  }
+
+  return normalized;
+}
+
+function readTrimmedString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeStoryDate(value: unknown): string | null {
+  const raw = readTrimmedString(value);
+  if (!raw) {
+    return null;
+  }
+  const date = new Date(raw);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function truncateText(value: string, maxLength: number): string {
+  return value.length > maxLength ? value.slice(0, maxLength) : value;
+}
+
+function normalizeStoryAspectRatio(value: unknown): { width: number; height: number } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const width = normalizePositiveInteger(raw["width"], 65_535);
+  const height = normalizePositiveInteger(raw["height"], 65_535);
+  return width && height ? { width, height } : null;
+}
+
+function normalizePositiveInteger(value: unknown, max: number): number | null {
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string"
+      ? Number.parseInt(value, 10)
+      : NaN;
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > max) {
+    return null;
+  }
+  return parsed;
+}
+
+function normalizeStoryLinks(value: unknown): Array<{ uri: string; title?: string }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const links: Array<{ uri: string; title?: string }> = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (links.length >= 4) {
+      break;
+    }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const raw = entry as Record<string, unknown>;
+    const uri = readTrimmedString(raw["uri"]);
+    if (!uri || seen.has(uri) || !isHttpUrl(uri)) {
+      continue;
+    }
+    seen.add(uri);
+    const title = readTrimmedString(raw["title"]);
+    links.push(title ? { uri, title: truncateText(title, 120) } : { uri });
+  }
+  return links;
+}
+
+function normalizeStoryLangs(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const langs: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (langs.length >= 8) {
+      break;
+    }
+    const lang = readTrimmedString(entry).toLowerCase();
+    if (lang.length < 2 || lang.length > 35 || seen.has(lang)) {
+      continue;
+    }
+    seen.add(lang);
+    langs.push(lang);
+  }
+  return langs;
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function storyMimeMatchesExpected(expected: string, actual: string): boolean {
+  const normalizedExpected = expected.trim().toLowerCase();
+  const normalizedActual = actual.trim().toLowerCase();
+  if (!normalizedExpected) {
+    return true;
+  }
+  if (normalizedExpected === normalizedActual) {
+    return true;
+  }
+  const [expectedType, expectedSubtype] = normalizedExpected.split("/", 2);
+  const [actualType] = normalizedActual.split("/", 2);
+  return !!expectedType && !!actualType && expectedSubtype === "*" && expectedType === actualType;
 }
 
 /**

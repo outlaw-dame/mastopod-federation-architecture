@@ -1,6 +1,14 @@
 "use strict";
 
+const crypto = require("crypto");
 const { Errors: E } = require("moleculer-web");
+
+const _HMAC_CMP_KEY = Buffer.alloc(32);
+function safeTokenEqual(a, b) {
+  const ha = crypto.createHmac("sha256", _HMAC_CMP_KEY).update(typeof a === "string" ? a : "").digest();
+  const hb = crypto.createHmac("sha256", _HMAC_CMP_KEY).update(typeof b === "string" ? b : "").digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 const {
   getActivityActorUri,
   groupTargetsByDomain,
@@ -60,7 +68,7 @@ module.exports = {
         onBeforeCall(_ctx, _route, req) {
           const authHeader = req.headers["authorization"] || "";
           const [scheme, token] = authHeader.split(" ");
-          if (scheme !== "Bearer" || !sidecarToken || token !== sidecarToken) {
+          if (scheme !== "Bearer" || !sidecarToken || !safeTokenEqual(token, sidecarToken)) {
             throw new E.UnAuthorizedError(E.ERR_NO_TOKEN, null, "Invalid sidecar token");
           }
         },
