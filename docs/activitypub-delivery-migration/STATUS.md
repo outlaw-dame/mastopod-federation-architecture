@@ -8,8 +8,8 @@ Last updated: 2026-08-10
 |---|---|---|---|
 | APDM-P0 | PR #13 merged | PR #8 merged | PASS |
 | APDM-P1 | PR #14 merged | PR #9 merged | PASS |
-| APDM-P2 | in progress | support/status only | pending strategy tests/review |
-| APDM-P3 | not started | fixture/support only | blocked by P2 |
+| APDM-P2 | PR #15 green | PR #10 current | PASS pending merge |
+| APDM-P3 | not started | fixture/support only | blocked until P2 merge |
 | APDM-P4 | not started | not started | blocked by P3 |
 | APDM-P5 | not started | not started | blocked by P4 |
 | APDM-P6 | not started | not started | blocked by P5 |
@@ -34,24 +34,36 @@ Phase 1 gate evidence:
 - AP Interop Smoke: PASS after replacing the Alpine interop Node image with a glibc-compatible Node 22 Bookworm image required by `onnxruntime-node`.
 - No substantive review threads remained on either P1 PR.
 
-## Phase 2 — in progress
+## Phase 2 — gate passed, merge pending
 
 ### APDM-P2-A — `outlaw-dame/activity-pods`
 
-Branch: `apdm/phase-2-remote-delivery-strategy`
+PR #15 — `[APDM-P2-A] Add pre-remotePost delivery strategy seam`
 
-Primary goals:
-- insert the remote-delivery strategy seam before SemApps native `remotePost` job creation;
-- retain `native` mode as the default rollback path;
-- expose `external` only behind an explicit preview guard until durable handoff exists;
-- suppress native `remotePost` creation in external preview mode without mutating the shared Moleculer service instance;
-- pin the adapter to exact `@semapps/activitypub` 1.1.4 so dependency upgrades fail fast pending outbox review.
+Verified behavior:
+- `native` remains the default and delegates unchanged to SemApps;
+- `external` is preview-only and requires a second explicit guard;
+- external preview suppresses native `remotePost` job creation before queue insertion;
+- unrelated queue work delegates normally;
+- the interception context is request-local and does not mutate the shared Moleculer service instance;
+- all required SemApps 1.1.4 deep package paths resolve;
+- package drift from 1.1.4 fails fast;
+- local delivery remains SemApps-owned and unchanged.
+
+Gate evidence:
+- Backend unit tests: PASS (217 tests after the Phase 2 additions).
+- Offline ATProto multibase smoke: PASS.
+- No unresolved review threads.
+
+Two test-harness defects were found and corrected before the gate closed:
+1. Jest initially executed an ESM-only crypto dependency while importing SemApps side-effects; tests now inject lightweight SemApps-shaped schemas while separately checking every production deep path with `require.resolve`.
+2. A queue-delegation assertion omitted the explicit fourth `undefined` options argument; the assertion was corrected without changing production behavior.
 
 ### APDM-P2-F — `outlaw-dame/mastopod-federation-architecture`
 
-Branch: `apdm/phase-2-remote-delivery-strategy`
+PR #10 — `[APDM-P2-F] Track pre-remotePost strategy seam`
 
-No federation runtime cutover occurs in Phase 2. The federation slice records the contract boundary and preserves the Phase 1 consumer contract while ActivityPods establishes the pre-`remotePost` seam. The sidecar remains non-authoritative until the expanded-target and durable-handoff phases.
+No sidecar runtime cutover occurs in Phase 2. This slice records the boundary and the passed gate. The sidecar remains non-authoritative until expanded-target planning and durable handoff are implemented.
 
 ## Verified baseline carried forward
 
