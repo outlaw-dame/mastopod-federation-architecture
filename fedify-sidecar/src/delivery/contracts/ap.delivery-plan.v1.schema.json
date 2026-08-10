@@ -8,8 +8,8 @@
   "properties": {
     "schema": { "const": "ap.delivery-plan.v1" },
     "intentId": { "type": "string", "minLength": 1 },
-    "activityId": { "type": "string", "format": "uri" },
-    "actorUri": { "type": "string", "format": "uri" },
+    "activityId": { "type": "string", "format": "uri", "pattern": "^https?://" },
+    "actorUri": { "type": "string", "format": "uri", "pattern": "^https?://" },
     "activity": { "type": "object" },
     "localRecipients": {
       "type": "array",
@@ -18,9 +18,9 @@
         "additionalProperties": false,
         "required": ["actorUri", "dataset", "inboxUri"],
         "properties": {
-          "actorUri": { "type": "string", "format": "uri" },
+          "actorUri": { "type": "string", "format": "uri", "pattern": "^https?://" },
           "dataset": { "type": "string", "minLength": 1 },
-          "inboxUri": { "type": "string", "format": "uri" }
+          "inboxUri": { "type": "string", "format": "uri", "pattern": "^https?://" }
         }
       }
     },
@@ -31,9 +31,9 @@
         "additionalProperties": false,
         "required": ["actorUri", "inboxUrl", "targetDomain"],
         "properties": {
-          "actorUri": { "type": "string", "format": "uri" },
-          "inboxUrl": { "type": "string", "format": "uri" },
-          "sharedInboxUrl": { "type": "string", "format": "uri" },
+          "actorUri": { "type": "string", "format": "uri", "pattern": "^https?://" },
+          "inboxUrl": { "type": "string", "format": "uri", "pattern": "^https?://" },
+          "sharedInboxUrl": { "type": "string", "format": "uri", "pattern": "^https?://" },
           "targetDomain": { "type": "string", "minLength": 1 }
         }
       }
