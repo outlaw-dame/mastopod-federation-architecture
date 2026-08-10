@@ -7,8 +7,8 @@ Last updated: 2026-08-10
 | Phase | ActivityPods slice | Federation slice | Gate |
 |---|---|---|---|
 | APDM-P0 | PR #13 merged | PR #8 merged | PASS |
-| APDM-P1 | PR #14 open | PR #9 open | pending contract tests/review |
-| APDM-P2 | not started | fixture/support only | blocked by P1 |
+| APDM-P1 | PR #14 merged | PR #9 merged | PASS |
+| APDM-P2 | in progress | support/status only | pending strategy tests/review |
 | APDM-P3 | not started | fixture/support only | blocked by P2 |
 | APDM-P4 | not started | not started | blocked by P3 |
 | APDM-P5 | not started | not started | blocked by P4 |
@@ -20,50 +20,46 @@ Last updated: 2026-08-10
 
 ## Phase 0 — complete
 
-### APDM-P0-F — `outlaw-dame/mastopod-federation-architecture`
+- Federation architecture PR #8 merged.
+- ActivityPods PR #13 merged.
 
-PR #8 merged. Authoritative program roadmap, contract ownership, invariants and status tracking established.
+## Phase 1 — complete
 
-### APDM-P0-A — `outlaw-dame/activity-pods`
+- Federation architecture PR #9 merged: strict `ap.delivery-plan.v1` consumer contract, mirrored schema/fixture, SHA-256 drift detection, and interop image correction required to restore the AP smoke lane.
+- ActivityPods PR #14 merged: strict producer schema/fixture, validation helper, and cross-repo compatibility fingerprints.
 
-PR #13 merged. Exact SemApps 1.1.4 baseline and ActivityPods ownership/optimization responsibilities recorded.
+Phase 1 gate evidence:
+- ActivityPods Backend checks: PASS.
+- Fedify Sidecar Fast Checks: PASS.
+- AP Interop Smoke: PASS after replacing the Alpine interop Node image with a glibc-compatible Node 22 Bookworm image required by `onnxruntime-node`.
+- No substantive review threads remained on either P1 PR.
 
-## Phase 1 — in progress
+## Phase 2 — in progress
 
-### APDM-P1-F — `outlaw-dame/mastopod-federation-architecture`
+### APDM-P2-A — `outlaw-dame/activity-pods`
 
-Branch: `apdm/phase-1-delivery-plan-contract`
+Branch: `apdm/phase-2-remote-delivery-strategy`
 
-PR: #9 — `[APDM-P1-F] Add ActivityPub Delivery Plan v1 consumer contract`
+Primary goals:
+- insert the remote-delivery strategy seam before SemApps native `remotePost` job creation;
+- retain `native` mode as the default rollback path;
+- expose `external` only behind an explicit preview guard until durable handoff exists;
+- suppress native `remotePost` creation in external preview mode without mutating the shared Moleculer service instance;
+- pin the adapter to exact `@semapps/activitypub` 1.1.4 so dependency upgrades fail fast pending outbox review.
 
-Deliverables:
-- strict Zod consumer parser;
-- mirrored JSON Schema;
-- shared compatibility fixture;
-- fixture and schema SHA-256 drift detection;
-- fail-closed version/target tests.
+### APDM-P2-F — `outlaw-dame/mastopod-federation-architecture`
 
-### APDM-P1-A — `outlaw-dame/activity-pods`
+Branch: `apdm/phase-2-remote-delivery-strategy`
 
-Branch: `apdm/phase-1-delivery-plan-contract`
-
-PR: #14 — `[APDM-P1-A] Add ActivityPub Delivery Plan v1 producer contract`
-
-Deliverables:
-- producer JSON Schema and shared fixture;
-- strict producer validation helper;
-- fixture and schema SHA-256 drift detection;
-- resolved local/remote target contract tests.
+No federation runtime cutover occurs in Phase 2. The federation slice records the contract boundary and preserves the Phase 1 consumer contract while ActivityPods establishes the pre-`remotePost` seam. The sidecar remains non-authoritative until the expanded-target and durable-handoff phases.
 
 ## Verified baseline carried forward
 
-- `@semapps/activitypub` is pinned to 1.1.4 in ActivityPods.
-- exact 1.1.4 `getRecipients` expands the local actor's followers collection.
-- exact 1.1.4 outbox partitions recipients and creates native `remotePost` jobs before `activitypub.outbox.posted`.
-- exact 1.1.4 `localPost` performs sequential recipient processing and repeats `auth.account.findByWebId`.
-- the ActivityPods wrapper does not replace this outbox behavior.
-- current ActivityPods `outbox-emitter` listens downstream of native job creation and does not itself expand `/followers`.
-- sidecar `OutboxIntentWorker` supports sharedInbox enrichment and delivery-URL dedupe before batch enqueue.
+- exact SemApps 1.1.4 `getRecipients` expands the local actor's followers collection;
+- exact 1.1.4 outbox partitions recipients and creates native `remotePost` jobs before `activitypub.outbox.posted`;
+- exact 1.1.4 `localPost` performs sequential recipient processing and repeats `auth.account.findByWebId`;
+- current ActivityPods `outbox-emitter` listens downstream of native job creation and does not itself expand `/followers`;
+- sidecar `OutboxIntentWorker` supports sharedInbox enrichment and delivery-URL dedupe before batch enqueue;
 - sidecar `OutboundWorker` uses bounded global/per-domain execution controls, retries, idempotency and DLQ handling.
 
 ## Open measurements (not architecture blockers)
