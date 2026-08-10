@@ -2,15 +2,24 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ACTIVITYPUB_DELIVERY_PLAN_FIXTURE_SHA256,
+  ACTIVITYPUB_DELIVERY_PLAN_JSON_SCHEMA_SHA256,
   ACTIVITYPUB_DELIVERY_PLAN_SCHEMA,
   activityPubDeliveryPlanFingerprint,
   parseActivityPubDeliveryPlanV1,
   safeParseActivityPubDeliveryPlanV1,
 } from "../ActivityPubDeliveryPlanContract.js";
 
-function loadFixture(): unknown {
-  const url = new URL("./fixtures/ap.delivery-plan.v1.fixture.json", import.meta.url);
+function loadJson(relativePath: string): unknown {
+  const url = new URL(relativePath, import.meta.url);
   return JSON.parse(readFileSync(url, "utf8"));
+}
+
+function loadFixture(): unknown {
+  return loadJson("./fixtures/ap.delivery-plan.v1.fixture.json");
+}
+
+function loadJsonSchema(): unknown {
+  return loadJson("../contracts/ap.delivery-plan.v1.schema.json");
 }
 
 describe("APDM delivery plan v1 consumer contract", () => {
@@ -24,6 +33,12 @@ describe("APDM delivery plan v1 consumer contract", () => {
   it("pins the cross-repo fixture fingerprint", () => {
     expect(activityPubDeliveryPlanFingerprint(loadFixture())).toBe(
       ACTIVITYPUB_DELIVERY_PLAN_FIXTURE_SHA256,
+    );
+  });
+
+  it("pins the cross-repo JSON schema fingerprint", () => {
+    expect(activityPubDeliveryPlanFingerprint(loadJsonSchema())).toBe(
+      ACTIVITYPUB_DELIVERY_PLAN_JSON_SCHEMA_SHA256,
     );
   });
 
