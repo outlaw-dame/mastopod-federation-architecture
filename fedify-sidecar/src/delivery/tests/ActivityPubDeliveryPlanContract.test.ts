@@ -98,7 +98,7 @@ describe("APDM delivery plan v1 consumer contract", () => {
     expect(activityPubDeliveryPlanFingerprint(raw)).toBe(FOLLOWERS_ONLY_FIXTURE_SHA256);
     const plan = parseActivityPubDeliveryPlanV1(raw);
 
-    expect(plan.activity.to).toEqual(["https://pods.example/alice/followers"]);
+    expect(plan.activity["to"]).toEqual(["https://pods.example/alice/followers"]);
     expect(plan.meta.visibility).toBe("followers");
     expect(plan.meta.isPublicActivity).toBe(false);
     expect(plan.localRecipients).toHaveLength(1);
