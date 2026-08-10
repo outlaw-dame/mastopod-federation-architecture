@@ -1,0 +1,44 @@
+{
+  "schema": "ap.delivery-plan.v1",
+  "intentId": "apdm-v1-followers-only-fixture",
+  "activityId": "https://pods.example/alice/activities/phase3-followers-only",
+  "actorUri": "https://pods.example/alice",
+  "activity": {
+    "@context": "https://www.w3.org/ns/activitystreams",
+    "id": "https://pods.example/alice/activities/phase3-followers-only",
+    "type": "Create",
+    "actor": "https://pods.example/alice",
+    "to": ["https://pods.example/alice/followers"],
+    "cc": [],
+    "object": {
+      "id": "https://pods.example/alice/objects/phase3-followers-only",
+      "type": "Note",
+      "attributedTo": "https://pods.example/alice",
+      "content": "APDM followers-only Phase 3 fixture"
+    }
+  },
+  "localRecipients": [
+    {
+      "actorUri": "https://pods.example/bob",
+      "dataset": "bob",
+      "inboxUri": "https://pods.example/bob/inbox"
+    }
+  ],
+  "remoteRecipients": [
+    {
+      "actorUri": "https://remote.example/users/carol",
+      "inboxUrl": "https://remote.example/users/carol/inbox",
+      "sharedInboxUrl": "https://remote.example/inbox",
+      "targetDomain": "remote.example"
+    },
+    {
+      "actorUri": "https://elsewhere.example/users/dana",
+      "inboxUrl": "https://elsewhere.example/users/dana/inbox",
+      "targetDomain": "elsewhere.example"
+    }
+  ],
+  "meta": {
+    "visibility": "followers",
+    "isPublicActivity": false
+  }
+}
