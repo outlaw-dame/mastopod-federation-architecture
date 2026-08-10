@@ -5,21 +5,30 @@ export const ACTIVITYPUB_DELIVERY_PLAN_SCHEMA = "ap.delivery-plan.v1" as const;
 export const ACTIVITYPUB_DELIVERY_PLAN_FIXTURE_SHA256 =
   "8a772d3c6d0555c9419ecf62f06e970ca0f82440f00db0c75b645f47fcaa27d7" as const;
 export const ACTIVITYPUB_DELIVERY_PLAN_JSON_SCHEMA_SHA256 =
-  "ca5fa95a87f00ebb1514d63272d90c39d3cd668d4d342759565e11a7253ca2e5" as const;
+  "555094968f8372e2e2438bf1dc6eae69d2f2541231d3a4aa7ce7efee8f5fcd9f" as const;
+
+const httpUrlSchema = z.string().url().refine((value) => {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}, "Expected an HTTP(S) URL");
 
 const localDeliveryTargetSchema = z
   .object({
-    actorUri: z.string().url(),
+    actorUri: httpUrlSchema,
     dataset: z.string().min(1),
-    inboxUri: z.string().url(),
+    inboxUri: httpUrlSchema,
   })
   .strict();
 
 const remoteDeliveryTargetSchema = z
   .object({
-    actorUri: z.string().url(),
-    inboxUrl: z.string().url(),
-    sharedInboxUrl: z.string().url().optional(),
+    actorUri: httpUrlSchema,
+    inboxUrl: httpUrlSchema,
+    sharedInboxUrl: httpUrlSchema.optional(),
     targetDomain: z.string().min(1),
   })
   .strict();
@@ -28,8 +37,8 @@ export const activityPubDeliveryPlanV1Schema = z
   .object({
     schema: z.literal(ACTIVITYPUB_DELIVERY_PLAN_SCHEMA),
     intentId: z.string().min(1),
-    activityId: z.string().url(),
-    actorUri: z.string().url(),
+    activityId: httpUrlSchema,
+    actorUri: httpUrlSchema,
     activity: z.record(z.unknown()),
     localRecipients: z.array(localDeliveryTargetSchema),
     remoteRecipients: z.array(remoteDeliveryTargetSchema),
