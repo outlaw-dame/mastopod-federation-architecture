@@ -4,6 +4,8 @@ import { z } from "zod";
 export const ACTIVITYPUB_DELIVERY_PLAN_SCHEMA = "ap.delivery-plan.v1" as const;
 export const ACTIVITYPUB_DELIVERY_PLAN_FIXTURE_SHA256 =
   "8a772d3c6d0555c9419ecf62f06e970ca0f82440f00db0c75b645f47fcaa27d7" as const;
+export const ACTIVITYPUB_DELIVERY_PLAN_JSON_SCHEMA_SHA256 =
+  "ca5fa95a87f00ebb1514d63272d90c39d3cd668d4d342759565e11a7253ca2e5" as const;
 
 const localDeliveryTargetSchema = z
   .object({
