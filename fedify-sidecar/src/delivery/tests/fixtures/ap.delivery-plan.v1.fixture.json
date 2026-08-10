@@ -1,0 +1,45 @@
+{
+  "schema": "ap.delivery-plan.v1",
+  "intentId": "01JAPDM0000000000000000000",
+  "activityId": "https://pods.example/alice/activities/01JAPDM0000000000000000001",
+  "actorUri": "https://pods.example/alice",
+  "activity": {
+    "@context": "https://www.w3.org/ns/activitystreams",
+    "id": "https://pods.example/alice/activities/01JAPDM0000000000000000001",
+    "type": "Create",
+    "actor": "https://pods.example/alice",
+    "to": ["https://www.w3.org/ns/activitystreams#Public"],
+    "cc": ["https://pods.example/alice/followers"],
+    "object": {
+      "id": "https://pods.example/alice/objects/01JAPDM0000000000000000002",
+      "type": "Note",
+      "attributedTo": "https://pods.example/alice",
+      "content": "APDM contract fixture"
+    }
+  },
+  "localRecipients": [
+    {
+      "actorUri": "https://pods.example/bob",
+      "dataset": "bob",
+      "inboxUri": "https://pods.example/bob/inbox"
+    }
+  ],
+  "remoteRecipients": [
+    {
+      "actorUri": "https://remote.example/users/carol",
+      "inboxUrl": "https://remote.example/users/carol/inbox",
+      "sharedInboxUrl": "https://remote.example/inbox",
+      "targetDomain": "remote.example"
+    }
+  ],
+  "meta": {
+    "visibility": "public",
+    "isPublicActivity": true,
+    "isPublicIndexable": true,
+    "searchConsent": {
+      "raw": ["https://www.w3.org/ns/activitystreams#Public"],
+      "isPublic": true,
+      "explicitlySet": true
+    }
+  }
+}
