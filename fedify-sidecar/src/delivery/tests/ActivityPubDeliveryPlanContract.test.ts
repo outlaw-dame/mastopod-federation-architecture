@@ -9,6 +9,8 @@ import {
   safeParseActivityPubDeliveryPlanV1,
 } from "../ActivityPubDeliveryPlanContract.js";
 
+const FOLLOWERS_ONLY_FIXTURE_SHA256 = "e166848b9d82e369fa6bace448dbd8ca42949aae9bdbba3b4034f0749d3d087c";
+
 function loadJson(relativePath: string): unknown {
   const url = new URL(relativePath, import.meta.url);
   return JSON.parse(readFileSync(url, "utf8"));
@@ -16,6 +18,10 @@ function loadJson(relativePath: string): unknown {
 
 function loadFixture(): unknown {
   return loadJson("./fixtures/ap.delivery-plan.v1.fixture.json");
+}
+
+function loadFollowersOnlyFixture(): unknown {
+  return loadJson("./fixtures/ap.delivery-plan.v1.followers-only.fixture.json");
 }
 
 function loadJsonSchema(): unknown {
@@ -85,5 +91,23 @@ describe("APDM delivery plan v1 consumer contract", () => {
         ],
       }).success,
     ).toBe(false);
+  });
+
+  it("parses the Phase 3 followers-only fixture with concrete remote followers", () => {
+    const raw = loadFollowersOnlyFixture();
+    expect(activityPubDeliveryPlanFingerprint(raw)).toBe(FOLLOWERS_ONLY_FIXTURE_SHA256);
+    const plan = parseActivityPubDeliveryPlanV1(raw);
+
+    expect(plan.activity.to).toEqual(["https://pods.example/alice/followers"]);
+    expect(plan.meta.visibility).toBe("followers");
+    expect(plan.meta.isPublicActivity).toBe(false);
+    expect(plan.localRecipients).toHaveLength(1);
+    expect(plan.remoteRecipients).toHaveLength(2);
+    expect(plan.remoteRecipients.map((target) => target.actorUri)).toEqual([
+      "https://remote.example/users/carol",
+      "https://elsewhere.example/users/dana",
+    ]);
+    expect(plan.remoteRecipients.some((target) => target.actorUri.endsWith("/followers"))).toBe(false);
+    expect(plan.remoteRecipients.every((target) => target.inboxUrl.startsWith("https://"))).toBe(true);
   });
 });
