@@ -6,7 +6,7 @@ Last updated: 2026-08-10
 
 | Phase | ActivityPods slice | Federation slice | Gate |
 |---|---|---|---|
-| APDM-P0 | in progress | in progress | pending paired PR review |
+| APDM-P0 | PR #13 open | PR #8 open | pending paired PR review |
 | APDM-P1 | not started | not started | blocked by P0 |
 | APDM-P2 | not started | fixture/support only | blocked by P1 |
 | APDM-P3 | not started | fixture/support only | blocked by P2 |
@@ -24,6 +24,8 @@ Last updated: 2026-08-10
 
 Branch: `apdm/phase-0-cross-repo-baseline`
 
+PR: #8 — `[APDM-P0-F] Establish cross-repo ActivityPub delivery migration program`
+
 Deliverables:
 - authoritative program README;
 - ordered PHASES roadmap;
@@ -34,6 +36,8 @@ Deliverables:
 ### APDM-P0-A — `outlaw-dame/activity-pods`
 
 Branch: `apdm/phase-0-cross-repo-baseline`
+
+PR: #13 — `[APDM-P0-A] Record ActivityPods ActivityPub delivery baseline`
 
 Deliverables:
 - ActivityPods-specific delivery baseline and SemApps 1.1.4 divergence/ownership note;
