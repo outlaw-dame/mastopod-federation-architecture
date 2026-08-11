@@ -5,16 +5,22 @@ export const ACTIVITYPUB_DELIVERY_PLAN_SCHEMA = "ap.delivery-plan.v1" as const;
 export const ACTIVITYPUB_DELIVERY_PLAN_FIXTURE_SHA256 =
   "0d38040d212f781deb71fc8a62c9f4a6bef60ef977414369e9b8a41df0d1b09a" as const;
 export const ACTIVITYPUB_DELIVERY_PLAN_JSON_SCHEMA_SHA256 =
-  "737f98bbda5c34fb26803c21abad1049c47b62643bcd4e162e017625ba380a9d" as const;
+  "90067ea8c3d309bccb70420920bdc976a59413ba88f477712dca9c77799dcfbe" as const;
 
 const APDM_INTENT_ID_PATTERN = /^apdm-v1-[a-f0-9]{64}$/u;
+const ASCII_CONTROL_PATTERN = /[\u0000-\u001f\u007f]/u;
 const PUBLIC_ADDRESSES = new Set([
   "https://www.w3.org/ns/activitystreams#Public",
   "as:Public",
   "Public",
 ]);
 
+function isCleanString(value: string): boolean {
+  return value.length > 0 && value === value.trim() && !ASCII_CONTROL_PATTERN.test(value);
+}
+
 function parseSafeHttpUrl(value: string): URL | null {
+  if (!isCleanString(value)) return null;
   try {
     const parsed = new URL(value);
     if (
@@ -30,38 +36,60 @@ function parseSafeHttpUrl(value: string): URL | null {
   }
 }
 
+function normalizeDeliveryTargetDomain(value: string): string | null {
+  if (!isCleanString(value)) return null;
+  const normalized = value.toLowerCase().replace(/\.+$/u, "");
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parseDeliveryEndpointUrl(value: string): URL | null {
+  const parsed = parseSafeHttpUrl(value);
+  if (!parsed || parsed.hash) return null;
+  return normalizeDeliveryTargetDomain(parsed.hostname) ? parsed : null;
+}
+
 const httpUrlSchema = z.string().url().refine(
   (value) => parseSafeHttpUrl(value) !== null,
-  "Expected an HTTP(S) URL without embedded credentials",
+  "Expected an HTTP(S) URL without credentials, surrounding whitespace, or control characters",
+);
+
+const deliveryEndpointUrlSchema = z.string().url().refine(
+  (value) => parseDeliveryEndpointUrl(value) !== null,
+  "Expected a fragment-free HTTP(S) delivery URL without credentials, surrounding whitespace, or control characters",
+);
+
+const cleanOpaqueStringSchema = z.string().min(1).refine(
+  isCleanString,
+  "Expected a non-empty string without surrounding whitespace or control characters",
 );
 
 const localDeliveryTargetSchema = z
   .object({
     actorUri: httpUrlSchema,
-    dataset: z.string().min(1),
-    inboxUri: httpUrlSchema,
+    dataset: cleanOpaqueStringSchema,
+    inboxUri: deliveryEndpointUrlSchema,
   })
   .strict();
 
 const remoteDeliveryTargetSchema = z
   .object({
     actorUri: httpUrlSchema,
-    inboxUrl: httpUrlSchema,
-    sharedInboxUrl: httpUrlSchema.optional(),
-    targetDomain: z.string().min(1),
+    inboxUrl: deliveryEndpointUrlSchema,
+    sharedInboxUrl: deliveryEndpointUrlSchema.optional(),
+    targetDomain: cleanOpaqueStringSchema,
   })
   .strict()
   .superRefine((target, ctx) => {
     const deliveryUrl = target.sharedInboxUrl ?? target.inboxUrl;
-    const parsedDeliveryUrl = parseSafeHttpUrl(deliveryUrl);
+    const parsedDeliveryUrl = parseDeliveryEndpointUrl(deliveryUrl);
     if (!parsedDeliveryUrl) return;
 
-    const expectedDomain = parsedDeliveryUrl.hostname.toLowerCase();
-    if (target.targetDomain !== expectedDomain) {
+    const expectedDomain = normalizeDeliveryTargetDomain(parsedDeliveryUrl.hostname);
+    if (!expectedDomain || target.targetDomain !== expectedDomain) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["targetDomain"],
-        message: `targetDomain must match delivery URL hostname ${expectedDomain}`,
+        message: `targetDomain must match canonical delivery URL hostname ${expectedDomain ?? "<invalid>"}`,
       });
     }
   });
@@ -229,17 +257,32 @@ export function safeParseActivityPubDeliveryPlanV1(value: unknown) {
 }
 
 export function canonicalizeDeliveryPlanValue(value: unknown): string {
+  if (value === null) return "null";
   if (Array.isArray(value)) {
     return `[${value.map(canonicalizeDeliveryPlanValue).join(",")}]`;
   }
-  if (value !== null && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalizeDeliveryPlanValue(record[key])}`)
-      .join(",")}}`;
+
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return JSON.stringify(value);
+    case "number":
+      if (!Number.isFinite(value)) throw new TypeError("Cannot canonicalize non-finite number");
+      return JSON.stringify(value);
+    case "object": {
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new TypeError("Cannot canonicalize non-JSON object");
+      }
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${canonicalizeDeliveryPlanValue(record[key])}`)
+        .join(",")}}`;
+    }
+    default:
+      throw new TypeError(`Cannot canonicalize unsupported ${typeof value} value`);
   }
-  return JSON.stringify(value);
 }
 
 export function activityPubDeliveryPlanFingerprint(value: unknown): string {
