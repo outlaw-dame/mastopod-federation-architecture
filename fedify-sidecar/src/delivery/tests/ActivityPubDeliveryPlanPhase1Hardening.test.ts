@@ -91,14 +91,54 @@ describe("APDM Phase 1 consumer hardening", () => {
     expect(safeParseActivityPubDeliveryPlanV1(plan).success).toBe(false);
   });
 
-  it("rejects a plan that omits any explicitly addressed concrete actor", () => {
+  it("rejects a plan that omits any explicitly addressed visible actor", () => {
     const omitted = clone(loadFixture());
-    (omitted["activity"] as Record<string, unknown>)["bcc"] = ["https://remote.example/users/missing"];
+    const omittedActivity = omitted["activity"] as Record<string, unknown>;
+    omittedActivity["cc"] = [
+      ...((omittedActivity["cc"] as unknown[]) ?? []),
+      "https://remote.example/users/missing",
+    ];
     expect(safeParseActivityPubDeliveryPlanV1(omitted).success).toBe(false);
 
     const included = clone(loadFixture());
-    (included["activity"] as Record<string, unknown>)["bcc"] = ["https://remote.example/users/carol"];
+    const includedActivity = included["activity"] as Record<string, unknown>;
+    includedActivity["cc"] = [
+      ...((includedActivity["cc"] as unknown[]) ?? []),
+      "https://remote.example/users/carol",
+    ];
     expect(safeParseActivityPubDeliveryPlanV1(included).success).toBe(true);
+  });
+
+  it("rejects outbound payloads that disclose bto/bcc at the top level or nested objects", () => {
+    const topLevel = clone(loadFixture());
+    (topLevel["activity"] as Record<string, unknown>)["bcc"] = ["https://remote.example/users/carol"];
+    expect(safeParseActivityPubDeliveryPlanV1(topLevel).success).toBe(false);
+
+    const nested = clone(loadFixture());
+    const nestedActivity = nested["activity"] as Record<string, unknown>;
+    const object = nestedActivity["object"] as Record<string, unknown>;
+    object["bto"] = ["https://remote.example/users/carol"];
+    expect(safeParseActivityPubDeliveryPlanV1(nested).success).toBe(false);
+  });
+
+  it("requires concrete audience recipients to be planned and fails closed on sender-followers audience", () => {
+    const omittedAudience = clone(loadFixture());
+    (omittedAudience["activity"] as Record<string, unknown>)["audience"] = [
+      "https://remote.example/users/missing",
+    ];
+    expect(safeParseActivityPubDeliveryPlanV1(omittedAudience).success).toBe(false);
+
+    const includedAudience = clone(loadFixture());
+    (includedAudience["activity"] as Record<string, unknown>)["audience"] = [
+      "https://remote.example/users/carol",
+    ];
+    expect(safeParseActivityPubDeliveryPlanV1(includedAudience).success).toBe(true);
+
+    const followersAudience = clone(loadFixture());
+    (followersAudience["activity"] as Record<string, unknown>)["audience"] = [
+      "https://pods.example/alice/followers",
+    ];
+    expect(safeParseActivityPubDeliveryPlanV1(followersAudience).success).toBe(false);
   });
 
   it("rejects non-JSON fingerprint inputs instead of permitting ambiguous canonical forms", () => {
