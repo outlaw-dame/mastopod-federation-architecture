@@ -53,6 +53,17 @@ describe("APDM Phase 1 consumer hardening", () => {
     expect(safeParseActivityPubDeliveryPlanV1(canonical).success).toBe(true);
   });
 
+  it("does not misclassify an unrelated actor whose path happens to end in /followers", () => {
+    const plan = clone(loadFixture());
+    plan.activity.to = ["https://remote.example/users/followers"];
+    plan.activity.cc = [];
+    plan.meta = { visibility: "direct", isPublicActivity: false };
+    expect(safeParseActivityPubDeliveryPlanV1(plan).success).toBe(true);
+
+    plan.meta = { visibility: "followers", isPublicActivity: false };
+    expect(safeParseActivityPubDeliveryPlanV1(plan).success).toBe(false);
+  });
+
   it("rejects non-JSON fingerprint inputs instead of permitting ambiguous canonical forms", () => {
     expect(() => canonicalizeDeliveryPlanValue([undefined])).toThrow(/unsupported undefined/u);
     expect(() => canonicalizeDeliveryPlanValue({ value: Number.NaN })).toThrow(/non-finite/u);
