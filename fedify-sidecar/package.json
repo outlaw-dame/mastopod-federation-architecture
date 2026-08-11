@@ -29,6 +29,7 @@
     "proof:media:local": "tsx scripts/proof-local-media-ingest.ts",
     "smoke:identity-repo:upsert": "tsx src/at-adapter/tests/IdentityBindingRepositoryUpsertSmoke.ts",
     "smoke:identity-sync:direct": "tsx src/at-adapter/tests/IdentitySyncDirectSmoke.ts",
+    "trace:identity-sync": "bash scripts/trace-identity-sync.sh",
     "topics:bootstrap": "tsx scripts/bootstrap-redpanda-topics.ts",
     "topics:verify": "REDPANDA_TOPIC_GOVERNANCE_MODE=verify tsx scripts/bootstrap-redpanda-topics.ts",
     "inspect:identity-redis": "tsx src/at-adapter/tests/IdentityRedisInspector.ts",
