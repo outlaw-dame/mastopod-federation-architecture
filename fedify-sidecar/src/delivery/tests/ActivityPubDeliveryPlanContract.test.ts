@@ -9,7 +9,7 @@ import {
   safeParseActivityPubDeliveryPlanV1,
 } from "../ActivityPubDeliveryPlanContract.js";
 
-const FOLLOWERS_ONLY_FIXTURE_SHA256 = "e166848b9d82e369fa6bace448dbd8ca42949aae9bdbba3b4034f0749d3d087c";
+const FOLLOWERS_ONLY_FIXTURE_SHA256 = "833658699fad1a73a688591789adfadcadf62e324607ed8fdf75a04b4227310d";
 
 function loadJson(relativePath: string): unknown {
   const url = new URL(relativePath, import.meta.url);
@@ -91,6 +91,73 @@ describe("APDM delivery plan v1 consumer contract", () => {
         ],
       }).success,
     ).toBe(false);
+  });
+
+  it("rejects a non-canonical intent id even when the payload is structurally valid", () => {
+    const fixture = loadFixture() as Record<string, unknown>;
+    expect(safeParseActivityPubDeliveryPlanV1({ ...fixture, intentId: "apdm-v1-not-a-hash" }).success).toBe(false);
+  });
+
+  it("rejects Activity/envelope identity mismatches", () => {
+    const fixture = loadFixture() as Record<string, any>;
+    const activity = fixture["activity"] as Record<string, unknown>;
+    expect(safeParseActivityPubDeliveryPlanV1({
+      ...fixture,
+      activity: { ...activity, id: "https://pods.example/alice/activities/other" },
+    }).success).toBe(false);
+    expect(safeParseActivityPubDeliveryPlanV1({
+      ...fixture,
+      activity: { ...activity, actor: "https://pods.example/mallory" },
+    }).success).toBe(false);
+  });
+
+  it("rejects targetDomain values that do not match the effective delivery URL", () => {
+    const fixture = loadFixture() as Record<string, any>;
+    const remoteRecipients = (fixture["remoteRecipients"] as Record<string, unknown>[]).map((target) => ({
+      ...target,
+      targetDomain: "attacker.example",
+    }));
+    expect(safeParseActivityPubDeliveryPlanV1({ ...fixture, remoteRecipients }).success).toBe(false);
+  });
+
+  it("rejects duplicate or local/remote-overlapping recipient identities", () => {
+    const fixture = loadFixture() as Record<string, any>;
+    const remoteRecipients = fixture["remoteRecipients"] as Record<string, unknown>[];
+    const localRecipients = fixture["localRecipients"] as Record<string, unknown>[];
+    expect(safeParseActivityPubDeliveryPlanV1({
+      ...fixture,
+      remoteRecipients: [...remoteRecipients, ...remoteRecipients],
+    }).success).toBe(false);
+    expect(safeParseActivityPubDeliveryPlanV1({
+      ...fixture,
+      remoteRecipients: [{
+        actorUri: localRecipients[0]?.["actorUri"],
+        inboxUrl: "https://remote.example/users/bob/inbox",
+        targetDomain: "remote.example",
+      }],
+    }).success).toBe(false);
+  });
+
+  it("rejects isPublicActivity metadata that contradicts visibility", () => {
+    const fixture = loadFixture() as Record<string, any>;
+    const meta = fixture["meta"] as Record<string, unknown>;
+    expect(safeParseActivityPubDeliveryPlanV1({
+      ...fixture,
+      meta: { ...meta, visibility: "followers", isPublicActivity: true },
+    }).success).toBe(false);
+  });
+
+  it("rejects credential-bearing federation endpoint URLs", () => {
+    const fixture = loadFixture() as Record<string, any>;
+    const remoteRecipients = fixture["remoteRecipients"] as Record<string, unknown>[];
+    expect(safeParseActivityPubDeliveryPlanV1({
+      ...fixture,
+      remoteRecipients: [{
+        ...remoteRecipients[0],
+        inboxUrl: "https://user:password@remote.example/users/carol/inbox",
+        sharedInboxUrl: undefined,
+      }],
+    }).success).toBe(false);
   });
 
   it("parses the Phase 3 followers-only fixture with concrete remote followers", () => {

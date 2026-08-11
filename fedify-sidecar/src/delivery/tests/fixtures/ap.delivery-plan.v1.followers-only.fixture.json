@@ -1,6 +1,6 @@
 {
   "schema": "ap.delivery-plan.v1",
-  "intentId": "apdm-v1-followers-only-fixture",
+  "intentId": "apdm-v1-ff18e2492a35bce5ed08baa9d12adc92b79a7a16adba6569d4d7442930a9fe2d",
   "activityId": "https://pods.example/alice/activities/phase3-followers-only",
   "actorUri": "https://pods.example/alice",
   "activity": {

@@ -7,7 +7,7 @@
   "required": ["schema", "intentId", "activityId", "actorUri", "activity", "localRecipients", "remoteRecipients", "meta"],
   "properties": {
     "schema": { "const": "ap.delivery-plan.v1" },
-    "intentId": { "type": "string", "minLength": 1 },
+    "intentId": { "type": "string", "pattern": "^apdm-v1-[a-f0-9]{64}$" },
     "activityId": { "type": "string", "format": "uri", "pattern": "^https?://" },
     "actorUri": { "type": "string", "format": "uri", "pattern": "^https?://" },
     "activity": { "type": "object" },

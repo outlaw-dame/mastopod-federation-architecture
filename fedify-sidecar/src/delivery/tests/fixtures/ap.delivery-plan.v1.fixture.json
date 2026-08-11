@@ -1,6 +1,6 @@
 {
   "schema": "ap.delivery-plan.v1",
-  "intentId": "01JAPDM0000000000000000000",
+  "intentId": "apdm-v1-4088ffcc6a7c53ae0661fb8f43e23566756a3df18a249d890513e04fe4d41548",
   "activityId": "https://pods.example/alice/activities/01JAPDM0000000000000000001",
   "actorUri": "https://pods.example/alice",
   "activity": {
