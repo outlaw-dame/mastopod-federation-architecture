@@ -36,6 +36,14 @@ describe("APDM Phase 3 semantic hardening regressions", () => {
     }).success).toBe(false);
   });
 
+  it("rejects private/followers plans marked public-indexable", () => {
+    const plan = basePlan();
+    expect(safeParseActivityPubDeliveryPlanV1({
+      ...plan,
+      meta: { ...plan.meta, isPublicIndexable: true },
+    }).success).toBe(false);
+  });
+
   it("rejects embedded credentials in actor URLs", () => {
     const plan = basePlan();
     expect(safeParseActivityPubDeliveryPlanV1({
