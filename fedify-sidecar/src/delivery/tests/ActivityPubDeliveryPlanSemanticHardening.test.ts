@@ -7,7 +7,7 @@ const actorUri = "https://pods.example/alice";
 function basePlan() {
   return {
     schema: "ap.delivery-plan.v1",
-    intentId: "apdm-v1-a34b1fdd77e98965f6aab4ad45a5cf118fa78087cca74f6fe06dd659cfeb0dad",
+    intentId: "apdm-v1-06f6dd74286e7c9343a40612322df9cfab7359de51ee2ce3b39a75cd8665df41",
     activityId,
     actorUri,
     activity: {
@@ -24,6 +24,10 @@ function basePlan() {
 }
 
 describe("APDM Phase 3 semantic hardening regressions", () => {
+  it("starts from a semantically valid baseline", () => {
+    expect(safeParseActivityPubDeliveryPlanV1(basePlan()).success).toBe(true);
+  });
+
   it("rejects metadata visibility that disagrees with Activity addressing", () => {
     const plan = basePlan();
     expect(safeParseActivityPubDeliveryPlanV1({
@@ -32,7 +36,7 @@ describe("APDM Phase 3 semantic hardening regressions", () => {
     }).success).toBe(false);
   });
 
-  it("rejects embedded credentials in actor and inbox URLs", () => {
+  it("rejects embedded credentials in actor URLs", () => {
     const plan = basePlan();
     expect(safeParseActivityPubDeliveryPlanV1({
       ...plan,
