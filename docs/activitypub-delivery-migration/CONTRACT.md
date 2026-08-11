@@ -6,7 +6,7 @@ ActivityPods is authoritative for data and semantics that require local knowledg
 
 ### ActivityPods produces
 
-- persisted Activity identifier and immutable Activity payload;
+- persisted Activity identifier and outbound Activity payload;
 - authoritative actor URI;
 - recipient expansion result;
 - local/remote recipient classification;
@@ -65,19 +65,32 @@ The exact serialized schema is pinned in both repositories and is guarded by cro
 
 1. Recipient expansion MUST happen once at the ActivityPods authority boundary for an ActivityPods-originated Activity.
 2. The sender's own unresolved followers collection MUST NOT be treated as a concrete actor delivery target. An unrelated legitimate actor URI merely ending in `/followers` is not a followers collection by name alone.
-3. Every concrete actor explicitly addressed in `to`, `bto`, `cc`, or `bcc` MUST be present in the Delivery Plan recipient set. Public aliases and the sender's own followers collection are excluded from this subset check because Public is not an actor target and follower members are expanded by ActivityPods.
-4. The sidecar MAY enrich a remote target with `sharedInboxUrl`, but MUST NOT change the logical recipient set.
-5. Local recipients MUST NOT be routed through the internet-facing Fedify path.
-6. Execution endpoints (`inboxUri`, `inboxUrl`, `sharedInboxUrl`) MUST be fragment-free HTTP(S) URLs without embedded credentials, whitespace, or ASCII control characters.
-7. `targetDomain` MUST be the canonical lowercase hostname of the effective delivery URL (shared inbox when present, otherwise inbox), with DNS trailing-dot aliases removed. Domain-keyed blocking, rate limiting, concurrency and telemetry MUST use this canonical value.
-8. Local dataset identifiers and domain authority tokens MUST be non-empty and free of whitespace/control-character ambiguity.
-9. The serialized contract is JSON. Contract fingerprinting MUST fail closed on unsupported non-JSON values rather than mapping different runtime values to an ambiguous canonical representation.
-10. The sidecar MUST deduplicate execution by final delivery URL after sharedInbox enrichment.
-11. Activity payload bytes used for signing/delivery MUST be immutable once an outbound job is created.
-12. Duplicate delivery-plan handoff MUST be safe and idempotent.
-13. External mode MUST prevent SemApps native `remotePost` jobs from being created; cancellation-after-enqueue is not an accepted suppression design.
-14. Native mode MUST remain available as a tested rollback path until the cleanup phase.
-15. Contract-version incompatibility MUST fail closed rather than silently falling back to raw recipient inference.
+3. Every concrete actor explicitly addressed in `to`, `bto`, `cc`, `bcc`, or `audience` MUST be represented by the authoritative recipient plan, except Public aliases and the sender's own followers collection. Sender-followers expressed through `audience` MUST fail closed until authoritative audience expansion exists.
+4. `bto` and `bcc` are routing-only inputs. They MUST be stripped from the outbound Activity before it enters the Delivery Plan, including nested object values, and a consumer MUST reject any Delivery Plan whose outbound `activity` still contains `bto` or `bcc`.
+5. The sidecar MAY enrich a remote target with `sharedInboxUrl`, but MUST NOT change the logical recipient set.
+6. Local recipients MUST NOT be routed through the internet-facing Fedify path.
+7. Execution endpoints (`inboxUri`, `inboxUrl`, `sharedInboxUrl`) MUST be fragment-free HTTP(S) URLs without embedded credentials, whitespace, or ASCII control characters.
+8. `targetDomain` MUST be the canonical lowercase hostname of the effective delivery URL (shared inbox when present, otherwise inbox), with DNS trailing-dot aliases removed. Domain-keyed blocking, rate limiting, concurrency and telemetry MUST use this canonical value.
+9. Local dataset identifiers and domain authority tokens MUST be non-empty and free of whitespace/control-character ambiguity.
+10. The serialized contract is JSON. Contract fingerprinting MUST fail closed on unsupported non-JSON values rather than mapping different runtime values to an ambiguous canonical representation.
+11. The sidecar MUST deduplicate execution by final delivery URL after sharedInbox enrichment.
+12. Activity payload bytes used for signing/delivery MUST be immutable once an outbound job is created.
+13. Duplicate delivery-plan handoff MUST be safe and idempotent.
+14. External mode MUST prevent SemApps native `remotePost` jobs from being created; cancellation-after-enqueue is not an accepted suppression design.
+15. Native mode MUST remain available as a tested rollback path until the cleanup phase.
+16. Contract-version incompatibility MUST fail closed rather than silently falling back to raw recipient inference.
+
+## Blind-address privacy boundary
+
+Exact SemApps 1.1.4 recipient discovery scans `to`, `bto`, `cc`, and `bcc`, but the native outbox path then carries the same Activity onward. APDM therefore cannot treat the persisted/native Activity bytes as automatically safe outbound bytes when blind addressing is present.
+
+For APDM external delivery, ActivityPods must use the unsanitized source Activity only for authoritative recipient planning, then construct the Delivery Plan with a sanitized outbound Activity in which `bto` and `bcc` are absent recursively. The sidecar independently rejects leaked blind-address fields as defense in depth.
+
+This Delivery Plan rule fixes the future external/Fedify boundary. It does **not** by itself repair SemApps native/local persistence and delivery behavior. That remaining ActivityPods/SemApps blind-address exposure is a pre-Phase-5 privacy blocker and must be addressed or proven unreachable before production cutover.
+
+## Audience compatibility boundary
+
+ActivityPub delivery semantics include `audience`, while exact SemApps 1.1.4 `activitypub.activity.getRecipients` scans only `to`, `bto`, `cc`, and `bcc`. APDM therefore fails closed rather than silently dropping concrete `audience` recipients. In particular, a sender-followers collection expressed through `audience` is rejected until an authoritative expansion path exists.
 
 ## Network-security boundary
 
