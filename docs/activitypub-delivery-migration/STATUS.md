@@ -10,8 +10,8 @@ Last updated: 2026-08-10
 | APDM-P1 | PR #14 merged | PR #9 merged | PASS |
 | APDM-P2 | PR #15 merged | PR #10 merged | PASS |
 | APDM-P3 | PR #16 merged | PR #11 merged | PASS |
-| APDM-P4 | PR #17 ready | PR #12 ready | implementation/review complete; final CI after docs update |
-| APDM-P5 | not started | not started | blocked by P4 merge |
+| APDM-P4 | PR #17 merged | PR #12 merged | PASS |
+| APDM-P5 | not started | not started | unblocked by P4; production authority cutover remains explicit P5 work |
 | APDM-P6 | not started | not started | blocked by P5 |
 | APDM-P7–P13 | not started | as needed | blocked by remote-authority stabilization |
 | APDM-P14 | support as needed | not started | may follow P6; final proof in P15 |
@@ -25,11 +25,12 @@ Last updated: 2026-08-10
 - P2: federation PR #10 / ActivityPods PR #15 merged; pre-`remotePost` native/external strategy seam established with native rollback default.
 - P3: federation PR #11 / ActivityPods PR #16 merged; SemApps' already-expanded live local/remote partition is the authoritative Delivery Plan source.
 
-## Phase 4 — implementation and review complete
+## Phase 4 — complete
 
 ### APDM-P4-A — ActivityPods durable producer handoff
 
 PR: `outlaw-dame/activity-pods#17`
+Merge commit: `f08babc9bbf0a335e50cdb9bf217dd273e272bd6`
 
 Implemented:
 - dedicated `deliveryHandoff` Bull queue on the strategy-aware SemApps outbox service;
@@ -68,6 +69,7 @@ Important recovery boundary: a followers-addressed persisted Activity normally c
 ### APDM-P4-F — sidecar durable acceptance and crash-safe duplicate suppression
 
 PR: `outlaw-dame/mastopod-federation-architecture#12`
+Merge commit: `c7d28a80d1aacc86692daada7bf8333a4cd27a97`
 
 The sidecar webhook acknowledges only after Redis Streams acceptance. Separate accepted sidecar intents for the same Activity and target still converge on deterministic outbound `jobId = activityId::deliveryUrl`.
 
@@ -101,20 +103,22 @@ Properties:
 
 Tests prove deterministic job convergence, stale/dead-worker claim recovery, delivery after claim expiry, and duplicate suppression only after completed state.
 
-## Phase 4 gate evidence
+## Phase 4 gate evidence — PASS
 
 ActivityPods PR #17:
-- Backend checks: PASS on the latest executable-code head before the final documentation-only update;
+- merged as `f08babc9bbf0a335e50cdb9bf217dd273e272bd6`;
+- final Backend Checks passed on the documentation-updated PR head;
 - full stable backend unit lane passed;
 - offline ATProto multibase smoke passed as part of the workflow;
 - all four substantive review threads were fixed and resolved.
 
 Federation PR #12:
-- Fedify Sidecar Fast Checks passed on the crash-safe claim-store/test head;
-- AP Interop Smoke passed on the preceding crash-safe worker head and is rerun after the final documentation/test updates;
-- the P1 review about pre-send claims being mistaken for completed delivery was fixed in production code and regression-tested, then resolved.
+- merged as `c7d28a80d1aacc86692daada7bf8333a4cd27a97`;
+- final Fedify Sidecar Fast Checks passed;
+- final AP Interop Smoke passed, including the AP interop smoke lane;
+- the P1 review about pre-send claims being mistaken for completed delivery was fixed in production code, regression-tested, and resolved.
 
-Final merge gate: both PR heads must have green current CI after the documentation updates and no new unresolved substantive review threads. After that P4 may merge; production remote-authority cutover still belongs to P5.
+Final manual diff review found no unresolved Phase 4 correctness/security blocker. Production remote-authority cutover remains deliberately deferred to P5.
 
 ## Verified baseline carried forward
 
@@ -125,11 +129,11 @@ Final merge gate: both PR heads must have green current CI after the documentati
 - `enqueueOutboundBatchForIntent` atomically guards per-intent fan-out;
 - deterministic outbound job IDs converge duplicate accepted intents onto the same Activity+delivery target identity.
 
-## Open measurements / later hardening (not P4 merge blockers)
+## Open measurements / later hardening — not P4 blockers
 
 - measured nested Tier 1 operation count behind the source-counted top-level local fan-out calls;
 - runtime duplicate-HTTP frequency while native and sidecar paths coexist before P5 cutover;
 - optional historical recipient-snapshot persistence if exact follower membership at the original post instant is required across the Fuseki-to-Bull crash boundary;
-- backend `yarn.lock` dependency drift warning in ActivityPods CI should be reconciled separately; the current Phase 4 backend workflow passes despite that pre-existing warning.
+- backend `yarn.lock` dependency drift warning in ActivityPods CI should be reconciled separately; the Phase 4 backend workflow passes despite that pre-existing warning.
 
 These remain explicit follow-up work rather than hidden assumptions in the P4 durability claim.
