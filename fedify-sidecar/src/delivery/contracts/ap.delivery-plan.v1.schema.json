@@ -8,8 +8,18 @@
   "properties": {
     "schema": { "const": "ap.delivery-plan.v1" },
     "intentId": { "type": "string", "pattern": "^apdm-v1-[a-f0-9]{64}$" },
-    "activityId": { "type": "string", "format": "uri", "pattern": "^https?://" },
-    "actorUri": { "type": "string", "format": "uri", "pattern": "^https?://" },
+    "activityId": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+      "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" }
+    },
+    "actorUri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+      "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" }
+    },
     "activity": { "type": "object" },
     "localRecipients": {
       "type": "array",
@@ -18,9 +28,22 @@
         "additionalProperties": false,
         "required": ["actorUri", "dataset", "inboxUri"],
         "properties": {
-          "actorUri": { "type": "string", "format": "uri", "pattern": "^https?://" },
+          "actorUri": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" }
+          },
           "dataset": { "type": "string", "minLength": 1 },
-          "inboxUri": { "type": "string", "format": "uri", "pattern": "^https?://" }
+          "inboxUri": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "allOf": [
+              { "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" } },
+              { "not": { "pattern": "#" } }
+            ]
+          }
         }
       }
     },
@@ -31,10 +54,41 @@
         "additionalProperties": false,
         "required": ["actorUri", "inboxUrl", "targetDomain"],
         "properties": {
-          "actorUri": { "type": "string", "format": "uri", "pattern": "^https?://" },
-          "inboxUrl": { "type": "string", "format": "uri", "pattern": "^https?://" },
-          "sharedInboxUrl": { "type": "string", "format": "uri", "pattern": "^https?://" },
-          "targetDomain": { "type": "string", "minLength": 1 }
+          "actorUri": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" }
+          },
+          "inboxUrl": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "allOf": [
+              { "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" } },
+              { "not": { "pattern": "#" } }
+            ]
+          },
+          "sharedInboxUrl": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "allOf": [
+              { "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" } },
+              { "not": { "pattern": "#" } }
+            ]
+          },
+          "targetDomain": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S+$",
+            "not": {
+              "anyOf": [
+                { "pattern": "[A-Z]" },
+                { "pattern": "\\.$" }
+              ]
+            }
+          }
         }
       }
     },
