@@ -8,6 +8,11 @@ export const ACTIVITYPUB_DELIVERY_PLAN_JSON_SCHEMA_SHA256 =
   "737f98bbda5c34fb26803c21abad1049c47b62643bcd4e162e017625ba380a9d" as const;
 
 const APDM_INTENT_ID_PATTERN = /^apdm-v1-[a-f0-9]{64}$/u;
+const PUBLIC_ADDRESSES = new Set([
+  "https://www.w3.org/ns/activitystreams#Public",
+  "as:Public",
+  "Public",
+]);
 
 const httpUrlSchema = z.string().url().refine((value) => {
   try {
@@ -58,6 +63,28 @@ function normalizeId(value: unknown): string | null {
     return typeof id === "string" ? id : null;
   }
   return null;
+}
+
+function normalizedAddresses(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : [value];
+  return values.map(normalizeId).filter((item): item is string => typeof item === "string");
+}
+
+function isFollowersAddress(value: string): boolean {
+  try {
+    return new URL(value).pathname.replace(/\/+$/u, "").endsWith("/followers");
+  } catch {
+    return false;
+  }
+}
+
+function determineActivityVisibility(activity: Record<string, unknown>): "public" | "unlisted" | "followers" | "direct" {
+  const to = normalizedAddresses(activity["to"]);
+  const cc = normalizedAddresses(activity["cc"]);
+  if (to.some((value) => PUBLIC_ADDRESSES.has(value))) return "public";
+  if (cc.some((value) => PUBLIC_ADDRESSES.has(value))) return "unlisted";
+  if (to.some(isFollowersAddress)) return "followers";
+  return "direct";
 }
 
 function computeExpectedIntentId(input: {
@@ -114,7 +141,15 @@ export const activityPubDeliveryPlanV1Schema = z
       });
     }
 
-    const expectedPublic = plan.meta.visibility === "public" || plan.meta.visibility === "unlisted";
+    const expectedVisibility = determineActivityVisibility(plan.activity);
+    if (plan.meta.visibility !== expectedVisibility) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["meta", "visibility"],
+        message: `visibility must agree with embedded Activity addressing (${expectedVisibility})`,
+      });
+    }
+    const expectedPublic = expectedVisibility === "public" || expectedVisibility === "unlisted";
     if (plan.meta.isPublicActivity !== expectedPublic) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
