@@ -38,7 +38,9 @@ output:
         urls:
           - "${OPENSEARCH_URL:http://opensearch:9200}"
         index: canonical-events
-        id: "${!this.intentId | uuid_v4()}"
+        # CanonicalIntentBase guarantees canonicalIntentId. Reusing it as the
+        # OpenSearch document ID makes Redpanda replay/redelivery idempotent.
+        id: "${!this.canonicalIntentId}"
         action: index
         basic_auth:
           enabled: ${OPENSEARCH_AUTH_ENABLED:false}
