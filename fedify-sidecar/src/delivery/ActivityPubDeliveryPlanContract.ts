@@ -14,18 +14,26 @@ const PUBLIC_ADDRESSES = new Set([
   "Public",
 ]);
 
-const httpUrlSchema = z.string().url().refine((value) => {
+function parseSafeHttpUrl(value: string): URL | null {
   try {
     const parsed = new URL(value);
-    return (
-      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-      !parsed.username &&
-      !parsed.password
-    );
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      parsed.username ||
+      parsed.password
+    ) {
+      return null;
+    }
+    return parsed;
   } catch {
-    return false;
+    return null;
   }
-}, "Expected an HTTP(S) URL without embedded credentials");
+}
+
+const httpUrlSchema = z.string().url().refine(
+  (value) => parseSafeHttpUrl(value) !== null,
+  "Expected an HTTP(S) URL without embedded credentials",
+);
 
 const localDeliveryTargetSchema = z
   .object({
@@ -45,7 +53,10 @@ const remoteDeliveryTargetSchema = z
   .strict()
   .superRefine((target, ctx) => {
     const deliveryUrl = target.sharedInboxUrl ?? target.inboxUrl;
-    const expectedDomain = new URL(deliveryUrl).hostname.toLowerCase();
+    const parsedDeliveryUrl = parseSafeHttpUrl(deliveryUrl);
+    if (!parsedDeliveryUrl) return;
+
+    const expectedDomain = parsedDeliveryUrl.hostname.toLowerCase();
     if (target.targetDomain !== expectedDomain) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
