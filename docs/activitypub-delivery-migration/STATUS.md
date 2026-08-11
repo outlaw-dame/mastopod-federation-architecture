@@ -9,7 +9,7 @@ Last updated: 2026-08-10
 | APDM-P0 | PR #13 merged | PR #8 merged | PASS |
 | APDM-P1 | PR #14 merged | PR #9 merged | PASS |
 | APDM-P2 | PR #15 merged | PR #10 merged | PASS |
-| APDM-P3 | PR #16 merged | PR #11 merged | PASS |
+| APDM-P3 | PR #16 merged; hardening PR #21 merged | PR #11 merged; hardening PR #14 merged | PASS; post-merge hardening complete |
 | APDM-P4 | PR #17 merged | PR #12 merged | PASS |
 | APDM-P5 | not started | not started | unblocked by P4; production authority cutover remains explicit P5 work |
 | APDM-P6 | not started | not started | blocked by P5 |
@@ -24,6 +24,58 @@ Last updated: 2026-08-10
 - P1: federation PR #9 / ActivityPods PR #14 merged; strict cross-repo `ap.delivery-plan.v1` contract established.
 - P2: federation PR #10 / ActivityPods PR #15 merged; pre-`remotePost` native/external strategy seam established with native rollback default.
 - P3: federation PR #11 / ActivityPods PR #16 merged; SemApps' already-expanded live local/remote partition is the authoritative Delivery Plan source.
+- P3 post-merge hardening: federation PR #14 / ActivityPods PR #21 merged after Codex-level review; contract semantics, deterministic identity, visibility/privacy invariants, remote endpoint validation, and bounded target resolution were tightened without advancing remote-authority ownership to P5.
+
+## Phase 3 post-merge hardening — complete
+
+### ActivityPods producer hardening
+
+PR: `outlaw-dame/activity-pods#21`
+Merge commit: `f53293261382a3027f492649a9ec36056041c7ae`
+
+Implemented and verified:
+- deterministic `apdm-v1-<sha256>` intent IDs are validated, not merely generated;
+- the Delivery Plan envelope must agree with the embedded Activity ID and actor;
+- visibility is independently derived from normalized ActivityPub `to` / `cc` addressing, including object-valued `id` / `@id` references;
+- `isPublicActivity` must agree with addressing-derived visibility;
+- followers/direct Activities cannot claim `isPublicIndexable: true`;
+- duplicate recipient actor identities are rejected and one actor cannot appear in both local and remote recipient sets;
+- remote inbox/sharedInbox URLs reject non-HTTP(S) protocols and embedded credentials;
+- `targetDomain` must equal the hostname of the effective sharedInbox/inbox URL;
+- local and remote resolution share one global bounded concurrency budget rather than independent per-class budgets;
+- shared fixtures use their real deterministic intent IDs;
+- the outbox-emitter regression fixture computes the canonical intent ID instead of using a structurally valid placeholder.
+
+Final ActivityPods gate evidence:
+- Backend Checks passed on the current-master replay PR;
+- 30/30 backend suites and 269/269 tests passed;
+- offline ATProto multibase smoke passed;
+- the normal backend install produced no `yarn.lock` drift warning;
+- no unresolved review threads, review submissions, or PR comments remained.
+
+### Federation consumer hardening
+
+PR: `outlaw-dame/mastopod-federation-architecture#14`
+Merge commit: `ab56a201c639eb3f28453ca36732383154f41c88`
+
+Implemented and verified:
+- the TypeScript/Zod contract mirrors deterministic intent-ID, Activity/envelope identity, visibility/public metadata, recipient uniqueness, and target-domain invariants;
+- malformed or credential-bearing federation URLs fail validation without escaping as parser exceptions;
+- the Codex P1 finding about an unguarded `new URL()` inside `superRefine()` was fixed with a non-throwing URL parser and regression coverage;
+- the contract parser remains explicitly documented as a cross-repo compatibility artifact under the current P4 webhook mapping, not yet the live network trust boundary.
+
+Final federation gate evidence:
+- Fedify Sidecar Fast Checks passed;
+- AP Interop Smoke passed;
+- the P1 review thread was fixed and resolved;
+- ActivityPods and federation `master` carry matching Delivery Plan fixture and JSON-schema fingerprints.
+
+### Lockfile reconciliation supporting the hardening review
+
+The pre-existing ActivityPods backend lockfile drift discovered during Phase 4 is resolved:
+- PR #18 regenerated the stale SemApps dependency graph from 1.1.2 to the package.json-pinned 1.1.4 set and merged as `a7aee8abc9765cfc2f7a90aec6619a7ceb97ec5a`;
+- PR #20 applied the remaining Yarn v1 canonical form for the public `node-cas` Git dependency and merged as `a8ddaddaa18aa330dc808eb2e84b4d984e6e3578`;
+- the final Phase 3 hardening CI run inherited that lockfile unchanged and emitted no lockfile drift warning.
 
 ## Phase 4 — complete
 
@@ -133,7 +185,6 @@ Final manual diff review found no unresolved Phase 4 correctness/security blocke
 
 - measured nested Tier 1 operation count behind the source-counted top-level local fan-out calls;
 - runtime duplicate-HTTP frequency while native and sidecar paths coexist before P5 cutover;
-- optional historical recipient-snapshot persistence if exact follower membership at the original post instant is required across the Fuseki-to-Bull crash boundary;
-- backend `yarn.lock` dependency drift warning in ActivityPods CI should be reconciled separately; the Phase 4 backend workflow passes despite that pre-existing warning.
+- optional historical recipient-snapshot persistence if exact follower membership at the original post instant is required across the Fuseki-to-Bull crash boundary.
 
-These remain explicit follow-up work rather than hidden assumptions in the P4 durability claim.
+These remain explicit follow-up work rather than hidden assumptions in the P4 durability claim. The backend lockfile drift item previously listed here is resolved by ActivityPods PRs #18 and #20.
