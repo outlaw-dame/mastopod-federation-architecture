@@ -35,11 +35,16 @@ describe("APDM Phase 1 consumer hardening", () => {
     expect(safeParseActivityPubDeliveryPlanV1(plan).success).toBe(false);
   });
 
-  it("rejects fragments and normalization whitespace in executable delivery URLs", () => {
+  it("rejects fragments including a bare empty fragment and normalization whitespace in executable delivery URLs", () => {
     const fragmented = clone(loadFixture());
     ((fragmented["remoteRecipients"] as Array<Record<string, unknown>>)[0] as Record<string, unknown>)["sharedInboxUrl"] =
       "https://remote.example/inbox#fragment";
     expect(safeParseActivityPubDeliveryPlanV1(fragmented).success).toBe(false);
+
+    const emptyFragment = clone(loadFixture());
+    ((emptyFragment["remoteRecipients"] as Array<Record<string, unknown>>)[0] as Record<string, unknown>)["sharedInboxUrl"] =
+      "https://remote.example/inbox#";
+    expect(safeParseActivityPubDeliveryPlanV1(emptyFragment).success).toBe(false);
 
     const padded = clone(loadFixture());
     ((padded["remoteRecipients"] as Array<Record<string, unknown>>)[0] as Record<string, unknown>)["sharedInboxUrl"] =
@@ -141,9 +146,10 @@ describe("APDM Phase 1 consumer hardening", () => {
     expect(safeParseActivityPubDeliveryPlanV1(followersAudience).success).toBe(false);
   });
 
-  it("rejects non-JSON fingerprint inputs instead of permitting ambiguous canonical forms", () => {
+  it("rejects non-JSON and sparse-array fingerprint inputs instead of permitting ambiguous canonical forms", () => {
     expect(() => canonicalizeDeliveryPlanValue([undefined])).toThrow(/unsupported undefined/u);
     expect(() => canonicalizeDeliveryPlanValue({ value: Number.NaN })).toThrow(/non-finite/u);
     expect(() => canonicalizeDeliveryPlanValue(new Date())).toThrow(/non-JSON object/u);
+    expect(() => canonicalizeDeliveryPlanValue(new Array(1))).toThrow(/sparse array/u);
   });
 });
