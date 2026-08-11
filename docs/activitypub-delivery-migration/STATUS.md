@@ -8,10 +8,10 @@ Last updated: 2026-08-11
 |---|---|---|---|
 | APDM-P0 | PR #13 merged | PR #8 merged | PASS |
 | APDM-P1 | PR #14 merged | PR #9 merged | PASS |
-| APDM-P2 | PR #15 merged; hardening PR #22 merged | PR #10 merged; hardening PR #16 in final review | HARDENING CLOSEOUT |
+| APDM-P2 | PR #15 merged; hardening PR #22 merged | PR #10 merged; hardening PR #16 merged | PASS; post-merge hardening complete |
 | APDM-P3 | PR #16 merged; hardening PR #21 merged | PR #11 merged; hardening PR #14 merged | PASS; post-merge hardening complete |
 | APDM-P4 | PR #17 merged | PR #12 merged | PASS |
-| APDM-P5 | not started | not started | blocked until federation PR #16 closes the P2 hardening gate; P4 prerequisites otherwise pass |
+| APDM-P5 | not started | not started | unblocked by P2/P4 gates; production authority cutover remains explicit P5 work |
 | APDM-P6 | not started | not started | blocked by P5 |
 | APDM-P7–P13 | not started | as needed | blocked by remote-authority stabilization |
 | APDM-P14 | support as needed | not started | may follow P6; final proof in P15 |
@@ -22,14 +22,14 @@ Last updated: 2026-08-11
 
 - P0: federation PR #8 / ActivityPods PR #13 merged.
 - P1: federation PR #9 / ActivityPods PR #14 merged; strict cross-repo `ap.delivery-plan.v1` contract established.
-- P2 baseline: federation PR #10 / ActivityPods PR #15 merged; pre-`remotePost` native/external strategy seam established with native rollback default. Post-merge hardening is closing through ActivityPods PR #22 and federation PR #16.
+- P2 baseline: federation PR #10 / ActivityPods PR #15 merged; pre-`remotePost` native/external strategy seam established with native rollback default. Post-merge hardening is complete through ActivityPods PR #22 and federation PR #16.
 - P3: federation PR #11 / ActivityPods PR #16 merged; SemApps' already-expanded live local/remote partition is the authoritative Delivery Plan source.
 - P3 post-merge hardening: federation PR #14 / ActivityPods PR #21 merged after Codex-level review; contract semantics, deterministic identity, visibility/privacy invariants, remote endpoint validation, and bounded target resolution were tightened without advancing remote-authority ownership to P5.
 - P4: federation PR #12 / ActivityPods PR #17 merged; durable handoff and crash-safe duplicate suppression are complete.
 
-## Phase 2 post-merge hardening — closeout
+## Phase 2 post-merge hardening — complete
 
-### ActivityPods interception seam — complete
+### ActivityPods interception seam
 
 PR: `outlaw-dame/activity-pods#22`
 Merge commit: `0759877385c756d5d2a8ba82ceb209b69ee595aa`
@@ -58,14 +58,21 @@ Final ActivityPods gate evidence:
 - a fresh Codex review on the exact final head reported no major issues;
 - PR #22 was squash-merged as `0759877385c756d5d2a8ba82ceb209b69ee595aa`.
 
-### Federation architecture companion — final review
+### Federation architecture companion
 
 PR: `outlaw-dame/mastopod-federation-architecture#16`
-Status: documentation/review closeout; no Fedify runtime change.
+Merge commit: `032af9e0e66a723c7b7a13e720514c97e4288d1b`
 
-The federation side records the ActivityPods interception guarantees above as prerequisites for later remote-authority cutover. Phase 4 remains the durable acceptance boundary and Phase 5 remains the explicit production-authority transition.
+Implemented and verified:
+- the federation-side hardening contract records ActivityPods interception guarantees as prerequisites for later remote-authority cutover;
+- no Fedify runtime behavior changed in this slice;
+- Codex found that the live status ledger incorrectly advertised P2 PASS/P5 unblocked while hardening remained open;
+- the authoritative ledger was changed to HARDENING IN PROGRESS/CLOSEOUT and P5 was blocked while the gate was open;
+- the Codex thread was resolved only after that change was verified;
+- repeated pre-merge review sweeps found no additional actionable thread on the final documentation head;
+- PR #16 was squash-merged as `032af9e0e66a723c7b7a13e720514c97e4288d1b`.
 
-Codex's P2 finding that the live status ledger incorrectly advertised P2 PASS/P5 unblocked while hardening was still open was addressed by reopening the P2 gate in this authoritative file. The thread was resolved only after that change was verified. This final closeout records the real ActivityPods merge SHA and keeps P5 blocked until PR #16 itself is reviewed and merged.
+Phase 2 hardening is now PASS. P5 is unblocked for its own explicit production remote-authority cutover work; this status change does not itself start or perform P5.
 
 ## Phase 3 post-merge hardening — complete
 
