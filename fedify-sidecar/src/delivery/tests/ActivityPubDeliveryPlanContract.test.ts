@@ -100,19 +100,20 @@ describe("APDM delivery plan v1 consumer contract", () => {
 
   it("rejects Activity/envelope identity mismatches", () => {
     const fixture = loadFixture() as Record<string, any>;
+    const activity = fixture["activity"] as Record<string, unknown>;
     expect(safeParseActivityPubDeliveryPlanV1({
       ...fixture,
-      activity: { ...fixture.activity, id: "https://pods.example/alice/activities/other" },
+      activity: { ...activity, id: "https://pods.example/alice/activities/other" },
     }).success).toBe(false);
     expect(safeParseActivityPubDeliveryPlanV1({
       ...fixture,
-      activity: { ...fixture.activity, actor: "https://pods.example/mallory" },
+      activity: { ...activity, actor: "https://pods.example/mallory" },
     }).success).toBe(false);
   });
 
   it("rejects targetDomain values that do not match the effective delivery URL", () => {
     const fixture = loadFixture() as Record<string, any>;
-    const remoteRecipients = fixture.remoteRecipients.map((target: Record<string, unknown>) => ({
+    const remoteRecipients = (fixture["remoteRecipients"] as Record<string, unknown>[]).map((target) => ({
       ...target,
       targetDomain: "attacker.example",
     }));
@@ -121,14 +122,16 @@ describe("APDM delivery plan v1 consumer contract", () => {
 
   it("rejects duplicate or local/remote-overlapping recipient identities", () => {
     const fixture = loadFixture() as Record<string, any>;
+    const remoteRecipients = fixture["remoteRecipients"] as Record<string, unknown>[];
+    const localRecipients = fixture["localRecipients"] as Record<string, unknown>[];
     expect(safeParseActivityPubDeliveryPlanV1({
       ...fixture,
-      remoteRecipients: [...fixture.remoteRecipients, ...fixture.remoteRecipients],
+      remoteRecipients: [...remoteRecipients, ...remoteRecipients],
     }).success).toBe(false);
     expect(safeParseActivityPubDeliveryPlanV1({
       ...fixture,
       remoteRecipients: [{
-        actorUri: fixture.localRecipients[0].actorUri,
+        actorUri: localRecipients[0]?.["actorUri"],
         inboxUrl: "https://remote.example/users/bob/inbox",
         targetDomain: "remote.example",
       }],
@@ -137,18 +140,20 @@ describe("APDM delivery plan v1 consumer contract", () => {
 
   it("rejects isPublicActivity metadata that contradicts visibility", () => {
     const fixture = loadFixture() as Record<string, any>;
+    const meta = fixture["meta"] as Record<string, unknown>;
     expect(safeParseActivityPubDeliveryPlanV1({
       ...fixture,
-      meta: { ...fixture.meta, visibility: "followers", isPublicActivity: true },
+      meta: { ...meta, visibility: "followers", isPublicActivity: true },
     }).success).toBe(false);
   });
 
   it("rejects credential-bearing federation endpoint URLs", () => {
     const fixture = loadFixture() as Record<string, any>;
+    const remoteRecipients = fixture["remoteRecipients"] as Record<string, unknown>[];
     expect(safeParseActivityPubDeliveryPlanV1({
       ...fixture,
       remoteRecipients: [{
-        ...fixture.remoteRecipients[0],
+        ...remoteRecipients[0],
         inboxUrl: "https://user:password@remote.example/users/carol/inbox",
         sharedInboxUrl: undefined,
       }],
