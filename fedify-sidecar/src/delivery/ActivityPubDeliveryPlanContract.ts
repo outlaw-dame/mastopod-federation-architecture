@@ -20,6 +20,14 @@ function isCleanString(value: string): boolean {
   return value.length > 0 && !UNSAFE_TOKEN_PATTERN.test(value);
 }
 
+function assertDenseArray(value: unknown[], label: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, index)) {
+      throw new TypeError(`Cannot ${label} sparse array`);
+    }
+  }
+}
+
 function parseSafeHttpUrl(value: string): URL | null {
   if (!isCleanString(value)) return null;
   try {
@@ -41,7 +49,7 @@ function normalizeDeliveryTargetDomain(value: string): string | null {
 
 function parseDeliveryEndpointUrl(value: string): URL | null {
   const parsed = parseSafeHttpUrl(value);
-  if (!parsed || parsed.hash) return null;
+  if (!parsed || value.includes("#")) return null;
   return normalizeDeliveryTargetDomain(parsed.hostname) ? parsed : null;
 }
 
@@ -264,7 +272,10 @@ export function safeParseActivityPubDeliveryPlanV1(value: unknown) {
 
 export function canonicalizeDeliveryPlanValue(value: unknown): string {
   if (value === null) return "null";
-  if (Array.isArray(value)) return `[${value.map(canonicalizeDeliveryPlanValue).join(",")}]`;
+  if (Array.isArray(value)) {
+    assertDenseArray(value, "canonicalize");
+    return `[${value.map(canonicalizeDeliveryPlanValue).join(",")}]`;
+  }
   switch (typeof value) {
     case "string":
     case "boolean":
