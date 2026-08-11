@@ -157,6 +157,13 @@ export const activityPubDeliveryPlanV1Schema = z
         message: "isPublicActivity must agree with visibility",
       });
     }
+    if (plan.meta.isPublicIndexable === true && !expectedPublic) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["meta", "isPublicIndexable"],
+        message: "private/followers/direct Activities cannot be public-indexable",
+      });
+    }
 
     const localUris = plan.localRecipients.map((target) => target.actorUri);
     const remoteUris = plan.remoteRecipients.map((target) => target.actorUri);
