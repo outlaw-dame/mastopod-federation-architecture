@@ -14,6 +14,7 @@ const PUBLIC_ADDRESSES = new Set([
   "as:Public",
   "Public",
 ]);
+const BLIND_AUDIENCE_KEYS = new Set(["bto", "bcc"]);
 
 function isCleanString(value: string): boolean {
   return value.length > 0 && !UNSAFE_TOKEN_PATTERN.test(value);
@@ -23,11 +24,7 @@ function parseSafeHttpUrl(value: string): URL | null {
   if (!isCleanString(value)) return null;
   try {
     const parsed = new URL(value);
-    if (
-      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
-      parsed.username ||
-      parsed.password
-    ) {
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) {
       return null;
     }
     return parsed;
@@ -52,47 +49,39 @@ const httpUrlSchema = z.string().url().refine(
   (value) => parseSafeHttpUrl(value) !== null,
   "Expected an HTTP(S) URL without credentials, whitespace, or control characters",
 );
-
 const deliveryEndpointUrlSchema = z.string().url().refine(
   (value) => parseDeliveryEndpointUrl(value) !== null,
   "Expected a fragment-free HTTP(S) delivery URL without credentials, whitespace, or control characters",
 );
-
 const cleanOpaqueStringSchema = z.string().min(1).refine(
   isCleanString,
   "Expected a non-empty string without whitespace or control characters",
 );
 
-const localDeliveryTargetSchema = z
-  .object({
-    actorUri: httpUrlSchema,
-    dataset: cleanOpaqueStringSchema,
-    inboxUri: deliveryEndpointUrlSchema,
-  })
-  .strict();
+const localDeliveryTargetSchema = z.object({
+  actorUri: httpUrlSchema,
+  dataset: cleanOpaqueStringSchema,
+  inboxUri: deliveryEndpointUrlSchema,
+}).strict();
 
-const remoteDeliveryTargetSchema = z
-  .object({
-    actorUri: httpUrlSchema,
-    inboxUrl: deliveryEndpointUrlSchema,
-    sharedInboxUrl: deliveryEndpointUrlSchema.optional(),
-    targetDomain: cleanOpaqueStringSchema,
-  })
-  .strict()
-  .superRefine((target, ctx) => {
-    const deliveryUrl = target.sharedInboxUrl ?? target.inboxUrl;
-    const parsedDeliveryUrl = parseDeliveryEndpointUrl(deliveryUrl);
-    if (!parsedDeliveryUrl) return;
-
-    const expectedDomain = normalizeDeliveryTargetDomain(parsedDeliveryUrl.hostname);
-    if (!expectedDomain || target.targetDomain !== expectedDomain) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["targetDomain"],
-        message: `targetDomain must match canonical delivery URL hostname ${expectedDomain ?? "<invalid>"}`,
-      });
-    }
-  });
+const remoteDeliveryTargetSchema = z.object({
+  actorUri: httpUrlSchema,
+  inboxUrl: deliveryEndpointUrlSchema,
+  sharedInboxUrl: deliveryEndpointUrlSchema.optional(),
+  targetDomain: cleanOpaqueStringSchema,
+}).strict().superRefine((target, ctx) => {
+  const deliveryUrl = target.sharedInboxUrl ?? target.inboxUrl;
+  const parsedDeliveryUrl = parseDeliveryEndpointUrl(deliveryUrl);
+  if (!parsedDeliveryUrl) return;
+  const expectedDomain = normalizeDeliveryTargetDomain(parsedDeliveryUrl.hostname);
+  if (!expectedDomain || target.targetDomain !== expectedDomain) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["targetDomain"],
+      message: `targetDomain must match canonical delivery URL hostname ${expectedDomain ?? "<invalid>"}`,
+    });
+  }
+});
 
 function normalizeId(value: unknown): string | null {
   if (typeof value === "string") return value;
@@ -133,14 +122,32 @@ function determineActivityVisibility(activity: Record<string, unknown>): "public
   return "direct";
 }
 
+function hasSenderFollowersAudience(activity: Record<string, unknown>): boolean {
+  const actorUri = normalizeId(activity["actor"]);
+  return Boolean(actorUri && normalizedAddresses(activity["audience"])
+    .some((value) => isActorFollowersAddress(value, actorUri)));
+}
+
 function getExplicitConcreteRecipientUris(activity: Record<string, unknown>): string[] {
   const actorUri = normalizeId(activity["actor"]);
-  const addresses = ["to", "bto", "cc", "bcc"].flatMap((key) => normalizedAddresses(activity[key]));
+  const addresses = ["to", "bto", "cc", "bcc", "audience"]
+    .flatMap((key) => normalizedAddresses(activity[key]));
   return [...new Set(addresses.filter((value) => {
     if (PUBLIC_ADDRESSES.has(value)) return false;
     if (actorUri && isActorFollowersAddress(value, actorUri)) return false;
     return true;
   }))];
+}
+
+function containsBlindAudienceFields(value: unknown, seen = new WeakSet<object>()): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const objectValue = value as object;
+  if (seen.has(objectValue)) return false;
+  seen.add(objectValue);
+  if (Array.isArray(value)) return value.some((item) => containsBlindAudienceFields(item, seen));
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => BLIND_AUDIENCE_KEYS.has(key))) return true;
+  return Object.values(record).some((item) => containsBlindAudienceFields(item, seen));
 }
 
 function computeExpectedIntentId(input: {
@@ -159,118 +166,90 @@ function computeExpectedIntentId(input: {
   return `apdm-v1-${createHash("sha256").update(material).digest("hex")}`;
 }
 
-export const activityPubDeliveryPlanV1Schema = z
-  .object({
-    schema: z.literal(ACTIVITYPUB_DELIVERY_PLAN_SCHEMA),
-    intentId: z.string().regex(APDM_INTENT_ID_PATTERN),
-    activityId: httpUrlSchema,
-    actorUri: httpUrlSchema,
-    activity: z.record(z.unknown()),
-    localRecipients: z.array(localDeliveryTargetSchema),
-    remoteRecipients: z.array(remoteDeliveryTargetSchema),
-    meta: z
-      .object({
-        visibility: z.enum(["public", "unlisted", "followers", "direct"]),
-        isPublicActivity: z.boolean(),
-        isPublicIndexable: z.boolean().optional(),
-        searchConsent: z.record(z.unknown()).nullable().optional(),
-      })
-      .strict(),
-  })
-  .strict()
-  .superRefine((plan, ctx) => {
-    const embeddedActivityId = normalizeId(plan.activity["id"] ?? plan.activity["@id"]);
-    if (embeddedActivityId !== plan.activityId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["activity"],
-        message: "embedded Activity id must match activityId",
-      });
-    }
-
-    const embeddedActorUri = normalizeId(plan.activity["actor"]);
-    if (embeddedActorUri !== plan.actorUri) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["activity"],
-        message: "embedded Activity actor must match actorUri",
-      });
-    }
-
-    const expectedVisibility = determineActivityVisibility(plan.activity);
-    if (plan.meta.visibility !== expectedVisibility) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["meta", "visibility"],
-        message: `visibility must agree with embedded Activity addressing (${expectedVisibility})`,
-      });
-    }
-    const expectedPublic = expectedVisibility === "public" || expectedVisibility === "unlisted";
-    if (plan.meta.isPublicActivity !== expectedPublic) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["meta", "isPublicActivity"],
-        message: "isPublicActivity must agree with visibility",
-      });
-    }
-    if (plan.meta.isPublicIndexable === true && !expectedPublic) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["meta", "isPublicIndexable"],
-        message: "private/followers/direct Activities cannot be public-indexable",
-      });
-    }
-
-    const localUris = plan.localRecipients.map((target) => target.actorUri);
-    const remoteUris = plan.remoteRecipients.map((target) => target.actorUri);
-    if (new Set(localUris).size !== localUris.length) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["localRecipients"],
-        message: "local recipient actorUri values must be unique",
-      });
-    }
-    if (new Set(remoteUris).size !== remoteUris.length) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["remoteRecipients"],
-        message: "remote recipient actorUri values must be unique",
-      });
-    }
-    const localSet = new Set(localUris);
-    if (remoteUris.some((uri) => localSet.has(uri))) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["remoteRecipients"],
-        message: "an actor cannot be both a local and remote recipient",
-      });
-    }
-
-    const plannedRecipients = new Set([...localUris, ...remoteUris]);
-    const omittedExplicitRecipient = getExplicitConcreteRecipientUris(plan.activity)
-      .find((uri) => !plannedRecipients.has(uri));
-    if (omittedExplicitRecipient) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["remoteRecipients"],
-        message: `Delivery Plan omits explicitly addressed recipient ${omittedExplicitRecipient}`,
-      });
-    }
-
-    const expectedIntentId = computeExpectedIntentId({
-      activityId: plan.activityId,
-      actorUri: plan.actorUri,
-      localRecipientUris: localUris,
-      remoteRecipientUris: remoteUris,
+export const activityPubDeliveryPlanV1Schema = z.object({
+  schema: z.literal(ACTIVITYPUB_DELIVERY_PLAN_SCHEMA),
+  intentId: z.string().regex(APDM_INTENT_ID_PATTERN),
+  activityId: httpUrlSchema,
+  actorUri: httpUrlSchema,
+  activity: z.record(z.unknown()),
+  localRecipients: z.array(localDeliveryTargetSchema),
+  remoteRecipients: z.array(remoteDeliveryTargetSchema),
+  meta: z.object({
+    visibility: z.enum(["public", "unlisted", "followers", "direct"]),
+    isPublicActivity: z.boolean(),
+    isPublicIndexable: z.boolean().optional(),
+    searchConsent: z.record(z.unknown()).nullable().optional(),
+  }).strict(),
+}).strict().superRefine((plan, ctx) => {
+  const embeddedActivityId = normalizeId(plan.activity["id"] ?? plan.activity["@id"]);
+  if (embeddedActivityId !== plan.activityId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["activity"], message: "embedded Activity id must match activityId" });
+  }
+  const embeddedActorUri = normalizeId(plan.activity["actor"]);
+  if (embeddedActorUri !== plan.actorUri) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["activity"], message: "embedded Activity actor must match actorUri" });
+  }
+  if (containsBlindAudienceFields(plan.activity)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["activity"],
+      message: "outbound Activity payload must not disclose bto/bcc blind addressing",
     });
-    if (plan.intentId !== expectedIntentId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["intentId"],
-        message: "intentId does not match the canonical Activity/recipient identity",
-      });
-    }
+  }
+  if (hasSenderFollowersAudience(plan.activity)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["activity", "audience"],
+      message: "sender followers in audience require authoritative expansion before external delivery",
+    });
+  }
+
+  const expectedVisibility = determineActivityVisibility(plan.activity);
+  if (plan.meta.visibility !== expectedVisibility) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["meta", "visibility"], message: `visibility must agree with embedded Activity addressing (${expectedVisibility})` });
+  }
+  const expectedPublic = expectedVisibility === "public" || expectedVisibility === "unlisted";
+  if (plan.meta.isPublicActivity !== expectedPublic) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["meta", "isPublicActivity"], message: "isPublicActivity must agree with visibility" });
+  }
+  if (plan.meta.isPublicIndexable === true && !expectedPublic) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["meta", "isPublicIndexable"], message: "private/followers/direct Activities cannot be public-indexable" });
+  }
+
+  const localUris = plan.localRecipients.map((target) => target.actorUri);
+  const remoteUris = plan.remoteRecipients.map((target) => target.actorUri);
+  if (new Set(localUris).size !== localUris.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["localRecipients"], message: "local recipient actorUri values must be unique" });
+  }
+  if (new Set(remoteUris).size !== remoteUris.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["remoteRecipients"], message: "remote recipient actorUri values must be unique" });
+  }
+  const localSet = new Set(localUris);
+  if (remoteUris.some((uri) => localSet.has(uri))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["remoteRecipients"], message: "an actor cannot be both a local and remote recipient" });
+  }
+
+  const plannedRecipients = new Set([...localUris, ...remoteUris]);
+  const omittedExplicitRecipient = getExplicitConcreteRecipientUris(plan.activity)
+    .find((uri) => !plannedRecipients.has(uri));
+  if (omittedExplicitRecipient) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["remoteRecipients"],
+      message: `Delivery Plan omits explicitly addressed recipient ${omittedExplicitRecipient}`,
+    });
+  }
+
+  const expectedIntentId = computeExpectedIntentId({
+    activityId: plan.activityId,
+    actorUri: plan.actorUri,
+    localRecipientUris: localUris,
+    remoteRecipientUris: remoteUris,
   });
+  if (plan.intentId !== expectedIntentId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["intentId"], message: "intentId does not match the canonical Activity/recipient identity" });
+  }
+});
 
 export type ActivityPubDeliveryPlanV1 = z.infer<typeof activityPubDeliveryPlanV1Schema>;
 export type LocalDeliveryTargetV1 = ActivityPubDeliveryPlanV1["localRecipients"][number];
@@ -279,17 +258,13 @@ export type RemoteDeliveryTargetV1 = ActivityPubDeliveryPlanV1["remoteRecipients
 export function parseActivityPubDeliveryPlanV1(value: unknown): ActivityPubDeliveryPlanV1 {
   return activityPubDeliveryPlanV1Schema.parse(value);
 }
-
 export function safeParseActivityPubDeliveryPlanV1(value: unknown) {
   return activityPubDeliveryPlanV1Schema.safeParse(value);
 }
 
 export function canonicalizeDeliveryPlanValue(value: unknown): string {
   if (value === null) return "null";
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalizeDeliveryPlanValue).join(",")}]`;
-  }
-
+  if (Array.isArray(value)) return `[${value.map(canonicalizeDeliveryPlanValue).join(",")}]`;
   switch (typeof value) {
     case "string":
     case "boolean":
@@ -299,14 +274,9 @@ export function canonicalizeDeliveryPlanValue(value: unknown): string {
       return JSON.stringify(value);
     case "object": {
       const prototype = Object.getPrototypeOf(value);
-      if (prototype !== Object.prototype && prototype !== null) {
-        throw new TypeError("Cannot canonicalize non-JSON object");
-      }
+      if (prototype !== Object.prototype && prototype !== null) throw new TypeError("Cannot canonicalize non-JSON object");
       const record = value as Record<string, unknown>;
-      return `{${Object.keys(record)
-        .sort()
-        .map((key) => `${JSON.stringify(key)}:${canonicalizeDeliveryPlanValue(record[key])}`)
-        .join(",")}}`;
+      return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalizeDeliveryPlanValue(record[key])}`).join(",")}}`;
     }
     default:
       throw new TypeError(`Cannot canonicalize unsupported ${typeof value} value`);
