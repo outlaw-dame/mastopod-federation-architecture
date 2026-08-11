@@ -8,10 +8,10 @@ Last updated: 2026-08-11
 |---|---|---|---|
 | APDM-P0 | PR #13 merged | PR #8 merged | PASS |
 | APDM-P1 | PR #14 merged | PR #9 merged | PASS |
-| APDM-P2 | PR #15 merged; hardening PR #22 in review | PR #10 merged; hardening PR #16 in review | HARDENING IN PROGRESS |
+| APDM-P2 | PR #15 merged; hardening PR #22 merged | PR #10 merged; hardening PR #16 in final review | HARDENING CLOSEOUT |
 | APDM-P3 | PR #16 merged; hardening PR #21 merged | PR #11 merged; hardening PR #14 merged | PASS; post-merge hardening complete |
 | APDM-P4 | PR #17 merged | PR #12 merged | PASS |
-| APDM-P5 | not started | not started | blocked by P2 hardening closeout; P4 prerequisites otherwise pass |
+| APDM-P5 | not started | not started | blocked until federation PR #16 closes the P2 hardening gate; P4 prerequisites otherwise pass |
 | APDM-P6 | not started | not started | blocked by P5 |
 | APDM-P7–P13 | not started | as needed | blocked by remote-authority stabilization |
 | APDM-P14 | support as needed | not started | may follow P6; final proof in P15 |
@@ -22,45 +22,50 @@ Last updated: 2026-08-11
 
 - P0: federation PR #8 / ActivityPods PR #13 merged.
 - P1: federation PR #9 / ActivityPods PR #14 merged; strict cross-repo `ap.delivery-plan.v1` contract established.
-- P2 baseline: federation PR #10 / ActivityPods PR #15 merged; pre-`remotePost` native/external strategy seam established with native rollback default. Its post-merge hardening gate is currently reopened by PRs #22/#16 and must close before P5.
+- P2 baseline: federation PR #10 / ActivityPods PR #15 merged; pre-`remotePost` native/external strategy seam established with native rollback default. Post-merge hardening is closing through ActivityPods PR #22 and federation PR #16.
 - P3: federation PR #11 / ActivityPods PR #16 merged; SemApps' already-expanded live local/remote partition is the authoritative Delivery Plan source.
 - P3 post-merge hardening: federation PR #14 / ActivityPods PR #21 merged after Codex-level review; contract semantics, deterministic identity, visibility/privacy invariants, remote endpoint validation, and bounded target resolution were tightened without advancing remote-authority ownership to P5.
 - P4: federation PR #12 / ActivityPods PR #17 merged; durable handoff and crash-safe duplicate suppression are complete.
 
-## Phase 2 post-merge hardening — in progress
+## Phase 2 post-merge hardening — closeout
 
-### ActivityPods interception seam
+### ActivityPods interception seam — complete
 
 PR: `outlaw-dame/activity-pods#22`
-Status: implementation complete on the PR head; final merge/review closeout pending.
+Merge commit: `0759877385c756d5d2a8ba82ceb209b69ee595aa`
 
-Hardening under review:
-- preserve the exact `@semapps/activitypub` 1.1.4 version pin and deep-import checks;
-- verify the installed SemApps outbox still has the critical `getRecipients -> remotePost creation -> activitypub.outbox.posted -> localPost` shape before enabling the adapter;
-- validate suppressed `remotePost` structure synchronously at the intercepted `createJob` boundary so malformed jobs fail before later SemApps outbox events/local delivery can run;
-- require a safe concrete HTTP(S) recipient URI, SemApps-compatible job identity, and concrete Activity ID/actor on every suppressed remote job;
-- verify captured remote/local Activity identity against the Activity returned by the outbox handler;
-- accumulate every `localPost` observation instead of overwriting an earlier call;
-- preserve native `localPost` execution and native-mode rollback behavior;
-- reject empty/ambiguous delivery-mode values rather than silently coercing them;
-- require a boolean external-preview guard rather than truthy coercion;
-- reject malformed, credential-bearing, fragment-bearing handoff URLs, blank tokens, and handoff timeouts that are non-integer or outside 100–60000 ms;
-- prove the ActivityPods adapter still registers the complete SemApps 1.1.4 ActivityPub subservice set exactly once.
+Implemented and verified:
+- the exact `@semapps/activitypub` 1.1.4 version pin and deep-import checks remain enforced;
+- the installed SemApps outbox must retain the critical `getRecipients -> remotePost creation -> activitypub.outbox.posted -> localPost` shape before the adapter will start;
+- suppressed `remotePost` structure is validated synchronously at the intercepted `createJob` boundary so malformed jobs fail before later SemApps outbox events/local delivery can run;
+- every suppressed remote job requires a safe concrete HTTP(S) recipient URI, SemApps-compatible job identity, and concrete Activity identity;
+- captured remote/local Activity identity must agree with the Activity returned by the outbox handler;
+- every `localPost` observation is accumulated rather than overwriting an earlier call;
+- native `localPost` execution and native-mode rollback behavior remain intact;
+- empty/ambiguous delivery-mode values are rejected rather than silently coerced;
+- the external-preview guard must be boolean rather than merely truthy;
+- malformed, credential-bearing, fragment-bearing handoff URLs and blank tokens are rejected;
+- handoff timeouts must be integer milliseconds in the range 100–60000;
+- the ActivityPods adapter is regression-tested to register the complete SemApps 1.1.4 ActivityPub subservice set exactly once.
 
-Current gate evidence:
-- an earlier hardening head passed Backend Checks;
-- Codex found a valid P2 fractional-timeout issue; it was fixed with integer startup validation and regression coverage;
-- a later manual review moved malformed remote-job structural rejection to the intercepted `createJob` call, before downstream outbox effects;
-- the final backend gate and fresh Codex review must pass before this section can be marked complete.
+Final ActivityPods gate evidence:
+- Backend Checks passed on the exact final PR head `24fa4f799d2e7c24d4f3ab7a418f542624b6e306`;
+- dependency installation and backend lockfile-drift check passed;
+- the full stable backend unit lane passed;
+- offline ATProto multibase smoke passed;
+- Codex's P2 fractional-timeout finding was fixed with `Number.isInteger` startup validation and regression coverage;
+- the Codex review thread was resolved only after the fix passed CI;
+- a fresh Codex review on the exact final head reported no major issues;
+- PR #22 was squash-merged as `0759877385c756d5d2a8ba82ceb209b69ee595aa`.
 
-### Federation architecture companion
+### Federation architecture companion — final review
 
 PR: `outlaw-dame/mastopod-federation-architecture#16`
-Status: documentation/review gate in progress; no Fedify runtime change.
+Status: documentation/review closeout; no Fedify runtime change.
 
-The federation side records these ActivityPods interception guarantees as prerequisites for later remote-authority cutover. Phase 4 remains the durable acceptance boundary and Phase 5 remains the explicit production-authority transition.
+The federation side records the ActivityPods interception guarantees above as prerequisites for later remote-authority cutover. Phase 4 remains the durable acceptance boundary and Phase 5 remains the explicit production-authority transition.
 
-P5 is intentionally blocked while this hardening gate is open.
+Codex's P2 finding that the live status ledger incorrectly advertised P2 PASS/P5 unblocked while hardening was still open was addressed by reopening the P2 gate in this authoritative file. The thread was resolved only after that change was verified. This final closeout records the real ActivityPods merge SHA and keeps P5 blocked until PR #16 itself is reviewed and merged.
 
 ## Phase 3 post-merge hardening — complete
 
