@@ -223,7 +223,10 @@ function buildMastodonSql(proof: AttachmentProof): string {
   `;
 }
 
-// Akkoma: PostgreSQL, stores ActivityPub objects in an objects JSONB table
+// Akkoma: PostgreSQL, stores ActivityPub objects in an objects JSONB table.
+// `attachment[].url` is polymorphic in the wild: it may be an array of Link
+// objects, one Link object, or a plain string. Keep all three forms equivalent
+// so the proof does not report a false negative based on representation shape.
 function buildAkkomaSql(proof: AttachmentProof): string {
   const activityId = sqlLiteral(proof.mediaActivityId);
   const objectId = sqlLiteral(proof.mediaObjectId);
@@ -237,14 +240,18 @@ function buildAkkomaSql(proof: AttachmentProof): string {
         COALESCE(o.data->>'id', '') AS object_uri,
         COALESCE(o.data->>'url', '') AS object_url,
         COALESCE(o.data->>'content', '') AS object_content,
+        COALESCE(o.data->>'summary', '') AS object_summary,
         COALESCE(jsonb_array_length(COALESCE(o.data->'attachment', '[]'::jsonb)), 0) AS attachment_count,
         COALESCE(
           MAX(
-            CASE
-              WHEN jsonb_typeof(att.value->'url') = 'array' THEN att.value->'url'->0->>'href'
-              WHEN jsonb_typeof(att.value->'url') = 'object' THEN att.value->'url'->>'href'
-              ELSE NULL
-            END
+            COALESCE(
+              CASE
+                WHEN jsonb_typeof(att.value->'url') = 'array' THEN att.value->'url'->0->>'href'
+                WHEN jsonb_typeof(att.value->'url') = 'object' THEN att.value->'url'->>'href'
+                ELSE NULL
+              END,
+              att.value->>'url'
+            )
           ),
           ''
         ) AS remote_url,
@@ -267,14 +274,18 @@ function buildAkkomaSql(proof: AttachmentProof): string {
       WHERE COALESCE(o.data->>'id', '') IN (${activityId}, ${objectId})
          OR COALESCE(o.data->>'url', '') IN (${activityId}, ${objectId})
          OR COALESCE(o.data->>'content', '') LIKE ${marker}
+         OR COALESCE(o.data->>'summary', '') LIKE ${marker}
          OR EXISTS (
            SELECT 1
            FROM jsonb_array_elements(COALESCE(o.data->'attachment', '[]'::jsonb)) AS attachment(value)
-           WHERE CASE
-             WHEN jsonb_typeof(attachment.value->'url') = 'array' THEN attachment.value->'url'->0->>'href'
-             WHEN jsonb_typeof(attachment.value->'url') = 'object' THEN attachment.value->'url'->>'href'
-             ELSE ''
-           END = ${fixtureUrl}
+           WHERE COALESCE(
+             CASE
+               WHEN jsonb_typeof(attachment.value->'url') = 'array' THEN attachment.value->'url'->0->>'href'
+               WHEN jsonb_typeof(attachment.value->'url') = 'object' THEN attachment.value->'url'->>'href'
+               ELSE NULL
+             END,
+             attachment.value->>'url'
+           ) = ${fixtureUrl}
          )
       GROUP BY o.id, o.data, o.inserted_at
     )
@@ -283,7 +294,7 @@ function buildAkkomaSql(proof: AttachmentProof): string {
       object_uri,
       object_url,
       object_content,
-      object_content,
+      object_summary,
       attachment_count,
       remote_url,
       file_content_type,
