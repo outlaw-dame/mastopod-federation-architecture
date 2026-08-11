@@ -126,6 +126,46 @@ describe("APDM Phase 1 consumer hardening", () => {
     expect(safeParseActivityPubDeliveryPlanV1(nested).success).toBe(false);
   });
 
+  it("rejects expanded and inline-aliased ActivityStreams blind properties", () => {
+    const expanded = clone(loadFixture());
+    (expanded["activity"] as Record<string, unknown>)["https://www.w3.org/ns/activitystreams#bcc"] = [
+      "https://remote.example/users/carol",
+    ];
+    expect(safeParseActivityPubDeliveryPlanV1(expanded).success).toBe(false);
+
+    const aliased = clone(loadFixture());
+    const activity = aliased["activity"] as Record<string, unknown>;
+    activity["@context"] = [
+      activity["@context"],
+      {
+        asx: "https://www.w3.org/ns/activitystreams#",
+        hiddenRecipients: "asx:bto",
+      },
+    ];
+    activity["hiddenRecipients"] = ["https://remote.example/users/carol"];
+    expect(safeParseActivityPubDeliveryPlanV1(aliased).success).toBe(false);
+  });
+
+  it("includes expanded and inline-aliased recipient properties in completeness checks", () => {
+    const expanded = clone(loadFixture());
+    (expanded["activity"] as Record<string, unknown>)["https://www.w3.org/ns/activitystreams#cc"] = [
+      "https://remote.example/users/missing",
+    ];
+    expect(safeParseActivityPubDeliveryPlanV1(expanded).success).toBe(false);
+
+    const aliased = clone(loadFixture());
+    const activity = aliased["activity"] as Record<string, unknown>;
+    activity["@context"] = [
+      activity["@context"],
+      {
+        asx: "https://www.w3.org/ns/activitystreams#",
+        intendedFor: { "@id": "asx:to" },
+      },
+    ];
+    activity["intendedFor"] = ["https://remote.example/users/missing"];
+    expect(safeParseActivityPubDeliveryPlanV1(aliased).success).toBe(false);
+  });
+
   it("requires concrete audience recipients to be planned and fails closed on sender-followers audience", () => {
     const omittedAudience = clone(loadFixture());
     (omittedAudience["activity"] as Record<string, unknown>)["audience"] = [
