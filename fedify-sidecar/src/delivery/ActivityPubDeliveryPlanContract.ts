@@ -133,6 +133,16 @@ function determineActivityVisibility(activity: Record<string, unknown>): "public
   return "direct";
 }
 
+function getExplicitConcreteRecipientUris(activity: Record<string, unknown>): string[] {
+  const actorUri = normalizeId(activity["actor"]);
+  const addresses = ["to", "bto", "cc", "bcc"].flatMap((key) => normalizedAddresses(activity[key]));
+  return [...new Set(addresses.filter((value) => {
+    if (PUBLIC_ADDRESSES.has(value)) return false;
+    if (actorUri && isActorFollowersAddress(value, actorUri)) return false;
+    return true;
+  }))];
+}
+
 function computeExpectedIntentId(input: {
   activityId: string;
   actorUri: string;
@@ -233,6 +243,17 @@ export const activityPubDeliveryPlanV1Schema = z
         code: z.ZodIssueCode.custom,
         path: ["remoteRecipients"],
         message: "an actor cannot be both a local and remote recipient",
+      });
+    }
+
+    const plannedRecipients = new Set([...localUris, ...remoteUris]);
+    const omittedExplicitRecipient = getExplicitConcreteRecipientUris(plan.activity)
+      .find((uri) => !plannedRecipients.has(uri));
+    if (omittedExplicitRecipient) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["remoteRecipients"],
+        message: `Delivery Plan omits explicitly addressed recipient ${omittedExplicitRecipient}`,
       });
     }
 
