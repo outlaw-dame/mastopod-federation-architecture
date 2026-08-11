@@ -10,7 +10,7 @@ Last updated: 2026-08-10
 | APDM-P1 | PR #14 merged | PR #9 merged | PASS |
 | APDM-P2 | PR #15 merged | PR #10 merged | PASS |
 | APDM-P3 | PR #16 merged | PR #11 merged | PASS |
-| APDM-P4 | implementation/testing | idempotency proof/testing | pending crash/recovery proof, CI, review |
+| APDM-P4 | durable handoff + reconciliation implemented | duplicate-execution proof implemented | pending CI/final review |
 | APDM-P5 | not started | not started | blocked by P4 |
 | APDM-P6 | not started | not started | blocked by P5 |
 | APDM-P7–P13 | not started | as needed | blocked by remote-authority stabilization |
@@ -25,58 +25,83 @@ Last updated: 2026-08-10
 - P2: federation PR #10 / ActivityPods PR #15 merged; pre-`remotePost` native/external strategy seam established with native rollback default.
 - P3: federation PR #11 / ActivityPods PR #16 merged; SemApps' already-expanded local/remote partition is now the authoritative Delivery Plan source.
 
-Phase 3 gate evidence:
-- ActivityPods Backend checks: PASS, including full unit suite and offline ATProto multibase smoke.
-- Fedify Sidecar Fast Checks: PASS.
-- AP Interop Smoke: PASS.
-- no unresolved substantive review threads.
-- paired followers-only producer/consumer fixture accepted in both repositories.
-
-## Phase 4 — in progress
+## Phase 4 — implementation complete, gate pending
 
 ### APDM-P4-A — ActivityPods durable producer handoff
 
 Branch: `apdm/phase-4-durable-handoff`
 
-Implemented so far:
-- adds a dedicated `deliveryHandoff` Bull queue on the strategy-aware SemApps outbox service;
-- external preview requires a real `SEMAPPS_QUEUE_SERVICE_URL`; FakeQueue/in-memory fallback is rejected for durable handoff;
-- the outbox action awaits Bull insertion before returning;
-- the stable Delivery Plan `intentId` is used as the Bull job ID;
-- queue processor maps authoritative `ap.delivery-plan.v1` remote targets to the sidecar's existing validated `/webhook/outbox` contract;
-- the stable Delivery Plan ID and schema are preserved in event metadata;
-- handoff worker throws on network/non-2xx/invalid acknowledgement so Bull retry/backoff owns recovery;
-- worker accepts success only when the sidecar reports `accepted: true`, which occurs after Redis Streams `XADD` succeeds;
-- the former P3 routing event name is no longer emitted, preventing the best-effort `outbox-emitter` listener from racing a second sidecar HTTP submission;
-- native mode remains unchanged and production remote-authority cutover remains blocked until P5.
+Implemented:
+- dedicated `deliveryHandoff` Bull queue on the strategy-aware SemApps outbox service;
+- external mode fails at service construction/startup unless the explicit migration guard, real `SEMAPPS_QUEUE_SERVICE_URL`, valid HTTP(S) handoff URL, and `SIDECAR_TOKEN` are present;
+- FakeQueue/in-memory fallback is forbidden in external mode;
+- the outbox action awaits Bull insertion before reporting successful handoff enqueue;
+- the deterministic Delivery Plan `intentId` is the Bull job ID;
+- an internal `activitypub.outbox.enqueueDeliveryHandoff` action lets reconciliation use exactly the same enqueue/idempotency path as live posts;
+- queue processor maps authoritative `ap.delivery-plan.v1` remote targets to the existing sidecar `/webhook/outbox` contract;
+- sidecar acceptance is considered durable only for HTTP 202 with `accepted: true` and a sidecar intent ID;
+- network errors, 200/other non-202 responses, malformed JSON, and incomplete acknowledgements fail the Bull job so retry/backoff remains authoritative;
+- stable APDM intent ID/schema stay in webhook metadata and `X-APDM-Intent-Id`;
+- the old P3 routing event is not emitted; P4's `handoff-queued` event is observation-only and cannot trigger a second sidecar HTTP submission;
+- native SemApps delivery remains unchanged and available as rollback until P5.
+
+### Cross-store reconciliation
+
+Fuseki persistence and Redis/Bull insertion are separate durability domains. P4 handles the process-crash window explicitly instead of pretending they are transactional.
+
+`activitypub-delivery-reconciler`:
+- runs only while APDM external mode is enabled;
+- enumerates non-tombstoned ActivityPods accounts with bounded account concurrency;
+- resolves each local actor's authoritative outbox and performs read-only SPARQL over the pod dataset for a bounded set of newest persisted Activities;
+- refetches each Activity through SemApps and applies the configurable lookback cutoff in application code, avoiding assumptions about RDF date datatype representation;
+- reruns exact SemApps `activitypub.activity.getRecipients` collection expansion;
+- reclassifies local/remote recipients using the same provider boundary;
+- rebuilds `ap.delivery-plan.v1` with the same deterministic intent algorithm;
+- calls `activitypub.outbox.enqueueDeliveryHandoff`, therefore recreating the same Bull job ID if the original process died before queue insertion;
+- skips local-only Activities;
+- prevents overlapping reconciliation runs;
+- exposes cumulative `getStats` counters for runs, accounts/activities scanned, handoffs requeued, failures, timestamps, and last error.
 
 Producer tests cover:
-- queue configuration fail-closed behavior;
-- Delivery Plan -> sidecar webhook mapping;
+- startup/config fail-fast behavior, including FakeQueue rejection;
+- Delivery Plan -> sidecar mapping;
 - stable Bull job IDs;
-- awaiting queue insertion before action success;
+- waiting for queue insertion;
 - insertion failure propagation;
-- 202 durable acknowledgement handling;
-- non-2xx retry behavior;
-- invalid acknowledgement rejection;
+- strict HTTP 202 durable acknowledgement semantics;
+- generic 200/non-202 retry behavior;
+- malformed/incomplete acknowledgement rejection;
+- deterministic recipient-order-independent intent IDs;
 - concurrent request isolation;
+- persisted-Activity reconciliation;
+- repeated reconciliation producing the same intent ID;
+- local-only reconciliation suppression;
+- overlap suppression and reconciliation counters;
 - preservation of native mode.
 
 ### APDM-P4-F — sidecar durable acceptance/idempotency proof
 
 Branch: `apdm/phase-4-durable-handoff`
 
-The current sidecar webhook already calls `queue.enqueueOutboxIntent(intent)` before sending HTTP 202, so its acknowledgement is after Redis Stream acceptance. The existing outbox-intent and outbound workers provide two additional recovery/idempotency layers:
-- Redis Streams consumer-group pending-message recovery;
-- deterministic outbound `jobId = activityId::deliveryUrl` plus `checkIdempotency()` before remote HTTP execution.
+The existing sidecar webhook calls `queue.enqueueOutboxIntent(intent)` before HTTP 202, so acknowledgement occurs after Redis Streams `XADD`. P4 carries the stable Delivery Plan ID in metadata even though the legacy webhook currently creates its own sidecar intent record ID.
 
-P4 adds tests proving that two separately accepted sidecar intents for the same Activity/target derive the same outbound job ID and that a duplicate outbound job is acknowledged without a second remote delivery.
+P4 tests prove the important execution invariant despite response-loss retries:
+- separately accepted sidecar intent records for one Activity/target derive the same deterministic outbound `jobId = activityId::deliveryUrl`;
+- the stable `deliveryPlanIntentId` survives into outbound metadata;
+- `OutboundWorker.checkIdempotency()` runs before remote HTTP;
+- a duplicate outbound job is acknowledged without a second delivery.
 
-### P4 gate still open: cross-store crash window
+Existing sidecar delivery metrics already include duplicate-delivery suppression (`deliveryDuplicatesSkipped`), while ActivityPods exposes reconciliation counters through the reconciler service.
 
-Activity persistence is authoritative in Fuseki/RDF while the producer retry job is durable in Redis/Bull. These are separate stores. The current branch closes the loss window **after Bull insertion**, but an abrupt process failure after Activity persistence and before Bull insertion is not yet proven recoverable.
+### Remaining Phase 4 gate
 
-P4 MUST NOT be marked complete until this cross-store gap is handled by an explicit recovery/reconciliation mechanism (or an equivalently strong proof) and crash-point tests demonstrate that persisted activities cannot permanently lose their remote handoff.
+P4 MUST NOT merge until:
+- ActivityPods full backend unit suite passes;
+- ActivityPods offline ATProto smoke passes;
+- federation Fast Checks pass, including `DurableHandoffIdempotency.test.ts`;
+- AP Interop Smoke passes;
+- final manual diff review finds no unresolved correctness/security issues;
+- review threads/comments, if any, are addressed.
 
 ## Verified baseline carried forward
 
@@ -90,6 +115,6 @@ P4 MUST NOT be marked complete until this cross-store gap is handled by an expli
 ## Open measurements (not architecture blockers)
 
 - measured nested Tier 1 operation count behind the source-counted top-level local fan-out calls;
-- runtime duplicate-HTTP frequency while native and sidecar paths coexist.
+- runtime duplicate-HTTP frequency while native and sidecar paths coexist before P5 cutover.
 
 These measurements remain scheduled for later APDM phases.
