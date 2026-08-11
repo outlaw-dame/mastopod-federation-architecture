@@ -11,13 +11,13 @@
     "activityId": {
       "type": "string",
       "format": "uri",
-      "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s\\u0000-\\u001F\\u007F]+$",
       "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" }
     },
     "actorUri": {
       "type": "string",
       "format": "uri",
-      "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s\\u0000-\\u001F\\u007F]+$",
       "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" }
     },
     "activity": { "type": "object" },
@@ -31,14 +31,18 @@
           "actorUri": {
             "type": "string",
             "format": "uri",
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s\\u0000-\\u001F\\u007F]+$",
             "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" }
           },
-          "dataset": { "type": "string", "minLength": 1 },
+          "dataset": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\s\\u0000-\\u001F\\u007F]+$"
+          },
           "inboxUri": {
             "type": "string",
             "format": "uri",
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s\\u0000-\\u001F\\u007F]+$",
             "allOf": [
               { "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" } },
               { "not": { "pattern": "#" } }
@@ -57,13 +61,13 @@
           "actorUri": {
             "type": "string",
             "format": "uri",
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s\\u0000-\\u001F\\u007F]+$",
             "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" }
           },
           "inboxUrl": {
             "type": "string",
             "format": "uri",
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s\\u0000-\\u001F\\u007F]+$",
             "allOf": [
               { "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" } },
               { "not": { "pattern": "#" } }
@@ -72,7 +76,7 @@
           "sharedInboxUrl": {
             "type": "string",
             "format": "uri",
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://\\S+$",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s\\u0000-\\u001F\\u007F]+$",
             "allOf": [
               { "not": { "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]*@" } },
               { "not": { "pattern": "#" } }
@@ -81,7 +85,7 @@
           "targetDomain": {
             "type": "string",
             "minLength": 1,
-            "pattern": "^\\S+$",
+            "pattern": "^[^\\s\\u0000-\\u001F\\u007F]+$",
             "not": {
               "anyOf": [
                 { "pattern": "[A-Z]" },
