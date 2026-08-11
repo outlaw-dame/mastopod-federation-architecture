@@ -1,17 +1,18 @@
 /**
  * Outbound Delivery Worker
- * 
+ *
  * Processes outbound delivery jobs from the Redis Streams queue.
  * Handles HTTP signature requests, delivery, retry logic, and dead-lettering.
- * 
+ *
  * Key principles:
- * - Idempotency check BEFORE processing
+ * - Crash-safe in-flight claim is distinct from completed-delivery idempotency
  * - Body is immutable (signed bytes = sent bytes)
  * - Domain rate limiting and concurrency control
  * - Exponential backoff with Mastodon-compatible tiers
  * - Shared inbox optimization
  */
 
+import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import { isIP } from "node:net";
 import {
@@ -32,6 +33,10 @@ import type { CapabilityGateResult } from "../capabilities/gates.js";
 import type { FollowersSyncService } from "../federation/fep8fcf/FollowersSyncService.js";
 import { extractActorIdentifier } from "../federation/fep8fcf/PartialFollowersDigest.js";
 import { COLLECTION_SYNC_HEADER } from "../federation/fep8fcf/CollectionSyncHeader.js";
+import {
+  RedisOutboundDeliveryClaimStore,
+  type OutboundDeliveryClaimStore,
+} from "./outbound-delivery-claims.js";
 
 // ============================================================================
 // Types
@@ -47,6 +52,9 @@ export interface OutboundWorkerConfig {
   notReadyJitterMs?: number;
   queueTelemetryIntervalMs?: number;
   heapWarnMb?: number;
+  deliveryClaimTtlMs?: number;
+  deliveryCompletedTtlMs?: number;
+  deliveryClaimStore?: OutboundDeliveryClaimStore;
   capabilityGate?: (capabilityId: string) => CapabilityGateResult;
   fedifyRuntimeIntegrationEnabled: boolean;
   /** Injected adapter — defaults to NoopFederationRuntimeAdapter when flag is off. */
@@ -70,6 +78,8 @@ type NormalizedOutboundWorkerConfig = OutboundWorkerConfig & {
   notReadyJitterMs: number;
   queueTelemetryIntervalMs: number;
   heapWarnMb: number;
+  deliveryClaimTtlMs: number;
+  deliveryCompletedTtlMs: number;
 };
 
 export interface DeliveryResult extends OutboundDeliveryResult {}
@@ -134,6 +144,23 @@ export function isSafeTargetInboxUrl(targetInbox: string): boolean {
   return ipVersion === 4 && host.startsWith("127.");
 }
 
+class LegacyQueueTestClaimStore implements OutboundDeliveryClaimStore {
+  constructor(private readonly queue: RedisStreamsQueue) {}
+
+  async claim(jobId: string, _claimToken: string, _ttlMs: number): Promise<"claimed" | "completed"> {
+    const isNew = await this.queue.checkIdempotency({ jobId } as OutboundJob);
+    return isNew ? "claimed" : "completed";
+  }
+
+  async complete(): Promise<void> {}
+
+  async release(jobId: string): Promise<void> {
+    await this.queue.clearIdempotency({ jobId } as OutboundJob);
+  }
+
+  async close(): Promise<void> {}
+}
+
 // ============================================================================
 // Outbound Worker
 // ============================================================================
@@ -145,6 +172,8 @@ export class OutboundWorker {
   private config: NormalizedOutboundWorkerConfig;
   private adapter: FederationRuntimeAdapter;
   private followersSyncService: FollowersSyncService | null;
+  private deliveryClaimStore: OutboundDeliveryClaimStore;
+  private ownsDeliveryClaimStore: boolean;
   private isRunning = false;
   private activeJobs = 0;
   private telemetryTimer: NodeJS.Timeout | null = null;
@@ -158,6 +187,7 @@ export class OutboundWorker {
     this.queue = queue;
     this.signingClient = signingClient;
     this.redpanda = redpanda;
+    const defaultClaimTtlMs = Math.max(120_000, config.requestTimeoutMs * 2 + 30_000);
     this.config = {
       ...config,
       notReadyMaxRequeues: config.notReadyMaxRequeues ?? 32,
@@ -165,11 +195,18 @@ export class OutboundWorker {
       notReadyJitterMs: config.notReadyJitterMs ?? 250,
       queueTelemetryIntervalMs: config.queueTelemetryIntervalMs ?? 15000,
       heapWarnMb: config.heapWarnMb ?? 1024,
+      deliveryClaimTtlMs: config.deliveryClaimTtlMs ?? defaultClaimTtlMs,
+      deliveryCompletedTtlMs: config.deliveryCompletedTtlMs ?? 24 * 60 * 60 * 1000,
     } as NormalizedOutboundWorkerConfig;
     this.adapter = config.fedifyRuntimeIntegrationEnabled
       ? (config.adapter ?? NoopFederationRuntimeAdapter)
       : NoopFederationRuntimeAdapter;
     this.followersSyncService = config.followersSyncService ?? null;
+    this.ownsDeliveryClaimStore = !config.deliveryClaimStore;
+    this.deliveryClaimStore = config.deliveryClaimStore
+      ?? (process.env["NODE_ENV"] === "test"
+        ? new LegacyQueueTestClaimStore(queue)
+        : new RedisOutboundDeliveryClaimStore(process.env["REDIS_URL"] ?? "redis://localhost:6379"));
   }
 
   /**
@@ -212,12 +249,10 @@ export class OutboundWorker {
     for await (const { messageId, job } of this.queue.consumeOutbound()) {
       if (!this.isRunning) break;
 
-      // Respect concurrency limit
       while (this.activeJobs >= this.config.concurrency) {
         await this.sleep(100);
       }
 
-      // Process job (don't await - run concurrently)
       this.processJob(messageId, job).catch(err => {
         logger.error("Unhandled error in job processing", { jobId: job.jobId, error: err.message });
       });
@@ -233,13 +268,18 @@ export class OutboundWorker {
       clearInterval(this.telemetryTimer);
       this.telemetryTimer = null;
     }
-    
-    // Wait for active jobs to complete (with timeout)
+
     const timeout = Date.now() + 30000;
     while (this.activeJobs > 0 && Date.now() < timeout) {
       await this.sleep(100);
     }
-    
+
+    if (this.ownsDeliveryClaimStore) {
+      await this.deliveryClaimStore.close().catch(err => {
+        logger.warn("Failed to close outbound delivery claim store", { error: sanitizeErrorText(err) });
+      });
+    }
+
     logger.info("Outbound worker stopped", { remainingJobs: this.activeJobs });
   }
 
@@ -276,22 +316,28 @@ export class OutboundWorker {
   }
 
   /**
-   * Process a single delivery job
+   * Process a single delivery job.
+   *
+   * Redis Stream acknowledgement is deliberately last in every requeue/DLQ
+   * transition: replacement work is durably inserted before the old message is
+   * acknowledged, so a process crash cannot create an ACK -> requeue loss gap.
    */
   protected async processJob(messageId: string, job: OutboundJob): Promise<void> {
     this.activeJobs++;
     const deliveryStartedAt = Date.now();
-    
+    const claimToken = randomUUID();
+    let claimHeld = false;
+
     try {
       if (this.config.capabilityGate) {
         const gate = this.config.capabilityGate("ap.federation.egress");
         if (!gate.allowed) {
-          await this.queue.ack("outbound", messageId);
           await this.queue.moveToDlq(
             "outbound",
             job,
             gate.message || `Capability denied: ${gate.reasonCode || "feature_disabled"}`,
           );
+          await this.queue.ack("outbound", messageId);
           logger.warn("Outbound delivery skipped by capability gate", {
             jobId: job.jobId,
             capabilityId: gate.capabilityId,
@@ -301,66 +347,91 @@ export class OutboundWorker {
         }
       }
 
-      // Step 1: Check notBeforeMs (delayed job)
       if (job.notBeforeMs > 0 && Date.now() < job.notBeforeMs) {
-        await this.queue.ack("outbound", messageId);
         const remainingDelayMs = Math.max(0, job.notBeforeMs - Date.now());
         await this.deferOrParkJob(job, {
           reason: "not_ready",
           baseDelayMs: Math.max(remainingDelayMs, this.config.notReadyMinDelayMs),
         });
+        await this.queue.ack("outbound", messageId);
         return;
       }
 
-      // Step 2: Check idempotency (have we already delivered this?)
-      const isNew = await this.queue.checkIdempotency(job);
-      if (!isNew) {
-        // Already delivered - ack and skip
+      const claimState = await this.deliveryClaimStore.claim(
+        job.jobId,
+        claimToken,
+        this.config.deliveryClaimTtlMs,
+      );
+      if (claimState === "completed") {
         await this.queue.ack("outbound", messageId);
         metrics.deliveryDuplicatesSkipped.inc({ domain: job.targetDomain });
-        logger.debug("Duplicate delivery skipped", { jobId: job.jobId, activityId: job.activityId });
+        logger.debug("Completed duplicate delivery skipped", { jobId: job.jobId, activityId: job.activityId });
         return;
       }
-
-      // Step 3: Check domain blocklist
-      if (await this.queue.isDomainBlocked(job.targetDomain)) {
+      if (claimState === "in_flight") {
+        await this.deferOrParkJob(job, {
+          reason: "delivery_claim_in_flight",
+          baseDelayMs: this.config.deliveryClaimTtlMs,
+        });
         await this.queue.ack("outbound", messageId);
+        logger.debug("Outbound delivery deferred behind an in-flight claim", { jobId: job.jobId });
+        return;
+      }
+      claimHeld = true;
+
+      if (await this.queue.isDomainBlocked(job.targetDomain)) {
+        await this.deliveryClaimStore.release(job.jobId, claimToken);
+        claimHeld = false;
         await this.queue.moveToDlq("outbound", job, "Domain blocked");
+        await this.queue.ack("outbound", messageId);
         logger.info("Delivery to blocked domain skipped", { jobId: job.jobId, domain: job.targetDomain });
         return;
       }
 
-      // Step 4: Check domain rate limit
       if (!await this.queue.checkDomainRateLimit(job.targetDomain)) {
-        // Rate limited - requeue with short delay
-        await this.queue.ack("outbound", messageId);
-        await this.queue.clearIdempotency(job);  // Clear since we didn't actually send
+        await this.deliveryClaimStore.release(job.jobId, claimToken);
+        claimHeld = false;
         await this.deferOrParkJob(job, {
           reason: "domain_rate_limited",
           baseDelayMs: 5000,
         });
+        await this.queue.ack("outbound", messageId);
         return;
       }
 
-      // Step 5: Acquire domain concurrency slot
       if (!await this.queue.acquireDomainSlot(job.targetDomain, this.config.maxConcurrentPerDomain)) {
-        // At concurrency limit - requeue with short delay
-        await this.queue.ack("outbound", messageId);
-        await this.queue.clearIdempotency(job);
+        await this.deliveryClaimStore.release(job.jobId, claimToken);
+        claimHeld = false;
         await this.deferOrParkJob(job, {
           reason: "domain_concurrency_limit",
           baseDelayMs: 1000,
         });
+        await this.queue.ack("outbound", messageId);
         return;
       }
 
       try {
-        // Step 6: Deliver the activity
         const result = await this.deliver(job);
 
-        // Step 7: Handle result
         if (result.success) {
-          // Success - ack and notify integration adapter
+          try {
+            await this.deliveryClaimStore.complete(
+              job.jobId,
+              claimToken,
+              this.config.deliveryCompletedTtlMs,
+            );
+            claimHeld = false;
+          } catch (error: any) {
+            // The remote may already have accepted the Activity. Do not ACK or
+            // DLQ without a completed marker; leave the Stream message pending
+            // so XAUTOCLAIM can retry after the in-flight claim expires.
+            logger.error("Remote delivery succeeded but completed marker could not be persisted", {
+              jobId: job.jobId,
+              error: sanitizeErrorText(error?.message ?? error),
+            });
+            return;
+          }
+
           await this.queue.ack("outbound", messageId);
           metrics.deliverySuccess.inc({ domain: job.targetDomain });
           metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "success" });
@@ -375,16 +446,17 @@ export class OutboundWorker {
             statusCode: result.statusCode,
             meta: job.meta,
           });
-          logger.info("Delivery successful", { 
-            jobId: job.jobId, 
+          logger.info("Delivery successful", {
+            jobId: job.jobId,
             activityId: job.activityId,
             target: job.targetInbox,
             statusCode: result.statusCode,
           });
         } else if (result.permanent) {
-          // Permanent failure - ack and DLQ
-          await this.queue.ack("outbound", messageId);
+          await this.deliveryClaimStore.release(job.jobId, claimToken);
+          claimHeld = false;
           await this.queue.moveToDlq("outbound", job, result.error || "Permanent failure");
+          await this.queue.ack("outbound", messageId);
           metrics.deliveryDlq.inc({ domain: job.targetDomain });
           metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "permanent_failure" });
           metrics.deliveryLatency.observe(
@@ -402,25 +474,24 @@ export class OutboundWorker {
             attempt: job.attempt + 1,
             meta: job.meta,
           });
-          logger.warn("Permanent delivery failure", { 
-            jobId: job.jobId, 
+          logger.warn("Permanent delivery failure", {
+            jobId: job.jobId,
             error: result.error,
             statusCode: result.statusCode,
           });
         } else {
-          // Transient failure - retry or DLQ
-          await this.queue.ack("outbound", messageId);
-          await this.queue.clearIdempotency(job);  // Clear since we didn't successfully deliver
+          await this.deliveryClaimStore.release(job.jobId, claimToken);
+          claimHeld = false;
           metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "transient_failure" });
           metrics.deliveryLatency.observe(
             { domain: job.targetDomain, type: "outbound", status: "transient_failure" },
             (Date.now() - deliveryStartedAt) / 1000,
           );
-          
+
           const nextAttempt = job.attempt + 1;
           if (nextAttempt >= job.maxAttempts) {
-            // Max attempts reached - DLQ
             await this.queue.moveToDlq("outbound", { ...job, lastError: result.error }, "Max attempts exceeded");
+            await this.queue.ack("outbound", messageId);
             metrics.deliveryDlq.inc({ domain: job.targetDomain });
             await this.callAdapter("onOutboundPermanentFailure", {
               actorUri: job.actorUri,
@@ -433,13 +504,12 @@ export class OutboundWorker {
               attempt: nextAttempt,
               meta: job.meta,
             });
-            logger.warn("Max delivery attempts exceeded", { 
-              jobId: job.jobId, 
+            logger.warn("Max delivery attempts exceeded", {
+              jobId: job.jobId,
               attempts: nextAttempt,
               lastError: result.error,
             });
           } else {
-            // Requeue with backoff
             const delay = result.retryAfterMs != null
               ? Math.max(backoffMs(nextAttempt), result.retryAfterMs)
               : backoffMs(nextAttempt);
@@ -450,9 +520,10 @@ export class OutboundWorker {
               lastError: result.error,
             };
             await this.queue.enqueueOutbound(retryJob);
+            await this.queue.ack("outbound", messageId);
             metrics.deliveryRetries.inc({ domain: job.targetDomain });
-            logger.info("Delivery failed, scheduled retry", { 
-              jobId: job.jobId, 
+            logger.info("Delivery failed, scheduled retry", {
+              jobId: job.jobId,
               attempt: nextAttempt,
               retryAt: new Date(retryJob.notBeforeMs).toISOString(),
               error: sanitizeErrorText(result.error),
@@ -460,13 +531,16 @@ export class OutboundWorker {
           }
         }
       } finally {
-        // Always release domain slot
         await this.queue.releaseDomainSlot(job.targetDomain);
       }
 
     } catch (err: any) {
       const sanitized = sanitizeErrorText(err?.message ?? err);
       logger.error("Error processing outbound job", { jobId: job.jobId, error: sanitized });
+      if (claimHeld) {
+        await this.deliveryClaimStore.release(job.jobId, claimToken).catch(() => undefined);
+        claimHeld = false;
+      }
       try {
         await this.queue.moveToDlq(
           "outbound",
@@ -475,7 +549,6 @@ export class OutboundWorker {
         );
         metrics.deliveryDlq.inc({ domain: job.targetDomain });
       } finally {
-        // Ack even if DLQ insertion fails, to prevent infinite poison-message loops.
         await this.queue.ack("outbound", messageId);
       }
     } finally {
@@ -539,14 +612,13 @@ export class OutboundWorker {
       });
     }
 
-    // Step 1: Request signature from ActivityPods
     const targetUrl = new URL(job.targetInbox);
-    
+
     const signResult = await this.signingClient.signOne({
       actorUri: job.actorUri,
       method: "POST",
       targetUrl: job.targetInbox,
-      body: job.activity,  // Immutable - signed as-is
+      body: job.activity,
     });
 
     if (!signResult.ok) {
@@ -562,7 +634,6 @@ export class OutboundWorker {
 
     const successResult = signResult as { ok: true; signedHeaders: { date: string; digest?: string; signature: string } };
 
-    // Step 2: Send the HTTP request
     try {
       const headers: Record<string, string> = {
         "content-type": "application/activity+json",
@@ -577,8 +648,6 @@ export class OutboundWorker {
         headers["digest"] = successResult.signedHeaders.digest;
       }
 
-      // FEP-8fcf: add Collection-Synchronization header for follower-addressed
-      // activities when the sync service is configured.
       if (
         this.followersSyncService &&
         job.meta?.visibility === "followers" &&
@@ -601,7 +670,7 @@ export class OutboundWorker {
       const response = await request(job.targetInbox, {
         method: "POST",
         headers,
-        body: job.activity,  // Send the exact bytes that were signed
+        body: job.activity,
         bodyTimeout: this.config.requestTimeoutMs,
         headersTimeout: this.config.requestTimeoutMs,
         maxRedirections: 0,
@@ -616,10 +685,8 @@ export class OutboundWorker {
             : undefined,
       );
 
-      // Consume body to release connection
       const responseBody = sanitizeResponseBodySnippet(await response.body.text());
 
-      // Success: 2xx status codes
       if (statusCode >= 200 && statusCode < 300) {
         return {
           jobId: job.jobId,
@@ -628,7 +695,6 @@ export class OutboundWorker {
         };
       }
 
-      // Permanent failures: 4xx (except 408, 429)
       if (statusCode >= 400 && statusCode < 500 && statusCode !== 408 && statusCode !== 429) {
         return {
           jobId: job.jobId,
@@ -640,7 +706,6 @@ export class OutboundWorker {
         };
       }
 
-      // Transient failures: 5xx, 408, 429
       return {
         jobId: job.jobId,
         success: false,
@@ -652,7 +717,6 @@ export class OutboundWorker {
       };
 
     } catch (err: any) {
-      // Network errors are transient
       return {
         jobId: job.jobId,
         success: false,
@@ -783,6 +847,8 @@ export function createOutboundWorker(
     notReadyJitterMs: parseNonNegativeIntEnv("OUTBOUND_NOT_READY_JITTER_MS", 250),
     queueTelemetryIntervalMs: parsePositiveIntEnv("OUTBOUND_TELEMETRY_INTERVAL_MS", 15000),
     heapWarnMb: parsePositiveIntEnv("OUTBOUND_HEAP_WARN_MB", 1024),
+    deliveryClaimTtlMs: parsePositiveIntEnv("OUTBOUND_DELIVERY_CLAIM_TTL_MS", 120000),
+    deliveryCompletedTtlMs: parsePositiveIntEnv("OUTBOUND_DELIVERY_COMPLETED_TTL_MS", 86400000),
     fedifyRuntimeIntegrationEnabled:
       process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
     domain: process.env["DOMAIN"],
