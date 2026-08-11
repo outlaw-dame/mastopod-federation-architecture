@@ -9,12 +9,18 @@ export const ACTIVITYPUB_DELIVERY_PLAN_JSON_SCHEMA_SHA256 =
 
 const APDM_INTENT_ID_PATTERN = /^apdm-v1-[a-f0-9]{64}$/u;
 const UNSAFE_TOKEN_PATTERN = /[\s\u0000-\u001f\u007f]/u;
+const ACTIVITYSTREAMS_NAMESPACE = "https://www.w3.org/ns/activitystreams#";
+const ADDRESSING_TERMS = new Set(["to", "bto", "cc", "bcc", "audience"]);
 const PUBLIC_ADDRESSES = new Set([
-  "https://www.w3.org/ns/activitystreams#Public",
+  `${ACTIVITYSTREAMS_NAMESPACE}Public`,
   "as:Public",
   "Public",
 ]);
-const BLIND_AUDIENCE_KEYS = new Set(["bto", "bcc"]);
+
+type ContextState = {
+  prefixes: Map<string, string>;
+  aliases: Map<string, string>;
+};
 
 function isCleanString(value: string): boolean {
   return value.length > 0 && !UNSAFE_TOKEN_PATTERN.test(value);
@@ -106,6 +112,74 @@ function normalizedAddresses(value: unknown): string[] {
   return values.map(normalizeId).filter((item): item is string => typeof item === "string");
 }
 
+function resolveAddressingDefinition(definition: unknown, prefixes: Map<string, string>): string | null {
+  const raw = typeof definition === "string"
+    ? definition
+    : definition !== null && typeof definition === "object" && !Array.isArray(definition)
+      ? (definition as Record<string, unknown>)["@id"]
+      : null;
+  if (typeof raw !== "string") return null;
+  if (raw.startsWith(ACTIVITYSTREAMS_NAMESPACE)) {
+    const term = raw.slice(ACTIVITYSTREAMS_NAMESPACE.length);
+    return ADDRESSING_TERMS.has(term) ? term : null;
+  }
+  const separator = raw.indexOf(":");
+  if (separator > 0) {
+    const prefix = raw.slice(0, separator);
+    const suffix = raw.slice(separator + 1);
+    if (prefixes.get(prefix) === ACTIVITYSTREAMS_NAMESPACE && ADDRESSING_TERMS.has(suffix)) return suffix;
+  }
+  return ADDRESSING_TERMS.has(raw) ? raw : null;
+}
+
+function buildContextState(context: unknown, inherited?: ContextState): ContextState {
+  const prefixes = new Map<string, string>(inherited?.prefixes ?? [["as", ACTIVITYSTREAMS_NAMESPACE]]);
+  const aliases = new Map<string, string>(inherited?.aliases ?? []);
+  const entries = Array.isArray(context) ? context : context === undefined ? [] : [context];
+
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    for (const [key, definition] of Object.entries(record)) {
+      const raw = typeof definition === "string"
+        ? definition
+        : definition !== null && typeof definition === "object" && !Array.isArray(definition)
+          ? (definition as Record<string, unknown>)["@id"]
+          : null;
+      if (raw === ACTIVITYSTREAMS_NAMESPACE) prefixes.set(key, ACTIVITYSTREAMS_NAMESPACE);
+    }
+    for (const [key, definition] of Object.entries(record)) {
+      const term = resolveAddressingDefinition(definition, prefixes);
+      if (term) aliases.set(key, term);
+    }
+  }
+  return { prefixes, aliases };
+}
+
+function canonicalAddressingTerm(key: string, state: ContextState): string | null {
+  if (ADDRESSING_TERMS.has(key)) return key;
+  if (key.startsWith(ACTIVITYSTREAMS_NAMESPACE)) {
+    const term = key.slice(ACTIVITYSTREAMS_NAMESPACE.length);
+    return ADDRESSING_TERMS.has(term) ? term : null;
+  }
+  const separator = key.indexOf(":");
+  if (separator > 0) {
+    const prefix = key.slice(0, separator);
+    const suffix = key.slice(separator + 1);
+    if (state.prefixes.get(prefix) === ACTIVITYSTREAMS_NAMESPACE && ADDRESSING_TERMS.has(suffix)) return suffix;
+  }
+  return state.aliases.get(key) ?? null;
+}
+
+function addressingValues(activity: Record<string, unknown>, term: string): string[] {
+  const state = buildContextState(activity["@context"]);
+  const values: string[] = [];
+  for (const [key, value] of Object.entries(activity)) {
+    if (canonicalAddressingTerm(key, state) === term) values.push(...normalizedAddresses(value));
+  }
+  return values;
+}
+
 function isActorFollowersAddress(value: string, actorUri: string): boolean {
   try {
     const address = new URL(value);
@@ -121,8 +195,8 @@ function isActorFollowersAddress(value: string, actorUri: string): boolean {
 }
 
 function determineActivityVisibility(activity: Record<string, unknown>): "public" | "unlisted" | "followers" | "direct" {
-  const to = normalizedAddresses(activity["to"]);
-  const cc = normalizedAddresses(activity["cc"]);
+  const to = addressingValues(activity, "to");
+  const cc = addressingValues(activity, "cc");
   if (to.some((value) => PUBLIC_ADDRESSES.has(value))) return "public";
   if (cc.some((value) => PUBLIC_ADDRESSES.has(value))) return "unlisted";
   const actorUri = normalizeId(activity["actor"]);
@@ -132,14 +206,13 @@ function determineActivityVisibility(activity: Record<string, unknown>): "public
 
 function hasSenderFollowersAudience(activity: Record<string, unknown>): boolean {
   const actorUri = normalizeId(activity["actor"]);
-  return Boolean(actorUri && normalizedAddresses(activity["audience"])
+  return Boolean(actorUri && addressingValues(activity, "audience")
     .some((value) => isActorFollowersAddress(value, actorUri)));
 }
 
 function getExplicitConcreteRecipientUris(activity: Record<string, unknown>): string[] {
   const actorUri = normalizeId(activity["actor"]);
-  const addresses = ["to", "bto", "cc", "bcc", "audience"]
-    .flatMap((key) => normalizedAddresses(activity[key]));
+  const addresses = [...ADDRESSING_TERMS].flatMap((term) => addressingValues(activity, term));
   return [...new Set(addresses.filter((value) => {
     if (PUBLIC_ADDRESSES.has(value)) return false;
     if (actorUri && isActorFollowersAddress(value, actorUri)) return false;
@@ -147,15 +220,23 @@ function getExplicitConcreteRecipientUris(activity: Record<string, unknown>): st
   }))];
 }
 
-function containsBlindAudienceFields(value: unknown, seen = new WeakSet<object>()): boolean {
+function containsBlindAudienceFields(
+  value: unknown,
+  seen = new WeakSet<object>(),
+  inheritedContext?: ContextState,
+): boolean {
   if (value === null || typeof value !== "object") return false;
   const objectValue = value as object;
   if (seen.has(objectValue)) return false;
   seen.add(objectValue);
-  if (Array.isArray(value)) return value.some((item) => containsBlindAudienceFields(item, seen));
+  if (Array.isArray(value)) return value.some((item) => containsBlindAudienceFields(item, seen, inheritedContext));
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).some((key) => BLIND_AUDIENCE_KEYS.has(key))) return true;
-  return Object.values(record).some((item) => containsBlindAudienceFields(item, seen));
+  const state = buildContextState(record["@context"], inheritedContext);
+  if (Object.keys(record).some((key) => {
+    const term = canonicalAddressingTerm(key, state);
+    return term === "bto" || term === "bcc";
+  })) return true;
+  return Object.values(record).some((item) => containsBlindAudienceFields(item, seen, state));
 }
 
 function computeExpectedIntentId(input: {
