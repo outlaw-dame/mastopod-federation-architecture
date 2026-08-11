@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -12,6 +13,17 @@ function loadFixture(): Record<string, any> {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function recomputeIntentId(plan: Record<string, any>): string {
+  const material = canonicalizeDeliveryPlanValue({
+    schema: "ap.delivery-plan.v1",
+    activityId: plan.activityId,
+    actorUri: plan.actorUri,
+    localRecipientUris: [...new Set(plan.localRecipients.map((target: any) => target.actorUri))].sort(),
+    remoteRecipientUris: [...new Set(plan.remoteRecipients.map((target: any) => target.actorUri))].sort(),
+  });
+  return `apdm-v1-${createHash("sha256").update(material).digest("hex")}`;
 }
 
 describe("APDM Phase 1 consumer hardening", () => {
@@ -54,14 +66,31 @@ describe("APDM Phase 1 consumer hardening", () => {
   });
 
   it("does not misclassify an unrelated actor whose path happens to end in /followers", () => {
+    const recipientUri = "https://remote.example/users/followers";
     const plan = clone(loadFixture());
-    plan.activity.to = ["https://remote.example/users/followers"];
+    plan.activity.to = [recipientUri];
     plan.activity.cc = [];
     plan.meta = { visibility: "direct", isPublicActivity: false };
+    plan.remoteRecipients = [{
+      actorUri: recipientUri,
+      inboxUrl: `${recipientUri}/inbox`,
+      targetDomain: "remote.example",
+    }];
+    plan.intentId = recomputeIntentId(plan);
     expect(safeParseActivityPubDeliveryPlanV1(plan).success).toBe(true);
 
     plan.meta = { visibility: "followers", isPublicActivity: false };
     expect(safeParseActivityPubDeliveryPlanV1(plan).success).toBe(false);
+  });
+
+  it("rejects a plan that omits any explicitly addressed concrete actor", () => {
+    const omitted = clone(loadFixture());
+    omitted.activity.bcc = ["https://remote.example/users/missing"];
+    expect(safeParseActivityPubDeliveryPlanV1(omitted).success).toBe(false);
+
+    const included = clone(loadFixture());
+    included.activity.bcc = ["https://remote.example/users/carol"];
+    expect(safeParseActivityPubDeliveryPlanV1(included).success).toBe(true);
   });
 
   it("rejects non-JSON fingerprint inputs instead of permitting ambiguous canonical forms", () => {
