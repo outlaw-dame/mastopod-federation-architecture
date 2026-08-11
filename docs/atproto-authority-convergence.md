@@ -173,6 +173,42 @@ Redpanda remains the durable replayable event plane:
 
 Redpanda is not the AT repository itself. A replayable `at.commit.v1` event does not substitute for the authoritative MST, commit block and record blocks required to serve a managed repository correctly.
 
+### Durable repository-to-event handoff
+
+"Persist the repository, then publish to Redpanda" is not by itself a sufficient durability guarantee. A crash or Redpanda outage between those two operations can leave a valid committed repository revision with no corresponding `at.commit.v1` event. That would make the commit permanently invisible to `subscribeRepos`, canonical projection, search and any other event-driven consumer.
+
+Tier 1 therefore needs a **durable commit-event outbox or equivalent reconciliation mechanism** coupled to authoritative repository persistence.
+
+Preferred invariant:
+
+```text
+Tier-1 repository transaction
+        |
+        +--> persist record/MST/commit/head
+        |
+        +--> persist pending native-event outbox entry
+        |
+        v
+transaction durable
+        |
+        +--> XRPC may return committed result
+        |
+        v
+outbox publisher/reconciler
+        |
+        +--> publish at.commit.v1 / identity / account event
+        |
+        +--> retry on Redpanda outage
+        |
+        +--> mark outbox entry delivered/idempotently published
+```
+
+The exact storage mechanism may differ depending on the SemApps AT repository implementation, but the guarantee is non-negotiable: **once a managed repository mutation is durably committed, there must be durable local evidence sufficient to regenerate every required native event until Redpanda acknowledges publication.**
+
+A periodic reconciler from authoritative repository history may supplement the outbox, but it must have enough information to reconstruct the exact missed commit/event and must not infer mutable historical facts from current state when exact commit history is required.
+
+Consumers remain replay-safe and idempotent, but consumer idempotency does not solve this producer-side gap.
+
 ## Desired managed AT write flow
 
 The converged local write path should become conceptually:
@@ -193,12 +229,16 @@ ActivityPods/SemApps ATProto middleware
    +--> mutate authoritative repo records/MST
    +--> build real commit/rev/CIDs
    +--> sign with Tier-1 key custody
-   +--> persist atomically/recoverably inside Pod authority
+   +--> atomically/recoverably persist repo state
+   +--> durably record native event outbox entry
    |
    v
 committed result
    |
    +--> XRPC response
+   |
+   v
+outbox publisher/reconciler
    |
    +--> at.commit.v1 / at.identity.v1 / at.account.v1 as applicable
              |
@@ -211,7 +251,7 @@ committed result
   firehose      canonical         search/etc.
 ```
 
-The event is emitted because the repository commit happened. The event must not be the only place the repository exists.
+The event is emitted because the repository commit happened. The event must not be the only place the repository exists, and the repository commit must not be allowed to become permanently eventless.
 
 ## Protocol bridge implications
 
@@ -244,14 +284,16 @@ The desired event topology keeps both:
 ```text
 native AT repository state
         |
-        +--> at.commit.v1
-        +--> at.identity.v1
-        +--> at.account.v1
-        |
-        +--> canonical translation when semantically applicable
+        +--> durable native-event outbox
                     |
-                    v
-               canonical.v1
+                    +--> at.commit.v1
+                    +--> at.identity.v1
+                    +--> at.account.v1
+                    |
+                    +--> canonical translation when semantically applicable
+                                |
+                                v
+                           canonical.v1
 ```
 
 Consumers that need exact AT semantics should consume native AT topics. Consumers that need protocol-neutral social semantics should consume `canonical.v1`.
@@ -291,12 +333,14 @@ Do not remove the current sidecar managed-repo implementation until all of the f
 4. AP → AT projection uses that same write primitive.
 5. `getRecord`, `listRecords`, `describeRepo`, `getLatestCommit` and `getRepo` read authoritative Tier-1 repository state.
 6. Real record CIDs, commit CIDs, MST state and CAR blocks survive restart and cache loss.
-7. `at.commit.v1` is emitted only after authoritative persistence succeeds and is replay-safe downstream.
-8. `subscribeRepos` serves events derived from those real committed events.
-9. Redis loss does not destroy a managed repository or identity binding.
-10. External-PDS mode remains correctly separated and fail-closed from local-managed write paths.
-11. Cross-protocol loop prevention and canonical provenance remain intact.
-12. Interop tests are run against an official/compatible AT relay/client implementation before the transitional authority is retired.
+7. Every authoritative managed-repo commit durably records a native-event outbox/reconciliation entry in the same durability boundary, so Redpanda failure cannot create an eventless committed revision.
+8. `at.commit.v1` is published idempotently from that durable handoff and is replay-safe downstream.
+9. `subscribeRepos` serves events derived from those real committed events.
+10. Redis loss does not destroy a managed repository or identity binding.
+11. External-PDS mode remains correctly separated and fail-closed from local-managed write paths.
+12. Cross-protocol loop prevention and canonical provenance remain intact.
+13. Crash tests cover repository-persisted/event-not-yet-published recovery and repeated Redpanda publication attempts.
+14. Interop tests are run against an official/compatible AT relay/client implementation before the transitional authority is retired.
 
 ## What not to do during cleanup
 
@@ -304,6 +348,7 @@ Do not remove the current sidecar managed-repo implementation until all of the f
 - Do not move AT private keys into the sidecar.
 - Do not use Redpanda as the repository datastore.
 - Do not make Redis the only durable source for managed repository state.
+- Do not publish native AT events as an unprotected best-effort second step after repository persistence.
 - Do not route native local writes through the canonical event log merely to force symmetry with ActivityPub.
 - Do not delete native AT topics in favor of `canonical.v1`.
 - Do not merge stale AT branches wholesale over the current APDM/canonical architecture.
