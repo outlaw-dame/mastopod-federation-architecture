@@ -110,8 +110,10 @@ export class OutboxIntentWorker {
       this.assertIntentWithinReplayHorizon(intent, "processing start");
 
       if (intent.notBeforeMs > 0 && Date.now() < intent.notBeforeMs) {
-        await this.queue.ack("outbox_intent", messageId);
+        // Persist the deferred replacement before ACKing the source message.
+        // If enqueue fails, the original remains pending and reclaimable.
         await this.queue.enqueueOutboxIntent(intent);
+        await this.queue.ack("outbox_intent", messageId);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "deferred" });
         logger.debug("Outbox intent not ready, requeued", {
           intentId: intent.intentId,
@@ -213,11 +215,11 @@ export class OutboxIntentWorker {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const permanent = this.isPermanentFailure(error);
-
-      await this.queue.ack("outbox_intent", messageId);
-
       const nextAttempt = intent.attempt + 1;
+
       if (permanent || nextAttempt >= intent.maxAttempts) {
+        // DLQ is the durable recovery record. Write it before ACKing the source
+        // message so a crash or Redis error cannot make rejected work disappear.
         await this.queue.moveToDlq(
           "outbox_intent",
           {
@@ -227,6 +229,7 @@ export class OutboxIntentWorker {
           },
           permanent ? message : "Max attempts exceeded",
         );
+        await this.queue.ack("outbox_intent", messageId);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "dlq" });
         logger.warn("Outbox intent moved to DLQ", {
           intentId: intent.intentId,
@@ -236,12 +239,15 @@ export class OutboxIntentWorker {
         });
       } else {
         const delay = backoffMs(nextAttempt);
+        // Persist retry work before ACKing the source message. If enqueue fails,
+        // the original remains pending for Redis Stream recovery.
         await this.queue.enqueueOutboxIntent({
           ...intent,
           attempt: nextAttempt,
           notBeforeMs: Date.now() + delay,
           lastError: message,
         });
+        await this.queue.ack("outbox_intent", messageId);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "retry" });
         logger.warn("Outbox intent failed, scheduled retry", {
           intentId: intent.intentId,
