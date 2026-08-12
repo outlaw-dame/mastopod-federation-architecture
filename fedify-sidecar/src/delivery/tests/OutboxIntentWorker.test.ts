@@ -89,7 +89,12 @@ function makeConfig(overrides: Partial<OutboxIntentWorkerConfig> = {}): OutboxIn
 function expectCalledBefore(first: ReturnType<typeof vi.fn>, second: ReturnType<typeof vi.fn>) {
   expect(first).toHaveBeenCalled();
   expect(second).toHaveBeenCalled();
-  expect(first.mock.invocationCallOrder[0]).toBeLessThan(second.mock.invocationCallOrder[0]);
+  const firstOrder = first.mock.invocationCallOrder[0];
+  const secondOrder = second.mock.invocationCallOrder[0];
+  if (firstOrder === undefined || secondOrder === undefined) {
+    throw new Error("Expected both mocks to have invocation order entries");
+  }
+  expect(firstOrder).toBeLessThan(secondOrder);
 }
 
 describe("OutboxIntentWorker", () => {
