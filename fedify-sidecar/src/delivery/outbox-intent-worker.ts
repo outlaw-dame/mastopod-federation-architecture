@@ -17,6 +17,10 @@ import type { RemoteSharedInboxCache } from "./RemoteSharedInboxCache.js";
 import { metrics } from "../metrics/index.js";
 import type { ActivityEventMeta, RedPandaProducer } from "../streams/redpanda-producer.js";
 import { logger } from "../utils/logger.js";
+import {
+  APDM_OUTBOX_INTENT_MAX_AGE_MS,
+  outboxIntentAgeMs,
+} from "./apdm-replay-horizon.js";
 
 export interface OutboxIntentWorkerConfig {
   concurrency: number;
@@ -103,6 +107,20 @@ export class OutboxIntentWorker {
     this.activeJobs++;
 
     try {
+      const intentAgeMs = outboxIntentAgeMs(intent.createdAt);
+      if (intentAgeMs === null) {
+        throw new OutboxIntentProcessingError(
+          "Outbox intent has an invalid or implausibly future createdAt timestamp",
+          true,
+        );
+      }
+      if (intentAgeMs > APDM_OUTBOX_INTENT_MAX_AGE_MS) {
+        throw new OutboxIntentProcessingError(
+          `Outbox intent exceeded the ${APDM_OUTBOX_INTENT_MAX_AGE_MS} ms APDM replay residence limit`,
+          true,
+        );
+      }
+
       if (intent.notBeforeMs > 0 && Date.now() < intent.notBeforeMs) {
         await this.queue.ack("outbox_intent", messageId);
         await this.queue.enqueueOutboxIntent(intent);
