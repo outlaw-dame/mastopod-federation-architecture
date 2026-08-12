@@ -208,24 +208,44 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
               || retryResidenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS
             ) {
               const reason = `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit while retrying delayed parking`;
+              let dlqRetryDelayMs = DELAYED_OUTBOUND_PARK_RETRY_MS;
+              let dlqPersisted = false;
+
+              while (!dlqPersisted) {
+                try {
+                  await this.moveToDlq("outbound", { ...job, lastError: reason }, reason);
+                  dlqPersisted = true;
+                } catch (dlqError) {
+                  logger.error(
+                    {
+                      jobId: job.jobId,
+                      messageId: entry.messageId,
+                      retryDelayMs: dlqRetryDelayMs,
+                      error: dlqError instanceof Error ? dlqError.message : String(dlqError),
+                    },
+                    "Failed to persist expired outbound job during delayed-park retry; retaining in-memory source and retrying DLQ",
+                  );
+                  await this.sleep(dlqRetryDelayMs);
+                  dlqRetryDelayMs = Math.min(
+                    dlqRetryDelayMs * 2,
+                    DELAYED_OUTBOUND_PARK_MAX_RETRY_MS,
+                  );
+                }
+              }
+
               try {
-                await this.moveToDlq("outbound", { ...job, lastError: reason }, reason);
                 await this.ack("outbound", entry.messageId);
-                parked = true;
-              } catch (dlqError) {
+              } catch (ackError) {
                 logger.error(
                   {
                     jobId: job.jobId,
                     messageId: entry.messageId,
-                    error: dlqError instanceof Error ? dlqError.message : String(dlqError),
+                    error: ackError instanceof Error ? ackError.message : String(ackError),
                   },
-                  "Failed to persist expired outbound job during delayed-park retry; source remains pending",
+                  "Expired outbound job is durable in DLQ but source ACK failed",
                 );
-                // The source is still pending and reclaimable. Suppress this
-                // stale entry for the current pass rather than falling through
-                // and yielding it to the delivery worker.
-                parked = true;
               }
+              parked = true;
               break;
             }
 
