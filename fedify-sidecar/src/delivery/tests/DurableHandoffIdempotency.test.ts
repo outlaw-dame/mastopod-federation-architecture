@@ -144,7 +144,10 @@ function outboundJob(): OutboundJob {
     attempt: 0,
     maxAttempts: 10,
     notBeforeMs: 0,
-    meta: { deliveryPlanIntentId: "apdm-v1-stable-plan-id" } as any,
+    meta: {
+      deliveryPlanIntentId: "apdm-v1-stable-plan-id",
+      apdmFirstQueuedAtMs: Date.now(),
+    } as any,
   };
 }
 
@@ -269,7 +272,7 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
     expect(queue.enqueueOutbound).not.toHaveBeenCalled();
   });
 
-  it("expires an outbound message that sat in Redis too long before its first claim check", async () => {
+  it("expires an outbound message from the preserved first-enqueue time before its first claim check", async () => {
     const queue = createOutboundQueue();
     const claimStore = new StatefulClaimStore();
     const job = outboundJob();
@@ -280,9 +283,10 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
       outboundWorkerConfig(claimStore),
     );
     const staleEnqueueMs = Date.now() - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS - 1;
-    const staleRedisMessageId = `${staleEnqueueMs}-0`;
+    const freshPromotedMessageId = `${Date.now()}-0`;
+    job.meta = { ...(job.meta ?? {}), apdmFirstQueuedAtMs: staleEnqueueMs } as any;
 
-    await worker.run(staleRedisMessageId, job);
+    await worker.run(freshPromotedMessageId, job);
 
     expect(worker.deliveries).toBe(0);
     expect(claimStore.claimCalls).toBe(0);
@@ -291,7 +295,32 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
       expect.objectContaining({ jobId: job.jobId }),
       expect.stringContaining("queue residence limit"),
     );
-    expect(queue.ack).toHaveBeenCalledWith("outbound", staleRedisMessageId);
+    expect(queue.ack).toHaveBeenCalledWith("outbound", freshPromotedMessageId);
+  });
+
+  it("fails closed when the preserved first-enqueue timestamp is absent", async () => {
+    const queue = createOutboundQueue();
+    const claimStore = new StatefulClaimStore();
+    const job = outboundJob();
+    job.meta = { deliveryPlanIntentId: "apdm-v1-stable-plan-id" } as any;
+    const worker = new TestOutboundWorker(
+      queue,
+      {} as any,
+      {} as any,
+      outboundWorkerConfig(claimStore),
+    );
+    const messageId = `${Date.now()}-0`;
+
+    await worker.run(messageId, job);
+
+    expect(worker.deliveries).toBe(0);
+    expect(claimStore.claimCalls).toBe(0);
+    expect(queue.moveToDlq).toHaveBeenCalledWith(
+      "outbound",
+      expect.objectContaining({ jobId: job.jobId }),
+      expect.stringContaining("first-enqueue timestamp"),
+    );
+    expect(queue.ack).toHaveBeenCalledWith("outbound", messageId);
   });
 
   it("leaves an expired outbound message pending when DLQ persistence fails", async () => {
@@ -306,7 +335,8 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
       outboundWorkerConfig(claimStore),
     );
     const staleEnqueueMs = Date.now() - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS - 1;
-    const staleRedisMessageId = `${staleEnqueueMs}-0`;
+    const staleRedisMessageId = `${Date.now()}-0`;
+    job.meta = { ...(job.meta ?? {}), apdmFirstQueuedAtMs: staleEnqueueMs } as any;
 
     await expect(worker.run(staleRedisMessageId, job)).rejects.toThrow("dlq unavailable");
 
