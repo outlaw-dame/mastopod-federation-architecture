@@ -155,21 +155,25 @@ describe("durable delayed outbound queue", () => {
     await queue.disconnect();
   });
 
-  it("keeps consuming after a transient park failure while leaving that source pending", async () => {
+  it("retries the same future source after a transient park failure before consuming later work", async () => {
     vi.useFakeTimers();
     const queue = new RedisStreamsQueue({ redisUrl: "redis://test" } as any);
     state.evalMock.mockResolvedValue(0);
     await queue.connect();
     state.evalMock.mockClear();
-    state.evalMock.mockRejectedValueOnce(new Error("redis transient"));
+    state.evalMock
+      .mockRejectedValueOnce(new Error("redis transient"))
+      .mockResolvedValueOnce(1);
 
     const firstMs = Date.now();
+    const firstMessageId = `${firstMs}-1`;
+    const secondMessageId = `${firstMs + 1}-2`;
     state.entries.push({
-      messageId: `${firstMs}-1`,
+      messageId: firstMessageId,
       job: outboundJob(firstMs + DELAYED_OUTBOUND_MIN_DELAY_MS + 60_000),
     });
     state.entries.push({
-      messageId: `${firstMs + 1}-2`,
+      messageId: secondMessageId,
       job: outboundJob(0),
     });
 
@@ -178,8 +182,13 @@ describe("durable delayed outbound queue", () => {
     const result = await next;
 
     expect(result.done).toBe(false);
-    expect(result.value?.messageId).toBe(`${firstMs + 1}-2`);
-    expect(state.coreAck).not.toHaveBeenCalledWith("outbound", `${firstMs}-1`);
+    expect(result.value?.messageId).toBe(secondMessageId);
+    expect(state.evalMock).toHaveBeenCalledTimes(2);
+    const firstPark = state.evalMock.mock.calls[0]?.[1] as { arguments: string[] };
+    const retriedPark = state.evalMock.mock.calls[1]?.[1] as { arguments: string[] };
+    expect(firstPark.arguments[5]).toBe(firstMessageId);
+    expect(retriedPark.arguments[5]).toBe(firstMessageId);
+    expect(state.coreAck).not.toHaveBeenCalledWith("outbound", firstMessageId);
 
     await queue.disconnect();
   });
