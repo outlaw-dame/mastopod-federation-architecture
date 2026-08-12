@@ -103,6 +103,7 @@ services:
       ENABLE_PROTOCOL_BRIDGE_AP_TO_AT: "false"
       ENABLE_PROTOCOL_BRIDGE_AT_TO_AP: "false"
       AP_INTEROP_ENABLE_MEDIA_FIXTURES: "true"
+      APDM_COMPLETION_MARKER_V2_CUTOVER: fresh
       REQUEST_TIMEOUT_MS: "10000"
       LOG_LEVEL: info
       NODE_EXTRA_CA_CERTS: /interop/runtime/certs/rootCA.crt
