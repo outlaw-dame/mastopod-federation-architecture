@@ -183,9 +183,13 @@ describe("durable delayed outbound queue", () => {
 
     expect(result.done).toBe(false);
     expect(result.value?.messageId).toBe(secondMessageId);
-    expect(state.evalMock).toHaveBeenCalledTimes(2);
-    const firstPark = state.evalMock.mock.calls[0]?.[1] as { arguments: string[] };
-    const retriedPark = state.evalMock.mock.calls[1]?.[1] as { arguments: string[] };
+    const parkCalls = state.evalMock.mock.calls.filter((call) => {
+      const options = call[1] as { arguments?: string[] } | undefined;
+      return options?.arguments?.length === 6;
+    });
+    expect(parkCalls).toHaveLength(2);
+    const firstPark = parkCalls[0]?.[1] as { arguments: string[] };
+    const retriedPark = parkCalls[1]?.[1] as { arguments: string[] };
     expect(firstPark.arguments[5]).toBe(firstMessageId);
     expect(retriedPark.arguments[5]).toBe(firstMessageId);
     expect(state.coreAck).not.toHaveBeenCalledWith("outbound", firstMessageId);
