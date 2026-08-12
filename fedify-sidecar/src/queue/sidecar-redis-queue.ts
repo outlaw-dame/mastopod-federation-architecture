@@ -1,4 +1,4 @@
-import { createClient, type RedisClientType } from "redis";
+import { createClient } from "redis";
 import { logger } from "../utils/logger.js";
 import { migrateLegacyCompletedDeliveryMarkers } from "../delivery/outbound-delivery-claims.js";
 import {
@@ -13,6 +13,8 @@ export const DELAYED_OUTBOUND_PROMOTION_INTERVAL_MS = 250;
 export const DELAYED_OUTBOUND_MIN_DELAY_MS = 2_000;
 export const DELAYED_OUTBOUND_PROMOTION_BATCH_SIZE = 100;
 
+type DelayedRedisClient = ReturnType<typeof createClient>;
+
 /**
  * Durability wrapper around the core Redis Streams queue.
  *
@@ -24,7 +26,7 @@ export const DELAYED_OUTBOUND_PROMOTION_BATCH_SIZE = 100;
  * due jobs back into the ready Stream.
  */
 export class RedisStreamsQueue extends CoreRedisStreamsQueue {
-  private delayedRedis: RedisClientType | null = null;
+  private delayedRedis: DelayedRedisClient | null = null;
   private readonly redisUrl: string;
   private readonly outboundStreamKeyForDelay: string;
   private readonly consumerGroupForDelay: string;
@@ -51,7 +53,7 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
     }
   }
 
-  private createDelayedRedisClient(): RedisClientType {
+  private createDelayedRedisClient(): DelayedRedisClient {
     const client = createClient({ url: this.redisUrl });
     client.on("error", (error) => {
       logger.error({ error: error.message }, "Redis delayed-outbound client error");
