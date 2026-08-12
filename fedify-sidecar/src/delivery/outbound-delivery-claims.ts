@@ -1,8 +1,9 @@
 import { createClient, type RedisClientType } from "redis";
+import { APDM_COMPLETED_DELIVERY_MIN_RETENTION_MS } from "./apdm-replay-horizon.js";
 
 export type DeliveryClaimResult = "claimed" | "completed" | "in_flight";
 
-export const MIN_COMPLETED_DELIVERY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const MIN_COMPLETED_DELIVERY_TTL_MS = APDM_COMPLETED_DELIVERY_MIN_RETENTION_MS;
 
 export function normalizeCompletedDeliveryTtlMs(ttlMs: number): number {
   const normalized = Number.isFinite(ttlMs) ? Math.floor(ttlMs) : 0;
