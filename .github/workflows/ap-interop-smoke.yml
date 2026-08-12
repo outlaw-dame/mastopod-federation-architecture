@@ -38,33 +38,52 @@ jobs:
     steps:
       - name: Check Out Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Detect Interop-Relevant Changes
         id: filter
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            interop_relevant:
-              - ".github/workflows/ap-interop-smoke.yml"
-              - "Dockerfile.interop"
-              - "fedify-sidecar/interop/ap/**"
-              - "fedify-sidecar/package.json"
-              - "fedify-sidecar/package-lock.json"
-              - "fedify-sidecar/tsconfig.json"
-              - "fedify-sidecar/src/index.ts"
-              - "fedify-sidecar/src/delivery/**"
-              - "fedify-sidecar/src/federation/**"
-              - "fedify-sidecar/src/interop/ap/**"
-              - "fedify-sidecar/src/queue/**"
-              - "fedify-sidecar/src/signing/**"
-              - "fedify-sidecar/src/streams/**"
-            akkoma_relevant:
-              - ".github/workflows/ap-interop-smoke.yml"
-              - "Dockerfile.interop"
-              - "fedify-sidecar/interop/ap/akkoma/**"
-              - "fedify-sidecar/interop/ap/runtime/akkoma/**"
-              - "fedify-sidecar/interop/ap/scripts/*akkoma*"
-              - "fedify-sidecar/src/interop/ap/**"
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            git fetch --no-tags origin "${BASE_REF}"
+            diff_base="origin/${BASE_REF}"
+            changed_files="$(git diff --name-only "${diff_base}...HEAD")"
+          elif [[ "${EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff --name-only "${BEFORE_SHA}..HEAD")"
+          else
+            changed_files=""
+          fi
+
+          printf '%s\n' "${changed_files}"
+
+          interop_relevant=false
+          akkoma_relevant=false
+
+          while IFS= read -r path; do
+            [[ -z "${path}" ]] && continue
+
+            case "${path}" in
+              .github/workflows/ap-interop-smoke.yml|Dockerfile.interop|fedify-sidecar/interop/ap/*|fedify-sidecar/package.json|fedify-sidecar/package-lock.json|fedify-sidecar/tsconfig.json|fedify-sidecar/src/index.ts|fedify-sidecar/src/delivery/*|fedify-sidecar/src/federation/*|fedify-sidecar/src/interop/ap/*|fedify-sidecar/src/queue/*|fedify-sidecar/src/signing/*|fedify-sidecar/src/streams/*)
+                interop_relevant=true
+                ;;
+            esac
+
+            case "${path}" in
+              .github/workflows/ap-interop-smoke.yml|Dockerfile.interop|fedify-sidecar/interop/ap/akkoma/*|fedify-sidecar/interop/ap/runtime/akkoma/*|fedify-sidecar/interop/ap/scripts/*akkoma*|fedify-sidecar/src/interop/ap/*)
+                akkoma_relevant=true
+                ;;
+            esac
+          done <<< "${changed_files}"
+
+          echo "interop_relevant=${interop_relevant}" >> "${GITHUB_OUTPUT}"
+          echo "akkoma_relevant=${akkoma_relevant}" >> "${GITHUB_OUTPUT}"
 
   ap-interop-smoke:
     needs: classify
