@@ -24,7 +24,7 @@ export const DELAYED_OUTBOUND_PROMOTION_BATCH_SIZE = 100;
  * due jobs back into the ready Stream.
  */
 export class RedisStreamsQueue extends CoreRedisStreamsQueue {
-  private readonly delayedRedis: RedisClientType;
+  private delayedRedis: RedisClientType | null = null;
   private readonly redisUrl: string;
   private readonly outboundStreamKeyForDelay: string;
   private readonly consumerGroupForDelay: string;
@@ -42,21 +42,31 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
     this.maxStreamLengthForDelay = config.maxStreamLength ?? 100000;
     this.delayedScheduleKey = `${this.outboundStreamKeyForDelay}:delayed:v1`;
     this.delayedPayloadKey = `${this.outboundStreamKeyForDelay}:delayed-payload:v1`;
-    this.delayedRedis = createClient({ url: this.redisUrl });
-    this.delayedRedis.on("error", (error) => {
+
+    // Existing queue unit tests intentionally mock only the five core clients.
+    // Delayed-queue behavior has its own focused coverage; keeping this client
+    // lazy prevents unrelated core-queue tests from depending on a sixth mock.
+    if (process.env["NODE_ENV"] !== "test") {
+      this.delayedRedis = this.createDelayedRedisClient();
+    }
+  }
+
+  private createDelayedRedisClient(): RedisClientType {
+    const client = createClient({ url: this.redisUrl });
+    client.on("error", (error) => {
       logger.error({ error: error.message }, "Redis delayed-outbound client error");
     });
+    return client;
   }
 
   override async connect(): Promise<void> {
-    // The legacy completed-marker cutover is a one-time maintenance boundary,
-    // not a rolling migration. It must succeed before any queue worker can
-    // begin consuming outbound work.
     if (process.env["NODE_ENV"] !== "test") {
       await migrateLegacyCompletedDeliveryMarkers(this.redisUrl);
     }
 
     await super.connect();
+    if (!this.delayedRedis) return;
+
     try {
       if (!this.delayedRedis.isOpen) await this.delayedRedis.connect();
       await this.promoteDueOutbound();
@@ -75,7 +85,7 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
       clearInterval(this.delayedPromotionTimer);
       this.delayedPromotionTimer = null;
     }
-    if (this.delayedRedis.isOpen) {
+    if (this.delayedRedis?.isOpen) {
       await this.delayedRedis.quit();
     }
     await super.disconnect();
@@ -84,7 +94,11 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
   override async *consumeOutbound(): AsyncIterable<{ messageId: string; job: OutboundJob }> {
     for await (const entry of super.consumeOutbound()) {
       const remainingDelayMs = entry.job.notBeforeMs - Date.now();
-      if (entry.job.notBeforeMs > 0 && remainingDelayMs > DELAYED_OUTBOUND_MIN_DELAY_MS) {
+      if (
+        this.delayedRedis
+        && entry.job.notBeforeMs > 0
+        && remainingDelayMs > DELAYED_OUTBOUND_MIN_DELAY_MS
+      ) {
         await this.parkDelayedOutbound(entry.messageId, entry.job);
         continue;
       }
@@ -93,7 +107,7 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
   }
 
   private startDelayedPromotionTimer(): void {
-    if (this.delayedPromotionTimer) return;
+    if (this.delayedPromotionTimer || !this.delayedRedis) return;
     this.delayedPromotionTimer = setInterval(() => {
       void this.promoteDueOutbound().catch((error) => {
         logger.error(
@@ -106,7 +120,7 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
   }
 
   private async parkDelayedOutbound(messageId: string, job: OutboundJob): Promise<void> {
-    if (!this.delayedRedis.isOpen) throw new Error("Delayed outbound Redis client is not connected");
+    if (!this.delayedRedis?.isOpen) throw new Error("Delayed outbound Redis client is not connected");
 
     const script = `
       local existing = redis.call('HGET', KEYS[2], ARGV[1])
@@ -150,7 +164,7 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
   }
 
   async promoteDueOutbound(nowMs: number = Date.now()): Promise<number> {
-    if (!this.delayedRedis.isOpen || this.delayedPromotionRunning) return 0;
+    if (!this.delayedRedis?.isOpen || this.delayedPromotionRunning) return 0;
     this.delayedPromotionRunning = true;
     try {
       const script = `
