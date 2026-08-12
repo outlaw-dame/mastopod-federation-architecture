@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  COMPLETED_DELIVERY_RETENTION_SWEEP_INTERVAL_MS,
+  COMPLETED_DELIVERY_CUTOVER_MODE,
+  COMPLETED_DELIVERY_CUTOVER_SENTINEL_KEY,
+  COMPLETED_KEY_PREFIX,
+  LEGACY_COMPLETED_KEY_PREFIX,
   MIN_COMPLETED_DELIVERY_TTL_MS,
   normalizeCompletedDeliveryTtlMs,
-  shouldExtendCompletedDeliveryTtl,
 } from "../outbound-delivery-claims.js";
 
 describe("APDM completed-delivery retention policy", () => {
@@ -26,18 +28,16 @@ describe("APDM completed-delivery retention policy", () => {
     );
   });
 
-  it("identifies legacy finite TTLs that must be extended during rolling deployment", () => {
-    expect(shouldExtendCompletedDeliveryTtl(24 * 60 * 60 * 1000)).toBe(true);
-    expect(shouldExtendCompletedDeliveryTtl(MIN_COMPLETED_DELIVERY_TTL_MS - 1)).toBe(true);
-    expect(shouldExtendCompletedDeliveryTtl(MIN_COMPLETED_DELIVERY_TTL_MS)).toBe(false);
-    expect(shouldExtendCompletedDeliveryTtl(10 * 24 * 60 * 60 * 1000)).toBe(false);
-    expect(shouldExtendCompletedDeliveryTtl(-1)).toBe(false);
-    expect(shouldExtendCompletedDeliveryTtl(-2)).toBe(false);
-    expect(shouldExtendCompletedDeliveryTtl(Number.NaN)).toBe(false);
+  it("uses a distinct v2 namespace so upgraded markers are never refreshed by legacy migration", () => {
+    expect(LEGACY_COMPLETED_KEY_PREFIX).toBe("ap:delivery:completed:");
+    expect(COMPLETED_KEY_PREFIX).toBe("ap:delivery:completed:v2:");
+    expect(COMPLETED_KEY_PREFIX).not.toBe(LEGACY_COMPLETED_KEY_PREFIX);
   });
 
-  it("sweeps much faster than the former 24-hour marker lifetime", () => {
-    expect(COMPLETED_DELIVERY_RETENTION_SWEEP_INTERVAL_MS).toBe(15 * 60 * 1000);
-    expect(COMPLETED_DELIVERY_RETENTION_SWEEP_INTERVAL_MS).toBeLessThan(24 * 60 * 60 * 1000);
+  it("pins the one-time migration sentinel and explicit maintenance cutover mode", () => {
+    expect(COMPLETED_DELIVERY_CUTOVER_SENTINEL_KEY).toBe(
+      "ap:delivery:completed:v2:migration-complete",
+    );
+    expect(COMPLETED_DELIVERY_CUTOVER_MODE).toBe("maintenance");
   });
 });
