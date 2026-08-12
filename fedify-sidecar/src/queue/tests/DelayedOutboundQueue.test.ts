@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS } from "../../delivery/apdm-replay-horizon.js";
 
 const state = vi.hoisted(() => ({
   entries: [] as Array<{ messageId: string; job: Record<string, any> }>,
@@ -193,6 +194,40 @@ describe("durable delayed outbound queue", () => {
     expect(firstPark.arguments[5]).toBe(firstMessageId);
     expect(retriedPark.arguments[5]).toBe(firstMessageId);
     expect(state.coreAck).not.toHaveBeenCalledWith("outbound", firstMessageId);
+
+    await queue.disconnect();
+  });
+
+  it("does not yield stale work when delayed parking and fallback DLQ persistence both fail", async () => {
+    vi.useFakeTimers();
+    const queue = new RedisStreamsQueue({ redisUrl: "redis://test" } as any);
+    state.evalMock.mockResolvedValue(0);
+    await queue.connect();
+    state.evalMock.mockClear();
+    state.evalMock.mockRejectedValue(new Error("redis transient"));
+    state.coreDlq.mockRejectedValue(new Error("dlq unavailable"));
+
+    const nowMs = Date.now();
+    const messageId = `${nowMs - 1_000}-7`;
+    const job = outboundJob(nowMs + DELAYED_OUTBOUND_MIN_DELAY_MS + 60_000);
+    job.meta = {
+      ...job.meta,
+      apdmFirstQueuedAtMs: nowMs - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS + 500,
+    };
+    state.entries.push({ messageId, job });
+
+    const next = queue.consumeOutbound()[Symbol.asyncIterator]().next();
+    await vi.advanceTimersByTimeAsync(DELAYED_OUTBOUND_PARK_RETRY_MS);
+    const result = await next;
+
+    expect(result.done).toBe(true);
+    expect(state.coreDlq).toHaveBeenCalledTimes(1);
+    expect(state.coreAck).not.toHaveBeenCalledWith("outbound", messageId);
+    const parkCalls = state.evalMock.mock.calls.filter((call) => {
+      const options = call[1] as { arguments?: string[] } | undefined;
+      return options?.arguments?.length === 6;
+    });
+    expect(parkCalls).toHaveLength(1);
 
     await queue.disconnect();
   });
