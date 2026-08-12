@@ -298,6 +298,47 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
     expect(queue.ack).toHaveBeenCalledWith("outbound", freshPromotedMessageId);
   });
 
+  it("revalidates outbound residence after claim/domain waits immediately before delivery", async () => {
+    vi.useFakeTimers();
+    try {
+      const nowMs = 2_000_000_000_000;
+      vi.setSystemTime(nowMs);
+      const queue = createOutboundQueue();
+      queue.acquireDomainSlot.mockImplementation(async () => {
+        vi.setSystemTime(nowMs + 1_000);
+        return true;
+      });
+      const claimStore = new StatefulClaimStore();
+      const job = outboundJob();
+      job.meta = {
+        ...(job.meta ?? {}),
+        apdmFirstQueuedAtMs: nowMs - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS + 500,
+      } as any;
+      const worker = new TestOutboundWorker(
+        queue,
+        {} as any,
+        {} as any,
+        outboundWorkerConfig(claimStore),
+      );
+      const messageId = `${nowMs}-9`;
+
+      await worker.run(messageId, job);
+
+      expect(claimStore.claimCalls).toBe(1);
+      expect(worker.deliveries).toBe(0);
+      expect(claimStore.isCompleted(job.jobId)).toBe(false);
+      expect(queue.moveToDlq).toHaveBeenCalledWith(
+        "outbound",
+        expect.objectContaining({ jobId: job.jobId }),
+        expect.stringContaining("immediately before delivery"),
+      );
+      expect(queue.ack).toHaveBeenCalledWith("outbound", messageId);
+      expect(queue.releaseDomainSlot).toHaveBeenCalledWith(job.targetDomain);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails closed when the preserved first-enqueue timestamp is absent", async () => {
     const queue = createOutboundQueue();
     const claimStore = new StatefulClaimStore();
