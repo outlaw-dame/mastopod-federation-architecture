@@ -19,10 +19,10 @@ These invariants apply across both repositories and are stronger than phase-spec
 3. Sidecar restart cannot lose durably accepted intents.
 4. Successful outbound targets are not redelivered merely because a different target failed.
 5. Local fan-out durability work must use activity-recipient idempotency rather than whole-activity replay.
-6. Automatic ActivityPods reconciliation is bounded to 48 hours, leaving a 24-hour processing margin inside the 72-hour blind-recipient recovery-snapshot lifetime.
+6. Automatic ActivityPods reconciliation is bounded to 48 hours, leaving a 24-hour processing allowance inside the 72-hour blind-recipient recovery-snapshot lifetime for cursor rotation, paging, refetch, and plan construction before sidecar acceptance.
 7. Sidecar replay residence is bounded independently: an accepted outbox intent may age at most 48 hours before outbound work is created, and an outbound Redis Stream message may age at most 48 hours before its first completed-delivery claim check. Requeue/retry must not reset the outbox-intent clock.
-8. The completed-delivery ledger retains successful-target markers for at least seven days. Therefore automatic producer replay (48h) + outbox-intent residence (48h) + first outbound-message residence (48h) must remain at most six days, leaving at least a 24-hour safety margin before the seven-day marker floor expires.
-9. Work that exceeds a bounded automatic replay/residence horizon fails closed into the DLQ before an external POST; manual/operator replay outside the bounded horizon is an explicit recovery operation rather than an implicit duplicate-suppression guarantee.
+8. The completed-delivery ledger retains successful-target markers for at least eight days. Therefore automatic producer replay (48h) + producer processing allowance (24h) + outbox-intent residence (48h) + first outbound-message residence (48h) is at most seven days, leaving at least a 24-hour safety margin before the eight-day marker floor expires.
+9. Work that exceeds a bounded automatic replay/residence horizon, or whose enqueue timestamp cannot be validated, fails closed into the DLQ before an external POST; manual/operator replay outside the bounded horizon is an explicit recovery operation rather than an implicit duplicate-suppression guarantee.
 
 ## Security and authority
 
