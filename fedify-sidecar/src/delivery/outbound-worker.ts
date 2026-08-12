@@ -100,6 +100,13 @@ const MAX_RESPONSE_BODY_LOG_LENGTH = 2048;
  */
 export const MAX_INLINE_NOT_BEFORE_WAIT_MS = 2_000;
 
+export class OutboundResidenceExpiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OutboundResidenceExpiredError";
+  }
+}
+
 export function sanitizeErrorText(value: unknown): string {
   const text = typeof value === "string" ? value : String(value ?? "unknown");
   const compact = text.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
@@ -626,6 +633,7 @@ export class OutboundWorker {
         maxAttempts: job.maxAttempts,
         requestTimeoutMs: this.config.requestTimeoutMs,
         userAgent: this.config.userAgent,
+        assertExternalPostAllowed: () => this.assertExternalPostAllowed(job),
         signHttpRequest: async ({ actorUri, method, targetUrl, body }) => {
           const signResult = await this.signingClient.signOne({ actorUri, method, targetUrl, body });
           if (!signResult.ok) {
@@ -699,6 +707,7 @@ export class OutboundWorker {
         }
       }
 
+      this.assertExternalPostAllowed(job);
       const response = await request(job.targetInbox, {
         method: "POST",
         headers,
@@ -743,12 +752,29 @@ export class OutboundWorker {
         permanent: false,
       };
     } catch (err: any) {
+      if (err instanceof OutboundResidenceExpiredError) throw err;
       return {
         jobId: job.jobId,
         success: false,
         error: `Network error: ${sanitizeErrorText(err?.message ?? err)}`,
         permanent: false,
       };
+    }
+  }
+
+  private assertExternalPostAllowed(job: OutboundJob): void {
+    const firstQueuedAtMs = job.meta?.apdmFirstQueuedAtMs;
+    const syntheticDirectTestJob = process.env["NODE_ENV"] === "test" && firstQueuedAtMs == null;
+    const residenceMs = typeof firstQueuedAtMs === "number"
+      ? outboxIntentAgeMs(firstQueuedAtMs, Date.now())
+      : syntheticDirectTestJob
+        ? 0
+        : null;
+    if (residenceMs === null || residenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS) {
+      const reason = residenceMs === null
+        ? "Outbound message is missing a valid preserved first-enqueue timestamp at external POST boundary"
+        : `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit at external POST boundary`;
+      throw new OutboundResidenceExpiredError(reason);
     }
   }
 
