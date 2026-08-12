@@ -39,7 +39,7 @@ import {
 } from "./outbound-delivery-claims.js";
 import {
   APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
-  outboundMessageResidenceMs,
+  outboxIntentAgeMs,
 } from "./apdm-replay-horizon.js";
 
 // ============================================================================
@@ -331,9 +331,14 @@ export class OutboundWorker {
     let claimHeld = false;
 
     try {
-      const queueResidenceMs = outboundMessageResidenceMs(messageId, deliveryStartedAt);
-      if (queueResidenceMs !== null && queueResidenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS) {
-        const reason = `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit`;
+      const firstQueuedAtMs = job.meta?.apdmFirstQueuedAtMs;
+      const queueResidenceMs = typeof firstQueuedAtMs === "number"
+        ? outboxIntentAgeMs(firstQueuedAtMs, deliveryStartedAt)
+        : null;
+      if (queueResidenceMs === null || queueResidenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS) {
+        const reason = queueResidenceMs === null
+          ? "Outbound message is missing a valid preserved first-enqueue timestamp"
+          : `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit`;
         await this.queue.moveToDlq("outbound", { ...job, lastError: reason }, reason);
         await this.queue.ack("outbound", messageId);
         metrics.deliveryDlq.inc({ domain: job.targetDomain });
@@ -341,6 +346,7 @@ export class OutboundWorker {
         logger.warn("Outbound delivery expired before duplicate claim check", {
           jobId: job.jobId,
           activityId: job.activityId,
+          firstQueuedAtMs,
           queueResidenceMs,
           maxQueueResidenceMs: APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
         });
@@ -777,7 +783,6 @@ export class OutboundWorker {
 
   private startTelemetryLoop(): void {
     if (this.config.queueTelemetryIntervalMs <= 0 || this.telemetryTimer) return;
-
     this.telemetryTimer = setInterval(() => {
       void this.emitQueueTelemetry();
     }, this.config.queueTelemetryIntervalMs);
