@@ -4,19 +4,13 @@ import { APDM_COMPLETED_DELIVERY_MIN_RETENTION_MS } from "./apdm-replay-horizon.
 export type DeliveryClaimResult = "claimed" | "completed" | "in_flight";
 
 export const MIN_COMPLETED_DELIVERY_TTL_MS = APDM_COMPLETED_DELIVERY_MIN_RETENTION_MS;
-export const COMPLETED_DELIVERY_RETENTION_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
-const COMPLETED_KEY_PREFIX = "ap:delivery:completed:";
-const RETENTION_SWEEP_SCAN_COUNT = 250;
+export const LEGACY_COMPLETED_KEY_PREFIX = "ap:delivery:completed:";
+export const COMPLETED_KEY_PREFIX = "ap:delivery:completed:v2:";
+export const COMPLETED_DELIVERY_CUTOVER_MODE = "maintenance";
 
 export function normalizeCompletedDeliveryTtlMs(ttlMs: number): number {
   const normalized = Number.isFinite(ttlMs) ? Math.floor(ttlMs) : 0;
   return Math.max(MIN_COMPLETED_DELIVERY_TTL_MS, normalized);
-}
-
-export function shouldExtendCompletedDeliveryTtl(ttlMs: number): boolean {
-  // Redis PTTL: -1 means the key has no expiry, -2 means it no longer exists.
-  // Neither case should be converted into a new finite lifetime.
-  return Number.isFinite(ttlMs) && ttlMs >= 0 && ttlMs < MIN_COMPLETED_DELIVERY_TTL_MS;
 }
 
 export interface OutboundDeliveryClaimStore {
@@ -26,79 +20,93 @@ export interface OutboundDeliveryClaimStore {
   close(): Promise<void>;
 }
 
+/**
+ * One-time v1 -> v2 completed-marker cutover.
+ *
+ * This intentionally uses one atomic Redis script with KEYS. The legacy key
+ * format has no version/index metadata, so an incremental SCAN cannot prove it
+ * saw a marker before that marker expires. Correct migration therefore needs a
+ * short maintenance boundary with legacy outbound workers stopped. The script
+ * blocks only for this explicit cutover and must never be used as a periodic
+ * runtime sweep.
+ */
+export async function migrateLegacyCompletedDeliveryMarkers(
+  redisUrl: string = process.env["REDIS_URL"] ?? "redis://localhost:6379",
+): Promise<number> {
+  if (process.env["APDM_COMPLETION_MARKER_V2_CUTOVER"] !== COMPLETED_DELIVERY_CUTOVER_MODE) {
+    throw new Error(
+      `APDM completed-marker v2 startup requires APDM_COMPLETION_MARKER_V2_CUTOVER=${COMPLETED_DELIVERY_CUTOVER_MODE}; stop all legacy outbound workers before starting v2 workers`,
+    );
+  }
+
+  const redis = createClient({ url: redisUrl });
+  redis.on("error", () => undefined);
+  await redis.connect();
+  try {
+    const result = await redis.eval(
+      `
+        local legacyPrefix = ARGV[1]
+        local v2Prefix = ARGV[2]
+        local ttlMs = ARGV[3]
+        local keys = redis.call('KEYS', legacyPrefix .. '*')
+        local migrated = 0
+        for _, legacyKey in ipairs(keys) do
+          if string.sub(legacyKey, 1, string.len(v2Prefix)) ~= v2Prefix then
+            local suffix = string.sub(legacyKey, string.len(legacyPrefix) + 1)
+            local v2Key = v2Prefix .. suffix
+            if redis.call('EXISTS', legacyKey) == 1 then
+              if redis.call('EXISTS', v2Key) == 0 then
+                redis.call('SET', v2Key, 'v2', 'PX', ttlMs)
+              end
+              redis.call('DEL', legacyKey)
+              migrated = migrated + 1
+            end
+          end
+        end
+        return migrated
+      `,
+      {
+        arguments: [
+          LEGACY_COMPLETED_KEY_PREFIX,
+          COMPLETED_KEY_PREFIX,
+          String(MIN_COMPLETED_DELIVERY_TTL_MS),
+        ],
+      },
+    );
+    return typeof result === "number" ? result : Number(result ?? 0);
+  } finally {
+    await redis.quit();
+  }
+}
+
 export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimStore {
   private readonly redis: RedisClientType;
   private connectPromise: Promise<void> | null = null;
-  private initialRetentionSweepPromise: Promise<void> | null = null;
-  private retentionSweepTimer: NodeJS.Timeout | null = null;
-  private retentionSweepRunning = false;
 
   constructor(redisUrl: string = process.env["REDIS_URL"] ?? "redis://localhost:6379") {
     this.redis = createClient({ url: redisUrl });
     this.redis.on("error", () => {
       // Runtime logging remains owned by the worker; Redis commands reject and
-      // are handled by the existing worker error/DLQ path.
+      // are handled by the worker's durable recovery path.
     });
   }
 
   private async ensureConnected(): Promise<void> {
-    if (!this.redis.isOpen) {
-      if (!this.connectPromise) {
-        this.connectPromise = this.redis.connect().then(() => undefined).finally(() => {
-          this.connectPromise = null;
-        });
-      }
-      await this.connectPromise;
-    }
-
-    // Before this upgraded store is allowed to claim any delivery, migrate
-    // legacy 24-hour completed markers to the new retention floor. A periodic
-    // sweep then covers short-lived markers written by old workers during a
-    // rolling deployment until those workers have drained.
-    if (!this.initialRetentionSweepPromise) {
-      this.initialRetentionSweepPromise = this.sweepCompletedMarkerRetention();
-    }
-    await this.initialRetentionSweepPromise;
-    this.startRetentionSweepTimer();
-  }
-
-  private startRetentionSweepTimer(): void {
-    if (this.retentionSweepTimer) return;
-    this.retentionSweepTimer = setInterval(() => {
-      void this.sweepCompletedMarkerRetention().catch(() => {
-        // A failed background sweep does not mutate markers. The next interval
-        // retries; command errors from foreground claim/complete remain visible
-        // to the worker. The interval is far shorter than the legacy 24h TTL.
+    if (this.redis.isOpen) return;
+    if (!this.connectPromise) {
+      this.connectPromise = this.redis.connect().then(() => undefined).finally(() => {
+        this.connectPromise = null;
       });
-    }, COMPLETED_DELIVERY_RETENTION_SWEEP_INTERVAL_MS);
-    this.retentionSweepTimer.unref?.();
-  }
-
-  private async sweepCompletedMarkerRetention(): Promise<void> {
-    if (this.retentionSweepRunning || !this.redis.isOpen) return;
-    this.retentionSweepRunning = true;
-
-    try {
-      // SCAN is incremental/nonblocking. node-redis v5's iterator yields small
-      // batches, so migration does not issue a production-wide KEYS operation.
-      for await (const keys of this.redis.scanIterator({
-        MATCH: `${COMPLETED_KEY_PREFIX}*`,
-        COUNT: RETENTION_SWEEP_SCAN_COUNT,
-      })) {
-        for (const key of keys) {
-          const ttlMs = await this.redis.pTTL(key);
-          if (shouldExtendCompletedDeliveryTtl(ttlMs)) {
-            await this.redis.pExpire(key, MIN_COMPLETED_DELIVERY_TTL_MS);
-          }
-        }
-      }
-    } finally {
-      this.retentionSweepRunning = false;
     }
+    await this.connectPromise;
   }
 
   private completedKey(jobId: string): string {
     return `${COMPLETED_KEY_PREFIX}${jobId}`;
+  }
+
+  private legacyCompletedKey(jobId: string): string {
+    return `${LEGACY_COMPLETED_KEY_PREFIX}${jobId}`;
   }
 
   private claimKey(jobId: string): string {
@@ -107,21 +115,38 @@ export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimSto
 
   async claim(jobId: string, claimToken: string, ttlMs: number): Promise<DeliveryClaimResult> {
     await this.ensureConnected();
-    const completedKey = this.completedKey(jobId);
-    const claimKey = this.claimKey(jobId);
-
-    if (await this.redis.exists(completedKey)) return "completed";
-
-    const claimed = await this.redis.set(claimKey, claimToken, {
-      PX: Math.max(1000, Math.floor(ttlMs)),
-      NX: true,
-    });
-    if (claimed === "OK") return "claimed";
-
-    // Close the race where another worker completed between the first completed
-    // check and our failed NX claim.
-    if (await this.redis.exists(completedKey)) return "completed";
-    return "in_flight";
+    const result = await this.redis.eval(
+      `
+        if redis.call('EXISTS', KEYS[1]) == 1 then
+          return 'completed'
+        end
+        if redis.call('EXISTS', KEYS[2]) == 1 then
+          if redis.call('EXISTS', KEYS[1]) == 0 then
+            redis.call('SET', KEYS[1], 'v2', 'PX', ARGV[2])
+          end
+          redis.call('DEL', KEYS[2])
+          return 'completed'
+        end
+        local claimed = redis.call('SET', KEYS[3], ARGV[1], 'PX', ARGV[3], 'NX')
+        if claimed then
+          return 'claimed'
+        end
+        if redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1 then
+          return 'completed'
+        end
+        return 'in_flight'
+      `,
+      {
+        keys: [this.completedKey(jobId), this.legacyCompletedKey(jobId), this.claimKey(jobId)],
+        arguments: [
+          claimToken,
+          String(MIN_COMPLETED_DELIVERY_TTL_MS),
+          String(Math.max(1000, Math.floor(ttlMs))),
+        ],
+      },
+    );
+    if (result === "completed" || result === "claimed" || result === "in_flight") return result;
+    throw new Error(`Unexpected outbound delivery claim result: ${String(result)}`);
   }
 
   async complete(jobId: string, claimToken: string, ttlMs: number): Promise<void> {
@@ -129,14 +154,15 @@ export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimSto
     const completedTtlMs = normalizeCompletedDeliveryTtlMs(ttlMs);
     await this.redis.eval(
       `
-        redis.call('set', KEYS[1], '1', 'PX', ARGV[2])
-        if redis.call('get', KEYS[2]) == ARGV[1] then
-          redis.call('del', KEYS[2])
+        redis.call('SET', KEYS[1], 'v2', 'PX', ARGV[2])
+        redis.call('DEL', KEYS[2])
+        if redis.call('GET', KEYS[3]) == ARGV[1] then
+          redis.call('DEL', KEYS[3])
         end
         return 1
       `,
       {
-        keys: [this.completedKey(jobId), this.claimKey(jobId)],
+        keys: [this.completedKey(jobId), this.legacyCompletedKey(jobId), this.claimKey(jobId)],
         arguments: [claimToken, String(completedTtlMs)],
       },
     );
@@ -146,8 +172,8 @@ export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimSto
     await this.ensureConnected();
     await this.redis.eval(
       `
-        if redis.call('get', KEYS[1]) == ARGV[1] then
-          return redis.call('del', KEYS[1])
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+          return redis.call('DEL', KEYS[1])
         end
         return 0
       `,
@@ -159,10 +185,6 @@ export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimSto
   }
 
   async close(): Promise<void> {
-    if (this.retentionSweepTimer) {
-      clearInterval(this.retentionSweepTimer);
-      this.retentionSweepTimer = null;
-    }
     if (!this.redis.isOpen) return;
     await this.redis.quit();
   }
