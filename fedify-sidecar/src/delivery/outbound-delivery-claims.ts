@@ -34,7 +34,8 @@ export interface CompletedDeliveryCutoverRequest {
  * namespace: an upgrade may also have no live v1 markers because the previous
  * 24-hour TTL already expired them. Upgrade mode therefore requires a replay
  * blackout long enough for both the producer's 48-hour lookback and the
- * sidecar's pre-cutover queued work to age outside the new fail-closed horizon.
+ * sidecar's pre-cutover queued work to age strictly outside the new fail-closed
+ * residence horizon.
  */
 export function validateCompletedDeliveryCutoverRequest(
   modeRaw: string | undefined,
@@ -59,9 +60,9 @@ export function validateCompletedDeliveryCutoverRequest(
   }
 
   const elapsedMs = nowMs - blackoutStartedAtMs;
-  if (!Number.isFinite(elapsedMs) || elapsedMs < LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS) {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS) {
     throw new Error(
-      `Legacy APDM cutover blackout must remain in force for at least ${LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS} ms before v2 queue consumption`,
+      `Legacy APDM cutover blackout must remain in force for more than ${LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS} ms before v2 queue consumption`,
     );
   }
 
@@ -83,12 +84,14 @@ export interface OutboundDeliveryClaimStore {
  * requires an explicit first-start declaration. A proven fresh deployment may
  * use `fresh` only when the legacy namespace is empty. An upgrade must disable
  * automatic reconciliation, stop every legacy sidecar worker, hold that
- * blackout for 48h + accepted clock skew, and then use `maintenance`.
+ * blackout strictly beyond 48h + accepted clock skew, and then use
+ * `maintenance`.
  *
- * Waiting the full producer lookback also means any pre-cutover outbox/outbound
- * work is older than the upgraded sidecar's 48-hour residence limits, so it is
- * rejected before a duplicate claim or external POST. The permanent sentinel
- * makes this disruptive fence strictly one-time; later starts need no flag.
+ * Waiting past the full producer lookback also means any pre-cutover
+ * outbox/outbound work is older than the upgraded sidecar's 48-hour residence
+ * limits, so it is rejected before a duplicate claim or external POST. The
+ * permanent sentinel makes this disruptive fence strictly one-time; later
+ * starts need no flag.
  */
 export async function migrateLegacyCompletedDeliveryMarkers(
   redisUrl: string = process.env["REDIS_URL"] ?? "redis://localhost:6379",
