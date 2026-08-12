@@ -15,7 +15,7 @@ export const COMPLETED_DELIVERY_CUTOVER_MODE = "maintenance";
 export const COMPLETED_DELIVERY_FRESH_INSTALL_MODE = "fresh";
 export const COMPLETED_DELIVERY_BLACKOUT_STARTED_AT_ENV = "APDM_COMPLETION_MARKER_V2_BLACKOUT_STARTED_AT_MS";
 export const LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS =
-  APDM_AUTOMATIC_PRODUCER_REPLAY_MAX_MS + APDM_MAX_CLOCK_SKEW_MS;
+  APDM_AUTOMATIC_PRODUCER_REPLAY_MAX_MS + (2 * APDM_MAX_CLOCK_SKEW_MS);
 
 export function normalizeCompletedDeliveryTtlMs(ttlMs: number): number {
   const normalized = Number.isFinite(ttlMs) ? Math.floor(ttlMs) : 0;
@@ -33,9 +33,10 @@ export interface CompletedDeliveryCutoverRequest {
  * We deliberately do not infer a fresh installation from an empty legacy
  * namespace: an upgrade may also have no live v1 markers because the previous
  * 24-hour TTL already expired them. Upgrade mode therefore requires a replay
- * blackout long enough for both the producer's 48-hour lookback and the
- * sidecar's pre-cutover queued work to age strictly outside the new fail-closed
- * residence horizon.
+ * blackout long enough for the producer's 48-hour lookback plus independent
+ * clock-skew allowances on both the recorded stop boundary and queued-source
+ * timestamps, so pre-cutover sidecar work is strictly outside the new
+ * fail-closed residence horizon.
  */
 export function validateCompletedDeliveryCutoverRequest(
   modeRaw: string | undefined,
@@ -84,14 +85,14 @@ export interface OutboundDeliveryClaimStore {
  * requires an explicit first-start declaration. A proven fresh deployment may
  * use `fresh` only when the legacy namespace is empty. An upgrade must disable
  * automatic reconciliation, stop every legacy sidecar worker, hold that
- * blackout strictly beyond 48h + accepted clock skew, and then use
- * `maintenance`.
+ * blackout for more than 48h + two accepted clock-skew allowances, and then
+ * use `maintenance`.
  *
- * Waiting past the full producer lookback also means any pre-cutover
- * outbox/outbound work is older than the upgraded sidecar's 48-hour residence
- * limits, so it is rejected before a duplicate claim or external POST. The
- * permanent sentinel makes this disruptive fence strictly one-time; later
- * starts need no flag.
+ * Waiting beyond the full producer lookback plus both skew reserves also means
+ * any pre-cutover outbox/outbound work is strictly older than the upgraded
+ * sidecar's 48-hour residence limits, so it is rejected before a duplicate
+ * claim or external POST. The permanent sentinel makes this disruptive fence
+ * strictly one-time; later starts need no flag.
  */
 export async function migrateLegacyCompletedDeliveryMarkers(
   redisUrl: string = process.env["REDIS_URL"] ?? "redis://localhost:6379",
