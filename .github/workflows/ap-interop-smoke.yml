@@ -143,7 +143,11 @@ jobs:
 
       - name: Run AP Interop Smoke Lane
         if: env.SHOULD_RUN_SMOKE == 'true'
-        run: npm --prefix fedify-sidecar run smoke:interop:ap
+        shell: bash
+        run: |
+          mkdir -p /tmp/ap-interop-logs
+          set -o pipefail
+          npm --prefix fedify-sidecar run smoke:interop:ap 2>&1 | tee /tmp/ap-interop-logs/proof.log
 
       - name: Collect Interop Logs On Failure
         if: failure() && env.SHOULD_RUN_SMOKE == 'true'
