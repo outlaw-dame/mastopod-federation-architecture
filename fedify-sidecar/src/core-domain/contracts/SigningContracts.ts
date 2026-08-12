@@ -219,7 +219,7 @@ export interface SignAtprotoCommitRequest {
  */
 export interface SignAtprotoCommitResponse {
   /**
-   * DID of the account (optional if not yet provisioned)
+   * DID of the repository
    */
   did: string;
 
@@ -230,8 +230,8 @@ export interface SignAtprotoCommitResponse {
   keyId: string;
 
   /**
-   * Signature in base64url format (optional)
-   * May be included for immediate use
+   * Signature in base64url format
+   * Can be directly used in commit objects
    */
   signatureBase64Url: string;
 
@@ -241,7 +241,7 @@ export interface SignAtprotoCommitResponse {
   algorithm: 'k256';
 
   /**
-   * ISO 8601 timestamp of key creation
+   * ISO 8601 timestamp of signing
    */
   signedAt: string;
 }
