@@ -37,6 +37,10 @@ import {
   RedisOutboundDeliveryClaimStore,
   type OutboundDeliveryClaimStore,
 } from "./outbound-delivery-claims.js";
+import {
+  APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
+  outboundMessageResidenceMs,
+} from "./apdm-replay-horizon.js";
 
 // ============================================================================
 // Types
@@ -329,6 +333,22 @@ export class OutboundWorker {
     let claimHeld = false;
 
     try {
+      const queueResidenceMs = outboundMessageResidenceMs(messageId, deliveryStartedAt);
+      if (queueResidenceMs !== null && queueResidenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS) {
+        const reason = `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit`;
+        await this.queue.moveToDlq("outbound", { ...job, lastError: reason }, reason);
+        await this.queue.ack("outbound", messageId);
+        metrics.deliveryDlq.inc({ domain: job.targetDomain });
+        metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "queue_expired" });
+        logger.warn("Outbound delivery expired before duplicate claim check", {
+          jobId: job.jobId,
+          activityId: job.activityId,
+          queueResidenceMs,
+          maxQueueResidenceMs: APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
+        });
+        return;
+      }
+
       if (this.config.capabilityGate) {
         const gate = this.config.capabilityGate("ap.federation.egress");
         if (!gate.allowed) {
