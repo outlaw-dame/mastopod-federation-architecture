@@ -49,6 +49,22 @@ All retry/defer paths insert their durable replacement before acknowledging the 
 
 `RedisOutboundDeliveryClaimStore` uses ownership tokens so a stale worker cannot release another worker's claim. Completion and claim release are performed with Redis-side token checks.
 
+## Replay-horizon guarantee
+
+Phase 4's no-duplicate guarantee is intentionally bounded rather than pretending completed-delivery state is retained forever.
+
+ActivityPods automatic delivery reconciliation may inspect at most the preceding **72 hours**. That bound matches the 72-hour private blind-recipient recovery-snapshot lifetime introduced by the P1 hardening work; configurations above that horizon fail closed instead of silently creating an unrecoverable replay range.
+
+The sidecar Redis completed-delivery ledger enforces a **seven-day minimum** retention period for successful `activityId::deliveryUrl` markers. A shorter worker configuration is clamped by the storage layer, while a longer configured retention remains valid. The seven-day floor therefore leaves more than four days of safety margin beyond the maximum supported automatic ActivityPods replay horizon.
+
+The cross-repository invariant is:
+
+```text
+maximum automatic producer replay horizon <= 72 hours < sidecar completed-marker retention >= 7 days
+```
+
+Manual/operator replay outside that bounded window is not covered by the automatic no-duplicate guarantee and must be treated as an explicit recovery operation.
+
 ## Tests
 
 `fedify-sidecar/src/delivery/tests/DurableHandoffIdempotency.test.ts` proves:
@@ -57,5 +73,7 @@ All retry/defer paths insert their durable replacement before acknowledging the 
 - a dead worker's still-live in-flight claim is not mistaken for completed delivery;
 - reclaimed work becomes deliverable after the stale claim expires;
 - a duplicate is suppressed only after completed-delivery state has been recorded.
+
+`fedify-sidecar/src/delivery/tests/OutboundDeliveryClaimRetention.test.ts` additionally proves that the production completion-ledger policy clamps shorter TTLs to seven days, preserves longer retention values, and fails safe to the floor for non-finite input.
 
 Phase 4 does not perform the production authority cutover. That remains APDM Phase 5.
