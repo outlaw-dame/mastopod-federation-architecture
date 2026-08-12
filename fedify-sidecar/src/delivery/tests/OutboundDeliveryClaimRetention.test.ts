@@ -61,7 +61,7 @@ describe("APDM completed-delivery retention policy", () => {
     });
   });
 
-  it("requires a 48-hour plus skew blackout for upgrades", () => {
+  it("requires an upgrade blackout strictly beyond 48 hours plus accepted skew", () => {
     const nowMs = 2_000_000_000_000;
     expect(LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS).toBe(48 * 60 * 60 * 1000 + 5 * 60 * 1000);
 
@@ -71,13 +71,19 @@ describe("APDM completed-delivery retention policy", () => {
       nowMs,
     )).toThrow("blackout must remain in force");
 
-    expect(validateCompletedDeliveryCutoverRequest(
+    expect(() => validateCompletedDeliveryCutoverRequest(
       "maintenance",
       String(nowMs - LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS),
       nowMs,
+    )).toThrow("blackout must remain in force");
+
+    expect(validateCompletedDeliveryCutoverRequest(
+      "maintenance",
+      String(nowMs - LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS - 1),
+      nowMs,
     )).toEqual({
       mode: "maintenance",
-      blackoutStartedAtMs: nowMs - LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS,
+      blackoutStartedAtMs: nowMs - LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS - 1,
     });
   });
 
