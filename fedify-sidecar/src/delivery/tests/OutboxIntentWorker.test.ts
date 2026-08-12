@@ -11,6 +11,7 @@ import {
 } from "../outbox-intent-worker.js";
 import type { OutboxIntent } from "../../queue/sidecar-redis-queue.js";
 import { DEFAULT_ACTIVITYPUB_OUTBOUND_DELIVERY_POLICY } from "../../protocol-bridge/projectors/activitypub/ActivityPubDeliveryPolicy.js";
+import { APDM_OUTBOX_INTENT_MAX_AGE_MS } from "../apdm-replay-horizon.js";
 
 class TestOutboxIntentWorker extends OutboxIntentWorker {
   async runIntent(messageId: string, intent: OutboxIntent): Promise<void> {
@@ -85,6 +86,12 @@ function makeConfig(overrides: Partial<OutboxIntentWorkerConfig> = {}): OutboxIn
   };
 }
 
+function expectCalledBefore(first: ReturnType<typeof vi.fn>, second: ReturnType<typeof vi.fn>) {
+  expect(first).toHaveBeenCalled();
+  expect(second).toHaveBeenCalled();
+  expect(first.mock.invocationCallOrder[0]).toBeLessThan(second.mock.invocationCallOrder[0]);
+}
+
 describe("OutboxIntentWorker", () => {
   it("publishes the event log and atomically fans out outbound jobs on success", async () => {
     const queue = makeQueue();
@@ -121,7 +128,7 @@ describe("OutboxIntentWorker", () => {
     expect(queue.moveToDlq).not.toHaveBeenCalled();
   });
 
-  it("requeues the intent with backoff after a transient event-log failure", async () => {
+  it("persists a transient retry before acknowledging the source intent", async () => {
     const queue = makeQueue();
     const redpanda = makeRedpanda({
       publishToStream1: vi.fn().mockRejectedValue(new Error("broker unavailable")),
@@ -134,6 +141,7 @@ describe("OutboxIntentWorker", () => {
 
     expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "msg-002");
     expect(queue.enqueueOutboxIntent).toHaveBeenCalledTimes(1);
+    expectCalledBefore(queue.enqueueOutboxIntent, queue.ack);
     const retryIntent = queue.enqueueOutboxIntent.mock.calls[0]?.[0] as OutboxIntent | undefined;
     expect(retryIntent).toBeDefined();
     if (!retryIntent) {
@@ -145,6 +153,53 @@ describe("OutboxIntentWorker", () => {
     expect(retryIntent.notBeforeMs).toBeGreaterThan(before);
     expect(queue.moveToDlq).not.toHaveBeenCalled();
     expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
+  });
+
+  it("persists a deferred replacement before acknowledging the source intent", async () => {
+    const queue = makeQueue();
+    const redpanda = makeRedpanda();
+    const worker = new TestOutboxIntentWorker(queue, redpanda, makeConfig());
+    const intent = makeIntent({ notBeforeMs: Date.now() + 60_000 });
+
+    await worker.runIntent("msg-deferred", intent);
+
+    expect(queue.enqueueOutboxIntent).toHaveBeenCalledWith(intent);
+    expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "msg-deferred");
+    expectCalledBefore(queue.enqueueOutboxIntent, queue.ack);
+    expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
+  });
+
+  it("persists stale intent recovery in the DLQ before acknowledging the source", async () => {
+    const queue = makeQueue();
+    const redpanda = makeRedpanda();
+    const worker = new TestOutboxIntentWorker(queue, redpanda, makeConfig());
+    const intent = makeIntent({
+      createdAt: Date.now() - APDM_OUTBOX_INTENT_MAX_AGE_MS - 1_000,
+    });
+
+    await worker.runIntent("msg-stale", intent);
+
+    expect(queue.moveToDlq).toHaveBeenCalledTimes(1);
+    expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "msg-stale");
+    expectCalledBefore(queue.moveToDlq, queue.ack);
+    expect(queue.enqueueOutboxIntent).not.toHaveBeenCalled();
+    expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
+  });
+
+  it("leaves the source pending if the DLQ write fails", async () => {
+    const queue = makeQueue({
+      moveToDlq: vi.fn().mockRejectedValue(new Error("dlq unavailable")),
+    });
+    const redpanda = makeRedpanda();
+    const worker = new TestOutboxIntentWorker(queue, redpanda, makeConfig());
+    const intent = makeIntent({
+      createdAt: Date.now() - APDM_OUTBOX_INTENT_MAX_AGE_MS - 1_000,
+    });
+
+    await expect(worker.runIntent("msg-stale-failure", intent)).rejects.toThrow("dlq unavailable");
+
+    expect(queue.moveToDlq).toHaveBeenCalledTimes(1);
+    expect(queue.ack).not.toHaveBeenCalled();
   });
 
   it("acks duplicate completed intents without re-publishing or re-enqueueing", async () => {
