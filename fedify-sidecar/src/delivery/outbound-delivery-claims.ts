@@ -2,6 +2,13 @@ import { createClient, type RedisClientType } from "redis";
 
 export type DeliveryClaimResult = "claimed" | "completed" | "in_flight";
 
+export const MIN_COMPLETED_DELIVERY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function normalizeCompletedDeliveryTtlMs(ttlMs: number): number {
+  const normalized = Number.isFinite(ttlMs) ? Math.floor(ttlMs) : 0;
+  return Math.max(MIN_COMPLETED_DELIVERY_TTL_MS, normalized);
+}
+
 export interface OutboundDeliveryClaimStore {
   claim(jobId: string, claimToken: string, ttlMs: number): Promise<DeliveryClaimResult>;
   complete(jobId: string, claimToken: string, ttlMs: number): Promise<void>;
@@ -60,6 +67,7 @@ export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimSto
 
   async complete(jobId: string, claimToken: string, ttlMs: number): Promise<void> {
     await this.ensureConnected();
+    const completedTtlMs = normalizeCompletedDeliveryTtlMs(ttlMs);
     await this.redis.eval(
       `
         redis.call('set', KEYS[1], '1', 'PX', ARGV[2])
@@ -70,7 +78,7 @@ export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimSto
       `,
       {
         keys: [this.completedKey(jobId), this.claimKey(jobId)],
-        arguments: [claimToken, String(Math.max(1000, Math.floor(ttlMs)))],
+        arguments: [claimToken, String(completedTtlMs)],
       },
     );
   }
