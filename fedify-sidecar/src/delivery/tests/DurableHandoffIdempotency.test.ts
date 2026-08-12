@@ -10,6 +10,10 @@ import { OutboundWorker, type DeliveryResult, type OutboundWorkerConfig } from "
 import type { OutboxIntent, OutboundJob } from "../../queue/sidecar-redis-queue.js";
 import type { OutboundDeliveryClaimStore, DeliveryClaimResult } from "../outbound-delivery-claims.js";
 import { DEFAULT_ACTIVITYPUB_OUTBOUND_DELIVERY_POLICY } from "../../protocol-bridge/projectors/activitypub/ActivityPubDeliveryPolicy.js";
+import {
+  APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
+  APDM_OUTBOX_INTENT_MAX_AGE_MS,
+} from "../apdm-replay-horizon.js";
 
 class TestIntentWorker extends OutboxIntentWorker {
   async run(messageId: string, intent: OutboxIntent): Promise<void> {
@@ -38,6 +42,7 @@ class TestOutboundWorker extends OutboundWorker {
 class StatefulClaimStore implements OutboundDeliveryClaimStore {
   private readonly claims = new Map<string, string>();
   private readonly completed = new Set<string>();
+  claimCalls = 0;
 
   seedInFlight(jobId: string, token = "dead-worker-token"): void {
     this.claims.set(jobId, token);
@@ -52,6 +57,7 @@ class StatefulClaimStore implements OutboundDeliveryClaimStore {
   }
 
   async claim(jobId: string, claimToken: string): Promise<DeliveryClaimResult> {
+    this.claimCalls += 1;
     if (this.completed.has(jobId)) return "completed";
     if (this.claims.has(jobId)) return "in_flight";
     this.claims.set(jobId, claimToken);
@@ -186,6 +192,31 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
     );
   });
 
+  it("expires a stale durable outbox intent before it can create outbound replay work", async () => {
+    const queue = {
+      getOutboxIntentState: vi.fn().mockResolvedValue({}),
+      enqueueOutboundBatchForIntent: vi.fn().mockResolvedValue({ enqueued: true, jobCount: 1 }),
+      markOutboxIntentCompleted: vi.fn().mockResolvedValue(undefined),
+      markOutboxIntentEventLogPublished: vi.fn().mockResolvedValue(undefined),
+      ack: vi.fn().mockResolvedValue(undefined),
+      enqueueOutboxIntent: vi.fn().mockResolvedValue("retry"),
+      moveToDlq: vi.fn().mockResolvedValue(undefined),
+    } as any;
+    const worker = new TestIntentWorker(queue, null, intentWorkerConfig());
+    const stale = intent("stale-sidecar-intent");
+    stale.createdAt = Date.now() - APDM_OUTBOX_INTENT_MAX_AGE_MS - 1;
+
+    await worker.run("stale-intent", stale);
+
+    expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
+    expect(queue.moveToDlq).toHaveBeenCalledWith(
+      "outbox_intent",
+      expect.objectContaining({ intentId: stale.intentId }),
+      expect.stringContaining("replay residence limit"),
+    );
+    expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "stale-intent");
+  });
+
   it("does not mistake a dead worker's in-flight claim for completed delivery", async () => {
     const queue = createOutboundQueue();
     const claimStore = new StatefulClaimStore();
@@ -232,5 +263,30 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
     expect(queue.ack).toHaveBeenCalledWith("outbound", "outbound-a");
     expect(queue.ack).toHaveBeenCalledWith("outbound", "outbound-b");
     expect(queue.enqueueOutbound).not.toHaveBeenCalled();
+  });
+
+  it("expires an outbound message that sat in Redis too long before its first claim check", async () => {
+    const queue = createOutboundQueue();
+    const claimStore = new StatefulClaimStore();
+    const job = outboundJob();
+    const worker = new TestOutboundWorker(
+      queue,
+      {} as any,
+      {} as any,
+      outboundWorkerConfig(claimStore),
+    );
+    const staleEnqueueMs = Date.now() - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS - 1;
+    const staleRedisMessageId = `${staleEnqueueMs}-0`;
+
+    await worker.run(staleRedisMessageId, job);
+
+    expect(worker.deliveries).toBe(0);
+    expect(claimStore.claimCalls).toBe(0);
+    expect(queue.moveToDlq).toHaveBeenCalledWith(
+      "outbound",
+      expect.objectContaining({ jobId: job.jobId }),
+      expect.stringContaining("queue residence limit"),
+    );
+    expect(queue.ack).toHaveBeenCalledWith("outbound", staleRedisMessageId);
   });
 });
