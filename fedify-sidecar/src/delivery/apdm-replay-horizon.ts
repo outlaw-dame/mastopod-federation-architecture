@@ -2,6 +2,7 @@ export const APDM_AUTOMATIC_PRODUCER_REPLAY_MAX_MS = 48 * 60 * 60 * 1000;
 export const APDM_OUTBOX_INTENT_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 export const APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS = 48 * 60 * 60 * 1000;
 export const APDM_COMPLETED_DELIVERY_MIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const APDM_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 export const APDM_MAX_AUTOMATIC_DUPLICATE_AGE_MS =
   APDM_AUTOMATIC_PRODUCER_REPLAY_MAX_MS +
@@ -18,7 +19,8 @@ if (APDM_REPLAY_SAFETY_MARGIN_MS <= 0) {
 export function outboxIntentAgeMs(createdAt: number, nowMs: number = Date.now()): number | null {
   if (!Number.isFinite(createdAt) || createdAt <= 0) return null;
   const age = nowMs - createdAt;
-  return Number.isFinite(age) ? Math.max(0, age) : null;
+  if (!Number.isFinite(age) || age < -APDM_MAX_CLOCK_SKEW_MS) return null;
+  return Math.max(0, age);
 }
 
 export function redisStreamMessageTimestampMs(messageId: string): number | null {
@@ -35,5 +37,6 @@ export function outboundMessageResidenceMs(messageId: string, nowMs: number = Da
   const enqueuedAt = redisStreamMessageTimestampMs(messageId);
   if (enqueuedAt === null) return null;
   const age = nowMs - enqueuedAt;
-  return Number.isFinite(age) ? Math.max(0, age) : null;
+  if (!Number.isFinite(age) || age < -APDM_MAX_CLOCK_SKEW_MS) return null;
+  return Math.max(0, age);
 }
