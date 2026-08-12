@@ -18,6 +18,7 @@ export const DELAYED_OUTBOUND_PROMOTION_INTERVAL_MS = 250;
 export const DELAYED_OUTBOUND_MIN_DELAY_MS = 2_000;
 export const DELAYED_OUTBOUND_PROMOTION_BATCH_SIZE = 100;
 export const DELAYED_OUTBOUND_PARK_RETRY_MS = 1_000;
+export const DELAYED_OUTBOUND_PARK_MAX_RETRY_MS = 30_000;
 
 type DelayedRedisClient = ReturnType<typeof createClient>;
 
@@ -172,26 +173,63 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
         continue;
       }
 
-      const remainingDelayMs = job.notBeforeMs - Date.now();
+      let remainingDelayMs = job.notBeforeMs - Date.now();
       if (
         this.delayedRedis
         && job.notBeforeMs > 0
         && remainingDelayMs > DELAYED_OUTBOUND_MIN_DELAY_MS
       ) {
-        try {
-          await this.parkDelayedOutbound(entry.messageId, job);
-        } catch (error) {
-          logger.error(
-            {
-              jobId: job.jobId,
-              messageId: entry.messageId,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            "Failed to park future outbound job; source remains pending for reclaim",
-          );
-          await this.sleep(DELAYED_OUTBOUND_PARK_RETRY_MS);
+        let retryDelayMs = DELAYED_OUTBOUND_PARK_RETRY_MS;
+        let parked = false;
+
+        while (remainingDelayMs > DELAYED_OUTBOUND_MIN_DELAY_MS) {
+          try {
+            await this.parkDelayedOutbound(entry.messageId, job);
+            parked = true;
+            break;
+          } catch (error) {
+            logger.error(
+              {
+                jobId: job.jobId,
+                messageId: entry.messageId,
+                retryDelayMs,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "Failed to park future outbound job; retrying same pending source",
+            );
+            await this.sleep(retryDelayMs);
+            retryDelayMs = Math.min(retryDelayMs * 2, DELAYED_OUTBOUND_PARK_MAX_RETRY_MS);
+
+            const retryResidenceMs = typeof firstQueuedAtMs === "number"
+              ? outboxIntentAgeMs(firstQueuedAtMs)
+              : null;
+            if (
+              retryResidenceMs === null
+              || retryResidenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS
+            ) {
+              const reason = `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit while retrying delayed parking`;
+              try {
+                await this.moveToDlq("outbound", { ...job, lastError: reason }, reason);
+                await this.ack("outbound", entry.messageId);
+                parked = true;
+              } catch (dlqError) {
+                logger.error(
+                  {
+                    jobId: job.jobId,
+                    messageId: entry.messageId,
+                    error: dlqError instanceof Error ? dlqError.message : String(dlqError),
+                  },
+                  "Failed to persist expired outbound job during delayed-park retry; source remains pending",
+                );
+              }
+              break;
+            }
+
+            remainingDelayMs = job.notBeforeMs - Date.now();
+          }
         }
-        continue;
+
+        if (parked) continue;
       }
 
       yield { messageId: entry.messageId, job };
