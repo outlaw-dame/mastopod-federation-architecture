@@ -53,14 +53,16 @@ All retry/defer paths insert their durable replacement before acknowledging the 
 
 Phase 4's no-duplicate guarantee is intentionally bounded rather than pretending completed-delivery state is retained forever.
 
-ActivityPods automatic delivery reconciliation may inspect at most the preceding **72 hours**. That bound matches the 72-hour private blind-recipient recovery-snapshot lifetime introduced by the P1 hardening work; configurations above that horizon fail closed instead of silently creating an unrecoverable replay range.
+ActivityPods automatic delivery reconciliation may inspect at most the preceding **48 hours**. Blind-recipient recovery snapshots remain private and expire after **72 hours**, leaving a full 24-hour margin for account-cursor rotation, paging, Activity refetch, and plan reconstruction after an Activity first enters the eligible lookback window. Configurations above 48 hours fail closed instead of allowing automatic reconciliation to race the blind-recipient snapshot expiry.
 
-The sidecar Redis completed-delivery ledger enforces a **seven-day minimum** retention period for successful `activityId::deliveryUrl` markers. A shorter worker configuration is clamped by the storage layer, while a longer configured retention remains valid. The seven-day floor therefore leaves more than four days of safety margin beyond the maximum supported automatic ActivityPods replay horizon.
+The sidecar Redis completed-delivery ledger enforces a **seven-day minimum** retention period for successful `activityId::deliveryUrl` markers. A shorter worker configuration is clamped by the storage layer, while a longer configured retention remains valid. The seven-day floor therefore leaves five days of safety margin beyond the maximum supported automatic ActivityPods replay horizon.
 
 The cross-repository invariant is:
 
 ```text
-maximum automatic producer replay horizon <= 72 hours < sidecar completed-marker retention >= 7 days
+maximum automatic producer replay horizon <= 48 hours
+    < blind-recipient recovery snapshot = 72 hours
+    < sidecar completed-marker retention >= 7 days
 ```
 
 Manual/operator replay outside that bounded window is not covered by the automatic no-duplicate guarantee and must be treated as an explicit recovery operation.
