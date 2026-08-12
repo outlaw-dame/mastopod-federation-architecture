@@ -55,11 +55,13 @@ Phase 4's automatic no-duplicate guarantee is bounded explicitly rather than ass
 
 ActivityPods automatic delivery reconciliation may inspect at most the preceding **48 hours**. Blind-recipient recovery snapshots remain private and expire after **72 hours**, leaving a full **24-hour producer-processing allowance** for account-cursor rotation, paging, Activity refetch, and plan reconstruction before the sidecar accepts the reconstructed intent. Configurations above 48 hours fail closed instead of allowing automatic reconciliation to race the blind-recipient snapshot expiry.
 
-After durable sidecar acceptance, the outbox-intent stage may retain an intent for at most **48 hours**. The bound uses the intent's original `createdAt`, which is preserved across retries, so retry/requeue cannot reset the residence clock. Stale intents are acknowledged into the DLQ before they can create outbound replay work.
+After durable sidecar acceptance, the outbox-intent stage may retain an intent for at most **48 hours**. The bound uses the intent's original `createdAt`, which is preserved across retries, so retry/requeue cannot reset the residence clock. Stale intents are acknowledged into the DLQ before they can create outbound replay work. The worker revalidates that original age again immediately before outbound fan-out, so time spent in target enrichment or event-log publication cannot silently extend the residence window.
 
-An outbound Redis Stream message may then wait at most **48 hours** before its first completed-delivery claim check. The worker derives this residence from Redis's millisecond Stream message ID and DLQs stale messages before claiming or performing any HTTP delivery. If the Stream ID is malformed or implausibly ahead of the worker clock, age validation fails closed and the job is DLQ'd rather than delivered. A completed duplicate is checked before rate-limit/concurrency requeue paths, so a reconciliation-generated duplicate cannot reset this first-check residence clock before consulting the completed marker.
+An outbound Redis Stream message may then wait at most **48 hours** before its first completed-delivery claim check. The worker derives this residence from a fully validated Redis millisecond Stream ID (`<milliseconds>-<sequence>`) and DLQs stale messages before claiming or performing any HTTP delivery. If the Stream ID is malformed or implausibly ahead of the worker clock, age validation fails closed and the job is DLQ'd rather than delivered. A completed duplicate is checked before rate-limit/concurrency requeue paths, so a reconciliation-generated duplicate cannot reset this first-check residence clock before consulting the completed marker.
 
-The production completed-delivery ledger enforces an **eight-day minimum** retention period for successful `activityId::deliveryUrl` markers. A shorter worker configuration is clamped by the storage layer, while a longer configured retention remains valid. The eight-day floor is one day longer than the entire worst-case bounded automatic duplicate path.
+Both sidecar age checks permit at most **5 minutes of positive clock skew**. Because that allowance can apply independently to the outbox-intent and outbound-message stages, the formal automatic replay bound includes **10 minutes** of skew in addition to the four nominal timing terms.
+
+The production completed-delivery ledger enforces an **eight-day minimum** retention period for successful `activityId::deliveryUrl` markers. A shorter worker configuration is clamped by the storage layer, while a longer configured retention remains valid. The eight-day floor therefore exceeds the complete worst-case bounded automatic duplicate path by **23 hours 50 minutes**.
 
 The cross-repository automatic-replay invariant is therefore:
 
@@ -68,10 +70,11 @@ producer reconciliation age        <= 48 hours
 producer processing allowance      <= 24 hours
 sidecar outbox-intent residence     <= 48 hours
 first outbound-message residence    <= 48 hours
-----------------------------------------------
-maximum automatic duplicate age     <= 168 hours (7 days)
+accepted sidecar clock skew         <= 10 minutes total
+-------------------------------------------------
+maximum automatic duplicate age     <= 168 hours 10 minutes
 completed-delivery marker retention >= 192 hours (8 days)
-safety margin                        >= 24 hours
+safety margin                        >= 23 hours 50 minutes
 ```
 
 Separately, the private blind-recipient recovery invariant remains:
@@ -92,10 +95,10 @@ Manual/operator replay outside the bounded automatic window is not covered by th
 - a dead worker's still-live in-flight claim is not mistaken for completed delivery;
 - reclaimed work becomes deliverable after the stale claim expires;
 - a duplicate is suppressed only after completed-delivery state has been recorded;
-- stale outbox intents are DLQ'd before outbound replay work is created;
+- stale outbox intents are DLQ'd before outbound replay work is created, including revalidation immediately before fan-out;
 - stale outbound Redis messages are DLQ'd before the completed-delivery claim check or external delivery.
 
-`fedify-sidecar/src/delivery/tests/ApdmReplayHorizon.test.ts` proves the 48h + 24h + 48h + 48h = seven-day automatic duplicate bound, the eight-day completed-marker floor, the 24-hour safety margin, and fail-closed Redis Stream timestamp parsing.
+`fedify-sidecar/src/delivery/tests/ApdmReplayHorizon.test.ts` proves the 48h + 24h + 48h + 48h + 10m automatic duplicate bound, the eight-day completed-marker floor, the 23h50m safety margin, complete Redis Stream-ID validation, and fail-closed timestamp handling.
 
 `fedify-sidecar/src/delivery/tests/OutboundDeliveryClaimRetention.test.ts` additionally proves that the production completion-ledger policy clamps shorter TTLs to eight days, preserves longer retention values, and fails safe to the floor for non-finite input.
 
