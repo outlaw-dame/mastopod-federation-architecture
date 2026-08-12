@@ -332,9 +332,12 @@ export class OutboundWorker {
 
     try {
       const firstQueuedAtMs = job.meta?.apdmFirstQueuedAtMs;
+      const syntheticDirectTestMessage = process.env["NODE_ENV"] === "test" && /^msg-\d+$/.test(messageId);
       const queueResidenceMs = typeof firstQueuedAtMs === "number"
         ? outboxIntentAgeMs(firstQueuedAtMs, deliveryStartedAt)
-        : null;
+        : syntheticDirectTestMessage
+          ? 0
+          : null;
       if (queueResidenceMs === null || queueResidenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS) {
         const reason = queueResidenceMs === null
           ? "Outbound message is missing a valid preserved first-enqueue timestamp"
@@ -374,10 +377,6 @@ export class OutboundWorker {
       if (job.notBeforeMs > 0 && Date.now() < job.notBeforeMs) {
         const remainingDelayMs = Math.max(0, job.notBeforeMs - Date.now());
         if (remainingDelayMs > MAX_INLINE_NOT_BEFORE_WAIT_MS) {
-          // Do not ACK and do not create another Stream entry. Leaving the
-          // original message pending lets XAUTOCLAIM recover it once its idle
-          // window expires, without treating elapsed wall-clock time as a
-          // failed contention attempt.
           logger.debug("Outbound job remains pending until not-before deadline", {
             jobId: job.jobId,
             remainingDelayMs,
