@@ -228,20 +228,22 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
       {} as any,
       outboundWorkerConfig(claimStore),
     );
+    const liveClaimMessageId = `${Date.now()}-1`;
 
-    await worker.run("reclaimed-while-claim-live", job);
+    await worker.run(liveClaimMessageId, job);
 
     expect(worker.deliveries).toBe(0);
     expect(claimStore.isCompleted(job.jobId)).toBe(false);
     expect(queue.enqueueOutbound).toHaveBeenCalledTimes(1);
-    expect(queue.ack).toHaveBeenCalledWith("outbound", "reclaimed-while-claim-live");
+    expect(queue.ack).toHaveBeenCalledWith("outbound", liveClaimMessageId);
 
     claimStore.expireInFlight(job.jobId);
-    await worker.run("reclaimed-after-claim-expiry", { ...job, notBeforeMs: 0 });
+    const expiredClaimMessageId = `${Date.now()}-2`;
+    await worker.run(expiredClaimMessageId, { ...job, notBeforeMs: 0 });
 
     expect(worker.deliveries).toBe(1);
     expect(claimStore.isCompleted(job.jobId)).toBe(true);
-    expect(queue.ack).toHaveBeenCalledWith("outbound", "reclaimed-after-claim-expiry");
+    expect(queue.ack).toHaveBeenCalledWith("outbound", expiredClaimMessageId);
   });
 
   it("suppresses a duplicate only after completed-delivery state is durable", async () => {
@@ -254,14 +256,16 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
       {} as any,
       outboundWorkerConfig(claimStore),
     );
+    const firstMessageId = `${Date.now()}-3`;
+    const duplicateMessageId = `${Date.now()}-4`;
 
-    await worker.run("outbound-a", job);
-    await worker.run("outbound-b", { ...job });
+    await worker.run(firstMessageId, job);
+    await worker.run(duplicateMessageId, { ...job });
 
     expect(worker.deliveries).toBe(1);
     expect(claimStore.isCompleted(job.jobId)).toBe(true);
-    expect(queue.ack).toHaveBeenCalledWith("outbound", "outbound-a");
-    expect(queue.ack).toHaveBeenCalledWith("outbound", "outbound-b");
+    expect(queue.ack).toHaveBeenCalledWith("outbound", firstMessageId);
+    expect(queue.ack).toHaveBeenCalledWith("outbound", duplicateMessageId);
     expect(queue.enqueueOutbound).not.toHaveBeenCalled();
   });
 
