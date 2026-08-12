@@ -561,16 +561,17 @@ export class OutboundWorker {
         await this.deliveryClaimStore.release(job.jobId, claimToken).catch(() => undefined);
         claimHeld = false;
       }
-      try {
-        await this.queue.moveToDlq(
-          "outbound",
-          { ...job, lastError: sanitized },
-          `Worker processing error: ${sanitized}`,
-        );
-        metrics.deliveryDlq.inc({ domain: job.targetDomain });
-      } finally {
-        await this.queue.ack("outbound", messageId);
-      }
+
+      // The DLQ entry is the durable recovery record. Persist it before ACKing
+      // the source message. If this write fails, propagate the error and leave
+      // the Redis Stream entry pending so XAUTOCLAIM can recover it later.
+      await this.queue.moveToDlq(
+        "outbound",
+        { ...job, lastError: sanitized },
+        `Worker processing error: ${sanitized}`,
+      );
+      metrics.deliveryDlq.inc({ domain: job.targetDomain });
+      await this.queue.ack("outbound", messageId);
     } finally {
       this.activeJobs--;
     }
