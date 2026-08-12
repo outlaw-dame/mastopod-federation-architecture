@@ -4,10 +4,19 @@ import { APDM_COMPLETED_DELIVERY_MIN_RETENTION_MS } from "./apdm-replay-horizon.
 export type DeliveryClaimResult = "claimed" | "completed" | "in_flight";
 
 export const MIN_COMPLETED_DELIVERY_TTL_MS = APDM_COMPLETED_DELIVERY_MIN_RETENTION_MS;
+export const COMPLETED_DELIVERY_RETENTION_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
+const COMPLETED_KEY_PREFIX = "ap:delivery:completed:";
+const RETENTION_SWEEP_SCAN_COUNT = 250;
 
 export function normalizeCompletedDeliveryTtlMs(ttlMs: number): number {
   const normalized = Number.isFinite(ttlMs) ? Math.floor(ttlMs) : 0;
   return Math.max(MIN_COMPLETED_DELIVERY_TTL_MS, normalized);
+}
+
+export function shouldExtendCompletedDeliveryTtl(ttlMs: number): boolean {
+  // Redis PTTL: -1 means the key has no expiry, -2 means it no longer exists.
+  // Neither case should be converted into a new finite lifetime.
+  return Number.isFinite(ttlMs) && ttlMs >= 0 && ttlMs < MIN_COMPLETED_DELIVERY_TTL_MS;
 }
 
 export interface OutboundDeliveryClaimStore {
@@ -20,6 +29,9 @@ export interface OutboundDeliveryClaimStore {
 export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimStore {
   private readonly redis: RedisClientType;
   private connectPromise: Promise<void> | null = null;
+  private initialRetentionSweepPromise: Promise<void> | null = null;
+  private retentionSweepTimer: NodeJS.Timeout | null = null;
+  private retentionSweepRunning = false;
 
   constructor(redisUrl: string = process.env["REDIS_URL"] ?? "redis://localhost:6379") {
     this.redis = createClient({ url: redisUrl });
@@ -30,17 +42,65 @@ export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimSto
   }
 
   private async ensureConnected(): Promise<void> {
-    if (this.redis.isOpen) return;
-    if (!this.connectPromise) {
-      this.connectPromise = this.redis.connect().then(() => undefined).finally(() => {
-        this.connectPromise = null;
-      });
+    if (!this.redis.isOpen) {
+      if (!this.connectPromise) {
+        this.connectPromise = this.redis.connect().then(() => undefined).finally(() => {
+          this.connectPromise = null;
+        });
+      }
+      await this.connectPromise;
     }
-    await this.connectPromise;
+
+    // Before this upgraded store is allowed to claim any delivery, migrate
+    // legacy 24-hour completed markers to the new retention floor. A periodic
+    // sweep then covers short-lived markers written by old workers during a
+    // rolling deployment until those workers have drained.
+    if (!this.initialRetentionSweepPromise) {
+      this.initialRetentionSweepPromise = this.sweepCompletedMarkerRetention();
+    }
+    await this.initialRetentionSweepPromise;
+    this.startRetentionSweepTimer();
+  }
+
+  private startRetentionSweepTimer(): void {
+    if (this.retentionSweepTimer) return;
+    this.retentionSweepTimer = setInterval(() => {
+      void this.sweepCompletedMarkerRetention().catch(() => {
+        // A failed background sweep does not mutate markers. The next interval
+        // retries; command errors from foreground claim/complete remain visible
+        // to the worker. The interval is far shorter than the legacy 24h TTL.
+      });
+    }, COMPLETED_DELIVERY_RETENTION_SWEEP_INTERVAL_MS);
+    this.retentionSweepTimer.unref?.();
+  }
+
+  private async sweepCompletedMarkerRetention(): Promise<void> {
+    if (this.retentionSweepRunning || !this.redis.isOpen) return;
+    this.retentionSweepRunning = true;
+
+    try {
+      let cursor = "0";
+      do {
+        const page = await this.redis.scan(cursor, {
+          MATCH: `${COMPLETED_KEY_PREFIX}*`,
+          COUNT: RETENTION_SWEEP_SCAN_COUNT,
+        });
+        cursor = page.cursor;
+
+        for (const key of page.keys) {
+          const ttlMs = await this.redis.pTTL(key);
+          if (shouldExtendCompletedDeliveryTtl(ttlMs)) {
+            await this.redis.pExpire(key, MIN_COMPLETED_DELIVERY_TTL_MS);
+          }
+        }
+      } while (cursor !== "0");
+    } finally {
+      this.retentionSweepRunning = false;
+    }
   }
 
   private completedKey(jobId: string): string {
-    return `ap:delivery:completed:${jobId}`;
+    return `${COMPLETED_KEY_PREFIX}${jobId}`;
   }
 
   private claimKey(jobId: string): string {
@@ -101,6 +161,10 @@ export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimSto
   }
 
   async close(): Promise<void> {
+    if (this.retentionSweepTimer) {
+      clearInterval(this.retentionSweepTimer);
+      this.retentionSweepTimer = null;
+    }
     if (!this.redis.isOpen) return;
     await this.redis.quit();
   }
