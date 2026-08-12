@@ -14,7 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { request } from "undici";
 import { createFedifyAdapter } from "../FedifyFederationAdapter.js";
 
-function makeAdapter() {
+function makeAdapter(overrides: Record<string, unknown> = {}) {
   return createFedifyAdapter(
     new MemoryKvStore(),
     {
@@ -23,6 +23,7 @@ function makeAdapter() {
       activityPodsToken: "test-token",
       requestTimeoutMs: 5_000,
       userAgent: "Fedify-Test/1.0",
+      ...overrides,
     },
   );
 }
@@ -53,6 +54,7 @@ function makeDeliveryInput(overrides: Partial<Parameters<ReturnType<typeof makeA
     maxAttempts: 10,
     requestTimeoutMs: 5_000,
     userAgent: "Fedify-Test/1.0",
+    assertExternalPostAllowed: vi.fn(),
     signHttpRequest: vi.fn().mockResolvedValue({
       ok: true,
       signedHeaders: {
@@ -93,7 +95,52 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       targetUrl: input.targetInbox,
       body: input.activity,
     });
+    expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not POST if the APDM deadline expires during ActivityPods signing", async () => {
+    const adapter = makeAdapter();
+    const deadlineError = new Error("APDM outbound residence expired");
+    const input = makeDeliveryInput({
+      assertExternalPostAllowed: vi.fn(() => {
+        throw deadlineError;
+      }),
+    });
+
+    await expect(adapter.deliverOutbound(input)).rejects.toBe(deadlineError);
+
+    expect(input.signHttpRequest).toHaveBeenCalledTimes(1);
+    expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("does not POST a sidecar-owned activity if the deadline expires during local signing", async () => {
+    const localSign = vi.fn().mockResolvedValue({
+      date: "Sun, 05 Apr 2026 12:00:00 GMT",
+      digest: "SHA-256=xyz",
+      signature: "keyId=\"relay\",signature=\"abc\"",
+    });
+    const adapter = makeAdapter({
+      localSigningService: {
+        signHttpRequest: localSign,
+      },
+      sidecarServiceActors: ["relay"],
+    });
+    const deadlineError = new Error("APDM outbound residence expired");
+    const input = makeDeliveryInput({
+      actorUri: "https://example.com/users/relay",
+      assertExternalPostAllowed: vi.fn(() => {
+        throw deadlineError;
+      }),
+    });
+
+    await expect(adapter.deliverOutbound(input)).rejects.toBe(deadlineError);
+
+    expect(localSign).toHaveBeenCalledTimes(1);
+    expect(input.signHttpRequest).not.toHaveBeenCalled();
+    expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
   });
 
   it("treats Fedify default permanent failure statuses as permanent", async () => {
@@ -156,6 +203,7 @@ describe("FedifyFederationAdapter outbound delivery", () => {
     });
     expect(result.error).toContain("safety validation");
     expect(input.signHttpRequest).not.toHaveBeenCalled();
+    expect(input.assertExternalPostAllowed).not.toHaveBeenCalled();
     expect(request).not.toHaveBeenCalled();
   });
 });
