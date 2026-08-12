@@ -79,21 +79,19 @@ export class RedisOutboundDeliveryClaimStore implements OutboundDeliveryClaimSto
     this.retentionSweepRunning = true;
 
     try {
-      let cursor = "0";
-      do {
-        const page = await this.redis.scan(cursor, {
-          MATCH: `${COMPLETED_KEY_PREFIX}*`,
-          COUNT: RETENTION_SWEEP_SCAN_COUNT,
-        });
-        cursor = page.cursor;
-
-        for (const key of page.keys) {
+      // SCAN is incremental/nonblocking. node-redis v5's iterator yields small
+      // batches, so migration does not issue a production-wide KEYS operation.
+      for await (const keys of this.redis.scanIterator({
+        MATCH: `${COMPLETED_KEY_PREFIX}*`,
+        COUNT: RETENTION_SWEEP_SCAN_COUNT,
+      })) {
+        for (const key of keys) {
           const ttlMs = await this.redis.pTTL(key);
           if (shouldExtendCompletedDeliveryTtl(ttlMs)) {
             await this.redis.pExpire(key, MIN_COMPLETED_DELIVERY_TTL_MS);
           }
         }
-      } while (cursor !== "0");
+      }
     } finally {
       this.retentionSweepRunning = false;
     }
