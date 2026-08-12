@@ -602,6 +602,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
       };
     }
 
+    input.assertExternalPostAllowed();
     try {
       const response = await request(targetUrl, {
         method: "POST",
@@ -633,7 +634,8 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         this.outboundRuntimeConfig.maxErrorResponseBodyBytes,
       );
       const sendErrorMessage =
-        `Failed to send activity ${input.activityId} to ${targetUrl.href} (${response.statusCode}):\n${responseBody}`;
+        `Failed to send activity ${input.activityId} to ${targetUrl.href} (${response.statusCode}):\
+${responseBody}`;
       const permanent = this.outboundRuntimeConfig.permanentFailureStatusCodes.includes(response.statusCode);
 
       return {
@@ -683,6 +685,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
       };
     }
 
+    input.assertExternalPostAllowed();
     try {
       const response = await request(targetUrl, {
         method: "POST",
@@ -714,7 +717,8 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         jobId: input.jobId,
         success: false,
         statusCode: response.statusCode,
-        error: `Failed to deliver (local-signed) activity to ${targetUrl.href} (${response.statusCode}):\n${responseBody}`,
+        error: `Failed to deliver (local-signed) activity to ${targetUrl.href} (${response.statusCode}):\
+${responseBody}`,
         responseBody,
         permanent,
         retryAfterMs: permanent ? undefined : parseRetryAfterMs(response.headers["retry-after"]),
