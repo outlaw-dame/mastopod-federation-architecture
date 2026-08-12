@@ -210,10 +210,8 @@ describe("durable delayed outbound queue", () => {
     const nowMs = Date.now();
     const messageId = `${nowMs - 1_000}-7`;
     const job = outboundJob(nowMs + DELAYED_OUTBOUND_MIN_DELAY_MS + 60_000);
-    job.meta = {
-      ...job.meta,
-      apdmFirstQueuedAtMs: nowMs - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS + 500,
-    };
+    (job.meta as any).apdmFirstQueuedAtMs =
+      nowMs - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS + 500;
     state.entries.push({ messageId, job });
 
     const next = queue.consumeOutbound()[Symbol.asyncIterator]().next();
