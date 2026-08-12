@@ -19,7 +19,7 @@ These invariants apply across both repositories and are stronger than phase-spec
 3. Sidecar restart cannot lose durably accepted intents.
 4. Successful outbound targets are not redelivered merely because a different target failed.
 5. Local fan-out durability work must use activity-recipient idempotency rather than whole-activity replay.
-6. Automatic ActivityPods reconciliation is bounded to the 72-hour blind-recipient recovery horizon, and the sidecar completed-delivery ledger retains successful-target markers for at least seven days. The completed-marker retention horizon must remain longer than every supported automatic replay horizon.
+6. Automatic ActivityPods reconciliation is bounded to 48 hours, leaving a 24-hour processing margin inside the 72-hour blind-recipient recovery-snapshot lifetime. The sidecar completed-delivery ledger retains successful-target markers for at least seven days. The completed-marker retention horizon must remain longer than every supported automatic replay horizon.
 
 ## Security and authority
 
