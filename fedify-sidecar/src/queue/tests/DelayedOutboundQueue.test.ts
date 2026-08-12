@@ -198,14 +198,16 @@ describe("durable delayed outbound queue", () => {
     await queue.disconnect();
   });
 
-  it("does not yield stale work when delayed parking and fallback DLQ persistence both fail", async () => {
+  it("retains expired work in memory and retries fallback DLQ until durable", async () => {
     vi.useFakeTimers();
     const queue = new RedisStreamsQueue({ redisUrl: "redis://test" } as any);
     state.evalMock.mockResolvedValue(0);
     await queue.connect();
     state.evalMock.mockClear();
     state.evalMock.mockRejectedValue(new Error("redis transient"));
-    state.coreDlq.mockRejectedValue(new Error("dlq unavailable"));
+    state.coreDlq
+      .mockRejectedValueOnce(new Error("dlq unavailable"))
+      .mockResolvedValueOnce(undefined);
 
     const nowMs = Date.now();
     const messageId = `${nowMs - 1_000}-7`;
@@ -215,12 +217,12 @@ describe("durable delayed outbound queue", () => {
     state.entries.push({ messageId, job });
 
     const next = queue.consumeOutbound()[Symbol.asyncIterator]().next();
-    await vi.advanceTimersByTimeAsync(DELAYED_OUTBOUND_PARK_RETRY_MS);
+    await vi.advanceTimersByTimeAsync(DELAYED_OUTBOUND_PARK_RETRY_MS * 2);
     const result = await next;
 
     expect(result.done).toBe(true);
-    expect(state.coreDlq).toHaveBeenCalledTimes(1);
-    expect(state.coreAck).not.toHaveBeenCalledWith("outbound", messageId);
+    expect(state.coreDlq).toHaveBeenCalledTimes(2);
+    expect(state.coreAck).toHaveBeenCalledWith("outbound", messageId);
     const parkCalls = state.evalMock.mock.calls.filter((call) => {
       const options = call[1] as { arguments?: string[] } | undefined;
       return options?.arguments?.length === 6;
