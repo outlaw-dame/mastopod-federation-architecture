@@ -51,34 +51,35 @@ All retry/defer paths insert their durable replacement before acknowledging the 
 
 ## Replay-horizon guarantee
 
-Phase 4's automatic no-duplicate guarantee is bounded explicitly rather than assuming either replay or queue residence is instantaneous.
+Phase 4's automatic no-duplicate guarantee is bounded explicitly rather than assuming either producer processing or queue residence is instantaneous.
 
-ActivityPods automatic delivery reconciliation may inspect at most the preceding **48 hours**. Blind-recipient recovery snapshots remain private and expire after **72 hours**, leaving a full 24-hour margin for account-cursor rotation, paging, Activity refetch, and plan reconstruction after an Activity first enters the eligible lookback window. Configurations above 48 hours fail closed instead of allowing automatic reconciliation to race the blind-recipient snapshot expiry.
+ActivityPods automatic delivery reconciliation may inspect at most the preceding **48 hours**. Blind-recipient recovery snapshots remain private and expire after **72 hours**, leaving a full **24-hour producer-processing allowance** for account-cursor rotation, paging, Activity refetch, and plan reconstruction before the sidecar accepts the reconstructed intent. Configurations above 48 hours fail closed instead of allowing automatic reconciliation to race the blind-recipient snapshot expiry.
 
 After durable sidecar acceptance, the outbox-intent stage may retain an intent for at most **48 hours**. The bound uses the intent's original `createdAt`, which is preserved across retries, so retry/requeue cannot reset the residence clock. Stale intents are acknowledged into the DLQ before they can create outbound replay work.
 
-An outbound Redis Stream message may then wait at most **48 hours** before its first completed-delivery claim check. The worker derives this residence from Redis's millisecond Stream message ID and DLQs stale messages before claiming or performing any HTTP delivery. A completed duplicate is checked before rate-limit/concurrency requeue paths, so a reconciliation-generated duplicate cannot reset this first-check residence clock before consulting the completed marker.
+An outbound Redis Stream message may then wait at most **48 hours** before its first completed-delivery claim check. The worker derives this residence from Redis's millisecond Stream message ID and DLQs stale messages before claiming or performing any HTTP delivery. If the Stream ID is malformed or implausibly ahead of the worker clock, age validation fails closed and the job is DLQ'd rather than delivered. A completed duplicate is checked before rate-limit/concurrency requeue paths, so a reconciliation-generated duplicate cannot reset this first-check residence clock before consulting the completed marker.
 
-The production completed-delivery ledger enforces a **seven-day minimum** retention period for successful `activityId::deliveryUrl` markers. A shorter worker configuration is clamped by the storage layer, while a longer configured retention remains valid. The storage floor and queue limits derive from the shared `apdm-replay-horizon` constants so the arithmetic cannot drift independently.
+The production completed-delivery ledger enforces an **eight-day minimum** retention period for successful `activityId::deliveryUrl` markers. A shorter worker configuration is clamped by the storage layer, while a longer configured retention remains valid. The eight-day floor is one day longer than the entire worst-case bounded automatic duplicate path.
 
 The cross-repository automatic-replay invariant is therefore:
 
 ```text
-producer reconciliation age       <= 48 hours
-sidecar outbox-intent residence    <= 48 hours
-first outbound-message residence   <= 48 hours
----------------------------------------------
-maximum automatic duplicate age    <= 144 hours (6 days)
-completed-delivery marker retention >= 168 hours (7 days)
-safety margin                       >= 24 hours
+producer reconciliation age        <= 48 hours
+producer processing allowance      <= 24 hours
+sidecar outbox-intent residence     <= 48 hours
+first outbound-message residence    <= 48 hours
+----------------------------------------------
+maximum automatic duplicate age     <= 168 hours (7 days)
+completed-delivery marker retention >= 192 hours (8 days)
+safety margin                        >= 24 hours
 ```
 
 Separately, the private blind-recipient recovery invariant remains:
 
 ```text
 producer reconciliation lookback <= 48 hours
-blind-recipient snapshot lifetime  = 72 hours
-snapshot-processing margin        >= 24 hours
+producer processing allowance    <= 24 hours
+blind-recipient snapshot lifetime = 72 hours
 ```
 
 Manual/operator replay outside the bounded automatic window is not covered by the automatic no-duplicate guarantee and must be treated as an explicit recovery operation.
@@ -94,8 +95,8 @@ Manual/operator replay outside the bounded automatic window is not covered by th
 - stale outbox intents are DLQ'd before outbound replay work is created;
 - stale outbound Redis messages are DLQ'd before the completed-delivery claim check or external delivery.
 
-`fedify-sidecar/src/delivery/tests/ApdmReplayHorizon.test.ts` proves the 48h + 48h + 48h = 6-day automatic duplicate bound, the seven-day completed-marker floor, the 24-hour safety margin, and Redis Stream timestamp parsing.
+`fedify-sidecar/src/delivery/tests/ApdmReplayHorizon.test.ts` proves the 48h + 24h + 48h + 48h = seven-day automatic duplicate bound, the eight-day completed-marker floor, the 24-hour safety margin, and fail-closed Redis Stream timestamp parsing.
 
-`fedify-sidecar/src/delivery/tests/OutboundDeliveryClaimRetention.test.ts` additionally proves that the production completion-ledger policy clamps shorter TTLs to seven days, preserves longer retention values, and fails safe to the floor for non-finite input.
+`fedify-sidecar/src/delivery/tests/OutboundDeliveryClaimRetention.test.ts` additionally proves that the production completion-ledger policy clamps shorter TTLs to eight days, preserves longer retention values, and fails safe to the floor for non-finite input.
 
 Phase 4 does not perform the production authority cutover. That remains APDM Phase 5.
