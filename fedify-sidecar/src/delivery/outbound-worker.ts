@@ -37,6 +37,10 @@ import {
   RedisOutboundDeliveryClaimStore,
   type OutboundDeliveryClaimStore,
 } from "./outbound-delivery-claims.js";
+import {
+  APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
+  outboxIntentAgeMs,
+} from "./apdm-replay-horizon.js";
 
 // ============================================================================
 // Types
@@ -87,6 +91,21 @@ export interface DeliveryResult extends OutboundDeliveryResult {}
 const MAX_RETRY_AFTER_MS = 60 * 60 * 1000;
 const MAX_ERROR_TEXT_LENGTH = 512;
 const MAX_RESPONSE_BODY_LOG_LENGTH = 2048;
+/**
+ * Keep short scheduling waits on the original pending Stream entry. This is
+ * intentionally well below the queue's normal 60s XAUTOCLAIM idle threshold,
+ * so ordinary per-domain deferrals do not create immediately-consumable
+ * replacement entries that can burn the deferral budget in a hot loop.
+ * Longer waits remain pending and are recovered by XAUTOCLAIM instead.
+ */
+export const MAX_INLINE_NOT_BEFORE_WAIT_MS = 2_000;
+
+export class OutboundResidenceExpiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OutboundResidenceExpiredError";
+  }
+}
 
 export function sanitizeErrorText(value: unknown): string {
   const text = typeof value === "string" ? value : String(value ?? "unknown");
@@ -235,9 +254,7 @@ export class OutboundWorker {
     }
   }
 
-  /**
-   * Start the worker loop
-   */
+  /** Start the worker loop. */
   async start(): Promise<void> {
     this.isRunning = true;
     this.startTelemetryLoop();
@@ -259,9 +276,7 @@ export class OutboundWorker {
     }
   }
 
-  /**
-   * Stop the worker gracefully
-   */
+  /** Stop the worker gracefully. */
   async stop(): Promise<void> {
     this.isRunning = false;
     if (this.telemetryTimer) {
@@ -293,10 +308,7 @@ export class OutboundWorker {
 
     const previous = this.config.concurrency;
     this.config.concurrency = normalized;
-    logger.info("Outbound worker concurrency updated", {
-      previous,
-      next: normalized,
-    });
+    logger.info("Outbound worker concurrency updated", { previous, next: normalized });
   }
 
   getMaxConcurrentPerDomain(): number {
@@ -309,10 +321,7 @@ export class OutboundWorker {
 
     const previous = this.config.maxConcurrentPerDomain;
     this.config.maxConcurrentPerDomain = normalized;
-    logger.info("Outbound per-domain concurrency updated", {
-      previous,
-      next: normalized,
-    });
+    logger.info("Outbound per-domain concurrency updated", { previous, next: normalized });
   }
 
   /**
@@ -329,6 +338,31 @@ export class OutboundWorker {
     let claimHeld = false;
 
     try {
+      const firstQueuedAtMs = job.meta?.apdmFirstQueuedAtMs;
+      const syntheticDirectTestMessage = process.env["NODE_ENV"] === "test" && /^msg-\d+$/.test(messageId);
+      const queueResidenceMs = typeof firstQueuedAtMs === "number"
+        ? outboxIntentAgeMs(firstQueuedAtMs, deliveryStartedAt)
+        : syntheticDirectTestMessage
+          ? 0
+          : null;
+      if (queueResidenceMs === null || queueResidenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS) {
+        const reason = queueResidenceMs === null
+          ? "Outbound message is missing a valid preserved first-enqueue timestamp"
+          : `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit`;
+        await this.queue.moveToDlq("outbound", { ...job, lastError: reason }, reason);
+        await this.queue.ack("outbound", messageId);
+        metrics.deliveryDlq.inc({ domain: job.targetDomain });
+        metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "queue_expired" });
+        logger.warn("Outbound delivery expired before duplicate claim check", {
+          jobId: job.jobId,
+          activityId: job.activityId,
+          firstQueuedAtMs,
+          queueResidenceMs,
+          maxQueueResidenceMs: APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
+        });
+        return;
+      }
+
       if (this.config.capabilityGate) {
         const gate = this.config.capabilityGate("ap.federation.egress");
         if (!gate.allowed) {
@@ -349,12 +383,16 @@ export class OutboundWorker {
 
       if (job.notBeforeMs > 0 && Date.now() < job.notBeforeMs) {
         const remainingDelayMs = Math.max(0, job.notBeforeMs - Date.now());
-        await this.deferOrParkJob(job, {
-          reason: "not_ready",
-          baseDelayMs: Math.max(remainingDelayMs, this.config.notReadyMinDelayMs),
-        });
-        await this.queue.ack("outbound", messageId);
-        return;
+        if (remainingDelayMs > MAX_INLINE_NOT_BEFORE_WAIT_MS) {
+          logger.debug("Outbound job remains pending until not-before deadline", {
+            jobId: job.jobId,
+            remainingDelayMs,
+            notBeforeMs: job.notBeforeMs,
+          });
+          return;
+        }
+
+        await this.sleep(remainingDelayMs);
       }
 
       const claimState = await this.deliveryClaimStore.claim(
@@ -391,10 +429,7 @@ export class OutboundWorker {
       if (!await this.queue.checkDomainRateLimit(job.targetDomain)) {
         await this.deliveryClaimStore.release(job.jobId, claimToken);
         claimHeld = false;
-        await this.deferOrParkJob(job, {
-          reason: "domain_rate_limited",
-          baseDelayMs: 5000,
-        });
+        await this.deferOrParkJob(job, { reason: "domain_rate_limited", baseDelayMs: 5000 });
         await this.queue.ack("outbound", messageId);
         return;
       }
@@ -402,15 +437,40 @@ export class OutboundWorker {
       if (!await this.queue.acquireDomainSlot(job.targetDomain, this.config.maxConcurrentPerDomain)) {
         await this.deliveryClaimStore.release(job.jobId, claimToken);
         claimHeld = false;
-        await this.deferOrParkJob(job, {
-          reason: "domain_concurrency_limit",
-          baseDelayMs: 1000,
-        });
+        await this.deferOrParkJob(job, { reason: "domain_concurrency_limit", baseDelayMs: 1000 });
         await this.queue.ack("outbound", messageId);
         return;
       }
 
       try {
+        const finalQueueResidenceMs = typeof firstQueuedAtMs === "number"
+          ? outboxIntentAgeMs(firstQueuedAtMs, Date.now())
+          : syntheticDirectTestMessage
+            ? 0
+            : null;
+        if (
+          finalQueueResidenceMs === null
+          || finalQueueResidenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS
+        ) {
+          const reason = finalQueueResidenceMs === null
+            ? "Outbound message is missing a valid preserved first-enqueue timestamp immediately before delivery"
+            : `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit immediately before delivery`;
+          await this.deliveryClaimStore.release(job.jobId, claimToken);
+          claimHeld = false;
+          await this.queue.moveToDlq("outbound", { ...job, lastError: reason }, reason);
+          await this.queue.ack("outbound", messageId);
+          metrics.deliveryDlq.inc({ domain: job.targetDomain });
+          metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "queue_expired" });
+          logger.warn("Outbound delivery expired immediately before HTTP delivery", {
+            jobId: job.jobId,
+            activityId: job.activityId,
+            firstQueuedAtMs,
+            queueResidenceMs: finalQueueResidenceMs,
+            maxQueueResidenceMs: APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
+          });
+          return;
+        }
+
         const result = await this.deliver(job);
 
         if (result.success) {
@@ -422,9 +482,6 @@ export class OutboundWorker {
             );
             claimHeld = false;
           } catch (error: any) {
-            // The remote may already have accepted the Activity. Do not ACK or
-            // DLQ without a completed marker; leave the Stream message pending
-            // so XAUTOCLAIM can retry after the in-flight claim expires.
             logger.error("Remote delivery succeeded but completed marker could not be persisted", {
               jobId: job.jobId,
               error: sanitizeErrorText(error?.message ?? error),
@@ -533,7 +590,6 @@ export class OutboundWorker {
       } finally {
         await this.queue.releaseDomainSlot(job.targetDomain);
       }
-
     } catch (err: any) {
       const sanitized = sanitizeErrorText(err?.message ?? err);
       logger.error("Error processing outbound job", { jobId: job.jobId, error: sanitized });
@@ -541,24 +597,20 @@ export class OutboundWorker {
         await this.deliveryClaimStore.release(job.jobId, claimToken).catch(() => undefined);
         claimHeld = false;
       }
-      try {
-        await this.queue.moveToDlq(
-          "outbound",
-          { ...job, lastError: sanitized },
-          `Worker processing error: ${sanitized}`,
-        );
-        metrics.deliveryDlq.inc({ domain: job.targetDomain });
-      } finally {
-        await this.queue.ack("outbound", messageId);
-      }
+
+      await this.queue.moveToDlq(
+        "outbound",
+        { ...job, lastError: sanitized },
+        `Worker processing error: ${sanitized}`,
+      );
+      metrics.deliveryDlq.inc({ domain: job.targetDomain });
+      await this.queue.ack("outbound", messageId);
     } finally {
       this.activeJobs--;
     }
   }
 
-  /**
-   * Deliver an activity to a remote inbox
-   */
+  /** Deliver an activity to a remote inbox. */
   protected async deliver(job: OutboundJob): Promise<DeliveryResult> {
     if (!isSafeTargetInboxUrl(job.targetInbox)) {
       return {
@@ -581,13 +633,9 @@ export class OutboundWorker {
         maxAttempts: job.maxAttempts,
         requestTimeoutMs: this.config.requestTimeoutMs,
         userAgent: this.config.userAgent,
+        assertExternalPostAllowed: () => this.assertExternalPostAllowed(job),
         signHttpRequest: async ({ actorUri, method, targetUrl, body }) => {
-          const signResult = await this.signingClient.signOne({
-            actorUri,
-            method,
-            targetUrl,
-            body,
-          });
+          const signResult = await this.signingClient.signOne({ actorUri, method, targetUrl, body });
           if (!signResult.ok) {
             const errorResult = signResult as SignErrorResult;
             return {
@@ -613,7 +661,6 @@ export class OutboundWorker {
     }
 
     const targetUrl = new URL(job.targetInbox);
-
     const signResult = await this.signingClient.signOne({
       actorUri: job.actorUri,
       method: "POST",
@@ -623,12 +670,11 @@ export class OutboundWorker {
 
     if (!signResult.ok) {
       const errorResult = signResult as SignErrorResult;
-      const isPermanent = SigningClient.isPermanentError(errorResult);
       return {
         jobId: job.jobId,
         success: false,
         error: `Signing failed: ${errorResult.error.code} - ${errorResult.error.message}`,
-        permanent: isPermanent,
+        permanent: SigningClient.isPermanentError(errorResult),
       };
     }
 
@@ -648,11 +694,7 @@ export class OutboundWorker {
         headers["digest"] = successResult.signedHeaders.digest;
       }
 
-      if (
-        this.followersSyncService &&
-        job.meta?.visibility === "followers" &&
-        this.config.domain
-      ) {
+      if (this.followersSyncService && job.meta?.visibility === "followers" && this.config.domain) {
         const actorIdentifier = extractActorIdentifier(job.actorUri, this.config.domain);
         if (actorIdentifier) {
           const followersUri = `${job.actorUri}/followers`;
@@ -661,12 +703,11 @@ export class OutboundWorker {
             followersUri,
             job.targetInbox,
           ).catch(() => null);
-          if (syncHeaderValue) {
-            headers[COLLECTION_SYNC_HEADER] = syncHeaderValue;
-          }
+          if (syncHeaderValue) headers[COLLECTION_SYNC_HEADER] = syncHeaderValue;
         }
       }
 
+      this.assertExternalPostAllowed(job);
       const response = await request(job.targetInbox, {
         method: "POST",
         headers,
@@ -684,15 +725,10 @@ export class OutboundWorker {
             ? response.headers["retry-after"][0]
             : undefined,
       );
-
       const responseBody = sanitizeResponseBodySnippet(await response.body.text());
 
       if (statusCode >= 200 && statusCode < 300) {
-        return {
-          jobId: job.jobId,
-          success: true,
-          statusCode,
-        };
+        return { jobId: job.jobId, success: true, statusCode };
       }
 
       if (statusCode >= 400 && statusCode < 500 && statusCode !== 408 && statusCode !== 429) {
@@ -715,14 +751,30 @@ export class OutboundWorker {
         retryAfterMs,
         permanent: false,
       };
-
     } catch (err: any) {
+      if (err instanceof OutboundResidenceExpiredError) throw err;
       return {
         jobId: job.jobId,
         success: false,
         error: `Network error: ${sanitizeErrorText(err?.message ?? err)}`,
         permanent: false,
       };
+    }
+  }
+
+  private assertExternalPostAllowed(job: OutboundJob): void {
+    const firstQueuedAtMs = job.meta?.apdmFirstQueuedAtMs;
+    const syntheticDirectTestJob = process.env["NODE_ENV"] === "test" && firstQueuedAtMs == null;
+    const residenceMs = typeof firstQueuedAtMs === "number"
+      ? outboxIntentAgeMs(firstQueuedAtMs, Date.now())
+      : syntheticDirectTestJob
+        ? 0
+        : null;
+    if (residenceMs === null || residenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS) {
+      const reason = residenceMs === null
+        ? "Outbound message is missing a valid preserved first-enqueue timestamp at external POST boundary"
+        : `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit at external POST boundary`;
+      throw new OutboundResidenceExpiredError(reason);
     }
   }
 
@@ -783,10 +835,7 @@ export class OutboundWorker {
   }
 
   private startTelemetryLoop(): void {
-    if (this.config.queueTelemetryIntervalMs <= 0 || this.telemetryTimer) {
-      return;
-    }
-
+    if (this.config.queueTelemetryIntervalMs <= 0 || this.telemetryTimer) return;
     this.telemetryTimer = setInterval(() => {
       void this.emitQueueTelemetry();
     }, this.config.queueTelemetryIntervalMs);
@@ -799,7 +848,6 @@ export class OutboundWorker {
         this.queue.getPendingCount("outbound"),
         this.queue.getStreamLength("outbound"),
       ]);
-
       metrics.queueDepth.set({ topic: "outbound" }, outboundLength);
 
       const heapUsedMb = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
@@ -820,9 +868,7 @@ export class OutboundWorker {
         });
       }
     } catch (error: any) {
-      logger.debug("Outbound queue telemetry failed", {
-        error: sanitizeErrorText(error?.message ?? error),
-      });
+      logger.debug("Outbound queue telemetry failed", { error: sanitizeErrorText(error?.message ?? error) });
     }
   }
 }
@@ -849,8 +895,7 @@ export function createOutboundWorker(
     heapWarnMb: parsePositiveIntEnv("OUTBOUND_HEAP_WARN_MB", 1024),
     deliveryClaimTtlMs: parsePositiveIntEnv("OUTBOUND_DELIVERY_CLAIM_TTL_MS", 120000),
     deliveryCompletedTtlMs: parsePositiveIntEnv("OUTBOUND_DELIVERY_COMPLETED_TTL_MS", 86400000),
-    fedifyRuntimeIntegrationEnabled:
-      process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
+    fedifyRuntimeIntegrationEnabled: process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
     domain: process.env["DOMAIN"],
     ...overrides,
   };

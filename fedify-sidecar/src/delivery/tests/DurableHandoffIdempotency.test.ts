@@ -10,6 +10,10 @@ import { OutboundWorker, type DeliveryResult, type OutboundWorkerConfig } from "
 import type { OutboxIntent, OutboundJob } from "../../queue/sidecar-redis-queue.js";
 import type { OutboundDeliveryClaimStore, DeliveryClaimResult } from "../outbound-delivery-claims.js";
 import { DEFAULT_ACTIVITYPUB_OUTBOUND_DELIVERY_POLICY } from "../../protocol-bridge/projectors/activitypub/ActivityPubDeliveryPolicy.js";
+import {
+  APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
+  APDM_OUTBOX_INTENT_MAX_AGE_MS,
+} from "../apdm-replay-horizon.js";
 
 class TestIntentWorker extends OutboxIntentWorker {
   async run(messageId: string, intent: OutboxIntent): Promise<void> {
@@ -38,6 +42,7 @@ class TestOutboundWorker extends OutboundWorker {
 class StatefulClaimStore implements OutboundDeliveryClaimStore {
   private readonly claims = new Map<string, string>();
   private readonly completed = new Set<string>();
+  claimCalls = 0;
 
   seedInFlight(jobId: string, token = "dead-worker-token"): void {
     this.claims.set(jobId, token);
@@ -52,6 +57,7 @@ class StatefulClaimStore implements OutboundDeliveryClaimStore {
   }
 
   async claim(jobId: string, claimToken: string): Promise<DeliveryClaimResult> {
+    this.claimCalls += 1;
     if (this.completed.has(jobId)) return "completed";
     if (this.claims.has(jobId)) return "in_flight";
     this.claims.set(jobId, claimToken);
@@ -138,7 +144,10 @@ function outboundJob(): OutboundJob {
     attempt: 0,
     maxAttempts: 10,
     notBeforeMs: 0,
-    meta: { deliveryPlanIntentId: "apdm-v1-stable-plan-id" } as any,
+    meta: {
+      deliveryPlanIntentId: "apdm-v1-stable-plan-id",
+      apdmFirstQueuedAtMs: Date.now(),
+    } as any,
   };
 }
 
@@ -186,6 +195,31 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
     );
   });
 
+  it("expires a stale durable outbox intent before it can create outbound replay work", async () => {
+    const queue = {
+      getOutboxIntentState: vi.fn().mockResolvedValue({}),
+      enqueueOutboundBatchForIntent: vi.fn().mockResolvedValue({ enqueued: true, jobCount: 1 }),
+      markOutboxIntentCompleted: vi.fn().mockResolvedValue(undefined),
+      markOutboxIntentEventLogPublished: vi.fn().mockResolvedValue(undefined),
+      ack: vi.fn().mockResolvedValue(undefined),
+      enqueueOutboxIntent: vi.fn().mockResolvedValue("retry"),
+      moveToDlq: vi.fn().mockResolvedValue(undefined),
+    } as any;
+    const worker = new TestIntentWorker(queue, null, intentWorkerConfig());
+    const stale = intent("stale-sidecar-intent");
+    stale.createdAt = Date.now() - APDM_OUTBOX_INTENT_MAX_AGE_MS - 1;
+
+    await worker.run("stale-intent", stale);
+
+    expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
+    expect(queue.moveToDlq).toHaveBeenCalledWith(
+      "outbox_intent",
+      expect.objectContaining({ intentId: stale.intentId }),
+      expect.stringContaining("replay residence limit"),
+    );
+    expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "stale-intent");
+  });
+
   it("does not mistake a dead worker's in-flight claim for completed delivery", async () => {
     const queue = createOutboundQueue();
     const claimStore = new StatefulClaimStore();
@@ -197,20 +231,22 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
       {} as any,
       outboundWorkerConfig(claimStore),
     );
+    const liveClaimMessageId = `${Date.now()}-1`;
 
-    await worker.run("reclaimed-while-claim-live", job);
+    await worker.run(liveClaimMessageId, job);
 
     expect(worker.deliveries).toBe(0);
     expect(claimStore.isCompleted(job.jobId)).toBe(false);
     expect(queue.enqueueOutbound).toHaveBeenCalledTimes(1);
-    expect(queue.ack).toHaveBeenCalledWith("outbound", "reclaimed-while-claim-live");
+    expect(queue.ack).toHaveBeenCalledWith("outbound", liveClaimMessageId);
 
     claimStore.expireInFlight(job.jobId);
-    await worker.run("reclaimed-after-claim-expiry", { ...job, notBeforeMs: 0 });
+    const expiredClaimMessageId = `${Date.now()}-2`;
+    await worker.run(expiredClaimMessageId, { ...job, notBeforeMs: 0 });
 
     expect(worker.deliveries).toBe(1);
     expect(claimStore.isCompleted(job.jobId)).toBe(true);
-    expect(queue.ack).toHaveBeenCalledWith("outbound", "reclaimed-after-claim-expiry");
+    expect(queue.ack).toHaveBeenCalledWith("outbound", expiredClaimMessageId);
   });
 
   it("suppresses a duplicate only after completed-delivery state is durable", async () => {
@@ -223,14 +259,131 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
       {} as any,
       outboundWorkerConfig(claimStore),
     );
+    const firstMessageId = `${Date.now()}-3`;
+    const duplicateMessageId = `${Date.now()}-4`;
 
-    await worker.run("outbound-a", job);
-    await worker.run("outbound-b", { ...job });
+    await worker.run(firstMessageId, job);
+    await worker.run(duplicateMessageId, { ...job });
 
     expect(worker.deliveries).toBe(1);
     expect(claimStore.isCompleted(job.jobId)).toBe(true);
-    expect(queue.ack).toHaveBeenCalledWith("outbound", "outbound-a");
-    expect(queue.ack).toHaveBeenCalledWith("outbound", "outbound-b");
+    expect(queue.ack).toHaveBeenCalledWith("outbound", firstMessageId);
+    expect(queue.ack).toHaveBeenCalledWith("outbound", duplicateMessageId);
     expect(queue.enqueueOutbound).not.toHaveBeenCalled();
+  });
+
+  it("expires an outbound message from the preserved first-enqueue time before its first claim check", async () => {
+    const queue = createOutboundQueue();
+    const claimStore = new StatefulClaimStore();
+    const job = outboundJob();
+    const worker = new TestOutboundWorker(
+      queue,
+      {} as any,
+      {} as any,
+      outboundWorkerConfig(claimStore),
+    );
+    const staleEnqueueMs = Date.now() - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS - 1;
+    const freshPromotedMessageId = `${Date.now()}-0`;
+    job.meta = { ...(job.meta ?? {}), apdmFirstQueuedAtMs: staleEnqueueMs } as any;
+
+    await worker.run(freshPromotedMessageId, job);
+
+    expect(worker.deliveries).toBe(0);
+    expect(claimStore.claimCalls).toBe(0);
+    expect(queue.moveToDlq).toHaveBeenCalledWith(
+      "outbound",
+      expect.objectContaining({ jobId: job.jobId }),
+      expect.stringContaining("queue residence limit"),
+    );
+    expect(queue.ack).toHaveBeenCalledWith("outbound", freshPromotedMessageId);
+  });
+
+  it("revalidates outbound residence after claim/domain waits immediately before delivery", async () => {
+    vi.useFakeTimers();
+    try {
+      const nowMs = 2_000_000_000_000;
+      vi.setSystemTime(nowMs);
+      const queue = createOutboundQueue();
+      queue.acquireDomainSlot.mockImplementation(async () => {
+        vi.setSystemTime(nowMs + 1_000);
+        return true;
+      });
+      const claimStore = new StatefulClaimStore();
+      const job = outboundJob();
+      job.meta = {
+        ...(job.meta ?? {}),
+        apdmFirstQueuedAtMs: nowMs - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS + 500,
+      } as any;
+      const worker = new TestOutboundWorker(
+        queue,
+        {} as any,
+        {} as any,
+        outboundWorkerConfig(claimStore),
+      );
+      const messageId = `${nowMs}-9`;
+
+      await worker.run(messageId, job);
+
+      expect(claimStore.claimCalls).toBe(1);
+      expect(worker.deliveries).toBe(0);
+      expect(claimStore.isCompleted(job.jobId)).toBe(false);
+      expect(queue.moveToDlq).toHaveBeenCalledWith(
+        "outbound",
+        expect.objectContaining({ jobId: job.jobId }),
+        expect.stringContaining("immediately before delivery"),
+      );
+      expect(queue.ack).toHaveBeenCalledWith("outbound", messageId);
+      expect(queue.releaseDomainSlot).toHaveBeenCalledWith(job.targetDomain);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails closed when the preserved first-enqueue timestamp is absent", async () => {
+    const queue = createOutboundQueue();
+    const claimStore = new StatefulClaimStore();
+    const job = outboundJob();
+    job.meta = { deliveryPlanIntentId: "apdm-v1-stable-plan-id" } as any;
+    const worker = new TestOutboundWorker(
+      queue,
+      {} as any,
+      {} as any,
+      outboundWorkerConfig(claimStore),
+    );
+    const messageId = `${Date.now()}-0`;
+
+    await worker.run(messageId, job);
+
+    expect(worker.deliveries).toBe(0);
+    expect(claimStore.claimCalls).toBe(0);
+    expect(queue.moveToDlq).toHaveBeenCalledWith(
+      "outbound",
+      expect.objectContaining({ jobId: job.jobId }),
+      expect.stringContaining("first-enqueue timestamp"),
+    );
+    expect(queue.ack).toHaveBeenCalledWith("outbound", messageId);
+  });
+
+  it("leaves an expired outbound message pending when DLQ persistence fails", async () => {
+    const queue = createOutboundQueue();
+    queue.moveToDlq.mockRejectedValue(new Error("dlq unavailable"));
+    const claimStore = new StatefulClaimStore();
+    const job = outboundJob();
+    const worker = new TestOutboundWorker(
+      queue,
+      {} as any,
+      {} as any,
+      outboundWorkerConfig(claimStore),
+    );
+    const staleEnqueueMs = Date.now() - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS - 1;
+    const staleRedisMessageId = `${Date.now()}-0`;
+    job.meta = { ...(job.meta ?? {}), apdmFirstQueuedAtMs: staleEnqueueMs } as any;
+
+    await expect(worker.run(staleRedisMessageId, job)).rejects.toThrow("dlq unavailable");
+
+    expect(worker.deliveries).toBe(0);
+    expect(claimStore.claimCalls).toBe(0);
+    expect(queue.moveToDlq).toHaveBeenCalledTimes(2);
+    expect(queue.ack).not.toHaveBeenCalled();
   });
 });

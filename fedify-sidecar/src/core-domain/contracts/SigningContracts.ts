@@ -72,6 +72,11 @@ export interface OutboundDeliveryMeta {
   visibility?: "public" | "unlisted" | "followers" | "direct";
   searchConsent?: PublicSearchConsentSignal;
   moderationReport?: OutboundDeliveryModerationReportMeta;
+  /**
+   * APDM-internal first durable outbound enqueue timestamp. Set once and
+   * preserved across retries, deferrals, delayed storage and promotion.
+   */
+  apdmFirstQueuedAtMs?: number;
 }
 
 export type OutboundDeliverySignResult =
@@ -99,6 +104,13 @@ export interface OutboundDeliveryInput {
   maxAttempts: number;
   requestTimeoutMs: number;
   userAgent: string;
+  /**
+   * APDM fail-closed deadline assertion. Runtime adapters MUST invoke this
+   * synchronously at the actual external HTTP POST boundary, after all signing
+   * and header preparation. It throws when preserved queue residence is no
+   * longer eligible for automatic delivery.
+   */
+  assertExternalPostAllowed(): void;
   signHttpRequest(input: {
     actorUri: string;
     method: "POST";

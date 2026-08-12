@@ -22,18 +22,22 @@ This convergence is necessary but not sufficient for crash safety. Phase 4 there
 ## Crash-safe delivery state
 
 ```text
-Redis Stream outbound message
+ready Redis Stream outbound message
         |
+        +-- future notBefore --> atomic delayed ZSET/hash handoff + XACK
+        |                         |
+        |                         v
+        |                    due promotion -> ready Stream
         v
 temporary in-flight claim (expiring, owner token)
         |
-        +-- another worker sees claim --> defer/requeue, do not mark delivered
+        +-- another worker sees claim --> durable defer, do not mark delivered
         |
         v
 remote HTTP delivery
         |
         v
-durable completed marker
+durable v2 completed marker
         |
         v
 XACK original Stream message
@@ -43,11 +47,80 @@ The completed marker is the only duplicate-delivery proof. An in-flight claim is
 
 If a worker dies after acquiring its claim but before sending HTTP, the claim expires and the reclaimed Stream message becomes deliverable. If another worker encounters the live claim before expiry, it durably enqueues deferred replacement work before acknowledging the current Stream message.
 
+Future-dated outbound jobs do **not** remain parked in the ready Stream's pending-entry list. The ready Stream is deliberately `MAXLEN`-trimmed, so long-lived pending entries are not a safe delay store. Instead, the queue atomically stores the complete job payload in a Redis hash, records its due timestamp in a sorted set, and acknowledges the ready Stream entry in the same Redis script. A short promotion loop atomically recreates due work in the ready Stream and removes the delayed record. If a transient Redis error prevents that park, the queue retries the **same pending source** with bounded exponential backoff before reading later ready work. If the source crosses the residence deadline while parking, the current in-memory payload remains the recovery authority and the queue keeps retrying the DLQ transition until that recovery record is durable before consumption advances. This prevents hot requeue loops, prevents trimming from deleting delayed work, and avoids `XAUTOCLAIM` cursor fairness/head-of-line behavior for scheduled retries.
+
+The first durable outbound enqueue timestamp is stored once in `meta.apdmFirstQueuedAtMs` and survives retries, deferrals, delayed storage and promotion. The queue wrapper validates residence before yielding, and the worker validates it before the duplicate claim and after claim/domain waits. A mandatory `assertExternalPostAllowed()` contract is then invoked at the literal external POST boundary after signing and all header preparation. The native worker, Fedify/ActivityPods signing path, and sidecar-local signing path all enforce that same final assertion immediately before `undici.request()`. A fresh Redis Stream ID created during promotion, an inline not-before wait, signing backoff, follower-sync preparation, or a Redis/domain-control stall therefore cannot reset or silently extend the 48-hour APDM clock.
+
 If remote HTTP succeeds but the completed marker cannot be persisted, the worker intentionally does not acknowledge the Stream message. This preserves at-least-once delivery: a later replay may duplicate the remote HTTP request, but the Activity is not silently lost.
 
-All retry/defer paths insert their durable replacement before acknowledging the original Stream message, avoiding an `ACK -> crash -> requeue` loss window.
+All retry/defer/DLQ transitions persist their replacement or recovery record before acknowledging the original Stream message. If that persistence fails, the source remains pending/recoverable or, where the Stream entry may have been trimmed during a prolonged delayed-store outage, remains held by the active in-memory retry loop until its DLQ record is durable. There is no `ACK -> write failure -> lost work` gap.
 
 `RedisOutboundDeliveryClaimStore` uses ownership tokens so a stale worker cannot release another worker's claim. Completion and claim release are performed with Redis-side token checks.
+
+## Replay-horizon guarantee
+
+Phase 4's automatic no-duplicate guarantee is bounded explicitly rather than assuming either producer processing or queue residence is instantaneous.
+
+ActivityPods automatic delivery reconciliation may inspect at most the preceding **48 hours**. Blind-recipient recovery snapshots remain private and expire after **72 hours**, leaving a full **24-hour producer-processing allowance** for account-cursor rotation, paging, Activity refetch, and plan reconstruction before the sidecar accepts the reconstructed intent. Configurations above 48 hours fail closed instead of allowing automatic reconciliation to race the blind-recipient snapshot expiry.
+
+After durable sidecar acceptance, the outbox-intent stage may retain an intent for at most **48 hours**. The bound uses the intent's original `createdAt`, which is preserved across retries, so retry/requeue cannot reset the residence clock. Stale intents are durably moved to the DLQ before their source Stream message is acknowledged and before they can create outbound replay work. The worker revalidates that original age again immediately before outbound fan-out, so time spent in target enrichment or event-log publication cannot silently extend the residence window.
+
+Outbound work may then remain in the sidecar for at most **48 hours** before external delivery. The durable queue stamps `meta.apdmFirstQueuedAtMs` on first enqueue and preserves it through every retry, deferral, delayed-store handoff and due promotion. The worker checks that preserved value before the completed-delivery claim and after claim/domain waits, while the outbound adapter contract rechecks it at the actual HTTP POST boundary after signing and header preparation. Missing, malformed, implausibly future, or stale residence evidence fails closed before an external POST.
+
+Both sidecar age checks permit at most **5 minutes of positive clock skew**. Because that allowance can apply independently to the outbox-intent and outbound-message stages, the formal automatic replay bound includes **10 minutes** of skew in addition to the four nominal timing terms.
+
+The production completed-delivery ledger enforces an **eight-day minimum** retention period for successful `activityId::deliveryUrl` markers. A shorter worker configuration is clamped by the storage layer, while a longer configured retention remains valid. The eight-day floor therefore exceeds the complete worst-case bounded automatic duplicate path by **23 hours 50 minutes**.
+
+### Legacy completion-marker cutover
+
+The pre-hardening sidecar wrote unversioned `ap:delivery:completed:<jobId>` markers with a much shorter lifetime. That namespace cannot be upgraded safely with an incremental rolling `SCAN`: the old format contains no durable index or version metadata, so a key may expire before an incremental cursor observes it. Repeatedly extending every key is also incorrect because it would keep upgraded completion proof alive forever.
+
+More importantly, an atomic snapshot alone is insufficient: a successful delivery from 24–48 hours before cutover may already have lost its old 24-hour marker while still being eligible for ActivityPods' 48-hour reconciliation lookback. Redis cannot migrate proof that has already expired. The upgrade therefore uses an explicit **reconciliation blackout**, not a guessed empty-namespace shortcut.
+
+First v2 startup has exactly two supported modes:
+
+- **Proven fresh Redis:** set `APDM_COMPLETION_MARKER_V2_CUTOVER=fresh`. Startup verifies that no legacy completion markers exist, writes the permanent v2 migration sentinel, and proceeds. An empty namespace is not automatically assumed to be fresh.
+- **Upgrade from the legacy ledger:** disable automatic ActivityPods delivery reconciliation and stop **all** legacy sidecar workers at the same boundary. Record that epoch-millisecond boundary as `APDM_COMPLETION_MARKER_V2_BLACKOUT_STARTED_AT_MS`. Keep both sources stopped for **more than 48 hours 10 minutes**: 48 hours for the producer replay window, five minutes reserved for possible skew on the recorded operator stop boundary, and another five minutes reserved for the queued-source/Redis timestamp boundary. Then start the upgraded sidecar with `APDM_COMPLETION_MARKER_V2_CUTOVER=maintenance`. Equality is intentionally rejected because the sidecar residence guard itself rejects only ages strictly greater than 48 hours.
+
+The upgrade sequence is therefore:
+
+1. deploy the ActivityPods configuration that caps automatic reconciliation at 48 hours;
+2. disable automatic reconciliation and stop all legacy sidecar workers;
+3. record that stop boundary in `APDM_COMPLETION_MARKER_V2_BLACKOUT_STARTED_AT_MS`;
+4. leave the blackout in force for **more than 48h10m**. During that interval no new reconciliation duplicates can be created, and every pre-cutover outbox/outbound source is aged strictly beyond the upgraded sidecar's 48-hour residence guard even when the operator boundary and Redis source timestamp are each skewed by the accepted five-minute allowance in opposite directions;
+5. start the upgraded sidecar with `APDM_COMPLETION_MARKER_V2_CUTOVER=maintenance` and the recorded blackout timestamp;
+6. before queue consumption begins, the migration verifies the elapsed blackout, atomically copies any still-live legacy markers to `ap:delivery:completed:v2:<jobId>` at the eight-day floor, deletes them, and writes the permanent sentinel;
+7. run only upgraded workers, then re-enable ActivityPods automatic reconciliation.
+
+If the first-v2-start mode is absent, invalid, or the maintenance blackout is too short or exactly equal to the boundary, startup fails closed before queue consumption. Once the sentinel exists, ordinary restarts do not require either cutover environment variable.
+
+New completions write only v2 markers. Claim-time logic defensively recognizes a stray legacy marker, upgrades that individual marker to v2, and treats the job as completed. There is **no periodic TTL-extension sweep**, so a v2 marker naturally expires after its bounded retention window instead of being refreshed forever.
+
+The one-time migration deliberately uses an atomic Redis namespace operation. That can briefly block Redis and is therefore restricted to the documented maintenance boundary; correctness is preferred over pretending an incremental cursor can provide a snapshot guarantee that Redis `SCAN` does not provide.
+
+The cross-repository automatic-replay invariant is therefore:
+
+```text
+producer reconciliation age        <= 48 hours
+producer processing allowance      <= 24 hours
+sidecar outbox-intent residence     <= 48 hours
+outbound residence before HTTP      <= 48 hours
+accepted sidecar clock skew         <= 10 minutes total
+-------------------------------------------------
+maximum automatic duplicate age     <= 168 hours 10 minutes
+completed-delivery marker retention >= 192 hours (8 days)
+safety margin                        >= 23 hours 50 minutes
+```
+
+Separately, the private blind-recipient recovery invariant remains:
+
+```text
+producer reconciliation lookback <= 48 hours
+producer processing allowance    <= 24 hours
+blind-recipient snapshot lifetime = 72 hours
+```
+
+Manual/operator replay outside the bounded automatic window is not covered by the automatic no-duplicate guarantee and must be treated as an explicit recovery operation.
 
 ## Tests
 
@@ -56,6 +129,19 @@ All retry/defer paths insert their durable replacement before acknowledging the 
 - two separately accepted sidecar intent records for the same Activity/target derive the same outbound `jobId`;
 - a dead worker's still-live in-flight claim is not mistaken for completed delivery;
 - reclaimed work becomes deliverable after the stale claim expires;
-- a duplicate is suppressed only after completed-delivery state has been recorded.
+- a duplicate is suppressed only after completed-delivery state has been recorded;
+- stale outbox intents are DLQ'd before outbound replay work is created, including revalidation immediately before fan-out;
+- stale outbound work is rejected from its preserved first-enqueue timestamp even after promotion creates a fresh Stream ID;
+- residence is revalidated after claim/domain waits immediately before delivery;
+- missing preserved residence evidence fails closed in production paths;
+- failed DLQ persistence leaves stale work pending rather than acknowledging it away.
+
+`fedify-sidecar/src/delivery/tests/OutboundHttpBoundary.test.ts` proves that native signing cannot cross the residence deadline and still reach `undici.request()`. `fedify-sidecar/src/federation/tests/FedifyFederationAdapterOutbound.test.ts` proves the same boundary for both ActivityPods-signed and sidecar-local-signed runtime adapter delivery.
+
+`fedify-sidecar/src/queue/tests/DelayedOutboundQueue.test.ts` additionally proves that a park failure crossing the residence deadline keeps the in-memory payload until fallback DLQ persistence succeeds, without yielding stale work.
+
+`fedify-sidecar/src/delivery/tests/ApdmReplayHorizon.test.ts` proves the 48h + 24h + 48h + 48h + 10m automatic duplicate bound, the eight-day completed-marker floor, the 23h50m safety margin, complete Redis Stream-ID validation, and fail-closed timestamp handling.
+
+`fedify-sidecar/src/delivery/tests/OutboundDeliveryClaimRetention.test.ts` proves the eight-day storage floor, longer-retention preservation, non-finite fail-safe behavior, distinct legacy/v2 namespaces, explicit fresh/maintenance declarations, and that the maintenance blackout must be strictly greater than 48h10m.
 
 Phase 4 does not perform the production authority cutover. That remains APDM Phase 5.

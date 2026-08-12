@@ -141,10 +141,11 @@ generate_config_if_needed() {
       --read-uploads-description N \
       --anonymize-uploads N"
 
-  # tzdata tries to auto-update timezone data and logs repeated permission
-  # warnings in the harness environment.  Disable it; the bundled data is fine.
-  printf '\n# Harness overrides\nconfig :tzdata, :autoupdate, :disabled\n' \
-    >> "${AKKOMA_RUNTIME_DIR}/etc/config.exs"
+  # The generated bind-mounted config is owned by the container user in CI.
+  # Append the harness-only tzdata override from the same container context
+  # instead of writing the file from the unprivileged GitHub runner host.
+  run_compose run --rm akkoma-app /bin/sh -lc \
+    "printf '\n# Harness overrides\nconfig :tzdata, :autoupdate, :disabled\n' >> ${CONFIG_PATH}"
 }
 
 ensure_database() {

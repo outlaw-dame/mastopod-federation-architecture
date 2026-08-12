@@ -17,6 +17,10 @@ import type { RemoteSharedInboxCache } from "./RemoteSharedInboxCache.js";
 import { metrics } from "../metrics/index.js";
 import type { ActivityEventMeta, RedPandaProducer } from "../streams/redpanda-producer.js";
 import { logger } from "../utils/logger.js";
+import {
+  APDM_OUTBOX_INTENT_MAX_AGE_MS,
+  outboxIntentAgeMs,
+} from "./apdm-replay-horizon.js";
 
 export interface OutboxIntentWorkerConfig {
   concurrency: number;
@@ -103,9 +107,13 @@ export class OutboxIntentWorker {
     this.activeJobs++;
 
     try {
+      this.assertIntentWithinReplayHorizon(intent, "processing start");
+
       if (intent.notBeforeMs > 0 && Date.now() < intent.notBeforeMs) {
-        await this.queue.ack("outbox_intent", messageId);
+        // Persist the deferred replacement before ACKing the source message.
+        // If enqueue fails, the original remains pending and reclaimable.
         await this.queue.enqueueOutboxIntent(intent);
+        await this.queue.ack("outbox_intent", messageId);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "deferred" });
         logger.debug("Outbox intent not ready, requeued", {
           intentId: intent.intentId,
@@ -174,6 +182,12 @@ export class OutboxIntentWorker {
         activity,
         normalizedTargets.targets,
       );
+
+      // Enrichment and event-log publication are awaited and may stall. Check
+      // the original accepted-at clock again at the actual fan-out boundary so
+      // a fresh outbound Redis Stream timestamp cannot extend stale replay work.
+      this.assertIntentWithinReplayHorizon(intent, "outbound fan-out");
+
       const enqueueResult = await this.queue.enqueueOutboundBatchForIntent(
         intent.intentId,
         outboundJobs,
@@ -201,11 +215,11 @@ export class OutboxIntentWorker {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const permanent = this.isPermanentFailure(error);
-
-      await this.queue.ack("outbox_intent", messageId);
-
       const nextAttempt = intent.attempt + 1;
+
       if (permanent || nextAttempt >= intent.maxAttempts) {
+        // DLQ is the durable recovery record. Write it before ACKing the source
+        // message so a crash or Redis error cannot make rejected work disappear.
         await this.queue.moveToDlq(
           "outbox_intent",
           {
@@ -215,6 +229,7 @@ export class OutboxIntentWorker {
           },
           permanent ? message : "Max attempts exceeded",
         );
+        await this.queue.ack("outbox_intent", messageId);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "dlq" });
         logger.warn("Outbox intent moved to DLQ", {
           intentId: intent.intentId,
@@ -224,12 +239,15 @@ export class OutboxIntentWorker {
         });
       } else {
         const delay = backoffMs(nextAttempt);
+        // Persist retry work before ACKing the source message. If enqueue fails,
+        // the original remains pending for Redis Stream recovery.
         await this.queue.enqueueOutboxIntent({
           ...intent,
           attempt: nextAttempt,
           notBeforeMs: Date.now() + delay,
           lastError: message,
         });
+        await this.queue.ack("outbox_intent", messageId);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "retry" });
         logger.warn("Outbox intent failed, scheduled retry", {
           intentId: intent.intentId,
@@ -245,6 +263,22 @@ export class OutboxIntentWorker {
       );
     } finally {
       this.activeJobs--;
+    }
+  }
+
+  private assertIntentWithinReplayHorizon(intent: OutboxIntent, boundary: string): void {
+    const intentAgeMs = outboxIntentAgeMs(intent.createdAt);
+    if (intentAgeMs === null) {
+      throw new OutboxIntentProcessingError(
+        `Outbox intent has an invalid or implausibly future createdAt timestamp at ${boundary}`,
+        true,
+      );
+    }
+    if (intentAgeMs > APDM_OUTBOX_INTENT_MAX_AGE_MS) {
+      throw new OutboxIntentProcessingError(
+        `Outbox intent exceeded the ${APDM_OUTBOX_INTENT_MAX_AGE_MS} ms APDM replay residence limit at ${boundary}`,
+        true,
+      );
     }
   }
 

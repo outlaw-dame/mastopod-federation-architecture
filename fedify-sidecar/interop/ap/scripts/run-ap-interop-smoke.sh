@@ -34,6 +34,7 @@ if [ "${needs_akkoma_build}" = "1" ]; then
 fi
 
 for target in ${TARGETS}; do
+  echo "=== AP interop target: ${target} ==="
   case "${target}" in
     gotosocial)
       AP_INTEROP_SKIP_BUILD=1 "${SCRIPT_DIR}/run-gotosocial-proof.sh"
@@ -45,4 +46,5 @@ for target in ${TARGETS}; do
       AP_INTEROP_SKIP_BUILD=1 "${SCRIPT_DIR}/run-akkoma-proof.sh"
       ;;
   esac
+  echo "=== AP interop target passed: ${target} ==="
 done
