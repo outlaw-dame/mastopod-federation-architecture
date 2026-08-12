@@ -1,16 +1,14 @@
 /**
  * Logger utility for Fedify Sidecar
- * 
+ *
  * Provides structured logging with configurable levels and formats.
  */
 
 import { pino, type LoggerOptions } from "pino";
 
-// Get log level from environment
 const level = process.env["LOG_LEVEL"] ?? "info";
 const format = process.env["LOG_FORMAT"] ?? "json";
 
-// Create pino logger
 const pinoOptions: LoggerOptions = {
   level,
   base: {
@@ -20,8 +18,7 @@ const pinoOptions: LoggerOptions = {
   timestamp: pino.stdTimeFunctions.isoTime,
 };
 
-// Use pretty printing in development
-export const logger = pino(
+const baseLogger = pino(
   format === "pretty"
     ? {
         ...pinoOptions,
@@ -37,7 +34,33 @@ export const logger = pino(
     : pinoOptions,
 );
 
-// Export log levels for convenience
+/**
+ * Historical call sites use both Pino's native `(fields, message)` form and a
+ * legacy `(message, fields)` form. Normalize only the latter so structured
+ * diagnostic fields are never silently discarded while callers are migrated.
+ */
+for (const method of ["debug", "info", "warn", "error"] as const) {
+  const original = baseLogger[method].bind(baseLogger) as (...args: unknown[]) => void;
+  (baseLogger[method] as unknown as (...args: unknown[]) => void) = (
+    first: unknown,
+    second?: unknown,
+    ...rest: unknown[]
+  ) => {
+    if (
+      typeof first === "string"
+      && second !== null
+      && typeof second === "object"
+      && !Array.isArray(second)
+    ) {
+      original(second, first, ...rest);
+      return;
+    }
+    original(first, second, ...rest);
+  };
+}
+
+export const logger = baseLogger;
+
 export const LogLevel = {
   DEBUG: "debug",
   INFO: "info",
