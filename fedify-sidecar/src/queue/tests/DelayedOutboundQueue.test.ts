@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
-  entries: [] as Array<{ messageId: string; job: Record<string, unknown> }>,
+  entries: [] as Array<{ messageId: string; job: Record<string, any> }>,
   evalMock: vi.fn(),
   migrationMock: vi.fn(),
+  coreEnqueueBatch: vi.fn(),
+  coreAck: vi.fn(),
+  coreDlq: vi.fn(),
   client: {
     isOpen: false,
     on: vi.fn(),
@@ -31,8 +34,19 @@ vi.mock("../sidecar-redis-queue-core.js", () => {
   class CoreRedisStreamsQueue {
     async connect(): Promise<void> {}
     async disconnect(): Promise<void> {}
-
-    async *consumeOutbound(): AsyncIterable<{ messageId: string; job: Record<string, unknown> }> {
+    async enqueueOutboundBatch(jobs: Record<string, unknown>[]): Promise<string[]> {
+      return state.coreEnqueueBatch(jobs);
+    }
+    async enqueueOutbound(job: Record<string, unknown>): Promise<void> {
+      await this.enqueueOutboundBatch([job]);
+    }
+    async ack(type: string, messageId: string): Promise<void> {
+      await state.coreAck(type, messageId);
+    }
+    async moveToDlq(type: string, data: unknown, reason: string): Promise<void> {
+      await state.coreDlq(type, data, reason);
+    }
+    async *consumeOutbound(): AsyncIterable<{ messageId: string; job: Record<string, any> }> {
       for (const entry of state.entries) yield entry;
     }
   }
@@ -42,6 +56,7 @@ vi.mock("../sidecar-redis-queue-core.js", () => {
 
 import {
   DELAYED_OUTBOUND_MIN_DELAY_MS,
+  DELAYED_OUTBOUND_PARK_RETRY_MS,
   DELAYED_OUTBOUND_PROMOTION_BATCH_SIZE,
   RedisStreamsQueue,
 } from "../sidecar-redis-queue.js";
@@ -59,7 +74,7 @@ function outboundJob(notBeforeMs: number) {
     notBeforeMs,
     deferCount: 2,
     lastError: "HTTP 503",
-    meta: { visibility: "public" },
+    meta: { visibility: "public" as const },
   };
 }
 
@@ -69,6 +84,9 @@ describe("durable delayed outbound queue", () => {
     state.entries.length = 0;
     state.evalMock.mockReset();
     state.migrationMock.mockReset().mockResolvedValue(0);
+    state.coreEnqueueBatch.mockReset().mockResolvedValue(["1700000000000-0"]);
+    state.coreAck.mockReset().mockResolvedValue(undefined);
+    state.coreDlq.mockReset().mockResolvedValue(undefined);
     state.client.isOpen = false;
     state.client.on.mockReset();
     state.client.connect.mockReset().mockImplementation(async () => {
@@ -81,40 +99,87 @@ describe("durable delayed outbound queue", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
   });
 
-  it("atomically parks long-delay work outside the trimmed ready Stream before yielding", async () => {
-    const queue = new RedisStreamsQueue({
-      redisUrl: "redis://test",
-      outboundStreamKey: "ap:queue:outbound:test",
-      consumerGroup: "test-workers",
-      maxStreamLength: 123,
-    } as any);
-
-    // connect() performs an initial due-promotion pass; isolate the subsequent park call.
+  it("writes future replacements directly to delayed storage before the ready Stream", async () => {
+    const queue = new RedisStreamsQueue({ redisUrl: "redis://test" } as any);
     state.evalMock.mockResolvedValue(0);
     await queue.connect();
     state.evalMock.mockClear();
 
+    const before = Date.now();
+    const job = outboundJob(before + DELAYED_OUTBOUND_MIN_DELAY_MS + 60_000);
+    await queue.enqueueOutbound(job as any);
+
+    expect(state.coreEnqueueBatch).not.toHaveBeenCalled();
+    expect(state.evalMock).toHaveBeenCalledTimes(1);
+    const [, options] = state.evalMock.mock.calls[0] as [string, { keys: string[]; arguments: string[] }];
+    expect(options.keys).toEqual([
+      "ap:queue:outbound:v1:delayed:v1",
+      "ap:queue:outbound:v1:delayed-payload:v1",
+    ]);
+    const stored = JSON.parse(options.arguments[2] ?? "{}");
+    expect(stored.jobId).toBe(job.jobId);
+    expect(stored.meta.apdmFirstQueuedAtMs).toBeGreaterThanOrEqual(before);
+    expect(stored.meta.apdmFirstQueuedAtMs).toBeLessThanOrEqual(Date.now());
+
+    await queue.disconnect();
+  });
+
+  it("parks a ready future entry with its original Stream timestamp preserved", async () => {
+    const queue = new RedisStreamsQueue({
+      redisUrl: "redis://test",
+      outboundStreamKey: "ap:queue:outbound:test",
+      consumerGroup: "test-workers",
+    } as any);
+    state.evalMock.mockResolvedValue(0);
+    await queue.connect();
+    state.evalMock.mockClear();
+
+    const streamMs = Date.now() - 1_000;
+    const messageId = `${streamMs}-1`;
     const job = outboundJob(Date.now() + DELAYED_OUTBOUND_MIN_DELAY_MS + 60_000);
-    state.entries.push({ messageId: "1700000000000-1", job });
+    state.entries.push({ messageId, job });
 
     const result = await queue.consumeOutbound()[Symbol.asyncIterator]().next();
 
     expect(result.done).toBe(true);
-    expect(state.evalMock).toHaveBeenCalledTimes(1);
     const [, options] = state.evalMock.mock.calls[0] as [string, { keys: string[]; arguments: string[] }];
-    expect(options.keys).toEqual([
-      "ap:queue:outbound:test:delayed:v1",
-      "ap:queue:outbound:test:delayed-payload:v1",
-      "ap:queue:outbound:test",
-    ]);
-    expect(options.arguments[0]).toBe(job.jobId);
-    expect(options.arguments[1]).toBe(String(job.notBeforeMs));
-    expect(JSON.parse(options.arguments[2] ?? "{}")).toMatchObject(job);
+    const stored = JSON.parse(options.arguments[2] ?? "{}");
+    expect(stored.meta.apdmFirstQueuedAtMs).toBe(streamMs);
     expect(options.arguments[4]).toBe("test-workers");
-    expect(options.arguments[5]).toBe("1700000000000-1");
+    expect(options.arguments[5]).toBe(messageId);
+
+    await queue.disconnect();
+  });
+
+  it("keeps consuming after a transient park failure while leaving that source pending", async () => {
+    vi.useFakeTimers();
+    const queue = new RedisStreamsQueue({ redisUrl: "redis://test" } as any);
+    state.evalMock.mockResolvedValue(0);
+    await queue.connect();
+    state.evalMock.mockClear();
+    state.evalMock.mockRejectedValueOnce(new Error("redis transient"));
+
+    const firstMs = Date.now();
+    state.entries.push({
+      messageId: `${firstMs}-1`,
+      job: outboundJob(firstMs + DELAYED_OUTBOUND_MIN_DELAY_MS + 60_000),
+    });
+    state.entries.push({
+      messageId: `${firstMs + 1}-2`,
+      job: outboundJob(0),
+    });
+
+    const next = queue.consumeOutbound()[Symbol.asyncIterator]().next();
+    await vi.advanceTimersByTimeAsync(DELAYED_OUTBOUND_PARK_RETRY_MS);
+    const result = await next;
+
+    expect(result.done).toBe(false);
+    expect(result.value?.messageId).toBe(`${firstMs + 1}-2`);
+    expect(state.coreAck).not.toHaveBeenCalledWith("outbound", `${firstMs}-1`);
 
     await queue.disconnect();
   });
