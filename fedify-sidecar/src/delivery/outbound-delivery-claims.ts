@@ -6,6 +6,7 @@ export type DeliveryClaimResult = "claimed" | "completed" | "in_flight";
 export const MIN_COMPLETED_DELIVERY_TTL_MS = APDM_COMPLETED_DELIVERY_MIN_RETENTION_MS;
 export const LEGACY_COMPLETED_KEY_PREFIX = "ap:delivery:completed:";
 export const COMPLETED_KEY_PREFIX = "ap:delivery:completed:v2:";
+export const COMPLETED_DELIVERY_CUTOVER_SENTINEL_KEY = "ap:delivery:completed:v2:migration-complete";
 export const COMPLETED_DELIVERY_CUTOVER_MODE = "maintenance";
 
 export function normalizeCompletedDeliveryTtlMs(ttlMs: number): number {
@@ -23,22 +24,18 @@ export interface OutboundDeliveryClaimStore {
 /**
  * One-time v1 -> v2 completed-marker cutover.
  *
- * This intentionally uses one atomic Redis script with KEYS. The legacy key
- * format has no version/index metadata, so an incremental SCAN cannot prove it
- * saw a marker before that marker expires. Correct migration therefore needs a
- * short maintenance boundary with legacy outbound workers stopped. The script
- * blocks only for this explicit cutover and must never be used as a periodic
- * runtime sweep.
+ * The legacy key format has no version/index metadata, so an incremental SCAN
+ * cannot prove it observed a marker before that marker expires. Correct
+ * migration therefore uses one atomic namespace conversion during an explicit
+ * maintenance boundary with legacy outbound workers stopped. A permanent
+ * sentinel makes the blocking conversion strictly one-time: fresh installs set
+ * the sentinel without requiring a maintenance flag, while installations that
+ * actually contain legacy markers fail closed until the operator acknowledges
+ * the cutover mode.
  */
 export async function migrateLegacyCompletedDeliveryMarkers(
   redisUrl: string = process.env["REDIS_URL"] ?? "redis://localhost:6379",
 ): Promise<number> {
-  if (process.env["APDM_COMPLETION_MARKER_V2_CUTOVER"] !== COMPLETED_DELIVERY_CUTOVER_MODE) {
-    throw new Error(
-      `APDM completed-marker v2 startup requires APDM_COMPLETION_MARKER_V2_CUTOVER=${COMPLETED_DELIVERY_CUTOVER_MODE}; stop all legacy outbound workers before starting v2 workers`,
-    );
-  }
-
   const redis = createClient({ url: redisUrl });
   redis.on("error", () => undefined);
   await redis.connect();
@@ -48,28 +45,51 @@ export async function migrateLegacyCompletedDeliveryMarkers(
         local legacyPrefix = ARGV[1]
         local v2Prefix = ARGV[2]
         local ttlMs = ARGV[3]
+        local requestedMode = ARGV[4]
+        local requiredMode = ARGV[5]
+
+        if redis.call('EXISTS', KEYS[1]) == 1 then
+          return 0
+        end
+
         local keys = redis.call('KEYS', legacyPrefix .. '*')
-        local migrated = 0
-        for _, legacyKey in ipairs(keys) do
-          if string.sub(legacyKey, 1, string.len(v2Prefix)) ~= v2Prefix then
-            local suffix = string.sub(legacyKey, string.len(legacyPrefix) + 1)
-            local v2Key = v2Prefix .. suffix
-            if redis.call('EXISTS', legacyKey) == 1 then
-              if redis.call('EXISTS', v2Key) == 0 then
-                redis.call('SET', v2Key, 'v2', 'PX', ttlMs)
-              end
-              redis.call('DEL', legacyKey)
-              migrated = migrated + 1
-            end
+        local legacyKeys = {}
+        for _, key in ipairs(keys) do
+          if string.sub(key, 1, string.len(v2Prefix)) ~= v2Prefix then
+            table.insert(legacyKeys, key)
           end
         end
+
+        if #legacyKeys > 0 and requestedMode ~= requiredMode then
+          return redis.error_reply(
+            'legacy APDM completed markers exist; stop all legacy outbound workers and set APDM_COMPLETION_MARKER_V2_CUTOVER=' .. requiredMode
+          )
+        end
+
+        local migrated = 0
+        for _, legacyKey in ipairs(legacyKeys) do
+          local suffix = string.sub(legacyKey, string.len(legacyPrefix) + 1)
+          local v2Key = v2Prefix .. suffix
+          if redis.call('EXISTS', legacyKey) == 1 then
+            if redis.call('EXISTS', v2Key) == 0 then
+              redis.call('SET', v2Key, 'v2', 'PX', ttlMs)
+            end
+            redis.call('DEL', legacyKey)
+            migrated = migrated + 1
+          end
+        end
+
+        redis.call('SET', KEYS[1], '1')
         return migrated
       `,
       {
+        keys: [COMPLETED_DELIVERY_CUTOVER_SENTINEL_KEY],
         arguments: [
           LEGACY_COMPLETED_KEY_PREFIX,
           COMPLETED_KEY_PREFIX,
           String(MIN_COMPLETED_DELIVERY_TTL_MS),
+          process.env["APDM_COMPLETION_MARKER_V2_CUTOVER"] ?? "",
+          COMPLETED_DELIVERY_CUTOVER_MODE,
         ],
       },
     );
