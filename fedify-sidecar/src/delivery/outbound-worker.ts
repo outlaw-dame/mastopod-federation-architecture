@@ -436,6 +436,34 @@ export class OutboundWorker {
       }
 
       try {
+        const finalQueueResidenceMs = typeof firstQueuedAtMs === "number"
+          ? outboxIntentAgeMs(firstQueuedAtMs, Date.now())
+          : syntheticDirectTestMessage
+            ? 0
+            : null;
+        if (
+          finalQueueResidenceMs === null
+          || finalQueueResidenceMs > APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS
+        ) {
+          const reason = finalQueueResidenceMs === null
+            ? "Outbound message is missing a valid preserved first-enqueue timestamp immediately before delivery"
+            : `Outbound message exceeded the ${APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS} ms APDM queue residence limit immediately before delivery`;
+          await this.deliveryClaimStore.release(job.jobId, claimToken);
+          claimHeld = false;
+          await this.queue.moveToDlq("outbound", { ...job, lastError: reason }, reason);
+          await this.queue.ack("outbound", messageId);
+          metrics.deliveryDlq.inc({ domain: job.targetDomain });
+          metrics.deliveriesTotal.inc({ domain: job.targetDomain, type: "outbound", status: "queue_expired" });
+          logger.warn("Outbound delivery expired immediately before HTTP delivery", {
+            jobId: job.jobId,
+            activityId: job.activityId,
+            firstQueuedAtMs,
+            queueResidenceMs: finalQueueResidenceMs,
+            maxQueueResidenceMs: APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS,
+          });
+          return;
+        }
+
         const result = await this.deliver(job);
 
         if (result.success) {
