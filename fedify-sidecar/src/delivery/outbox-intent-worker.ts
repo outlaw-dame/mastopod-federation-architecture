@@ -107,19 +107,7 @@ export class OutboxIntentWorker {
     this.activeJobs++;
 
     try {
-      const intentAgeMs = outboxIntentAgeMs(intent.createdAt);
-      if (intentAgeMs === null) {
-        throw new OutboxIntentProcessingError(
-          "Outbox intent has an invalid or implausibly future createdAt timestamp",
-          true,
-        );
-      }
-      if (intentAgeMs > APDM_OUTBOX_INTENT_MAX_AGE_MS) {
-        throw new OutboxIntentProcessingError(
-          `Outbox intent exceeded the ${APDM_OUTBOX_INTENT_MAX_AGE_MS} ms APDM replay residence limit`,
-          true,
-        );
-      }
+      this.assertIntentWithinReplayHorizon(intent, "processing start");
 
       if (intent.notBeforeMs > 0 && Date.now() < intent.notBeforeMs) {
         await this.queue.ack("outbox_intent", messageId);
@@ -192,6 +180,12 @@ export class OutboxIntentWorker {
         activity,
         normalizedTargets.targets,
       );
+
+      // Enrichment and event-log publication are awaited and may stall. Check
+      // the original accepted-at clock again at the actual fan-out boundary so
+      // a fresh outbound Redis Stream timestamp cannot extend stale replay work.
+      this.assertIntentWithinReplayHorizon(intent, "outbound fan-out");
+
       const enqueueResult = await this.queue.enqueueOutboundBatchForIntent(
         intent.intentId,
         outboundJobs,
@@ -263,6 +257,22 @@ export class OutboxIntentWorker {
       );
     } finally {
       this.activeJobs--;
+    }
+  }
+
+  private assertIntentWithinReplayHorizon(intent: OutboxIntent, boundary: string): void {
+    const intentAgeMs = outboxIntentAgeMs(intent.createdAt);
+    if (intentAgeMs === null) {
+      throw new OutboxIntentProcessingError(
+        `Outbox intent has an invalid or implausibly future createdAt timestamp at ${boundary}`,
+        true,
+      );
+    }
+    if (intentAgeMs > APDM_OUTBOX_INTENT_MAX_AGE_MS) {
+      throw new OutboxIntentProcessingError(
+        `Outbox intent exceeded the ${APDM_OUTBOX_INTENT_MAX_AGE_MS} ms APDM replay residence limit at ${boundary}`,
+        true,
+      );
     }
   }
 
