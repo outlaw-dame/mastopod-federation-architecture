@@ -104,6 +104,13 @@ export interface OutboundDeliveryInput {
   maxAttempts: number;
   requestTimeoutMs: number;
   userAgent: string;
+  /**
+   * APDM fail-closed deadline assertion. Runtime adapters MUST invoke this
+   * synchronously at the actual external HTTP POST boundary, after all signing
+   * and header preparation. It throws when preserved queue residence is no
+   * longer eligible for automatic delivery.
+   */
+  assertExternalPostAllowed(): void;
   signHttpRequest(input: {
     actorUri: string;
     method: "POST";
@@ -212,7 +219,7 @@ export interface SignAtprotoCommitRequest {
  */
 export interface SignAtprotoCommitResponse {
   /**
-   * DID of the repository
+   * DID of the account (optional if not yet provisioned)
    */
   did: string;
 
@@ -223,8 +230,8 @@ export interface SignAtprotoCommitResponse {
   keyId: string;
 
   /**
-   * Signature in base64url format
-   * Can be directly used in commit objects
+   * Signature in base64url format (optional)
+   * May be included for immediate use
    */
   signatureBase64Url: string;
 
@@ -234,7 +241,7 @@ export interface SignAtprotoCommitResponse {
   algorithm: 'k256';
 
   /**
-   * ISO 8601 timestamp of signing
+   * ISO 8601 timestamp of key creation
    */
   signedAt: string;
 }
