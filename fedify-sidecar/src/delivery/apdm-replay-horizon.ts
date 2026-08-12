@@ -9,7 +9,8 @@ export const APDM_MAX_AUTOMATIC_DUPLICATE_AGE_MS =
   APDM_AUTOMATIC_PRODUCER_REPLAY_MAX_MS +
   APDM_PRODUCER_PROCESSING_ALLOWANCE_MS +
   APDM_OUTBOX_INTENT_MAX_AGE_MS +
-  APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS;
+  APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS +
+  2 * APDM_MAX_CLOCK_SKEW_MS;
 
 export const APDM_REPLAY_SAFETY_MARGIN_MS =
   APDM_COMPLETED_DELIVERY_MIN_RETENTION_MS - APDM_MAX_AUTOMATIC_DUPLICATE_AGE_MS;
@@ -27,12 +28,14 @@ export function outboxIntentAgeMs(createdAt: number, nowMs: number = Date.now())
 
 export function redisStreamMessageTimestampMs(messageId: string): number | null {
   if (typeof messageId !== 'string') return null;
-  const separator = messageId.indexOf('-');
-  if (separator <= 0) return null;
-  const timestampText = messageId.slice(0, separator);
-  if (!/^\d+$/.test(timestampText)) return null;
-  const timestamp = Number(timestampText);
-  return Number.isSafeInteger(timestamp) && timestamp > 0 ? timestamp : null;
+  const match = /^(\d+)-(\d+)$/.exec(messageId);
+  if (!match) return null;
+
+  const timestamp = Number(match[1]);
+  const sequence = Number(match[2]);
+  if (!Number.isSafeInteger(timestamp) || timestamp <= 0) return null;
+  if (!Number.isSafeInteger(sequence) || sequence < 0) return null;
+  return timestamp;
 }
 
 /**
