@@ -221,6 +221,10 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
                   },
                   "Failed to persist expired outbound job during delayed-park retry; source remains pending",
                 );
+                // The source is still pending and reclaimable. Suppress this
+                // stale entry for the current pass rather than falling through
+                // and yielding it to the delivery worker.
+                parked = true;
               }
               break;
             }
