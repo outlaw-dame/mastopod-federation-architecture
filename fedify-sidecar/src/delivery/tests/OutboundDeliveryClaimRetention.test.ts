@@ -61,9 +61,9 @@ describe("APDM completed-delivery retention policy", () => {
     });
   });
 
-  it("requires an upgrade blackout strictly beyond 48 hours plus accepted skew", () => {
+  it("requires an upgrade blackout strictly beyond 48 hours plus two skew reserves", () => {
     const nowMs = 2_000_000_000_000;
-    expect(LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS).toBe(48 * 60 * 60 * 1000 + 5 * 60 * 1000);
+    expect(LEGACY_COMPLETED_DELIVERY_BLACKOUT_MS).toBe(48 * 60 * 60 * 1000 + 10 * 60 * 1000);
 
     expect(() => validateCompletedDeliveryCutoverRequest(
       "maintenance",
