@@ -289,4 +289,26 @@ describe("APDM Phase 4 durable handoff idempotency", () => {
     );
     expect(queue.ack).toHaveBeenCalledWith("outbound", staleRedisMessageId);
   });
+
+  it("leaves an expired outbound message pending when DLQ persistence fails", async () => {
+    const queue = createOutboundQueue();
+    queue.moveToDlq.mockRejectedValue(new Error("dlq unavailable"));
+    const claimStore = new StatefulClaimStore();
+    const job = outboundJob();
+    const worker = new TestOutboundWorker(
+      queue,
+      {} as any,
+      {} as any,
+      outboundWorkerConfig(claimStore),
+    );
+    const staleEnqueueMs = Date.now() - APDM_OUTBOUND_MESSAGE_MAX_RESIDENCE_MS - 1;
+    const staleRedisMessageId = `${staleEnqueueMs}-0`;
+
+    await expect(worker.run(staleRedisMessageId, job)).rejects.toThrow("dlq unavailable");
+
+    expect(worker.deliveries).toBe(0);
+    expect(claimStore.claimCalls).toBe(0);
+    expect(queue.moveToDlq).toHaveBeenCalledTimes(2);
+    expect(queue.ack).not.toHaveBeenCalled();
+  });
 });
