@@ -4,9 +4,13 @@ vi.mock("../../utils/logger.js", () => {
   return { logger, default: logger };
 });
 
-vi.mock("undici", () => ({
-  request: vi.fn(),
-}));
+vi.mock("undici", async () => {
+  const actual = await vi.importActual<typeof import("undici")>("undici");
+  return {
+    ...actual,
+    request: vi.fn(),
+  };
+});
 
 import { Readable } from "node:stream";
 import { MemoryKvStore } from "@fedify/fedify";
@@ -48,8 +52,11 @@ function makeDeliveryInput(overrides: Partial<Parameters<ReturnType<typeof makeA
         content: "Hello",
       },
     }),
-    targetInbox: "https://remote.example/inbox",
-    targetDomain: "remote.example",
+    // Unit tests exercise the explicit test-only loopback exception so the
+    // secure egress layer performs real validation without relying on public
+    // DNS or weakening production private-address policy.
+    targetInbox: "http://localhost:8080/inbox",
+    targetDomain: "localhost",
     attempt: 0,
     maxAttempts: 10,
     requestTimeoutMs: 5_000,
