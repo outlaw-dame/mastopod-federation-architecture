@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isForbiddenActivityPubAddress,
+  isUnsafeActivityPubTargetError,
   validateActivityPubTarget,
   type ResolvedAddress,
 } from "../activitypub-egress-policy.js";
@@ -37,19 +38,25 @@ describe("ActivityPub egress policy", () => {
     expect(isForbiddenActivityPubAddress("2606:4700:4700::1111")).toBe(false);
   });
 
-  it("rejects credentials, fragments and non-HTTP schemes", async () => {
-    await expect(validateActivityPubTarget("https://user:pass@example.com/inbox", { lookup: resolver([{ address: "8.8.8.8", family: 4 }]) })).rejects.toThrow(/credentials/u);
-    await expect(validateActivityPubTarget("https://example.com/inbox#fragment", { lookup: resolver([{ address: "8.8.8.8", family: 4 }]) })).rejects.toThrow(/fragment/u);
-    await expect(validateActivityPubTarget("ftp://example.com/inbox", { lookup: resolver([{ address: "8.8.8.8", family: 4 }]) })).rejects.toThrow(/HTTP\(S\)/u);
+  it("rejects credentials, fragments and non-HTTP schemes as permanent policy failures", async () => {
+    for (const invocation of [
+      validateActivityPubTarget("https://user:pass@example.com/inbox", { lookup: resolver([{ address: "8.8.8.8", family: 4 }]) }),
+      validateActivityPubTarget("https://example.com/inbox#fragment", { lookup: resolver([{ address: "8.8.8.8", family: 4 }]) }),
+      validateActivityPubTarget("ftp://example.com/inbox", { lookup: resolver([{ address: "8.8.8.8", family: 4 }]) }),
+    ]) {
+      await expect(invocation).rejects.toSatisfy(isUnsafeActivityPubTargetError);
+    }
   });
 
   it("rejects a hostname when any DNS answer is forbidden", async () => {
-    await expect(validateActivityPubTarget("https://example.com/inbox", {
+    const result = validateActivityPubTarget("https://example.com/inbox", {
       lookup: resolver([
         { address: "8.8.8.8", family: 4 },
         { address: "127.0.0.1", family: 4 },
       ]),
-    })).rejects.toThrow(/forbidden address 127\.0\.0\.1/u);
+    });
+    await expect(result).rejects.toThrow(/forbidden address 127\.0\.0\.1/u);
+    await expect(result).rejects.toSatisfy(isUnsafeActivityPubTargetError);
   });
 
   it("accepts HTTPS only when every resolved address is public", async () => {
@@ -67,7 +74,7 @@ describe("ActivityPub egress policy", () => {
   it("allows plain HTTP only for explicitly enabled literal loopback targets", async () => {
     await expect(validateActivityPubTarget("http://localhost:8080/inbox", {
       lookup: resolver([{ address: "127.0.0.1", family: 4 }]),
-    })).rejects.toThrow(/Plain HTTP|forbidden/u);
+    })).rejects.toSatisfy(isUnsafeActivityPubTargetError);
 
     await expect(validateActivityPubTarget("http://localhost:8080/inbox", {
       allowLoopbackHttp: true,
@@ -77,15 +84,22 @@ describe("ActivityPub egress policy", () => {
     await expect(validateActivityPubTarget("http://example.com/inbox", {
       allowLoopbackHttp: true,
       lookup: resolver([{ address: "8.8.8.8", family: 4 }]),
-    })).rejects.toThrow(/Plain HTTP/u);
+    })).rejects.toSatisfy(isUnsafeActivityPubTargetError);
 
     await expect(validateActivityPubTarget("http://attacker.example/inbox", {
       allowLoopbackHttp: true,
       lookup: resolver([{ address: "127.0.0.1", family: 4 }]),
-    })).rejects.toThrow(/forbidden address 127\.0\.0\.1/u);
+    })).rejects.toSatisfy(isUnsafeActivityPubTargetError);
   });
 
-  it("fails closed when DNS returns no addresses", async () => {
-    await expect(validateActivityPubTarget("https://example.com/inbox", { lookup: resolver([]) })).rejects.toThrow(/resolved to no addresses/u);
+  it("keeps an empty DNS result retryable instead of misclassifying it as a policy violation", async () => {
+    try {
+      await validateActivityPubTarget("https://example.com/inbox", { lookup: resolver([]) });
+      throw new Error("expected validation to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect(isUnsafeActivityPubTargetError(error)).toBe(false);
+      expect((error as Error).message).toMatch(/resolved to no addresses/u);
+    }
   });
 });
