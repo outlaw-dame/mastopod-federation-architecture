@@ -64,7 +64,7 @@ describe("ActivityPub egress policy", () => {
     }));
   });
 
-  it("allows plain HTTP only for explicitly enabled all-loopback targets", async () => {
+  it("allows plain HTTP only for explicitly enabled literal loopback targets", async () => {
     await expect(validateActivityPubTarget("http://localhost:8080/inbox", {
       lookup: resolver([{ address: "127.0.0.1", family: 4 }]),
     })).rejects.toThrow(/Plain HTTP|forbidden/u);
@@ -78,6 +78,11 @@ describe("ActivityPub egress policy", () => {
       allowLoopbackHttp: true,
       lookup: resolver([{ address: "8.8.8.8", family: 4 }]),
     })).rejects.toThrow(/Plain HTTP/u);
+
+    await expect(validateActivityPubTarget("http://attacker.example/inbox", {
+      allowLoopbackHttp: true,
+      lookup: resolver([{ address: "127.0.0.1", family: 4 }]),
+    })).rejects.toThrow(/forbidden address 127\.0\.0\.1/u);
   });
 
   it("fails closed when DNS returns no addresses", async () => {
