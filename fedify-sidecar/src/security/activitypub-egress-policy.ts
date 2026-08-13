@@ -1,6 +1,8 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { Agent, request, type Dispatcher, type RequestOptions } from "undici";
+import { Agent, request, type Dispatcher } from "undici";
+
+type UrlRequestOptions = NonNullable<Parameters<typeof request>[1]>;
 
 export interface ResolvedAddress {
   address: string;
@@ -61,10 +63,10 @@ export function isForbiddenActivityPubAddress(address: string): boolean {
       return isIP(mapped) === 4 ? isForbiddenActivityPubAddress(mapped) : true;
     }
     const firstHextet = Number.parseInt(normalized.split(":", 1)[0] || "0", 16);
-    if (firstHextet >= 0xfc00 && firstHextet <= 0xfdff) return true; // unique-local fc00::/7
-    if (firstHextet >= 0xfe80 && firstHextet <= 0xfebf) return true; // link-local fe80::/10
-    if (firstHextet >= 0xff00 && firstHextet <= 0xffff) return true; // multicast ff00::/8
-    if (normalized.startsWith("2001:db8:")) return true; // documentation
+    if (firstHextet >= 0xfc00 && firstHextet <= 0xfdff) return true;
+    if (firstHextet >= 0xfe80 && firstHextet <= 0xfebf) return true;
+    if (firstHextet >= 0xff00 && firstHextet <= 0xffff) return true;
+    if (normalized.startsWith("2001:db8:")) return true;
     return false;
   }
 
@@ -76,6 +78,13 @@ function isLoopbackAddress(address: string): boolean {
   if (isIP(address) !== 4) return false;
   const octets = parseIpv4(address);
   return octets?.[0] === 127;
+}
+
+function isExplicitLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  if (normalized === "localhost" || normalized === "[::1]" || normalized === "::1") return true;
+  if (isIP(normalized) !== 4) return false;
+  return parseIpv4(normalized)?.[0] === 127;
 }
 
 async function defaultLookup(hostname: string): Promise<ResolvedAddress[]> {
@@ -117,17 +126,19 @@ export async function validateActivityPubTarget(
 
   if (addresses.length === 0) throw new Error("ActivityPub egress target resolved to no addresses");
 
+  const loopbackException =
+    allowLoopbackHttp
+    && url.protocol === "http:"
+    && isExplicitLoopbackHost(hostname)
+    && addresses.every(entry => isLoopbackAddress(entry.address));
+
   const unsafe = addresses.find(entry => isForbiddenActivityPubAddress(entry.address));
-  if (unsafe) {
-    if (!(allowLoopbackHttp && url.protocol === "http:" && isLoopbackAddress(unsafe.address) && addresses.every(entry => isLoopbackAddress(entry.address)))) {
-      throw new Error(`ActivityPub egress target resolved to forbidden address ${unsafe.address}`);
-    }
+  if (unsafe && !loopbackException) {
+    throw new Error(`ActivityPub egress target resolved to forbidden address ${unsafe.address}`);
   }
 
-  if (url.protocol === "http:") {
-    if (!allowLoopbackHttp || !addresses.every(entry => isLoopbackAddress(entry.address))) {
-      throw new Error("Plain HTTP ActivityPub egress is restricted to explicitly enabled loopback targets");
-    }
+  if (url.protocol === "http:" && !loopbackException) {
+    throw new Error("Plain HTTP ActivityPub egress is restricted to explicitly enabled literal loopback targets");
   }
 
   const chosen = addresses[0]!;
@@ -174,7 +185,7 @@ function getPinnedDispatcher(target: ValidatedActivityPubTarget): Dispatcher {
 
 export async function secureActivityPubRequest(
   value: string | URL,
-  options: RequestOptions,
+  options: UrlRequestOptions,
 ): Promise<Dispatcher.ResponseData> {
   const target = await validateActivityPubTarget(value, {
     allowLoopbackHttp: process.env["NODE_ENV"] === "test" || process.env["APDM_ALLOW_LOOPBACK_HTTP"] === "true",
