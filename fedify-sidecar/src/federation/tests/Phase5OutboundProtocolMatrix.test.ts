@@ -76,7 +76,7 @@ describe("APDM Phase 5 outbound protocol matrix", () => {
     vi.mocked(request).mockResolvedValue({ statusCode: 202, headers: {}, body: responseBody() } as never);
   });
 
-  it.each(cases)("passes $name unchanged through signing, deadline, and secure HTTP execution", async ({ value }) => {
+  it.each(cases)("passes $name unchanged through signing, pre/post-DNS deadlines, and secure HTTP execution", async ({ value }) => {
     const adapter = makeAdapter();
     const body = JSON.stringify(value);
     const valueId = String(value["id"]);
@@ -108,7 +108,7 @@ describe("APDM Phase 5 outbound protocol matrix", () => {
     expect(result).toMatchObject({ success: true, statusCode: 202 });
     expect(signHttpRequest).toHaveBeenCalledTimes(1);
     expect(signHttpRequest).toHaveBeenCalledWith({ actorUri: ACTOR, method: "POST", targetUrl: "http://localhost:8080/inbox", body });
-    expect(assertExternalPostAllowed).toHaveBeenCalledTimes(1);
+    expect(assertExternalPostAllowed).toHaveBeenCalledTimes(2);
     expect(request).toHaveBeenCalledTimes(1);
 
     const [postedUrl, postedOptions] = vi.mocked(request).mock.calls[0]!;
