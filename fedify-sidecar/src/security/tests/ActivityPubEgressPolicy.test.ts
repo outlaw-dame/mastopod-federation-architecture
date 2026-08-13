@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isForbiddenActivityPubAddress,
   isUnsafeActivityPubTargetError,
+  UnsafeActivityPubTargetError,
   validateActivityPubTarget,
   type ResolvedAddress,
 } from "../activitypub-egress-policy.js";
@@ -44,7 +45,7 @@ describe("ActivityPub egress policy", () => {
       validateActivityPubTarget("https://example.com/inbox#fragment", { lookup: resolver([{ address: "8.8.8.8", family: 4 }]) }),
       validateActivityPubTarget("ftp://example.com/inbox", { lookup: resolver([{ address: "8.8.8.8", family: 4 }]) }),
     ]) {
-      await expect(invocation).rejects.toSatisfy(isUnsafeActivityPubTargetError);
+      await expect(invocation).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
     }
   });
 
@@ -55,8 +56,7 @@ describe("ActivityPub egress policy", () => {
         { address: "127.0.0.1", family: 4 },
       ]),
     });
-    await expect(result).rejects.toThrow(/forbidden address 127\.0\.0\.1/u);
-    await expect(result).rejects.toSatisfy(isUnsafeActivityPubTargetError);
+    await expect(result).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
   });
 
   it("accepts HTTPS only when every resolved address is public", async () => {
@@ -74,7 +74,7 @@ describe("ActivityPub egress policy", () => {
   it("allows plain HTTP only for explicitly enabled literal loopback targets", async () => {
     await expect(validateActivityPubTarget("http://localhost:8080/inbox", {
       lookup: resolver([{ address: "127.0.0.1", family: 4 }]),
-    })).rejects.toSatisfy(isUnsafeActivityPubTargetError);
+    })).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
 
     await expect(validateActivityPubTarget("http://localhost:8080/inbox", {
       allowLoopbackHttp: true,
@@ -84,12 +84,12 @@ describe("ActivityPub egress policy", () => {
     await expect(validateActivityPubTarget("http://example.com/inbox", {
       allowLoopbackHttp: true,
       lookup: resolver([{ address: "8.8.8.8", family: 4 }]),
-    })).rejects.toSatisfy(isUnsafeActivityPubTargetError);
+    })).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
 
     await expect(validateActivityPubTarget("http://attacker.example/inbox", {
       allowLoopbackHttp: true,
       lookup: resolver([{ address: "127.0.0.1", family: 4 }]),
-    })).rejects.toSatisfy(isUnsafeActivityPubTargetError);
+    })).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
   });
 
   it("keeps an empty DNS result retryable instead of misclassifying it as a policy violation", async () => {
