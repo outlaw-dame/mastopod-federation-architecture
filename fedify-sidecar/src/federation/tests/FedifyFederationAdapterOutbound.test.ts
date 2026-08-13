@@ -124,7 +124,9 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       }),
     });
 
-    await expect(adapter.deliverOutbound(input)).rejects.toBe(deadlineError);
+    const result = await adapter.deliverOutbound(input);
+    expect(result).toMatchObject({ jobId: input.jobId, success: false, permanent: false });
+    expect(result.error).toContain(deadlineError.message);
     expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(2);
     expect(request).not.toHaveBeenCalled();
   });
