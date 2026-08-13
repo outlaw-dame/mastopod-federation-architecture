@@ -35,6 +35,14 @@ const DISPATCHER_TTL_MS = 60_000;
 const MAX_DISPATCHERS = 128;
 const dispatcherCache = new Map<string, { dispatcher: Agent; expiresAt: number }>();
 
+function normalizeUrlHostname(hostname: string): string {
+  const normalized = hostname.trim().toLowerCase();
+  if (normalized.startsWith("[") && normalized.endsWith("]")) {
+    return normalized.slice(1, -1);
+  }
+  return normalized;
+}
+
 function parseIpv4(address: string): number[] | null {
   const parts = address.split(".");
   if (parts.length !== 4) return null;
@@ -44,9 +52,10 @@ function parseIpv4(address: string): number[] | null {
 }
 
 export function isForbiddenActivityPubAddress(address: string): boolean {
-  const version = isIP(address);
+  const normalizedAddress = normalizeUrlHostname(address);
+  const version = isIP(normalizedAddress);
   if (version === 4) {
-    const octets = parseIpv4(address);
+    const octets = parseIpv4(normalizedAddress);
     if (!octets) return true;
     const [a = 0, b = 0, c = 0] = octets;
     return (
@@ -67,7 +76,7 @@ export function isForbiddenActivityPubAddress(address: string): boolean {
   }
 
   if (version === 6) {
-    const normalized = address.toLowerCase();
+    const normalized = normalizedAddress;
     if (normalized === "::" || normalized === "::1") return true;
     if (normalized.startsWith("::ffff:")) {
       const mapped = normalized.slice("::ffff:".length);
@@ -85,15 +94,16 @@ export function isForbiddenActivityPubAddress(address: string): boolean {
 }
 
 function isLoopbackAddress(address: string): boolean {
-  if (address === "::1") return true;
-  if (isIP(address) !== 4) return false;
-  const octets = parseIpv4(address);
+  const normalized = normalizeUrlHostname(address);
+  if (normalized === "::1") return true;
+  if (isIP(normalized) !== 4) return false;
+  const octets = parseIpv4(normalized);
   return octets?.[0] === 127;
 }
 
 function isExplicitLoopbackHost(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  if (normalized === "localhost" || normalized === "[::1]" || normalized === "::1") return true;
+  const normalized = normalizeUrlHostname(hostname);
+  if (normalized === "localhost" || normalized === "::1") return true;
   if (isIP(normalized) !== 4) return false;
   return parseIpv4(normalized)?.[0] === 127;
 }
@@ -103,6 +113,17 @@ async function defaultLookup(hostname: string): Promise<ResolvedAddress[]> {
   return results
     .filter((entry): entry is { address: string; family: 4 | 6 } => entry.family === 4 || entry.family === 6)
     .map(entry => ({ address: entry.address, family: entry.family }));
+}
+
+function normalizeResolvedAddresses(addresses: ResolvedAddress[]): ResolvedAddress[] {
+  return addresses.map(entry => {
+    const address = normalizeUrlHostname(entry.address);
+    const family = isIP(address);
+    if ((family !== 4 && family !== 6) || family !== entry.family) {
+      throw new UnsafeActivityPubTargetError("ActivityPub egress resolver returned an invalid address/family pair");
+    }
+    return { address, family };
+  });
 }
 
 export async function validateActivityPubTarget(
@@ -123,7 +144,7 @@ export async function validateActivityPubTarget(
   }
 
   const allowLoopbackHttp = options.allowLoopbackHttp === true;
-  const hostname = url.hostname.toLowerCase();
+  const hostname = normalizeUrlHostname(url.hostname);
   if (!hostname) throw new UnsafeActivityPubTargetError("ActivityPub egress target must contain a hostname");
 
   let addresses: ResolvedAddress[];
@@ -138,6 +159,7 @@ export async function validateActivityPubTarget(
   // An empty resolver result can be a transient resolver condition. Keep it a
   // normal network error so retry policy may recover without weakening safety.
   if (addresses.length === 0) throw new Error("ActivityPub egress target resolved to no addresses");
+  addresses = normalizeResolvedAddresses(addresses);
 
   const loopbackException =
     allowLoopbackHttp
@@ -151,7 +173,7 @@ export async function validateActivityPubTarget(
   }
 
   if (url.protocol === "http:" && !loopbackException) {
-    throw new UnsafeActivityPubTargetError("Plain HTTP ActivityPub egress is restricted to explicitly enabled literal loopback targets");
+    throw new UnsafeActivityPubTargetError("Plain HTTP ActivityPub egress is restricted to explicitly enabled loopback targets");
   }
 
   const chosen = addresses[0]!;
@@ -159,11 +181,11 @@ export async function validateActivityPubTarget(
 }
 
 function createPinnedDispatcher(target: ValidatedActivityPubTarget): Agent {
-  const expectedHost = target.url.hostname.toLowerCase();
+  const expectedHost = normalizeUrlHostname(target.url.hostname);
   return new Agent({
     connect: {
       lookup: ((hostname: string, _options: unknown, callback: (error: Error | null, address?: string, family?: number) => void) => {
-        if (hostname.toLowerCase() !== expectedHost) {
+        if (normalizeUrlHostname(hostname) !== expectedHost) {
           callback(new UnsafeActivityPubTargetError("ActivityPub egress dispatcher hostname mismatch"));
           return;
         }
