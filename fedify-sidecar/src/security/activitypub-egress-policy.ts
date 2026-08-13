@@ -30,6 +30,7 @@ export interface ValidatedActivityPubTarget {
   url: URL;
   address: string;
   family: 4 | 6;
+  hostname: string;
 }
 
 const DISPATCHER_TTL_MS = 60_000;
@@ -42,6 +43,12 @@ function parseIpv4(address: string): number[] | null {
   const octets = parts.map(part => Number.parseInt(part, 10));
   if (octets.some((part, index) => !/^\d+$/u.test(parts[index] ?? "") || part < 0 || part > 255)) return null;
   return octets;
+}
+
+function normalizeUrlHostname(hostname: string): string {
+  const normalized = hostname.trim().toLowerCase();
+  if (normalized.startsWith("[") && normalized.endsWith("]")) return normalized.slice(1, -1);
+  return normalized;
 }
 
 export function isForbiddenActivityPubAddress(address: string): boolean {
@@ -69,16 +76,18 @@ export function isForbiddenActivityPubAddress(address: string): boolean {
 
   if (version === 6) {
     const normalized = address.toLowerCase();
-    if (normalized === "::" || normalized === "::1") return true;
-    if (normalized.startsWith("::ffff:")) {
-      const mapped = normalized.slice("::ffff:".length);
-      return isIP(mapped) === 4 ? isForbiddenActivityPubAddress(mapped) : true;
-    }
-    const firstHextet = Number.parseInt(normalized.split(":", 1)[0] || "0", 16);
-    if (firstHextet >= 0xfc00 && firstHextet <= 0xfdff) return true;
-    if (firstHextet >= 0xfe80 && firstHextet <= 0xfebf) return true;
-    if (firstHextet >= 0xff00 && firstHextet <= 0xffff) return true;
-    if (normalized.startsWith("2001:db8:")) return true;
+    if (normalized === "::" || normalized === "::1" || normalized.startsWith("::")) return true;
+    const parts = normalized.split(":");
+    const first = Number.parseInt(parts[0] || "0", 16);
+    const second = Number.parseInt(parts[1] || "0", 16);
+
+    // ActivityPub federation targets must resolve to globally routable IPv6.
+    // Global unicast is 2000::/3; reject special-purpose ranges inside it too.
+    if (first < 0x2000 || first > 0x3fff) return true;
+    if (first === 0x2001 && second <= 0x01ff) return true; // protocol/special-purpose block
+    if (first === 0x2001 && second === 0x0db8) return true; // documentation
+    if (first === 0x2002) return true; // 6to4 embeds IPv4 and can reach non-global space
+    if (first === 0x3fff) return true; // documentation prefix
     return false;
   }
 
@@ -93,8 +102,8 @@ function isLoopbackAddress(address: string): boolean {
 }
 
 function isExplicitLoopbackHost(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  if (normalized === "localhost" || normalized === "[::1]" || normalized === "::1") return true;
+  const normalized = normalizeUrlHostname(hostname);
+  if (normalized === "localhost" || normalized === "::1") return true;
   if (isIP(normalized) !== 4) return false;
   return parseIpv4(normalized)?.[0] === 127;
 }
@@ -108,8 +117,8 @@ function isInteropPrivateAddress(address: string): boolean {
     return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
   }
   if (version === 6) {
-    const firstHextet = Number.parseInt(address.toLowerCase().split(":", 1)[0] || "0", 16);
-    return firstHextet >= 0xfc00 && firstHextet <= 0xfdff;
+    const first = Number.parseInt(address.toLowerCase().split(":", 1)[0] || "0", 16);
+    return first >= 0xfc00 && first <= 0xfdff;
   }
   return false;
 }
@@ -139,7 +148,7 @@ export async function validateActivityPubTarget(
   }
 
   const allowLoopbackHttp = options.allowLoopbackHttp === true;
-  const hostname = url.hostname.toLowerCase();
+  const hostname = normalizeUrlHostname(url.hostname);
   if (!hostname) throw new UnsafeActivityPubTargetError("ActivityPub egress target must contain a hostname");
 
   let addresses: ResolvedAddress[];
@@ -174,13 +183,13 @@ export async function validateActivityPubTarget(
   }
 
   const chosen = addresses[0]!;
-  return { url, address: chosen.address, family: chosen.family };
+  return { url, address: chosen.address, family: chosen.family, hostname };
 }
 
 export function createPinnedLookup(target: ValidatedActivityPubTarget) {
-  const expectedHost = target.url.hostname.toLowerCase();
+  const expectedHost = target.hostname;
   return (hostname: string, lookupOptions: { all?: boolean } | undefined, callback: (...args: any[]) => void): void => {
-    if (hostname.toLowerCase() !== expectedHost) {
+    if (normalizeUrlHostname(hostname) !== expectedHost) {
       callback(new UnsafeActivityPubTargetError("ActivityPub egress dispatcher hostname mismatch"));
       return;
     }
@@ -193,11 +202,7 @@ export function createPinnedLookup(target: ValidatedActivityPubTarget) {
 }
 
 function createPinnedDispatcher(target: ValidatedActivityPubTarget): Agent {
-  return new Agent({
-    connect: {
-      lookup: createPinnedLookup(target) as any,
-    },
-  });
+  return new Agent({ connect: { lookup: createPinnedLookup(target) as any } });
 }
 
 function getPinnedDispatcher(target: ValidatedActivityPubTarget): Dispatcher {
@@ -224,28 +229,28 @@ function getPinnedDispatcher(target: ValidatedActivityPubTarget): Dispatcher {
 }
 
 function interopPrivateHostnamesFromEnvironment(): ReadonlySet<string> | undefined {
-  if (process.env["NODE_ENV"] !== "development" || process.env["AP_INTEROP_ENABLE_MEDIA_FIXTURES"] !== "true") {
-    return undefined;
-  }
+  if (process.env["NODE_ENV"] !== "development" || process.env["AP_INTEROP_ENABLE_MEDIA_FIXTURES"] !== "true") return undefined;
   const configured = process.env["APDM_INTEROP_PRIVATE_HOSTS"];
   if (!configured) return undefined;
-  return new Set(
-    configured
-      .split(",")
-      .map(value => value.trim().toLowerCase())
-      .filter(Boolean),
-  );
+  return new Set(configured.split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
+}
+
+function loopbackHttpAllowedFromEnvironment(): boolean {
+  if (process.env["NODE_ENV"] === "test") return true;
+  return process.env["NODE_ENV"] === "development" && process.env["APDM_ALLOW_LOOPBACK_HTTP"] === "true";
 }
 
 export async function secureActivityPubRequest(
   value: string | URL,
   options: UrlRequestOptions,
+  assertExternalPostAllowed?: () => void,
 ): Promise<Dispatcher.ResponseData> {
   const target = await validateActivityPubTarget(value, {
-    allowLoopbackHttp: process.env["NODE_ENV"] === "test" || process.env["APDM_ALLOW_LOOPBACK_HTTP"] === "true",
+    allowLoopbackHttp: loopbackHttpAllowedFromEnvironment(),
     interopPrivateHostnames: interopPrivateHostnamesFromEnvironment(),
   });
   const dispatcher = getPinnedDispatcher(target);
+  assertExternalPostAllowed?.();
   return request(target.url, {
     ...options,
     dispatcher,
