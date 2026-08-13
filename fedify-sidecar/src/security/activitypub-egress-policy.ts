@@ -4,6 +4,17 @@ import { Agent, request, type Dispatcher } from "undici";
 
 type UrlRequestOptions = NonNullable<Parameters<typeof request>[1]>;
 
+export class UnsafeActivityPubTargetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsafeActivityPubTargetError";
+  }
+}
+
+export function isUnsafeActivityPubTargetError(error: unknown): error is UnsafeActivityPubTargetError {
+  return error instanceof UnsafeActivityPubTargetError;
+}
+
 export interface ResolvedAddress {
   address: string;
   family: 4 | 6;
@@ -102,18 +113,18 @@ export async function validateActivityPubTarget(
   try {
     url = value instanceof URL ? new URL(value.href) : new URL(value);
   } catch {
-    throw new Error("ActivityPub egress target is not a valid URL");
+    throw new UnsafeActivityPubTargetError("ActivityPub egress target is not a valid URL");
   }
 
-  if (url.username || url.password) throw new Error("ActivityPub egress target must not contain credentials");
-  if (url.hash) throw new Error("ActivityPub egress target must not contain a fragment");
+  if (url.username || url.password) throw new UnsafeActivityPubTargetError("ActivityPub egress target must not contain credentials");
+  if (url.hash) throw new UnsafeActivityPubTargetError("ActivityPub egress target must not contain a fragment");
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error("ActivityPub egress target must use HTTP(S)");
+    throw new UnsafeActivityPubTargetError("ActivityPub egress target must use HTTP(S)");
   }
 
   const allowLoopbackHttp = options.allowLoopbackHttp === true;
   const hostname = url.hostname.toLowerCase();
-  if (!hostname) throw new Error("ActivityPub egress target must contain a hostname");
+  if (!hostname) throw new UnsafeActivityPubTargetError("ActivityPub egress target must contain a hostname");
 
   let addresses: ResolvedAddress[];
   const literalFamily = isIP(hostname);
@@ -124,6 +135,8 @@ export async function validateActivityPubTarget(
     addresses = await resolver(hostname);
   }
 
+  // An empty resolver result can be a transient resolver condition. Keep it a
+  // normal network error so retry policy may recover without weakening safety.
   if (addresses.length === 0) throw new Error("ActivityPub egress target resolved to no addresses");
 
   const loopbackException =
@@ -134,11 +147,11 @@ export async function validateActivityPubTarget(
 
   const unsafe = addresses.find(entry => isForbiddenActivityPubAddress(entry.address));
   if (unsafe && !loopbackException) {
-    throw new Error(`ActivityPub egress target resolved to forbidden address ${unsafe.address}`);
+    throw new UnsafeActivityPubTargetError(`ActivityPub egress target resolved to forbidden address ${unsafe.address}`);
   }
 
   if (url.protocol === "http:" && !loopbackException) {
-    throw new Error("Plain HTTP ActivityPub egress is restricted to explicitly enabled literal loopback targets");
+    throw new UnsafeActivityPubTargetError("Plain HTTP ActivityPub egress is restricted to explicitly enabled literal loopback targets");
   }
 
   const chosen = addresses[0]!;
@@ -151,7 +164,7 @@ function createPinnedDispatcher(target: ValidatedActivityPubTarget): Agent {
     connect: {
       lookup: ((hostname: string, _options: unknown, callback: (error: Error | null, address?: string, family?: number) => void) => {
         if (hostname.toLowerCase() !== expectedHost) {
-          callback(new Error("ActivityPub egress dispatcher hostname mismatch"));
+          callback(new UnsafeActivityPubTargetError("ActivityPub egress dispatcher hostname mismatch"));
           return;
         }
         callback(null, target.address, target.family);
