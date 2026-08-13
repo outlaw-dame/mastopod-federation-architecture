@@ -52,9 +52,6 @@ function makeDeliveryInput(overrides: Partial<Parameters<ReturnType<typeof makeA
         content: "Hello",
       },
     }),
-    // Unit tests exercise the explicit test-only loopback exception so the
-    // secure egress layer performs real validation without relying on public
-    // DNS or weakening production private-address policy.
     targetInbox: "http://localhost:8080/inbox",
     targetDomain: "localhost",
     attempt: 0,
@@ -88,21 +85,16 @@ describe("FedifyFederationAdapter outbound delivery", () => {
 
     const adapter = makeAdapter();
     const input = makeDeliveryInput();
-
     const result = await adapter.deliverOutbound(input);
 
-    expect(result).toMatchObject({
-      jobId: input.jobId,
-      success: true,
-      statusCode: 202,
-    });
+    expect(result).toMatchObject({ jobId: input.jobId, success: true, statusCode: 202 });
     expect(input.signHttpRequest).toHaveBeenCalledWith({
       actorUri: input.actorUri,
       method: "POST",
       targetUrl: input.targetInbox,
       body: input.activity,
     });
-    expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(1);
+    expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(2);
     expect(request).toHaveBeenCalledTimes(1);
   });
 
@@ -116,9 +108,24 @@ describe("FedifyFederationAdapter outbound delivery", () => {
     });
 
     await expect(adapter.deliverOutbound(input)).rejects.toBe(deadlineError);
-
     expect(input.signHttpRequest).toHaveBeenCalledTimes(1);
     expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the APDM deadline after DNS validation before external POST", async () => {
+    const adapter = makeAdapter();
+    const deadlineError = new Error("APDM outbound residence expired after DNS");
+    let checks = 0;
+    const input = makeDeliveryInput({
+      assertExternalPostAllowed: vi.fn(() => {
+        checks += 1;
+        if (checks === 2) throw deadlineError;
+      }),
+    });
+
+    await expect(adapter.deliverOutbound(input)).rejects.toBe(deadlineError);
+    expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(2);
     expect(request).not.toHaveBeenCalled();
   });
 
@@ -129,9 +136,7 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       signature: "keyId=\"relay\",signature=\"abc\"",
     });
     const adapter = makeAdapter({
-      localSigningService: {
-        signHttpRequest: localSign,
-      },
+      localSigningService: { signHttpRequest: localSign },
       sidecarServiceActors: ["relay"],
     });
     const deadlineError = new Error("APDM outbound residence expired");
@@ -143,7 +148,6 @@ describe("FedifyFederationAdapter outbound delivery", () => {
     });
 
     await expect(adapter.deliverOutbound(input)).rejects.toBe(deadlineError);
-
     expect(localSign).toHaveBeenCalledTimes(1);
     expect(input.signHttpRequest).not.toHaveBeenCalled();
     expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(1);
@@ -156,10 +160,8 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       headers: {},
       body: makeBody("gone"),
     } as never);
-
     const adapter = makeAdapter();
     const input = makeDeliveryInput();
-
     const result = await adapter.deliverOutbound(input);
 
     expect(result).toMatchObject({
@@ -178,10 +180,8 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       headers: { "retry-after": "7" },
       body: makeBody("slow down"),
     } as never);
-
     const adapter = makeAdapter();
     const input = makeDeliveryInput();
-
     const result = await adapter.deliverOutbound(input);
 
     expect(result).toMatchObject({
@@ -200,14 +200,9 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       targetInbox: "http://10.0.0.5/inbox",
       targetDomain: "10.0.0.5",
     });
-
     const result = await adapter.deliverOutbound(input);
 
-    expect(result).toMatchObject({
-      jobId: input.jobId,
-      success: false,
-      permanent: true,
-    });
+    expect(result).toMatchObject({ jobId: input.jobId, success: false, permanent: true });
     expect(result.error).toContain("safety validation");
     expect(input.signHttpRequest).not.toHaveBeenCalled();
     expect(input.assertExternalPostAllowed).not.toHaveBeenCalled();
