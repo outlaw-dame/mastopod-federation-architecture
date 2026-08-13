@@ -1,6 +1,6 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { Agent, request, type Dispatcher } from "undici";
+import { Agent, request, type Dispatcher, type RequestOptions } from "undici";
 
 export interface ResolvedAddress {
   address: string;
@@ -174,7 +174,7 @@ function getPinnedDispatcher(target: ValidatedActivityPubTarget): Dispatcher {
 
 export async function secureActivityPubRequest(
   value: string | URL,
-  options: Dispatcher.RequestOptions,
+  options: RequestOptions,
 ): Promise<Dispatcher.ResponseData> {
   const target = await validateActivityPubTarget(value, {
     allowLoopbackHttp: process.env["NODE_ENV"] === "test" || process.env["APDM_ALLOW_LOOPBACK_HTTP"] === "true",
