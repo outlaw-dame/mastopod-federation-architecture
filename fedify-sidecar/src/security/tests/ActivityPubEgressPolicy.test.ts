@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   isForbiddenActivityPubAddress,
   isUnsafeActivityPubTargetError,
@@ -39,6 +39,19 @@ describe("ActivityPub egress policy", () => {
     expect(isForbiddenActivityPubAddress("2606:4700:4700::1111")).toBe(false);
   });
 
+  it("normalizes bracketed IPv6 literals without invoking DNS", async () => {
+    const lookup = vi.fn(async () => [{ address: "127.0.0.1", family: 4 as const }]);
+    await expect(validateActivityPubTarget("https://[2606:4700:4700::1111]/inbox", { lookup })).resolves.toEqual(
+      expect.objectContaining({ address: "2606:4700:4700::1111", family: 6 }),
+    );
+    expect(lookup).not.toHaveBeenCalled();
+
+    await expect(validateActivityPubTarget("https://[::1]/inbox", { lookup })).rejects.toBeInstanceOf(
+      UnsafeActivityPubTargetError,
+    );
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
   it("rejects credentials, fragments and non-HTTP schemes as permanent policy failures", async () => {
     for (const invocation of [
       validateActivityPubTarget("https://user:pass@example.com/inbox", { lookup: resolver([{ address: "8.8.8.8", family: 4 }]) }),
@@ -59,6 +72,12 @@ describe("ActivityPub egress policy", () => {
     await expect(result).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
   });
 
+  it("rejects resolver address/family mismatches", async () => {
+    await expect(validateActivityPubTarget("https://example.com/inbox", {
+      lookup: resolver([{ address: "2606:4700:4700::1111", family: 4 }]),
+    })).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
+  });
+
   it("accepts HTTPS only when every resolved address is public", async () => {
     await expect(validateActivityPubTarget("https://example.com/inbox", {
       lookup: resolver([
@@ -71,7 +90,7 @@ describe("ActivityPub egress policy", () => {
     }));
   });
 
-  it("allows plain HTTP only for explicitly enabled literal loopback targets", async () => {
+  it("allows plain HTTP only for explicitly enabled loopback targets", async () => {
     await expect(validateActivityPubTarget("http://localhost:8080/inbox", {
       lookup: resolver([{ address: "127.0.0.1", family: 4 }]),
     })).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
@@ -80,6 +99,10 @@ describe("ActivityPub egress policy", () => {
       allowLoopbackHttp: true,
       lookup: resolver([{ address: "127.0.0.1", family: 4 }]),
     })).resolves.toEqual(expect.objectContaining({ address: "127.0.0.1" }));
+
+    await expect(validateActivityPubTarget("http://[::1]:8080/inbox", {
+      allowLoopbackHttp: true,
+    })).resolves.toEqual(expect.objectContaining({ address: "::1", family: 6 }));
 
     await expect(validateActivityPubTarget("http://example.com/inbox", {
       allowLoopbackHttp: true,
