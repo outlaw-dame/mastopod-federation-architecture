@@ -12,7 +12,8 @@ export class UnsafeActivityPubTargetError extends Error {
 }
 
 export function isUnsafeActivityPubTargetError(error: unknown): error is UnsafeActivityPubTargetError {
-  return error instanceof UnsafeActivityPubTargetError;
+  return error instanceof UnsafeActivityPubTargetError
+    || (error instanceof Error && error.name === "OutboundResidenceExpiredError");
 }
 
 export interface ResolvedAddress {
@@ -82,11 +83,13 @@ export function isForbiddenActivityPubAddress(address: string): boolean {
     const second = Number.parseInt(parts[1] || "0", 16);
 
     // ActivityPub federation targets must resolve to globally routable IPv6.
-    // Global unicast is 2000::/3; reject special-purpose ranges inside it too.
+    // Global unicast is 2000::/3, but returned/special-purpose sub-ranges are
+    // still fail-closed even if a local network happens to route them.
     if (first < 0x2000 || first > 0x3fff) return true;
     if (first === 0x2001 && second <= 0x01ff) return true; // protocol/special-purpose block
     if (first === 0x2001 && second === 0x0db8) return true; // documentation
     if (first === 0x2002) return true; // 6to4 embeds IPv4 and can reach non-global space
+    if (first === 0x3ffe) return true; // former 6bone prefix; returned to IANA
     if (first === 0x3fff) return true; // documentation prefix
     return false;
   }
