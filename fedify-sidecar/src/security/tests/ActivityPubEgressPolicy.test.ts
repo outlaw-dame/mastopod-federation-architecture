@@ -114,6 +114,7 @@ describe("ActivityPub egress policy", () => {
   it("returns the pinned address in both single-address and all-address lookup callback forms", () => {
     const lookup = createPinnedLookup({
       url: new URL("https://example.com/inbox"),
+      hostname: "example.com",
       address: "8.8.8.8",
       family: 4,
     });
