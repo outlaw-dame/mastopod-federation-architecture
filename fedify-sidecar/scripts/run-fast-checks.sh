@@ -15,6 +15,8 @@ npm exec -- vitest run \
   src/delivery/tests/OutboundDeliveryClaimRetention.test.ts \
   src/delivery/tests/OutboundNotBeforeScheduling.test.ts \
   src/delivery/tests/OutboxIntentWorker.test.ts \
+  src/security/tests/ActivityPubEgressPolicy.test.ts \
   src/federation/tests/FedifyFastifyBridge.test.ts \
+  src/federation/tests/FedifyFederationAdapterOutbound.test.ts \
   src/delivery/tests/FederationRuntimeAdapterParity.test.ts \
   src/signing/tests/ActivityPubHttpSignatureGoldenVectors.test.ts

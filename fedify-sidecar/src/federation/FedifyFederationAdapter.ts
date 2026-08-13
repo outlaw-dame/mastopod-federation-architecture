@@ -59,7 +59,7 @@ import {
 } from "@fedify/fedify/vocab";
 import type { SidecarLocalSigningService } from "../signing/SidecarLocalSigningService.js";
 import { isIP } from "node:net";
-import { request } from "undici";
+import { secureActivityPubRequest } from "../security/activitypub-egress-policy.js";
 import type {
   OutboundDeliveryMeta,
   FederationRuntimeAdapter,
@@ -273,7 +273,7 @@ function normalizeOutboundTargetUrl(value: string): URL | null {
     return null;
   }
 
-  targetUrl.hash = "";
+  if (targetUrl.hash) return null;
   return targetUrl;
 }
 
@@ -604,7 +604,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
 
     input.assertExternalPostAllowed();
     try {
-      const response = await request(targetUrl, {
+      const response = await secureActivityPubRequest(targetUrl, {
         method: "POST",
         headers: {
           "content-type": "application/activity+json",
@@ -687,7 +687,7 @@ ${responseBody}`;
 
     input.assertExternalPostAllowed();
     try {
-      const response = await request(targetUrl, {
+      const response = await secureActivityPubRequest(targetUrl, {
         method: "POST",
         headers: {
           "content-type": "application/activity+json",

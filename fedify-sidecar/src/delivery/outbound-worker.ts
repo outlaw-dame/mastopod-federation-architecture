@@ -13,8 +13,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { request } from "undici";
 import { isIP } from "node:net";
+import { secureActivityPubRequest } from "../security/activitypub-egress-policy.js";
 import {
   RedisStreamsQueue,
   OutboundJob,
@@ -708,7 +708,7 @@ export class OutboundWorker {
       }
 
       this.assertExternalPostAllowed(job);
-      const response = await request(job.targetInbox, {
+      const response = await secureActivityPubRequest(job.targetInbox, {
         method: "POST",
         headers,
         body: job.activity,
