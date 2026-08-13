@@ -23,6 +23,7 @@ export interface ResolvedAddress {
 export interface ActivityPubEgressPolicyOptions {
   lookup?: (hostname: string) => Promise<ResolvedAddress[]>;
   allowLoopbackHttp?: boolean;
+  interopPrivateHostnames?: ReadonlySet<string>;
 }
 
 export interface ValidatedActivityPubTarget {
@@ -98,6 +99,21 @@ function isExplicitLoopbackHost(hostname: string): boolean {
   return parseIpv4(normalized)?.[0] === 127;
 }
 
+function isInteropPrivateAddress(address: string): boolean {
+  const version = isIP(address);
+  if (version === 4) {
+    const octets = parseIpv4(address);
+    if (!octets) return false;
+    const [a = 0, b = 0] = octets;
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (version === 6) {
+    const firstHextet = Number.parseInt(address.toLowerCase().split(":", 1)[0] || "0", 16);
+    return firstHextet >= 0xfc00 && firstHextet <= 0xfdff;
+  }
+  return false;
+}
+
 async function defaultLookup(hostname: string): Promise<ResolvedAddress[]> {
   const results = await dnsLookup(hostname, { all: true, order: "verbatim" });
   return results
@@ -135,8 +151,6 @@ export async function validateActivityPubTarget(
     addresses = await resolver(hostname);
   }
 
-  // An empty resolver result can be a transient resolver condition. Keep it a
-  // normal network error so retry policy may recover without weakening safety.
   if (addresses.length === 0) throw new Error("ActivityPub egress target resolved to no addresses");
 
   const loopbackException =
@@ -145,8 +159,13 @@ export async function validateActivityPubTarget(
     && isExplicitLoopbackHost(hostname)
     && addresses.every(entry => isLoopbackAddress(entry.address));
 
+  const interopPrivateException =
+    url.protocol === "https:"
+    && options.interopPrivateHostnames?.has(hostname) === true
+    && addresses.every(entry => isInteropPrivateAddress(entry.address));
+
   const unsafe = addresses.find(entry => isForbiddenActivityPubAddress(entry.address));
-  if (unsafe && !loopbackException) {
+  if (unsafe && !loopbackException && !interopPrivateException) {
     throw new UnsafeActivityPubTargetError(`ActivityPub egress target resolved to forbidden address ${unsafe.address}`);
   }
 
@@ -158,17 +177,25 @@ export async function validateActivityPubTarget(
   return { url, address: chosen.address, family: chosen.family };
 }
 
-function createPinnedDispatcher(target: ValidatedActivityPubTarget): Agent {
+export function createPinnedLookup(target: ValidatedActivityPubTarget) {
   const expectedHost = target.url.hostname.toLowerCase();
+  return (hostname: string, lookupOptions: { all?: boolean } | undefined, callback: (...args: any[]) => void): void => {
+    if (hostname.toLowerCase() !== expectedHost) {
+      callback(new UnsafeActivityPubTargetError("ActivityPub egress dispatcher hostname mismatch"));
+      return;
+    }
+    if (lookupOptions?.all === true) {
+      callback(null, [{ address: target.address, family: target.family }]);
+      return;
+    }
+    callback(null, target.address, target.family);
+  };
+}
+
+function createPinnedDispatcher(target: ValidatedActivityPubTarget): Agent {
   return new Agent({
     connect: {
-      lookup: ((hostname: string, _options: unknown, callback: (error: Error | null, address?: string, family?: number) => void) => {
-        if (hostname.toLowerCase() !== expectedHost) {
-          callback(new UnsafeActivityPubTargetError("ActivityPub egress dispatcher hostname mismatch"));
-          return;
-        }
-        callback(null, target.address, target.family);
-      }) as any,
+      lookup: createPinnedLookup(target) as any,
     },
   });
 }
@@ -196,12 +223,27 @@ function getPinnedDispatcher(target: ValidatedActivityPubTarget): Dispatcher {
   return dispatcher;
 }
 
+function interopPrivateHostnamesFromEnvironment(): ReadonlySet<string> | undefined {
+  if (process.env["NODE_ENV"] !== "development" || process.env["AP_INTEROP_ENABLE_MEDIA_FIXTURES"] !== "true") {
+    return undefined;
+  }
+  const configured = process.env["APDM_INTEROP_PRIVATE_HOSTS"];
+  if (!configured) return undefined;
+  return new Set(
+    configured
+      .split(",")
+      .map(value => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
 export async function secureActivityPubRequest(
   value: string | URL,
   options: UrlRequestOptions,
 ): Promise<Dispatcher.ResponseData> {
   const target = await validateActivityPubTarget(value, {
     allowLoopbackHttp: process.env["NODE_ENV"] === "test" || process.env["APDM_ALLOW_LOOPBACK_HTTP"] === "true",
+    interopPrivateHostnames: interopPrivateHostnamesFromEnvironment(),
   });
   const dispatcher = getPinnedDispatcher(target);
   return request(target.url, {
