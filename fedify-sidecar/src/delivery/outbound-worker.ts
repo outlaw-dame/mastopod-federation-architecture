@@ -13,8 +13,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { request } from "undici";
 import { isIP } from "node:net";
+import { isUnsafeActivityPubTargetError, secureActivityPubRequest } from "../security/activitypub-egress-policy.js";
 import {
   RedisStreamsQueue,
   OutboundJob,
@@ -708,7 +708,7 @@ export class OutboundWorker {
       }
 
       this.assertExternalPostAllowed(job);
-      const response = await request(job.targetInbox, {
+      const response = await secureActivityPubRequest(job.targetInbox, {
         method: "POST",
         headers,
         body: job.activity,
@@ -753,11 +753,12 @@ export class OutboundWorker {
       };
     } catch (err: any) {
       if (err instanceof OutboundResidenceExpiredError) throw err;
+      const unsafeTarget = isUnsafeActivityPubTargetError(err);
       return {
         jobId: job.jobId,
         success: false,
-        error: `Network error: ${sanitizeErrorText(err?.message ?? err)}`,
-        permanent: false,
+        error: `${unsafeTarget ? "Unsafe target" : "Network error"}: ${sanitizeErrorText(err?.message ?? err)}`,
+        permanent: unsafeTarget,
       };
     }
   }
