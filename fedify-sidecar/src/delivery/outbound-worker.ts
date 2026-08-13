@@ -715,7 +715,7 @@ export class OutboundWorker {
         bodyTimeout: this.config.requestTimeoutMs,
         headersTimeout: this.config.requestTimeoutMs,
         maxRedirections: 0,
-      });
+      }, () => this.assertExternalPostAllowed(job));
 
       const statusCode = response.statusCode;
       const retryAfterMs = parseRetryAfterMs(

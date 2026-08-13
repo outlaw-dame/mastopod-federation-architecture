@@ -618,7 +618,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         body: input.activity,
         bodyTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
         headersTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
-      });
+      }, input.assertExternalPostAllowed);
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         await readLimitedResponseBody(response.body, this.outboundRuntimeConfig.maxErrorResponseBodyBytes);
@@ -702,7 +702,7 @@ ${responseBody}`;
         body: input.activity,
         bodyTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
         headersTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
-      });
+      }, input.assertExternalPostAllowed);
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         await readLimitedResponseBody(response.body, this.outboundRuntimeConfig.maxErrorResponseBodyBytes);
