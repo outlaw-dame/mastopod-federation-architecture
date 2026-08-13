@@ -59,7 +59,7 @@ import {
 } from "@fedify/fedify/vocab";
 import type { SidecarLocalSigningService } from "../signing/SidecarLocalSigningService.js";
 import { isIP } from "node:net";
-import { secureActivityPubRequest } from "../security/activitypub-egress-policy.js";
+import { isUnsafeActivityPubTargetError, secureActivityPubRequest } from "../security/activitypub-egress-policy.js";
 import type {
   OutboundDeliveryMeta,
   FederationRuntimeAdapter,
@@ -648,11 +648,12 @@ ${responseBody}`;
         retryAfterMs: permanent ? undefined : parseRetryAfterMs(response.headers["retry-after"]),
       };
     } catch (error) {
+      const unsafeTarget = isUnsafeActivityPubTargetError(error);
       return {
         jobId: input.jobId,
         success: false,
-        error: `Network error: ${error instanceof Error ? error.message : String(error)}`,
-        permanent: false,
+        error: `${unsafeTarget ? "Unsafe target" : "Network error"}: ${error instanceof Error ? error.message : String(error)}`,
+        permanent: unsafeTarget,
       };
     }
   }
@@ -724,11 +725,12 @@ ${responseBody}`,
         retryAfterMs: permanent ? undefined : parseRetryAfterMs(response.headers["retry-after"]),
       };
     } catch (err) {
+      const unsafeTarget = isUnsafeActivityPubTargetError(err);
       return {
         jobId: input.jobId,
         success: false,
-        error: `Network error (local-signed): ${err instanceof Error ? err.message : String(err)}`,
-        permanent: false,
+        error: `${unsafeTarget ? "Unsafe target" : "Network error (local-signed)"}: ${err instanceof Error ? err.message : String(err)}`,
+        permanent: unsafeTarget,
       };
     }
   }

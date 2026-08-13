@@ -14,7 +14,7 @@
 
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
-import { secureActivityPubRequest } from "../security/activitypub-egress-policy.js";
+import { isUnsafeActivityPubTargetError, secureActivityPubRequest } from "../security/activitypub-egress-policy.js";
 import {
   RedisStreamsQueue,
   OutboundJob,
@@ -753,11 +753,12 @@ export class OutboundWorker {
       };
     } catch (err: any) {
       if (err instanceof OutboundResidenceExpiredError) throw err;
+      const unsafeTarget = isUnsafeActivityPubTargetError(err);
       return {
         jobId: job.jobId,
         success: false,
-        error: `Network error: ${sanitizeErrorText(err?.message ?? err)}`,
-        permanent: false,
+        error: `${unsafeTarget ? "Unsafe target" : "Network error"}: ${sanitizeErrorText(err?.message ?? err)}`,
+        permanent: unsafeTarget,
       };
     }
   }
