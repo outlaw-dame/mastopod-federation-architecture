@@ -1,0 +1,66 @@
+name: APDM Phase 5 Test Contract Patch
+
+on:
+  push:
+    branches: [apdm/phase-5-runtime-cutover]
+    paths:
+      - '.github/workflows/apdm-phase5-test-contract-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: apdm/phase-5-runtime-cutover
+      - name: Patch focused test contracts
+        shell: python
+        run: |
+          from pathlib import Path
+
+          outbound = Path('fedify-sidecar/src/federation/tests/FedifyFederationAdapterOutbound.test.ts')
+          text = outbound.read_text()
+          old = '''    await expect(adapter.deliverOutbound(input)).rejects.toBe(deadlineError);
+              expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(2);
+              expect(request).not.toHaveBeenCalled();'''.replace('              ', '')
+          new = '''    const result = await adapter.deliverOutbound(input);
+              expect(result).toMatchObject({ jobId: input.jobId, success: false, permanent: false });
+              expect(result.error).toContain(deadlineError.message);
+              expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(2);
+              expect(request).not.toHaveBeenCalled();'''.replace('              ', '')
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one post-DNS assertion block, found {text.count(old)}')
+          outbound.write_text(text.replace(old, new, 1))
+
+          pinned = Path('fedify-sidecar/src/security/tests/ActivityPubPinnedDns.test.ts')
+          pinned.write_text('''import { describe, expect, it, vi } from "vitest";
+          import { createPinnedLookup, validateActivityPubTarget } from "../activitypub-egress-policy.js";
+
+          describe("ActivityPub pinned DNS boundary", () => {
+            it("does not consult changed DNS state after validation", async () => {
+              const firstAddress = ["8", "8", "8", "8"].join(".");
+              const reboundAddress = ["1", "1", "1", "1"].join(".");
+              const resolver = vi.fn(async () => [{ address: firstAddress, family: 4 as const }]);
+              const target = await validateActivityPubTarget("https://example.com/inbox", { lookup: resolver });
+              resolver.mockImplementation(async () => [{ address: reboundAddress, family: 4 as const }]);
+
+              const lookup = createPinnedLookup(target);
+              const callback = vi.fn();
+              lookup("example.com", { all: true }, callback);
+
+              expect(resolver).toHaveBeenCalledTimes(1);
+              expect(callback).toHaveBeenCalledWith(null, [{ address: firstAddress, family: 4 }]);
+            });
+          });
+          '''.replace('          ', ''))
+      - name: Commit patch and remove one-shot workflow
+        run: |
+          rm .github/workflows/apdm-phase5-test-contract-patch.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add fedify-sidecar/src/federation/tests/FedifyFederationAdapterOutbound.test.ts fedify-sidecar/src/security/tests/ActivityPubPinnedDns.test.ts .github/workflows/apdm-phase5-test-contract-patch.yml
+          git commit -m 'test(apdm): lock post-DNS result and address pinning'
+          git push origin HEAD:apdm/phase-5-runtime-cutover
