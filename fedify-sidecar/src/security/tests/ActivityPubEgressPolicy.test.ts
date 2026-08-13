@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  createPinnedLookup,
   isForbiddenActivityPubAddress,
   isUnsafeActivityPubTargetError,
   UnsafeActivityPubTargetError,
@@ -90,6 +91,44 @@ describe("ActivityPub egress policy", () => {
       allowLoopbackHttp: true,
       lookup: resolver([{ address: "127.0.0.1", family: 4 }]),
     })).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
+  });
+
+  it("allows only explicitly named HTTPS interop hosts to resolve to RFC1918 addresses", async () => {
+    const interopPrivateHostnames = new Set(["gotosocial"]);
+    await expect(validateActivityPubTarget("https://gotosocial/users/interop/inbox", {
+      interopPrivateHostnames,
+      lookup: resolver([{ address: "172.31.240.7", family: 4 }]),
+    })).resolves.toEqual(expect.objectContaining({ address: "172.31.240.7" }));
+
+    await expect(validateActivityPubTarget("https://attacker.example/inbox", {
+      interopPrivateHostnames,
+      lookup: resolver([{ address: "172.31.240.7", family: 4 }]),
+    })).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
+
+    await expect(validateActivityPubTarget("https://gotosocial/inbox", {
+      interopPrivateHostnames,
+      lookup: resolver([{ address: "169.254.1.1", family: 4 }]),
+    })).rejects.toBeInstanceOf(UnsafeActivityPubTargetError);
+  });
+
+  it("returns the pinned address in both single-address and all-address lookup callback forms", () => {
+    const lookup = createPinnedLookup({
+      url: new URL("https://example.com/inbox"),
+      address: "8.8.8.8",
+      family: 4,
+    });
+
+    const single = vi.fn();
+    lookup("example.com", { all: false }, single);
+    expect(single).toHaveBeenCalledWith(null, "8.8.8.8", 4);
+
+    const all = vi.fn();
+    lookup("example.com", { all: true }, all);
+    expect(all).toHaveBeenCalledWith(null, [{ address: "8.8.8.8", family: 4 }]);
+
+    const mismatch = vi.fn();
+    lookup("other.example", { all: true }, mismatch);
+    expect(mismatch.mock.calls[0]?.[0]).toBeInstanceOf(UnsafeActivityPubTargetError);
   });
 
   it("keeps an empty DNS result retryable instead of misclassifying it as a policy violation", async () => {
