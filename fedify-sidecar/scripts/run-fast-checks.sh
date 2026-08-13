@@ -18,5 +18,6 @@ npm exec -- vitest run \
   src/security/tests/ActivityPubEgressPolicy.test.ts \
   src/federation/tests/FedifyFastifyBridge.test.ts \
   src/federation/tests/FedifyFederationAdapterOutbound.test.ts \
+  src/federation/tests/Phase5OutboundProtocolMatrix.test.ts \
   src/delivery/tests/FederationRuntimeAdapterParity.test.ts \
   src/signing/tests/ActivityPubHttpSignatureGoldenVectors.test.ts
