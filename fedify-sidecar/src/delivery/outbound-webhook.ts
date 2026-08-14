@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 
 const APDM_DELIVERY_PLAN_SCHEMA = "ap.delivery-plan.v1";
 const APDM_INTEROP_LEGACY_INTENT_ID = "apdm-interop-legacy-fixture";
+const APDM_OBSERVATION_INTENT_PREFIX = "apdm-observation:";
 const EXPLICIT_NON_PRODUCTION_ENVIRONMENTS = new Set(["test", "development"]);
 
 type ApdmAuthoritySource = "delivery_plan" | "interop_legacy";
@@ -175,6 +176,14 @@ export function validateApdmWebhookIdentity(input: {
 
   if (authoritySource === "interop_legacy") {
     return undefined;
+  }
+
+  if (markerIntentId.startsWith(APDM_OBSERVATION_INTENT_PREFIX)) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_INTENT_RESERVED",
+      400,
+      "Delivery Plan intentId must not use the reserved observation intent namespace.",
+    );
   }
 
   const headerIntentId = normalizeExactIntentId(input.headerIntentId);
