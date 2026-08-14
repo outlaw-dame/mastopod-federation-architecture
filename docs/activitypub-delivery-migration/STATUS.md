@@ -12,7 +12,7 @@ Last updated: 2026-08-14
 | APDM-P3 | PR #16 merged; hardening PR #21 merged | PR #11 merged; hardening PR #14 merged | PASS |
 | APDM-P4 | PR #17 merged | PR #12 merged | PASS |
 | APDM-P5 | PR #26 merged (`427d3d3258382f91355ff08c33cfd40360087d84`) | PR #28 merged (`a6f6af242c11e098cfc6692c42988016d7b5a2a3`) | PASS |
-| APDM-P6 | PR #27 merged (`8f6a1bd244015c58698d92a9b9fd939a602d6b96`) | PR #30 merged (`0e350e0baa51e098cfc6692c42988016d7b5a2a3`) | PASS |
+| APDM-P6 | PR #27 merged (`8f6a1bd244015c58698d92a9b9fd939a602d6b96`) | PR #30 merged (`0e350e0baa51d94d874ee99a18ee3140fc85d3a3`) | PASS |
 | APDM-P7 | PR #28 merged (`6d65b2375b9860229dda3d081446f890bfa8699e`) | not required | PASS |
 | APDM-P8 | next: nested Tier 1 instrumentation | as needed | READY |
 | APDM-P9–P16 | not started | as needed | blocked by preceding local-fan-out phases |
