@@ -254,14 +254,17 @@ function signingApiPayload(idSuffix) {
 // Request helpers
 // ---------------------------------------------------------------------------
 
-function relaySubscribeRequest() {
+function relaySubscribeRequest(idSuffix) {
+  const suffix = idSuffix || `${__VU}-${__ITER}`;
+  const intentId = `apdm-relay-loadtest-${suffix}`;
   const res = http.post(
     `${baseUrl}/webhook/outbox`,
-    relaySubscribePayload(),
+    relaySubscribePayload(suffix),
     {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${sidecarToken}`,
+        'X-APDM-Intent-Id': intentId,
       },
       tags: { endpoint: 'relay_subscribe' },
     },
@@ -471,6 +474,7 @@ export function setup() {
         headers: {
           'content-type': 'application/json',
           authorization: `Bearer ${sidecarToken}`,
+          'X-APDM-Intent-Id': 'apdm-relay-loadtest-setup-probe',
         },
         tags: { endpoint: 'relay_subscribe_probe' },
       },
