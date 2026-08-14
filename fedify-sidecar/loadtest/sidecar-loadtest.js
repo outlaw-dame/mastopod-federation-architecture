@@ -10,18 +10,21 @@ const rampUpDuration = __ENV.RAMP_UP_DURATION || '1m';
 const rampDownDuration = __ENV.RAMP_DOWN_DURATION || '1m';
 const vus = Number.parseInt(__ENV.VUS || '20', 10);
 const rampTarget = Number.parseInt(__ENV.RAMP_TARGET || `${vus * 2}`, 10);
+const runNonce = __ENV.APDM_LOADTEST_RUN_NONCE
+  || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 const acceptedCounter = new Counter('fedify_loadtest_accepted_total');
 const expectedStatusRate = new Rate('fedify_loadtest_expected_status_rate');
 const appLatency = new Trend('fedify_loadtest_app_latency_ms', true);
 
+function webhookIntentId() {
+  return `apdm-loadtest-${runNonce}-${__VU}-${__ITER}`;
+}
+
 function inboxPayload() {
-  // ActivityPub spec: the inbox accepts Activities, not bare Objects.
-  // A Note is an Object; it must be wrapped in a Create activity so that
-  // Fedify's inbox listener (.on(Activity, …)) accepts the request.
   const actorUri = `https://remote.example/users/loadtest-${__VU}`;
-  const noteId = `https://remote.example/notes/${__VU}-${__ITER}`;
-  const activityId = `https://remote.example/activities/create-${__VU}-${__ITER}`;
+  const noteId = `https://remote.example/notes/${runNonce}-${__VU}-${__ITER}`;
+  const activityId = `https://remote.example/activities/create-${runNonce}-${__VU}-${__ITER}`;
   const ts = new Date().toISOString();
   return JSON.stringify({
     '@context': 'https://www.w3.org/ns/activitystreams',
@@ -44,12 +47,13 @@ function inboxPayload() {
 }
 
 function webhookPayload() {
+  const intentId = webhookIntentId();
   return JSON.stringify({
-    activityId: `urn:loadtest:${__VU}:${__ITER}`,
+    activityId: `urn:loadtest:${runNonce}:${__VU}:${__ITER}`,
     actorUri: 'https://pods.example/users/loadtest-actor',
     activity: {
       '@context': 'https://www.w3.org/ns/activitystreams',
-      id: `urn:loadtest:activity:${__VU}:${__ITER}`,
+      id: `urn:loadtest:activity:${runNonce}:${__VU}:${__ITER}`,
       type: 'Create',
       actor: 'https://pods.example/users/loadtest-actor',
       object: {
@@ -62,8 +66,16 @@ function webhookPayload() {
       {
         targetDomain: 'remote.example',
         inboxUrl: 'https://remote.example/inbox',
+        apdmAuthority: {
+          schema: 'ap.delivery-plan.v1',
+          intentId,
+        },
       },
     ],
+    meta: {
+      deliveryPlanSchema: 'ap.delivery-plan.v1',
+      deliveryPlanIntentId: intentId,
+    },
   });
 }
 
@@ -86,10 +98,12 @@ function inboxRequest() {
 }
 
 function webhookRequest() {
+  const intentId = webhookIntentId();
   const res = http.post(`${baseUrl}/webhook/outbox`, webhookPayload(), {
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${sidecarToken}`,
+      'X-APDM-Intent-Id': intentId,
     },
     tags: { endpoint: 'webhook_outbox' },
   });

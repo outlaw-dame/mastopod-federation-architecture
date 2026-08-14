@@ -1,5 +1,13 @@
 import { isIP } from "node:net";
 
+const APDM_DELIVERY_PLAN_SCHEMA = "ap.delivery-plan.v1";
+const APDM_INTEROP_LEGACY_INTENT_ID = "apdm-interop-legacy-fixture";
+const APDM_OBSERVATION_INTENT_PREFIX = "apdm-observation:";
+const SIDECAR_INTERNAL_INTENT_PREFIXES = [APDM_OBSERVATION_INTENT_PREFIX, "moderation-report:"] as const;
+const EXPLICIT_NON_PRODUCTION_ENVIRONMENTS = new Set(["test", "development"]);
+
+type ApdmAuthoritySource = "delivery_plan" | "interop_legacy";
+
 export interface NormalizedOutboundTarget {
   inboxUrl: string;
   sharedInboxUrl?: string;
@@ -12,6 +20,10 @@ export interface NormalizedOutboundTargetsResult {
   inputTargetCount: number;
   duplicateTargetCount: number;
   invalidTargetCount: number;
+  /** Present only while normalizing raw ActivityPods webhook targets. */
+  apdmAuthorityIntentId?: string;
+  /** Provenance for the accepted raw-boundary authority. Never inferred from the intent ID itself. */
+  apdmAuthoritySource?: ApdmAuthoritySource;
 }
 
 export interface OutboundWebhookBackpressureConfig {
@@ -20,6 +32,9 @@ export interface OutboundWebhookBackpressureConfig {
   retryAfterSeconds: number;
   maxTargetsPerRequest: number;
 }
+
+type OutboundTargetNormalizationConfig = Pick<OutboundWebhookBackpressureConfig, "maxTargetsPerRequest"> &
+  Partial<Pick<OutboundWebhookBackpressureConfig, "maxPending" | "maxQueueDepth" | "retryAfterSeconds">>;
 
 export interface OutboundWebhookQueueSnapshot {
   pendingCount: number;
@@ -45,7 +60,7 @@ export class OutboundWebhookValidationError extends Error {
 
 export function normalizeAndDedupeOutboundTargets(
   remoteTargets: unknown,
-  config: Pick<OutboundWebhookBackpressureConfig, "maxTargetsPerRequest">,
+  config: OutboundTargetNormalizationConfig,
 ): NormalizedOutboundTargetsResult {
   if (!Array.isArray(remoteTargets)) {
     throw new OutboundWebhookValidationError(
@@ -69,6 +84,36 @@ export function normalizeAndDedupeOutboundTargets(
       413,
       `remoteTargets exceeds the configured maximum of ${config.maxTargetsPerRequest}.`,
     );
+  }
+
+  const requireApdmAuthority = isWebhookBoundaryConfig(config);
+
+  let apdmAuthorityIntentId: string | undefined;
+  let apdmAuthoritySource: ApdmAuthoritySource | undefined;
+  if (requireApdmAuthority) {
+    for (const rawTarget of remoteTargets) {
+      const authority = parseApdmAuthority(rawTarget) ?? parseExplicitInteropAuthority(rawTarget);
+      if (!authority) {
+        throw new OutboundWebhookValidationError(
+          "OUTBOUND_APDM_AUTHORITY_REQUIRED",
+          400,
+          "Every raw remote target must carry an ap.delivery-plan.v1 APDM authority marker.",
+        );
+      }
+      if (apdmAuthorityIntentId === undefined) {
+        apdmAuthorityIntentId = authority.intentId;
+        apdmAuthoritySource = authority.source;
+      } else if (
+        authority.intentId !== apdmAuthorityIntentId ||
+        authority.source !== apdmAuthoritySource
+      ) {
+        throw new OutboundWebhookValidationError(
+          "OUTBOUND_APDM_AUTHORITY_MIXED",
+          400,
+          "All raw remote targets in one handoff must carry the same APDM Delivery Plan authority.",
+        );
+      }
+    }
   }
 
   const deduped = new Map<string, NormalizedOutboundTarget>();
@@ -104,7 +149,88 @@ export function normalizeAndDedupeOutboundTargets(
     inputTargetCount: remoteTargets.length,
     duplicateTargetCount,
     invalidTargetCount,
+    ...(apdmAuthorityIntentId ? { apdmAuthorityIntentId } : {}),
+    ...(apdmAuthoritySource ? { apdmAuthoritySource } : {}),
   };
+}
+
+/**
+ * Bind the raw target marker to the rest of the authoritative APDM handoff.
+ * Returns the stable Delivery Plan intent ID for production handoffs. The only
+ * undefined result is an exception whose provenance was established by the
+ * explicit non-production interop allowlist during target normalization.
+ */
+export function validateApdmWebhookIdentity(input: {
+  normalizedTargets: NormalizedOutboundTargetsResult;
+  headerIntentId: unknown;
+  meta: unknown;
+}): string | undefined {
+  const markerIntentId = input.normalizedTargets.apdmAuthorityIntentId;
+  const authoritySource = input.normalizedTargets.apdmAuthoritySource;
+  if (!markerIntentId || !authoritySource) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_AUTHORITY_REQUIRED",
+      400,
+      "APDM Delivery Plan target authority is required.",
+    );
+  }
+
+  if (authoritySource === "interop_legacy") {
+    return undefined;
+  }
+
+  if (SIDECAR_INTERNAL_INTENT_PREFIXES.some((prefix) => markerIntentId.startsWith(prefix))) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_INTENT_RESERVED",
+      400,
+      "Delivery Plan intentId must not use a sidecar-reserved durable intent namespace.",
+    );
+  }
+
+  const headerIntentId = normalizeExactIntentId(input.headerIntentId);
+  if (!headerIntentId) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_INTENT_HEADER_REQUIRED",
+      400,
+      "X-APDM-Intent-Id must contain the authoritative Delivery Plan intentId.",
+    );
+  }
+
+  if (!input.meta || typeof input.meta !== "object" || Array.isArray(input.meta)) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_META_REQUIRED",
+      400,
+      "APDM Delivery Plan metadata is required.",
+    );
+  }
+
+  const meta = input.meta as Record<string, unknown>;
+  if (meta["deliveryPlanSchema"] !== APDM_DELIVERY_PLAN_SCHEMA) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_SCHEMA_MISMATCH",
+      400,
+      "meta.deliveryPlanSchema must be ap.delivery-plan.v1.",
+    );
+  }
+
+  const metaIntentId = normalizeExactIntentId(meta["deliveryPlanIntentId"]);
+  if (!metaIntentId) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_META_INTENT_REQUIRED",
+      400,
+      "meta.deliveryPlanIntentId must contain the authoritative Delivery Plan intentId.",
+    );
+  }
+
+  if (headerIntentId !== markerIntentId || metaIntentId !== markerIntentId) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_INTENT_MISMATCH",
+      400,
+      "APDM target marker, X-APDM-Intent-Id, and meta.deliveryPlanIntentId must match.",
+    );
+  }
+
+  return markerIntentId;
 }
 
 export function evaluateOutboundWebhookBackpressure(
@@ -119,9 +245,6 @@ export function evaluateOutboundWebhookBackpressure(
     };
   }
 
-  // Redis stream length is historical and can stay high even after workers
-  // drain current load. Treat queue-depth backpressure as actionable only when
-  // there is active pending work to avoid permanent false-positive rejection.
   if (
     config.maxQueueDepth > 0 &&
     snapshot.pendingCount > 0 &&
@@ -140,29 +263,67 @@ export function evaluateOutboundWebhookBackpressure(
 export function resolveOutboundWebhookBackpressureConfigFromEnv(): OutboundWebhookBackpressureConfig {
   return {
     maxPending: parsePositiveIntEnv("OUTBOUND_WEBHOOK_MAX_PENDING", 25_000),
-    // Stream length is historical, not just active backlog. Keep disabled by
-    // default to avoid false positives after long-running benchmarks.
     maxQueueDepth: parseNonNegativeIntEnv("OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH", 0),
     retryAfterSeconds: parsePositiveIntEnv("OUTBOUND_WEBHOOK_RETRY_AFTER_SECONDS", 5),
     maxTargetsPerRequest: parsePositiveIntEnv("OUTBOUND_WEBHOOK_MAX_TARGETS", 5_000),
   };
 }
 
-function normalizeOutboundTarget(rawTarget: unknown): NormalizedOutboundTarget | null {
-  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) {
-    return null;
-  }
+function isWebhookBoundaryConfig(config: OutboundTargetNormalizationConfig): boolean {
+  return (
+    typeof config.maxPending === "number" &&
+    typeof config.maxQueueDepth === "number" &&
+    typeof config.retryAfterSeconds === "number"
+  );
+}
+
+function parseApdmAuthority(rawTarget: unknown): { intentId: string; source: ApdmAuthoritySource } | null {
+  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
+  const authority = (rawTarget as Record<string, unknown>)["apdmAuthority"];
+  if (!authority || typeof authority !== "object" || Array.isArray(authority)) return null;
+  const record = authority as Record<string, unknown>;
+  if (record["schema"] !== APDM_DELIVERY_PLAN_SCHEMA) return null;
+  const intentId = normalizeExactIntentId(record["intentId"]);
+  return intentId ? { intentId, source: "delivery_plan" } : null;
+}
+
+function parseExplicitInteropAuthority(rawTarget: unknown): { intentId: string; source: ApdmAuthoritySource } | null {
+  const environment = String(process.env["NODE_ENV"] ?? "").trim().toLowerCase();
+  if (!EXPLICIT_NON_PRODUCTION_ENVIRONMENTS.has(environment)) return null;
+  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
 
   const target = rawTarget as Record<string, unknown>;
+  const sharedInboxUrl = normalizeFederationTargetUrl(target["sharedInboxUrl"]);
   const inboxUrl = normalizeFederationTargetUrl(target["inboxUrl"]);
-  if (!inboxUrl) {
-    return null;
-  }
+  const deliveryUrl = sharedInboxUrl ?? inboxUrl;
+  if (!deliveryUrl) return null;
 
+  const hostname = new URL(deliveryUrl).hostname.toLowerCase();
+
+  const allowedHosts = new Set(
+    String(process.env["APDM_INTEROP_PRIVATE_HOSTS"] ?? "")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (!allowedHosts.has(hostname)) return null;
+
+  return { intentId: APDM_INTEROP_LEGACY_INTENT_ID, source: "interop_legacy" };
+}
+
+function normalizeExactIntentId(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim().length === 0 || value !== value.trim()) return null;
+  return value;
+}
+
+function normalizeOutboundTarget(rawTarget: unknown): NormalizedOutboundTarget | null {
+  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
+  const target = rawTarget as Record<string, unknown>;
+  const inboxUrl = normalizeFederationTargetUrl(target["inboxUrl"]);
+  if (!inboxUrl) return null;
   const sharedInboxUrl = normalizeFederationTargetUrl(target["sharedInboxUrl"]);
   const deliveryUrl = sharedInboxUrl ?? inboxUrl;
   const targetDomain = new URL(deliveryUrl).hostname.toLowerCase();
-
   return {
     inboxUrl,
     ...(sharedInboxUrl ? { sharedInboxUrl } : {}),
@@ -172,64 +333,40 @@ function normalizeOutboundTarget(rawTarget: unknown): NormalizedOutboundTarget |
 }
 
 function normalizeFederationTargetUrl(value: unknown): string | null {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return null;
-  }
-
+  if (typeof value !== "string" || value.trim().length === 0) return null;
   let parsed: URL;
   try {
     parsed = new URL(value.trim());
   } catch {
     return null;
   }
-
-  if (parsed.username || parsed.password) {
-    return null;
-  }
-
+  if (parsed.username || parsed.password) return null;
   const protocol = parsed.protocol.toLowerCase();
   const hostname = parsed.hostname.toLowerCase();
-  if (protocol !== "https:" && !(protocol === "http:" && isLoopbackHost(hostname))) {
-    return null;
-  }
-
+  if (protocol !== "https:" && !(protocol === "http:" && isLoopbackHost(hostname))) return null;
   parsed.hash = "";
   return parsed.toString();
 }
 
 function isLoopbackHost(hostname: string): boolean {
-  if (hostname === "localhost" || hostname === "::1") {
-    return true;
-  }
-
+  if (hostname === "localhost" || hostname === "::1") return true;
   const ipVersion = isIP(hostname);
-  if (ipVersion === 4) {
-    return hostname.startsWith("127.");
-  }
-
+  if (ipVersion === 4) return hostname.startsWith("127.");
   return false;
 }
 
 function parsePositiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
-
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
 }
 
 function parseNonNegativeIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
-
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return fallback;
-  }
-
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return parsed;
 }

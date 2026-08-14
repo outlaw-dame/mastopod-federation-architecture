@@ -92,6 +92,8 @@ const rampUpDuration = __ENV.RAMP_UP_DURATION || '20s';
 const rampDownDuration = __ENV.RAMP_DOWN_DURATION || '20s';
 const vus = parseInt(__ENV.VUS || '20', 10);
 const rampTarget = parseInt(__ENV.RAMP_TARGET || String(vus * 2), 10);
+const runNonce = __ENV.APDM_LOADTEST_RUN_NONCE
+  || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 // ---------------------------------------------------------------------------
 // Custom metrics
@@ -118,7 +120,7 @@ const RELAY_INBOX_URL = `https://${RELAY_DOMAIN}/inbox`;
 // ---------------------------------------------------------------------------
 // Payload factories
 // Each factory produces a fully spec-compliant AP JSON-LD document.
-// VU+iteration pairs in IDs prevent idempotency deduplication across runs.
+// Per-run nonce + VU/iteration IDs prevent cross-run idempotency deduplication.
 // ---------------------------------------------------------------------------
 
 /**
@@ -134,7 +136,8 @@ const RELAY_INBOX_URL = `https://${RELAY_DOMAIN}/inbox`;
 function relaySubscribePayload(idSuffix) {
   const suffix = idSuffix || `${__VU}-${__ITER}`;
   const activityId =
-    `https://localhost/activities/follow-relay-${suffix}`;
+    `https://localhost/activities/follow-relay-${runNonce}-${suffix}`;
+  const intentId = `apdm-relay-loadtest-${runNonce}-${suffix}`;
 
   return JSON.stringify({
     actorUri: localRelayActorUri,
@@ -150,8 +153,16 @@ function relaySubscribePayload(idSuffix) {
       {
         targetDomain: RELAY_DOMAIN,
         inboxUrl: RELAY_INBOX_URL,
+        apdmAuthority: {
+          schema: 'ap.delivery-plan.v1',
+          intentId,
+        },
       },
     ],
+    meta: {
+      deliveryPlanSchema: 'ap.delivery-plan.v1',
+      deliveryPlanIntentId: intentId,
+    },
   });
 }
 
@@ -170,9 +181,9 @@ function relaySubscribePayload(idSuffix) {
 function relayInboundPayload() {
   const objectActor = `https://social.example.com/users/user-${__VU}`;
   const objectNoteId =
-    `https://social.example.com/users/user-${__VU}/statuses/${__ITER}`;
+    `https://social.example.com/users/user-${__VU}/statuses/${runNonce}-${__ITER}`;
   const announceId =
-    `https://${RELAY_DOMAIN}/activities/announce-${__VU}-${__ITER}`;
+    `https://${RELAY_DOMAIN}/activities/announce-${runNonce}-${__VU}-${__ITER}`;
   const ts = new Date().toISOString();
 
   return JSON.stringify({
@@ -245,14 +256,17 @@ function signingApiPayload(idSuffix) {
 // Request helpers
 // ---------------------------------------------------------------------------
 
-function relaySubscribeRequest() {
+function relaySubscribeRequest(idSuffix) {
+  const suffix = idSuffix || `${__VU}-${__ITER}`;
+  const intentId = `apdm-relay-loadtest-${runNonce}-${suffix}`;
   const res = http.post(
     `${baseUrl}/webhook/outbox`,
-    relaySubscribePayload(),
+    relaySubscribePayload(suffix),
     {
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${sidecarToken}`,
+        'X-APDM-Intent-Id': intentId,
       },
       tags: { endpoint: 'relay_subscribe' },
     },
@@ -462,6 +476,7 @@ export function setup() {
         headers: {
           'content-type': 'application/json',
           authorization: `Bearer ${sidecarToken}`,
+          'X-APDM-Intent-Id': `apdm-relay-loadtest-${runNonce}-setup-probe`,
         },
         tags: { endpoint: 'relay_subscribe_probe' },
       },

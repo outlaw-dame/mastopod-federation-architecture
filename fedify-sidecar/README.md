@@ -47,7 +47,7 @@ A high-performance federation sidecar for ActivityPods that handles remote HTTP 
 │                   ActivityPods Pod Server                        │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │  Signing Service (keys stay here)                           ││
-│  │  Outbox Emitter (emits events to sidecar)                   ││
+│  │  Delivery Plan + Observation Integration                   ││
 │  │  Local Federation (Moleculer, no HTTP)                      ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
@@ -69,7 +69,7 @@ A high-performance federation sidecar for ActivityPods that handles remote HTTP 
 | Component | Responsibility |
 |-----------|----------------|
 | **Signing Service** | Batch HTTP signature generation (keys never leave) |
-| **Outbox Emitter** | Emits events when activities are committed |
+| **Delivery Plan / Observation Integration** | Produces authoritative remote Delivery Plans and targetless native-mode indexing observations |
 | **Local Federation** | Pod-to-pod via Moleculer (no HTTP) |
 
 ### Redis Streams
@@ -288,16 +288,14 @@ Authorization: Bearer <token>
 
 ### Outbound (Local → Remote)
 
-1. User posts activity to outbox
-2. ActivityPods commits to outbox
-3. ActivityPods emits `activitypub.outbox.committed` event
-4. Sidecar receives event via webhook
-5. Sidecar produces to Stream1 (if public)
-6. Sidecar creates delivery jobs in Redis
-7. Delivery worker consumes job
-8. Delivery worker calls Signing API
-9. Delivery worker POSTs to remote inbox
-10. On success: ack job; On failure: retry or DLQ
+1. User posts activity to the ActivityPods outbox.
+2. ActivityPods commits the activity and remains authoritative for recipient expansion.
+3. In **external** mode, ActivityPods creates one validated `ap.delivery-plan.v1` intent and durably hands it to `POST /webhook/outbox`.
+4. The sidecar binds the target marker, `X-APDM-Intent-Id`, metadata, and durable intent ID before Redis enqueue.
+5. The outbox-intent worker publishes Stream1/event-log state when eligible and fans the authoritative targets into delivery jobs.
+6. Delivery workers call the ActivityPods Signing API and POST to remote inboxes; keys never leave ActivityPods.
+7. In **native** rollback mode, SemApps owns remote delivery and ActivityPods sends only targetless committed/indexability metadata to `POST /webhook/outbox-observation`; that path creates zero remote delivery jobs.
+8. On external delivery success the job is acknowledged; transient failures retry and terminal failures go to the DLQ.
 
 ### Inbound (Remote → Local)
 
@@ -312,23 +310,24 @@ Authorization: Bearer <token>
 
 ### Required Services
 
-Add these Moleculer services to your ActivityPods instance:
+The sidecar depends on these ActivityPods-owned integration capabilities:
 
-1. **`signing.service.js`** - Signing API for HTTP signatures
-2. **`outbox-emitter.service.js`** - Emit events when activities are committed
-3. **`activitypub-bridge-recipient-resolver.service.js`** - Trusted internal resolver for outbound targets and bridge media fetches
+1. **`signing.service.js`** - Signing API for HTTP signatures; private keys remain inside ActivityPods.
+2. **Authoritative Delivery Plan / observation producer** - The ActivityPods Phase 6 integration creates `ap.delivery-plan.v1` remote handoffs for external mode and targetless `/webhook/outbox-observation` handoffs for native rollback indexing. This producer lives in the ActivityPods repository; there is no copied `outbox-emitter.service.js` implementation in this sidecar repository.
+3. **`activitypub-bridge-recipient-resolver.service.js`** - Trusted internal resolver for bridge attachment/media fetches and other bridge-only resolution work; it is not a second remote-delivery routing authority.
 
 Optional but recommended when you want derivative generation and media analysis off the pod request path:
 
-4. **`media-pipeline-emitter.service.js`** - Forward newly created pod file resources to `media-pipeline-sidecar`
+4. **`media-pipeline-emitter.service.js`** - Forward newly created pod file resources to `media-pipeline-sidecar`.
 
-See `activitypods-integration/` directory for implementations.
+See `activitypods-integration/` for the integration helpers that are still owned here, and the paired ActivityPods APDM documentation for the authoritative Delivery Plan/observation producer.
 
 Important architecture note:
 
+- Remote recipient expansion is performed once by ActivityPods and arrives at the sidecar only through the validated Delivery Plan handoff.
 - `activitypub-bridge-recipient-resolver.service.js` resolves bridge attachment bytes for AP->AT projection and link-preview flows.
 - `media-pipeline-emitter.service.js` is the asynchronous handoff into `media-pipeline-sidecar`.
-- These are complementary paths, not the same subsystem.
+- These are complementary paths, not duplicate federation authorities.
 
 ## Monitoring
 
@@ -357,7 +356,8 @@ Important architecture note:
 | `/metrics` | GET | Prometheus metrics |
 | `/inbox` | POST | Shared inbox |
 | `/users/:username/inbox` | POST | Per-user inbox |
-| `/webhook/outbox` | POST | Receive outbox events |
+| `/webhook/outbox` | POST | Receive authority-bound `ap.delivery-plan.v1` remote handoffs |
+| `/webhook/outbox-observation` | POST | Receive targetless native-mode committed/indexability observations; creates zero delivery jobs |
 
 ## Development
 

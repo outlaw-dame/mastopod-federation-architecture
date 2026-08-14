@@ -205,6 +205,7 @@ import {
   normalizeAndDedupeOutboundTargets,
   OutboundWebhookValidationError,
   resolveOutboundWebhookBackpressureConfigFromEnv,
+  validateApdmWebhookIdentity,
 } from "./delivery/outbound-webhook.js";
 import { registerMrfAdminIntegration } from "./admin/mrf/integration.js";
 import { registerModerationBridgeIntegration } from "./admin/moderation/integration.js";
@@ -2548,6 +2549,124 @@ async function main() {
       await enqueueRawInboundRequest(request, reply, `/${username}/inbox`);
     });
 
+    // Native rollback observation webhook — durable indexing/event-log only.
+    // It accepts no delivery targets and marks the resulting durable intent so
+    // OutboxIntentWorker returns before any recipient normalization or fan-out.
+    app.post("/webhook/outbox-observation", async (request, reply) => {
+      const authHeader = (request.headers["authorization"] as string) || "";
+      const [scheme, token] = authHeader.split(" ");
+      if (scheme !== "Bearer" || token !== config.sidecarToken) {
+        reply.status(401).send({ error: "Unauthorized" });
+        return;
+      }
+
+      let body: Record<string, unknown> | null = null;
+      if (typeof request.body === "string") {
+        try {
+          const parsed = JSON.parse(request.body) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            body = parsed as Record<string, unknown>;
+          }
+        } catch {
+          body = null;
+        }
+      } else if (request.body && typeof request.body === "object" && !Array.isArray(request.body)) {
+        body = request.body as Record<string, unknown>;
+      }
+
+      const actorUri = body?.["actorUri"];
+      const activity = body?.["activity"];
+      if (
+        typeof actorUri !== "string"
+        || actorUri.trim().length === 0
+        || actorUri !== actorUri.trim()
+        || !activity
+        || typeof activity !== "object"
+        || Array.isArray(activity)
+        || (body && (Object.hasOwn(body, "remoteTargets") || Object.hasOwn(body, "deliveryTargets")))
+      ) {
+        reply.status(400).send({ error: "Bad Request" });
+        return;
+      }
+
+      const eventIdHeader = request.headers["x-event-id"];
+      const eventSchemaHeader = request.headers["x-event-schema"];
+      if (
+        typeof eventIdHeader !== "string"
+        || eventIdHeader.trim().length === 0
+        || eventIdHeader !== eventIdHeader.trim()
+        || eventIdHeader.length > 256
+        || eventSchemaHeader !== "ap.outbox.committed.v1"
+      ) {
+        reply.status(400).send({
+          error: "Observation identity is missing or invalid",
+          code: "OUTBOX_OBSERVATION_IDENTITY_INVALID",
+        });
+        return;
+      }
+
+      if (!queue || !config.enableOutboxIntentWorker) {
+        reply.status(503).send({ error: "Service unavailable" });
+        return;
+      }
+
+      const bodyRecord = body as Record<string, unknown>;
+      const activityRecord = activity as Record<string, unknown>;
+      const activityIdValue = bodyRecord["activityId"];
+      const activityId = typeof activityIdValue === "string" && activityIdValue.trim().length > 0
+        ? activityIdValue
+        : typeof activityRecord["id"] === "string" && activityRecord["id"].trim().length > 0
+          ? activityRecord["id"]
+          : null;
+      if (!activityId) {
+        reply.status(400).send({
+          error: "activityId is required when activity.id is not present.",
+          code: "OUTBOX_OBSERVATION_ACTIVITY_ID_MISSING",
+        });
+        return;
+      }
+
+      const metaValue = bodyRecord["meta"];
+      const normalizedMeta = metaValue && typeof metaValue === "object" && !Array.isArray(metaValue)
+        ? metaValue
+        : undefined;
+
+      const outboxIntentPending = await queue.getPendingCount("outbox_intent");
+      const outboxIntentLength = await queue.getStreamLength("outbox_intent");
+      const backpressure = evaluateOutboundWebhookBackpressure(
+        { pendingCount: outboxIntentPending, streamLength: outboxIntentLength },
+        outboundWebhookBackpressureConfig,
+      );
+      if (backpressure.reject) {
+        if (backpressure.retryAfterSeconds) {
+          reply.header("retry-after", backpressure.retryAfterSeconds.toString());
+        }
+        reply.status(503).send({
+          error: "Outbox observation queue is under backpressure",
+          reason: backpressure.reason,
+          retryAfterSeconds: backpressure.retryAfterSeconds,
+        });
+        return;
+      }
+
+      const intent = createOutboxIntent({
+        intentId: `apdm-observation:${eventIdHeader}`,
+        activityId,
+        actorUri,
+        activity: JSON.stringify(activityRecord),
+        targets: [],
+        ...(normalizedMeta ? { meta: normalizedMeta } : {}),
+        bridgeHints: { observationOnly: true },
+      });
+      await queue.enqueueOutboxIntent(intent);
+      reply.status(202).send({
+        accepted: true,
+        intentId: intent.intentId,
+        jobCount: 0,
+        observationOnly: true,
+      });
+    });
+
     // Outbound webhook — receives delivery work from ActivityPods
     app.post("/webhook/outbox", async (request, reply) => {
       const requestStartedAt = Date.now();
@@ -2606,6 +2725,11 @@ async function main() {
           remoteTargets,
           outboundWebhookBackpressureConfig,
         );
+        const authoritativeIntentId = validateApdmWebhookIdentity({
+          normalizedTargets,
+          headerIntentId: request.headers["x-apdm-intent-id"],
+          meta: normalizedMeta,
+        });
         promMetrics.outboundWebhookTargetCount.observe(normalizedTargets.inputTargetCount);
         if (normalizedTargets.invalidTargetCount > 0) {
           promMetrics.outboundWebhookTargetsDedupedTotal.inc(
@@ -2673,6 +2797,7 @@ async function main() {
           ? activityPubHints as Record<string, unknown>
           : undefined;
         const intent = createOutboxIntent({
+          ...(authoritativeIntentId ? { intentId: authoritativeIntentId } : {}),
           activityId,
           actorUri,
           activity: JSON.stringify(activityRecord),
