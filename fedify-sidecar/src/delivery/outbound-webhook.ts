@@ -4,6 +4,8 @@ const APDM_DELIVERY_PLAN_SCHEMA = "ap.delivery-plan.v1";
 const APDM_INTEROP_LEGACY_INTENT_ID = "apdm-interop-legacy-fixture";
 const EXPLICIT_NON_PRODUCTION_ENVIRONMENTS = new Set(["test", "development"]);
 
+type ApdmAuthoritySource = "delivery_plan" | "interop_legacy";
+
 export interface NormalizedOutboundTarget {
   inboxUrl: string;
   sharedInboxUrl?: string;
@@ -18,6 +20,8 @@ export interface NormalizedOutboundTargetsResult {
   invalidTargetCount: number;
   /** Present only while normalizing raw ActivityPods webhook targets. */
   apdmAuthorityIntentId?: string;
+  /** Provenance for the accepted raw-boundary authority. Never inferred from the intent ID itself. */
+  apdmAuthoritySource?: ApdmAuthoritySource;
 }
 
 export interface OutboundWebhookBackpressureConfig {
@@ -83,6 +87,7 @@ export function normalizeAndDedupeOutboundTargets(
   const requireApdmAuthority = isWebhookBoundaryConfig(config);
 
   let apdmAuthorityIntentId: string | undefined;
+  let apdmAuthoritySource: ApdmAuthoritySource | undefined;
   if (requireApdmAuthority) {
     for (const rawTarget of remoteTargets) {
       const authority = parseApdmAuthority(rawTarget) ?? parseExplicitInteropAuthority(rawTarget);
@@ -95,11 +100,15 @@ export function normalizeAndDedupeOutboundTargets(
       }
       if (apdmAuthorityIntentId === undefined) {
         apdmAuthorityIntentId = authority.intentId;
-      } else if (authority.intentId !== apdmAuthorityIntentId) {
+        apdmAuthoritySource = authority.source;
+      } else if (
+        authority.intentId !== apdmAuthorityIntentId ||
+        authority.source !== apdmAuthoritySource
+      ) {
         throw new OutboundWebhookValidationError(
           "OUTBOUND_APDM_AUTHORITY_MIXED",
           400,
-          "All raw remote targets in one handoff must carry the same APDM Delivery Plan intentId.",
+          "All raw remote targets in one handoff must carry the same APDM Delivery Plan authority.",
         );
       }
     }
@@ -139,14 +148,15 @@ export function normalizeAndDedupeOutboundTargets(
     duplicateTargetCount,
     invalidTargetCount,
     ...(apdmAuthorityIntentId ? { apdmAuthorityIntentId } : {}),
+    ...(apdmAuthoritySource ? { apdmAuthoritySource } : {}),
   };
 }
 
 /**
  * Bind the raw target marker to the rest of the authoritative APDM handoff.
  * Returns the stable Delivery Plan intent ID for production handoffs. The only
- * undefined result is the explicitly allowlisted non-production interop fixture,
- * which retains its historical sidecar-generated intent identity.
+ * undefined result is an exception whose provenance was established by the
+ * explicit non-production interop allowlist during target normalization.
  */
 export function validateApdmWebhookIdentity(input: {
   normalizedTargets: NormalizedOutboundTargetsResult;
@@ -154,7 +164,8 @@ export function validateApdmWebhookIdentity(input: {
   meta: unknown;
 }): string | undefined {
   const markerIntentId = input.normalizedTargets.apdmAuthorityIntentId;
-  if (!markerIntentId) {
+  const authoritySource = input.normalizedTargets.apdmAuthoritySource;
+  if (!markerIntentId || !authoritySource) {
     throw new OutboundWebhookValidationError(
       "OUTBOUND_APDM_AUTHORITY_REQUIRED",
       400,
@@ -162,7 +173,7 @@ export function validateApdmWebhookIdentity(input: {
     );
   }
 
-  if (markerIntentId === APDM_INTEROP_LEGACY_INTENT_ID) {
+  if (authoritySource === "interop_legacy") {
     return undefined;
   }
 
@@ -256,17 +267,17 @@ function isWebhookBoundaryConfig(config: OutboundTargetNormalizationConfig): boo
   );
 }
 
-function parseApdmAuthority(rawTarget: unknown): { intentId: string } | null {
+function parseApdmAuthority(rawTarget: unknown): { intentId: string; source: ApdmAuthoritySource } | null {
   if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
   const authority = (rawTarget as Record<string, unknown>)["apdmAuthority"];
   if (!authority || typeof authority !== "object" || Array.isArray(authority)) return null;
   const record = authority as Record<string, unknown>;
   if (record["schema"] !== APDM_DELIVERY_PLAN_SCHEMA) return null;
   const intentId = normalizeExactIntentId(record["intentId"]);
-  return intentId ? { intentId } : null;
+  return intentId ? { intentId, source: "delivery_plan" } : null;
 }
 
-function parseExplicitInteropAuthority(rawTarget: unknown): { intentId: string } | null {
+function parseExplicitInteropAuthority(rawTarget: unknown): { intentId: string; source: ApdmAuthoritySource } | null {
   const environment = String(process.env["NODE_ENV"] ?? "").trim().toLowerCase();
   if (!EXPLICIT_NON_PRODUCTION_ENVIRONMENTS.has(environment)) return null;
   if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
@@ -292,7 +303,7 @@ function parseExplicitInteropAuthority(rawTarget: unknown): { intentId: string }
   );
   if (!allowedHosts.has(hostname)) return null;
 
-  return { intentId: APDM_INTEROP_LEGACY_INTENT_ID };
+  return { intentId: APDM_INTEROP_LEGACY_INTENT_ID, source: "interop_legacy" };
 }
 
 function normalizeExactIntentId(value: unknown): string | null {
