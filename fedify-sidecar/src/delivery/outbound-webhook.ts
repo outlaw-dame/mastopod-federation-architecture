@@ -16,8 +16,8 @@ export interface NormalizedOutboundTargetsResult {
   inputTargetCount: number;
   duplicateTargetCount: number;
   invalidTargetCount: number;
-  /** Stable ActivityPods Delivery Plan identity proven by every input target. */
-  apdmAuthorityIntentId: string;
+  /** Present only while normalizing raw ActivityPods webhook targets. */
+  apdmAuthorityIntentId?: string;
 }
 
 export interface OutboundWebhookBackpressureConfig {
@@ -77,34 +77,46 @@ export function normalizeAndDedupeOutboundTargets(
     );
   }
 
-  // APDM Phase 6 retires the legacy raw-activity webhook as a routing
-  // authority. Every target accepted from ActivityPods must now prove that it
-  // came from one stable ap.delivery-plan.v1 intent. Validate this before URL
-  // filtering/dedupe so a mixed request cannot smuggle an unmarked target in
-  // as a merely "invalid" entry while another marked target keeps it accepted.
+  // This normalizer is used twice:
+  // 1. at /webhook/outbox on raw ActivityPods targets; and
+  // 2. inside OutboxIntentWorker on already-normalized durable intent targets.
   //
-  // The only exception is the containerized AP interoperability harness. It
-  // requires an explicit test/development NODE_ENV and a destination host in
-  // APDM_INTEROP_PRIVATE_HOSTS. Unset/unknown/production environments remain
-  // fail-closed even if that allowlist is accidentally present.
+  // Phase 6 authority proof belongs only at boundary (1). Durable intent targets
+  // are recognizable by the complete normalized shape produced before queueing
+  // (`deliveryUrl` + `targetDomain`) and must remain usable by sidecar-generated
+  // intents such as relay subscriptions and moderation reports.
+  const alreadyNormalizedInternalTargets = remoteTargets.every(isNormalizedOutboxIntentTargetShape);
+
   let apdmAuthorityIntentId: string | undefined;
-  for (const rawTarget of remoteTargets) {
-    const authority = parseApdmAuthority(rawTarget) ?? parseExplicitInteropAuthority(rawTarget);
-    if (!authority) {
-      throw new OutboundWebhookValidationError(
-        "OUTBOUND_APDM_AUTHORITY_REQUIRED",
-        400,
-        "Every remote target must carry an ap.delivery-plan.v1 APDM authority marker.",
-      );
-    }
-    if (apdmAuthorityIntentId === undefined) {
-      apdmAuthorityIntentId = authority.intentId;
-    } else if (authority.intentId !== apdmAuthorityIntentId) {
-      throw new OutboundWebhookValidationError(
-        "OUTBOUND_APDM_AUTHORITY_MIXED",
-        400,
-        "All remote targets in one handoff must carry the same APDM Delivery Plan intentId.",
-      );
+  if (!alreadyNormalizedInternalTargets) {
+    // APDM Phase 6 retires the legacy raw-activity webhook as a routing
+    // authority. Every raw target accepted from ActivityPods must prove that it
+    // came from one stable ap.delivery-plan.v1 intent. Validate this before URL
+    // filtering/dedupe so a mixed request cannot smuggle an unmarked target in
+    // as a merely "invalid" entry while another marked target keeps it accepted.
+    //
+    // The only exception is the containerized AP interoperability harness. It
+    // requires an explicit test/development NODE_ENV and a destination host in
+    // APDM_INTEROP_PRIVATE_HOSTS. Unset/unknown/production environments remain
+    // fail-closed even if that allowlist is accidentally present.
+    for (const rawTarget of remoteTargets) {
+      const authority = parseApdmAuthority(rawTarget) ?? parseExplicitInteropAuthority(rawTarget);
+      if (!authority) {
+        throw new OutboundWebhookValidationError(
+          "OUTBOUND_APDM_AUTHORITY_REQUIRED",
+          400,
+          "Every raw remote target must carry an ap.delivery-plan.v1 APDM authority marker.",
+        );
+      }
+      if (apdmAuthorityIntentId === undefined) {
+        apdmAuthorityIntentId = authority.intentId;
+      } else if (authority.intentId !== apdmAuthorityIntentId) {
+        throw new OutboundWebhookValidationError(
+          "OUTBOUND_APDM_AUTHORITY_MIXED",
+          400,
+          "All raw remote targets in one handoff must carry the same APDM Delivery Plan intentId.",
+        );
+      }
     }
   }
 
@@ -141,7 +153,7 @@ export function normalizeAndDedupeOutboundTargets(
     inputTargetCount: remoteTargets.length,
     duplicateTargetCount,
     invalidTargetCount,
-    apdmAuthorityIntentId: apdmAuthorityIntentId!,
+    ...(apdmAuthorityIntentId ? { apdmAuthorityIntentId } : {}),
   };
 }
 
@@ -184,6 +196,16 @@ export function resolveOutboundWebhookBackpressureConfigFromEnv(): OutboundWebho
     retryAfterSeconds: parsePositiveIntEnv("OUTBOUND_WEBHOOK_RETRY_AFTER_SECONDS", 5),
     maxTargetsPerRequest: parsePositiveIntEnv("OUTBOUND_WEBHOOK_MAX_TARGETS", 5_000),
   };
+}
+
+function isNormalizedOutboxIntentTargetShape(rawTarget: unknown): boolean {
+  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return false;
+  const target = rawTarget as Record<string, unknown>;
+  return (
+    typeof target["inboxUrl"] === "string" && target["inboxUrl"].length > 0 &&
+    typeof target["deliveryUrl"] === "string" && target["deliveryUrl"].length > 0 &&
+    typeof target["targetDomain"] === "string" && target["targetDomain"].length > 0
+  );
 }
 
 function parseApdmAuthority(rawTarget: unknown): { intentId: string } | null {
