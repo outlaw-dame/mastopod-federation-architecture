@@ -50,7 +50,7 @@ function deliveryPlanMeta(intentId = AUTHORITY.intentId) {
 }
 
 describe("normalizeAndDedupeOutboundTargets", () => {
-  it("dedupes repeated shared inbox targets and skips invalid URLs after APDM authority validation", () => {
+  it("dedupes repeated shared inbox targets and records Delivery Plan authority provenance", () => {
     const result = normalizeAndDedupeOutboundTargets(
       [
         target({
@@ -83,6 +83,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
     expect(result.duplicateTargetCount).toBe(1);
     expect(result.invalidTargetCount).toBe(1);
     expect(result.apdmAuthorityIntentId).toBe(AUTHORITY.intentId);
+    expect(result.apdmAuthoritySource).toBe("delivery_plan");
   });
 
   it("preserves already-normalized durable intent targets without transport authority metadata", () => {
@@ -108,6 +109,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
       },
     ]);
     expect(result.apdmAuthorityIntentId).toBeUndefined();
+    expect(result.apdmAuthoritySource).toBeUndefined();
   });
 
   it("does not let raw callers bypass authority by supplying normalized-looking target fields", () => {
@@ -136,17 +138,6 @@ describe("normalizeAndDedupeOutboundTargets", () => {
         webhookConfig(),
       ),
     ).toThrowError(/ap\.delivery-plan\.v1 APDM authority marker/u);
-
-    try {
-      normalizeAndDedupeOutboundTargets(
-        [{ inboxUrl: "https://one.example/inbox" }],
-        webhookConfig(),
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(OutboundWebhookValidationError);
-      expect((error as OutboundWebhookValidationError).code).toBe("OUTBOUND_APDM_AUTHORITY_REQUIRED");
-      expect((error as OutboundWebhookValidationError).statusCode).toBe(400);
-    }
   });
 
   it("permits only explicitly allowlisted unmarked interop hosts in test/development", () => {
@@ -158,6 +149,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
       webhookConfig(),
     );
     expect(result.apdmAuthorityIntentId).toBe("apdm-interop-legacy-fixture");
+    expect(result.apdmAuthoritySource).toBe("interop_legacy");
     expect(
       validateApdmWebhookIdentity({
         normalizedTargets: result,
@@ -187,7 +179,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
     }
   });
 
-  it("rejects wrong schemas, blank intent IDs, and mixed Delivery Plan identities", () => {
+  it("rejects wrong schemas, blank intent IDs, and mixed Delivery Plan authority", () => {
     delete process.env["APDM_INTEROP_PRIVATE_HOSTS"];
     for (const apdmAuthority of [
       { schema: "ap.delivery-plan.v0", intentId: AUTHORITY.intentId },
@@ -214,7 +206,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
         ],
         webhookConfig(),
       ),
-    ).toThrowError(/same APDM Delivery Plan intentId/u);
+    ).toThrowError(/same APDM Delivery Plan authority/u);
   });
 
   it("rejects requests that exceed the configured maximum target count", () => {
@@ -285,6 +277,31 @@ describe("validateApdmWebhookIdentity", () => {
         meta: deliveryPlanMeta("different-meta-intent"),
       }),
     ).toThrowError(/must match/u);
+  });
+
+  it("does not treat the interop sentinel literal as an exception without interop provenance", () => {
+    process.env["NODE_ENV"] = "production";
+    process.env["APDM_INTEROP_PRIVATE_HOSTS"] = "gotosocial";
+    const sentinel = "apdm-interop-legacy-fixture";
+    const result = normalizeAndDedupeOutboundTargets(
+      [
+        {
+          inboxUrl: "https://gotosocial/users/attacker/inbox",
+          apdmAuthority: { schema: "ap.delivery-plan.v1", intentId: sentinel },
+        },
+      ],
+      webhookConfig(),
+    );
+
+    expect(result.apdmAuthorityIntentId).toBe(sentinel);
+    expect(result.apdmAuthoritySource).toBe("delivery_plan");
+    expect(() =>
+      validateApdmWebhookIdentity({
+        normalizedTargets: result,
+        headerIntentId: undefined,
+        meta: undefined,
+      }),
+    ).toThrowError(OutboundWebhookValidationError);
   });
 });
 
