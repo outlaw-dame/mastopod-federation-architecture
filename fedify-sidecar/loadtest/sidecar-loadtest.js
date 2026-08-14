@@ -15,10 +15,11 @@ const acceptedCounter = new Counter('fedify_loadtest_accepted_total');
 const expectedStatusRate = new Rate('fedify_loadtest_expected_status_rate');
 const appLatency = new Trend('fedify_loadtest_app_latency_ms', true);
 
+function webhookIntentId() {
+  return `apdm-loadtest-${__VU}-${__ITER}`;
+}
+
 function inboxPayload() {
-  // ActivityPub spec: the inbox accepts Activities, not bare Objects.
-  // A Note is an Object; it must be wrapped in a Create activity so that
-  // Fedify's inbox listener (.on(Activity, …)) accepts the request.
   const actorUri = `https://remote.example/users/loadtest-${__VU}`;
   const noteId = `https://remote.example/notes/${__VU}-${__ITER}`;
   const activityId = `https://remote.example/activities/create-${__VU}-${__ITER}`;
@@ -44,7 +45,7 @@ function inboxPayload() {
 }
 
 function webhookPayload() {
-  const intentId = `apdm-loadtest-${__VU}-${__ITER}`;
+  const intentId = webhookIntentId();
   return JSON.stringify({
     activityId: `urn:loadtest:${__VU}:${__ITER}`,
     actorUri: 'https://pods.example/users/loadtest-actor',
@@ -95,10 +96,12 @@ function inboxRequest() {
 }
 
 function webhookRequest() {
+  const intentId = webhookIntentId();
   const res = http.post(`${baseUrl}/webhook/outbox`, webhookPayload(), {
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${sidecarToken}`,
+      'X-APDM-Intent-Id': intentId,
     },
     tags: { endpoint: 'webhook_outbox' },
   });
