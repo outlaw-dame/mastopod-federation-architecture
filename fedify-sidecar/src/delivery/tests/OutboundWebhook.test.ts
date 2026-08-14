@@ -250,25 +250,29 @@ describe("validateApdmWebhookIdentity", () => {
     ).toBe(AUTHORITY.intentId);
   });
 
-  it("reserves the observation intent namespace from Delivery Plan handoffs", () => {
-    const reservedIntentId = "apdm-observation:01TESTEVENT";
-    const result = normalizeAndDedupeOutboundTargets(
-      [
-        {
-          inboxUrl: "https://one.example/inbox",
-          apdmAuthority: { schema: "ap.delivery-plan.v1", intentId: reservedIntentId },
-        },
-      ],
-      webhookConfig(),
-    );
+  it("reserves sidecar-owned durable intent namespaces from Delivery Plan handoffs", () => {
+    for (const reservedIntentId of [
+      "apdm-observation:01TESTEVENT",
+      "moderation-report:01TESTREPORT",
+    ]) {
+      const result = normalizeAndDedupeOutboundTargets(
+        [
+          {
+            inboxUrl: "https://one.example/inbox",
+            apdmAuthority: { schema: "ap.delivery-plan.v1", intentId: reservedIntentId },
+          },
+        ],
+        webhookConfig(),
+      );
 
-    expect(() =>
-      validateApdmWebhookIdentity({
-        normalizedTargets: result,
-        headerIntentId: reservedIntentId,
-        meta: deliveryPlanMeta(reservedIntentId),
-      }),
-    ).toThrowError(/reserved observation intent namespace/u);
+      expect(() =>
+        validateApdmWebhookIdentity({
+          normalizedTargets: result,
+          headerIntentId: reservedIntentId,
+          meta: deliveryPlanMeta(reservedIntentId),
+        }),
+      ).toThrowError(/sidecar-reserved durable intent namespace/u);
+    }
   });
 
   it("rejects missing and padded X-APDM-Intent-Id headers", () => {

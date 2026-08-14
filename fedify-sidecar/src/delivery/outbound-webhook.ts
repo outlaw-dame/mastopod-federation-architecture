@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 const APDM_DELIVERY_PLAN_SCHEMA = "ap.delivery-plan.v1";
 const APDM_INTEROP_LEGACY_INTENT_ID = "apdm-interop-legacy-fixture";
 const APDM_OBSERVATION_INTENT_PREFIX = "apdm-observation:";
+const SIDECAR_INTERNAL_INTENT_PREFIXES = [APDM_OBSERVATION_INTENT_PREFIX, "moderation-report:"] as const;
 const EXPLICIT_NON_PRODUCTION_ENVIRONMENTS = new Set(["test", "development"]);
 
 type ApdmAuthoritySource = "delivery_plan" | "interop_legacy";
@@ -178,11 +179,11 @@ export function validateApdmWebhookIdentity(input: {
     return undefined;
   }
 
-  if (markerIntentId.startsWith(APDM_OBSERVATION_INTENT_PREFIX)) {
+  if (SIDECAR_INTERNAL_INTENT_PREFIXES.some((prefix) => markerIntentId.startsWith(prefix))) {
     throw new OutboundWebhookValidationError(
       "OUTBOUND_APDM_INTENT_RESERVED",
       400,
-      "Delivery Plan intentId must not use the reserved observation intent namespace.",
+      "Delivery Plan intentId must not use a sidecar-reserved durable intent namespace.",
     );
   }
 
