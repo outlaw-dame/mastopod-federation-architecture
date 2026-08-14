@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   evaluateOutboundWebhookBackpressure,
   normalizeAndDedupeOutboundTargets,
@@ -10,6 +10,16 @@ const AUTHORITY = {
   schema: "ap.delivery-plan.v1",
   intentId: "apdm-phase6-test-intent",
 };
+
+const originalNodeEnv = process.env["NODE_ENV"];
+const originalInteropHosts = process.env["APDM_INTEROP_PRIVATE_HOSTS"];
+
+afterEach(() => {
+  if (originalNodeEnv === undefined) delete process.env["NODE_ENV"];
+  else process.env["NODE_ENV"] = originalNodeEnv;
+  if (originalInteropHosts === undefined) delete process.env["APDM_INTEROP_PRIVATE_HOSTS"];
+  else process.env["APDM_INTEROP_PRIVATE_HOSTS"] = originalInteropHosts;
+});
 
 function target(input: Record<string, unknown>): Record<string, unknown> {
   return { ...input, apdmAuthority: AUTHORITY };
@@ -51,7 +61,8 @@ describe("normalizeAndDedupeOutboundTargets", () => {
     expect(result.apdmAuthorityIntentId).toBe(AUTHORITY.intentId);
   });
 
-  it("rejects the retired legacy raw-routing target shape", () => {
+  it("rejects the retired legacy raw-routing target shape by default", () => {
+    delete process.env["APDM_INTEROP_PRIVATE_HOSTS"];
     expect(() =>
       normalizeAndDedupeOutboundTargets(
         [{ inboxUrl: "https://one.example/inbox" }],
@@ -71,7 +82,39 @@ describe("normalizeAndDedupeOutboundTargets", () => {
     }
   });
 
+  it("permits only explicitly allowlisted unmarked interop hosts in test/development", () => {
+    process.env["NODE_ENV"] = "development";
+    process.env["APDM_INTEROP_PRIVATE_HOSTS"] = "gotosocial,mastodon";
+
+    const result = normalizeAndDedupeOutboundTargets(
+      [{ inboxUrl: "https://gotosocial/users/interop/inbox" }],
+      { maxTargetsPerRequest: 100 },
+    );
+    expect(result.apdmAuthorityIntentId).toBe("apdm-interop-legacy-fixture");
+
+    expect(() =>
+      normalizeAndDedupeOutboundTargets(
+        [{ inboxUrl: "https://attacker.example/inbox" }],
+        { maxTargetsPerRequest: 100 },
+      ),
+    ).toThrowError(OutboundWebhookValidationError);
+  });
+
+  it("keeps the interop allowlist fail-closed in production and unknown environments", () => {
+    process.env["APDM_INTEROP_PRIVATE_HOSTS"] = "gotosocial";
+    for (const environment of ["production", "staging", ""]) {
+      process.env["NODE_ENV"] = environment;
+      expect(() =>
+        normalizeAndDedupeOutboundTargets(
+          [{ inboxUrl: "https://gotosocial/users/interop/inbox" }],
+          { maxTargetsPerRequest: 100 },
+        ),
+      ).toThrowError(OutboundWebhookValidationError);
+    }
+  });
+
   it("rejects wrong schemas, blank intent IDs, and mixed Delivery Plan identities", () => {
+    delete process.env["APDM_INTEROP_PRIVATE_HOSTS"];
     for (const apdmAuthority of [
       { schema: "ap.delivery-plan.v0", intentId: AUTHORITY.intentId },
       { schema: "ap.delivery-plan.v1", intentId: "" },
@@ -129,77 +172,33 @@ describe("normalizeAndDedupeOutboundTargets", () => {
 describe("evaluateOutboundWebhookBackpressure", () => {
   it("rejects when pending jobs exceed the configured threshold", () => {
     const result = evaluateOutboundWebhookBackpressure(
-      {
-        pendingCount: 200,
-        streamLength: 50,
-      },
-      {
-        maxPending: 200,
-        maxQueueDepth: 500,
-        retryAfterSeconds: 5,
-        maxTargetsPerRequest: 100,
-      },
+      { pendingCount: 200, streamLength: 50 },
+      { maxPending: 200, maxQueueDepth: 500, retryAfterSeconds: 5, maxTargetsPerRequest: 100 },
     );
-
-    expect(result).toEqual({
-      reject: true,
-      reason: "pending",
-      retryAfterSeconds: 5,
-    });
+    expect(result).toEqual({ reject: true, reason: "pending", retryAfterSeconds: 5 });
   });
 
   it("rejects when queue depth exceeds the configured threshold", () => {
     const result = evaluateOutboundWebhookBackpressure(
-      {
-        pendingCount: 10,
-        streamLength: 500,
-      },
-      {
-        maxPending: 200,
-        maxQueueDepth: 500,
-        retryAfterSeconds: 7,
-        maxTargetsPerRequest: 100,
-      },
+      { pendingCount: 10, streamLength: 500 },
+      { maxPending: 200, maxQueueDepth: 500, retryAfterSeconds: 7, maxTargetsPerRequest: 100 },
     );
-
-    expect(result).toEqual({
-      reject: true,
-      reason: "queue_depth",
-      retryAfterSeconds: 7,
-    });
+    expect(result).toEqual({ reject: true, reason: "queue_depth", retryAfterSeconds: 7 });
   });
 
   it("does not reject on queue depth alone when there is no pending backlog", () => {
     const result = evaluateOutboundWebhookBackpressure(
-      {
-        pendingCount: 0,
-        streamLength: 500,
-      },
-      {
-        maxPending: 200,
-        maxQueueDepth: 500,
-        retryAfterSeconds: 7,
-        maxTargetsPerRequest: 100,
-      },
+      { pendingCount: 0, streamLength: 500 },
+      { maxPending: 200, maxQueueDepth: 500, retryAfterSeconds: 7, maxTargetsPerRequest: 100 },
     );
-
     expect(result).toEqual({ reject: false });
   });
 
   it("does not reject on stream length when queue-depth gate is disabled", () => {
     const result = evaluateOutboundWebhookBackpressure(
-      {
-        pendingCount: 10,
-        streamLength: 500_000,
-      },
-      {
-        maxPending: 200,
-        maxQueueDepth: 0,
-        retryAfterSeconds: 7,
-        maxTargetsPerRequest: 100,
-      },
+      { pendingCount: 10, streamLength: 500_000 },
+      { maxPending: 200, maxQueueDepth: 0, retryAfterSeconds: 7, maxTargetsPerRequest: 100 },
     );
-
     expect(result).toEqual({ reject: false });
   });
 });
@@ -208,28 +207,18 @@ describe("resolveOutboundWebhookBackpressureConfigFromEnv", () => {
   it("defaults queue-depth gate to disabled to avoid stream-history false positives", () => {
     const previous = process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
     delete process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
-
     const config = resolveOutboundWebhookBackpressureConfigFromEnv();
     expect(config.maxQueueDepth).toBe(0);
-
-    if (previous === undefined) {
-      delete process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
-    } else {
-      process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"] = previous;
-    }
+    if (previous === undefined) delete process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
+    else process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"] = previous;
   });
 
   it("allows explicit queue-depth thresholds via env when desired", () => {
     const previous = process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
     process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"] = "75000";
-
     const config = resolveOutboundWebhookBackpressureConfigFromEnv();
     expect(config.maxQueueDepth).toBe(75_000);
-
-    if (previous === undefined) {
-      delete process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
-    } else {
-      process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"] = previous;
-    }
+    if (previous === undefined) delete process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"];
+    else process.env["OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH"] = previous;
   });
 });
