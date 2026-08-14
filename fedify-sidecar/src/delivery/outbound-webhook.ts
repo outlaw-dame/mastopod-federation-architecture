@@ -80,32 +80,10 @@ export function normalizeAndDedupeOutboundTargets(
     );
   }
 
-  // This normalizer has two call sites with intentionally different authority
-  // requirements:
-  //
-  // 1. /webhook/outbox passes the complete webhook/backpressure configuration.
-  //    This is the ActivityPods transport boundary and MUST prove APDM authority.
-  // 2. OutboxIntentWorker passes only maxTargetsPerRequest while re-normalizing
-  //    already-durable targets. Sidecar-generated intents (relay subscriptions,
-  //    moderation reports, etc.) must remain valid there.
-  //
-  // Use call-site context, never caller-controlled target fields, to distinguish
-  // those stages. A raw HTTP caller therefore cannot bypass Phase 6 by adding
-  // deliveryUrl/targetDomain to its JSON payload.
   const requireApdmAuthority = isWebhookBoundaryConfig(config);
 
   let apdmAuthorityIntentId: string | undefined;
   if (requireApdmAuthority) {
-    // APDM Phase 6 retires the legacy raw-activity webhook as a routing
-    // authority. Every raw target accepted from ActivityPods must prove that it
-    // came from one stable ap.delivery-plan.v1 intent. Validate this before URL
-    // filtering/dedupe so a mixed request cannot smuggle an unmarked target in
-    // as a merely "invalid" entry while another marked target keeps it accepted.
-    //
-    // The only exception is the containerized AP interoperability harness. It
-    // requires an explicit test/development NODE_ENV and a destination host in
-    // APDM_INTEROP_PRIVATE_HOSTS. Unset/unknown/production environments remain
-    // fail-closed even if that allowlist is accidentally present.
     for (const rawTarget of remoteTargets) {
       const authority = parseApdmAuthority(rawTarget) ?? parseExplicitInteropAuthority(rawTarget);
       if (!authority) {
@@ -164,6 +142,76 @@ export function normalizeAndDedupeOutboundTargets(
   };
 }
 
+/**
+ * Bind the raw target marker to the rest of the authoritative APDM handoff.
+ * Returns the stable Delivery Plan intent ID for production handoffs. The only
+ * undefined result is the explicitly allowlisted non-production interop fixture,
+ * which retains its historical sidecar-generated intent identity.
+ */
+export function validateApdmWebhookIdentity(input: {
+  normalizedTargets: NormalizedOutboundTargetsResult;
+  headerIntentId: unknown;
+  meta: unknown;
+}): string | undefined {
+  const markerIntentId = input.normalizedTargets.apdmAuthorityIntentId;
+  if (!markerIntentId) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_AUTHORITY_REQUIRED",
+      400,
+      "APDM Delivery Plan target authority is required.",
+    );
+  }
+
+  if (markerIntentId === APDM_INTEROP_LEGACY_INTENT_ID) {
+    return undefined;
+  }
+
+  const headerIntentId = normalizeExactIntentId(input.headerIntentId);
+  if (!headerIntentId) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_INTENT_HEADER_REQUIRED",
+      400,
+      "X-APDM-Intent-Id must contain the authoritative Delivery Plan intentId.",
+    );
+  }
+
+  if (!input.meta || typeof input.meta !== "object" || Array.isArray(input.meta)) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_META_REQUIRED",
+      400,
+      "APDM Delivery Plan metadata is required.",
+    );
+  }
+
+  const meta = input.meta as Record<string, unknown>;
+  if (meta["deliveryPlanSchema"] !== APDM_DELIVERY_PLAN_SCHEMA) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_SCHEMA_MISMATCH",
+      400,
+      "meta.deliveryPlanSchema must be ap.delivery-plan.v1.",
+    );
+  }
+
+  const metaIntentId = normalizeExactIntentId(meta["deliveryPlanIntentId"]);
+  if (!metaIntentId) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_META_INTENT_REQUIRED",
+      400,
+      "meta.deliveryPlanIntentId must contain the authoritative Delivery Plan intentId.",
+    );
+  }
+
+  if (headerIntentId !== markerIntentId || metaIntentId !== markerIntentId) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_INTENT_MISMATCH",
+      400,
+      "APDM target marker, X-APDM-Intent-Id, and meta.deliveryPlanIntentId must match.",
+    );
+  }
+
+  return markerIntentId;
+}
+
 export function evaluateOutboundWebhookBackpressure(
   snapshot: OutboundWebhookQueueSnapshot,
   config: OutboundWebhookBackpressureConfig,
@@ -176,9 +224,6 @@ export function evaluateOutboundWebhookBackpressure(
     };
   }
 
-  // Redis stream length is historical and can stay high even after workers
-  // drain current load. Treat queue-depth backpressure as actionable only when
-  // there is active pending work to avoid permanent false-positive rejection.
   if (
     config.maxQueueDepth > 0 &&
     snapshot.pendingCount > 0 &&
@@ -197,8 +242,6 @@ export function evaluateOutboundWebhookBackpressure(
 export function resolveOutboundWebhookBackpressureConfigFromEnv(): OutboundWebhookBackpressureConfig {
   return {
     maxPending: parsePositiveIntEnv("OUTBOUND_WEBHOOK_MAX_PENDING", 25_000),
-    // Stream length is historical, not just active backlog. Keep disabled by
-    // default to avoid false positives after long-running benchmarks.
     maxQueueDepth: parseNonNegativeIntEnv("OUTBOUND_WEBHOOK_MAX_QUEUE_DEPTH", 0),
     retryAfterSeconds: parsePositiveIntEnv("OUTBOUND_WEBHOOK_RETRY_AFTER_SECONDS", 5),
     maxTargetsPerRequest: parsePositiveIntEnv("OUTBOUND_WEBHOOK_MAX_TARGETS", 5_000),
@@ -214,26 +257,13 @@ function isWebhookBoundaryConfig(config: OutboundTargetNormalizationConfig): boo
 }
 
 function parseApdmAuthority(rawTarget: unknown): { intentId: string } | null {
-  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) {
-    return null;
-  }
-
+  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
   const authority = (rawTarget as Record<string, unknown>)["apdmAuthority"];
-  if (!authority || typeof authority !== "object" || Array.isArray(authority)) {
-    return null;
-  }
-
+  if (!authority || typeof authority !== "object" || Array.isArray(authority)) return null;
   const record = authority as Record<string, unknown>;
-  if (record["schema"] !== APDM_DELIVERY_PLAN_SCHEMA) {
-    return null;
-  }
-
-  const intentId = record["intentId"];
-  if (typeof intentId !== "string" || intentId.trim().length === 0 || intentId !== intentId.trim()) {
-    return null;
-  }
-
-  return { intentId };
+  if (record["schema"] !== APDM_DELIVERY_PLAN_SCHEMA) return null;
+  const intentId = normalizeExactIntentId(record["intentId"]);
+  return intentId ? { intentId } : null;
 }
 
 function parseExplicitInteropAuthority(rawTarget: unknown): { intentId: string } | null {
@@ -265,21 +295,19 @@ function parseExplicitInteropAuthority(rawTarget: unknown): { intentId: string }
   return { intentId: APDM_INTEROP_LEGACY_INTENT_ID };
 }
 
-function normalizeOutboundTarget(rawTarget: unknown): NormalizedOutboundTarget | null {
-  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) {
-    return null;
-  }
+function normalizeExactIntentId(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim().length === 0 || value !== value.trim()) return null;
+  return value;
+}
 
+function normalizeOutboundTarget(rawTarget: unknown): NormalizedOutboundTarget | null {
+  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
   const target = rawTarget as Record<string, unknown>;
   const inboxUrl = normalizeFederationTargetUrl(target["inboxUrl"]);
-  if (!inboxUrl) {
-    return null;
-  }
-
+  if (!inboxUrl) return null;
   const sharedInboxUrl = normalizeFederationTargetUrl(target["sharedInboxUrl"]);
   const deliveryUrl = sharedInboxUrl ?? inboxUrl;
   const targetDomain = new URL(deliveryUrl).hostname.toLowerCase();
-
   return {
     inboxUrl,
     ...(sharedInboxUrl ? { sharedInboxUrl } : {}),
@@ -289,64 +317,40 @@ function normalizeOutboundTarget(rawTarget: unknown): NormalizedOutboundTarget |
 }
 
 function normalizeFederationTargetUrl(value: unknown): string | null {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return null;
-  }
-
+  if (typeof value !== "string" || value.trim().length === 0) return null;
   let parsed: URL;
   try {
     parsed = new URL(value.trim());
   } catch {
     return null;
   }
-
-  if (parsed.username || parsed.password) {
-    return null;
-  }
-
+  if (parsed.username || parsed.password) return null;
   const protocol = parsed.protocol.toLowerCase();
   const hostname = parsed.hostname.toLowerCase();
-  if (protocol !== "https:" && !(protocol === "http:" && isLoopbackHost(hostname))) {
-    return null;
-  }
-
+  if (protocol !== "https:" && !(protocol === "http:" && isLoopbackHost(hostname))) return null;
   parsed.hash = "";
   return parsed.toString();
 }
 
 function isLoopbackHost(hostname: string): boolean {
-  if (hostname === "localhost" || hostname === "::1") {
-    return true;
-  }
-
+  if (hostname === "localhost" || hostname === "::1") return true;
   const ipVersion = isIP(hostname);
-  if (ipVersion === 4) {
-    return hostname.startsWith("127.");
-  }
-
+  if (ipVersion === 4) return hostname.startsWith("127.");
   return false;
 }
 
 function parsePositiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
-
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
 }
 
 function parseNonNegativeIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
-
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return fallback;
-  }
-
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return parsed;
 }
