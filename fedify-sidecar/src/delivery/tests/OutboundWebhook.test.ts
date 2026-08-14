@@ -166,6 +166,23 @@ describe("normalizeAndDedupeOutboundTargets", () => {
     ).toThrowError(OutboundWebhookValidationError);
   });
 
+  it("applies the interop allowlist to the actual normalized delivery URL", () => {
+    process.env["NODE_ENV"] = "development";
+    process.env["APDM_INTEROP_PRIVATE_HOSTS"] = "gotosocial";
+
+    expect(() =>
+      normalizeAndDedupeOutboundTargets(
+        [
+          {
+            inboxUrl: "https://attacker.example/inbox",
+            sharedInboxUrl: "http://gotosocial/inbox",
+          },
+        ],
+        webhookConfig(),
+      ),
+    ).toThrowError(OutboundWebhookValidationError);
+  });
+
   it("keeps the interop allowlist fail-closed in production and unknown environments", () => {
     process.env["APDM_INTEROP_PRIVATE_HOSTS"] = "gotosocial";
     for (const environment of ["production", "staging", ""]) {

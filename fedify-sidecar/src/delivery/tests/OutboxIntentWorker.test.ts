@@ -169,10 +169,19 @@ describe("OutboxIntentWorker", () => {
     expect(queue.moveToDlq).not.toHaveBeenCalled();
   });
 
-  it("fails closed when an observation-only intent contains any delivery target", async () => {
+  it("does not let a target-bearing intent opt into observation-only via bridge hints", async () => {
     const queue = makeQueue();
     const redpanda = makeRedpanda();
-    const sharedInboxCache = { enrichTargets: vi.fn() } as any;
+    const sharedInboxCache = {
+      enrichTargets: vi.fn().mockResolvedValue([
+        {
+          inboxUrl: "https://remote.example/users/bob/inbox",
+          sharedInboxUrl: "https://remote.example/inbox",
+          deliveryUrl: "https://remote.example/inbox",
+          targetDomain: "remote.example",
+        },
+      ]),
+    } as any;
     const worker = new TestOutboxIntentWorker(
       queue,
       redpanda,
@@ -180,13 +189,21 @@ describe("OutboxIntentWorker", () => {
     );
     const intent = makeIntent({ bridgeHints: { observationOnly: true } });
 
-    await worker.runIntent("msg-observation-invalid", intent);
+    await worker.runIntent("msg-target-bearing-reserved-hint", intent);
 
-    expect(queue.moveToDlq).toHaveBeenCalledTimes(1);
-    expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "msg-observation-invalid");
-    expect(redpanda.publishToStream1).not.toHaveBeenCalled();
-    expect(sharedInboxCache.enrichTargets).not.toHaveBeenCalled();
-    expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
+    expect(sharedInboxCache.enrichTargets).toHaveBeenCalledTimes(1);
+    expect(redpanda.publishToStream1).toHaveBeenCalledTimes(1);
+    expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledTimes(1);
+    expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledWith(
+      intent.intentId,
+      expect.arrayContaining([
+        expect.objectContaining({
+          targetInbox: "https://remote.example/inbox",
+          targetDomain: "remote.example",
+        }),
+      ]),
+    );
+    expect(queue.moveToDlq).not.toHaveBeenCalled();
   });
 
   it("persists a transient retry before acknowledging the source intent", async () => {

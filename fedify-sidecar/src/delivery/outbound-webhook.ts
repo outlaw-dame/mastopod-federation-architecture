@@ -283,17 +283,12 @@ function parseExplicitInteropAuthority(rawTarget: unknown): { intentId: string; 
   if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
 
   const target = rawTarget as Record<string, unknown>;
-  const rawUrl = typeof target["sharedInboxUrl"] === "string"
-    ? target["sharedInboxUrl"]
-    : target["inboxUrl"];
-  if (typeof rawUrl !== "string") return null;
+  const sharedInboxUrl = normalizeFederationTargetUrl(target["sharedInboxUrl"]);
+  const inboxUrl = normalizeFederationTargetUrl(target["inboxUrl"]);
+  const deliveryUrl = sharedInboxUrl ?? inboxUrl;
+  if (!deliveryUrl) return null;
 
-  let hostname: string;
-  try {
-    hostname = new URL(rawUrl).hostname.toLowerCase();
-  } catch {
-    return null;
-  }
+  const hostname = new URL(deliveryUrl).hostname.toLowerCase();
 
   const allowedHosts = new Set(
     String(process.env["APDM_INTEROP_PRIVATE_HOSTS"] ?? "")

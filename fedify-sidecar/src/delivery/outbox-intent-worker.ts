@@ -274,6 +274,7 @@ export class OutboxIntentWorker {
 
   private isObservationOnlyIntent(intent: OutboxIntent): boolean {
     return Boolean(
+      intent.targets.length === 0 &&
       intent.bridgeHints &&
       typeof intent.bridgeHints === "object" &&
       !Array.isArray(intent.bridgeHints) &&
