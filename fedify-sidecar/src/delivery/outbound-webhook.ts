@@ -27,6 +27,9 @@ export interface OutboundWebhookBackpressureConfig {
   maxTargetsPerRequest: number;
 }
 
+type OutboundTargetNormalizationConfig = Pick<OutboundWebhookBackpressureConfig, "maxTargetsPerRequest"> &
+  Partial<Pick<OutboundWebhookBackpressureConfig, "maxPending" | "maxQueueDepth" | "retryAfterSeconds">>;
+
 export interface OutboundWebhookQueueSnapshot {
   pendingCount: number;
   streamLength: number;
@@ -51,7 +54,7 @@ export class OutboundWebhookValidationError extends Error {
 
 export function normalizeAndDedupeOutboundTargets(
   remoteTargets: unknown,
-  config: Pick<OutboundWebhookBackpressureConfig, "maxTargetsPerRequest">,
+  config: OutboundTargetNormalizationConfig,
 ): NormalizedOutboundTargetsResult {
   if (!Array.isArray(remoteTargets)) {
     throw new OutboundWebhookValidationError(
@@ -77,18 +80,22 @@ export function normalizeAndDedupeOutboundTargets(
     );
   }
 
-  // This normalizer is used twice:
-  // 1. at /webhook/outbox on raw ActivityPods targets; and
-  // 2. inside OutboxIntentWorker on already-normalized durable intent targets.
+  // This normalizer has two call sites with intentionally different authority
+  // requirements:
   //
-  // Phase 6 authority proof belongs only at boundary (1). Durable intent targets
-  // are recognizable by the complete normalized shape produced before queueing
-  // (`deliveryUrl` + `targetDomain`) and must remain usable by sidecar-generated
-  // intents such as relay subscriptions and moderation reports.
-  const alreadyNormalizedInternalTargets = remoteTargets.every(isNormalizedOutboxIntentTargetShape);
+  // 1. /webhook/outbox passes the complete webhook/backpressure configuration.
+  //    This is the ActivityPods transport boundary and MUST prove APDM authority.
+  // 2. OutboxIntentWorker passes only maxTargetsPerRequest while re-normalizing
+  //    already-durable targets. Sidecar-generated intents (relay subscriptions,
+  //    moderation reports, etc.) must remain valid there.
+  //
+  // Use call-site context, never caller-controlled target fields, to distinguish
+  // those stages. A raw HTTP caller therefore cannot bypass Phase 6 by adding
+  // deliveryUrl/targetDomain to its JSON payload.
+  const requireApdmAuthority = isWebhookBoundaryConfig(config);
 
   let apdmAuthorityIntentId: string | undefined;
-  if (!alreadyNormalizedInternalTargets) {
+  if (requireApdmAuthority) {
     // APDM Phase 6 retires the legacy raw-activity webhook as a routing
     // authority. Every raw target accepted from ActivityPods must prove that it
     // came from one stable ap.delivery-plan.v1 intent. Validate this before URL
@@ -198,13 +205,11 @@ export function resolveOutboundWebhookBackpressureConfigFromEnv(): OutboundWebho
   };
 }
 
-function isNormalizedOutboxIntentTargetShape(rawTarget: unknown): boolean {
-  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return false;
-  const target = rawTarget as Record<string, unknown>;
+function isWebhookBoundaryConfig(config: OutboundTargetNormalizationConfig): boolean {
   return (
-    typeof target["inboxUrl"] === "string" && target["inboxUrl"].length > 0 &&
-    typeof target["deliveryUrl"] === "string" && target["deliveryUrl"].length > 0 &&
-    typeof target["targetDomain"] === "string" && target["targetDomain"].length > 0
+    typeof config.maxPending === "number" &&
+    typeof config.maxQueueDepth === "number" &&
+    typeof config.retryAfterSeconds === "number"
   );
 }
 
