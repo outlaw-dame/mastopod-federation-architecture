@@ -1,0 +1,59 @@
+name: APDM Phase 6 internal intent namespace patch
+
+on:
+  push:
+    branches:
+      - apdm/phase-6-retire-raw-routing
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[skip apdm-internal-intent-namespace-patcher]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: apdm/phase-6-retire-raw-routing
+          fetch-depth: 0
+      - name: Reserve sidecar-owned durable intent namespaces
+        shell: python
+        run: |
+          from pathlib import Path
+
+          impl = Path('fedify-sidecar/src/delivery/outbound-webhook.ts')
+          text = impl.read_text()
+          old = 'const APDM_OBSERVATION_INTENT_PREFIX = "apdm-observation:";\n'
+          new = old + 'const SIDECAR_INTERNAL_INTENT_PREFIXES = [APDM_OBSERVATION_INTENT_PREFIX, "moderation-report:"] as const;\n'
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('observation prefix anchor missing')
+              text = text.replace(old, new, 1)
+
+          old_check = '''  if (markerIntentId.startsWith(APDM_OBSERVATION_INTENT_PREFIX)) {\n    throw new OutboundWebhookValidationError(\n      "OUTBOUND_APDM_INTENT_RESERVED",\n      400,\n      "Delivery Plan intentId must not use the reserved observation intent namespace.",\n    );\n  }\n'''
+          new_check = '''  if (SIDECAR_INTERNAL_INTENT_PREFIXES.some((prefix) => markerIntentId.startsWith(prefix))) {\n    throw new OutboundWebhookValidationError(\n      "OUTBOUND_APDM_INTENT_RESERVED",\n      400,\n      "Delivery Plan intentId must not use a sidecar-reserved durable intent namespace.",\n    );\n  }\n'''
+          if new_check not in text:
+              if old_check not in text:
+                  raise SystemExit('reserved-prefix validation anchor missing')
+              text = text.replace(old_check, new_check, 1)
+          impl.write_text(text)
+
+          test = Path('fedify-sidecar/src/delivery/tests/OutboundWebhook.test.ts')
+          text = test.read_text()
+          old_test = '''  it("reserves the observation intent namespace from Delivery Plan handoffs", () => {\n    const reservedIntentId = "apdm-observation:01TESTEVENT";\n    const result = normalizeAndDedupeOutboundTargets(\n      [\n        {\n          inboxUrl: "https://one.example/inbox",\n          apdmAuthority: { schema: "ap.delivery-plan.v1", intentId: reservedIntentId },\n        },\n      ],\n      webhookConfig(),\n    );\n\n    expect(() =>\n      validateApdmWebhookIdentity({\n        normalizedTargets: result,\n        headerIntentId: reservedIntentId,\n        meta: deliveryPlanMeta(reservedIntentId),\n      }),\n    ).toThrowError(/reserved observation intent namespace/u);\n  });\n'''
+          new_test = '''  it("reserves sidecar-owned durable intent namespaces from Delivery Plan handoffs", () => {\n    for (const reservedIntentId of [\n      "apdm-observation:01TESTEVENT",\n      "moderation-report:01TESTREPORT",\n    ]) {\n      const result = normalizeAndDedupeOutboundTargets(\n        [\n          {\n            inboxUrl: "https://one.example/inbox",\n            apdmAuthority: { schema: "ap.delivery-plan.v1", intentId: reservedIntentId },\n          },\n        ],\n        webhookConfig(),\n      );\n\n      expect(() =>\n        validateApdmWebhookIdentity({\n          normalizedTargets: result,\n          headerIntentId: reservedIntentId,\n          meta: deliveryPlanMeta(reservedIntentId),\n        }),\n      ).toThrowError(/sidecar-reserved durable intent namespace/u);\n    }\n  });\n'''
+          if new_test not in text:
+              if old_test not in text:
+                  raise SystemExit('reserved-prefix test anchor missing')
+              text = text.replace(old_test, new_test, 1)
+          test.write_text(text)
+
+          Path('.github/workflows/apdm-phase6-internal-intent-namespace-patcher.yml').unlink()
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(apdm): reserve sidecar durable intent namespaces [skip apdm-internal-intent-namespace-patcher]"
+          git push origin HEAD:apdm/phase-6-retire-raw-routing
