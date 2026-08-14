@@ -1,0 +1,50 @@
+name: APDM Phase 6 README patch
+
+on:
+  push:
+    branches:
+      - apdm/phase-6-retire-raw-routing
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[skip apdm-readme-patcher]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: apdm/phase-6-retire-raw-routing
+          fetch-depth: 0
+      - name: Align README with Phase 6 authority model
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('fedify-sidecar/README.md')
+          text = p.read_text()
+          text = text.replace('  │  Outbox Emitter (emits events to sidecar)                   ││\n', '  │  Delivery Plan + Observation Integration                   ││\n')
+          text = text.replace('| **Outbox Emitter** | Emits events when activities are committed |\n', '| **Delivery Plan / Observation Integration** | Produces authoritative remote Delivery Plans and targetless native-mode indexing observations |\n')
+          old_flow = '''### Outbound (Local → Remote)\n\n1. User posts activity to outbox\n2. ActivityPods commits to outbox\n3. ActivityPods emits `activitypub.outbox.committed` event\n4. Sidecar receives event via webhook\n5. Sidecar produces to Stream1 (if public)\n6. Sidecar creates delivery jobs in Redis\n7. Delivery worker consumes job\n8. Delivery worker calls Signing API\n9. Delivery worker POSTs to remote inbox\n10. On success: ack job; On failure: retry or DLQ\n'''
+          new_flow = '''### Outbound (Local → Remote)\n\n1. User posts activity to the ActivityPods outbox.\n2. ActivityPods commits the activity and remains authoritative for recipient expansion.\n3. In **external** mode, ActivityPods creates one validated `ap.delivery-plan.v1` intent and durably hands it to `POST /webhook/outbox`.\n4. The sidecar binds the target marker, `X-APDM-Intent-Id`, metadata, and durable intent ID before Redis enqueue.\n5. The outbox-intent worker publishes Stream1/event-log state when eligible and fans the authoritative targets into delivery jobs.\n6. Delivery workers call the ActivityPods Signing API and POST to remote inboxes; keys never leave ActivityPods.\n7. In **native** rollback mode, SemApps owns remote delivery and ActivityPods sends only targetless committed/indexability metadata to `POST /webhook/outbox-observation`; that path creates zero remote delivery jobs.\n8. On external delivery success the job is acknowledged; transient failures retry and terminal failures go to the DLQ.\n'''
+          if old_flow not in text:
+              raise SystemExit('outbound flow anchor missing')
+          text = text.replace(old_flow, new_flow, 1)
+
+          old_services = '''### Required Services\n\nAdd these Moleculer services to your ActivityPods instance:\n\n1. **`signing.service.js`** - Signing API for HTTP signatures\n2. **`outbox-emitter.service.js`** - Emit events when activities are committed\n3. **`activitypub-bridge-recipient-resolver.service.js`** - Trusted internal resolver for outbound targets and bridge media fetches\n\nOptional but recommended when you want derivative generation and media analysis off the pod request path:\n\n4. **`media-pipeline-emitter.service.js`** - Forward newly created pod file resources to `media-pipeline-sidecar`\n\nSee `activitypods-integration/` directory for implementations.\n\nImportant architecture note:\n\n- `activitypub-bridge-recipient-resolver.service.js` resolves bridge attachment bytes for AP->AT projection and link-preview flows.\n- `media-pipeline-emitter.service.js` is the asynchronous handoff into `media-pipeline-sidecar`.\n- These are complementary paths, not the same subsystem.\n'''
+          new_services = '''### Required Services\n\nThe sidecar depends on these ActivityPods-owned integration capabilities:\n\n1. **`signing.service.js`** - Signing API for HTTP signatures; private keys remain inside ActivityPods.\n2. **Authoritative Delivery Plan / observation producer** - The ActivityPods Phase 6 integration creates `ap.delivery-plan.v1` remote handoffs for external mode and targetless `/webhook/outbox-observation` handoffs for native rollback indexing. This producer lives in the ActivityPods repository; there is no copied `outbox-emitter.service.js` implementation in this sidecar repository.\n3. **`activitypub-bridge-recipient-resolver.service.js`** - Trusted internal resolver for bridge attachment/media fetches and other bridge-only resolution work; it is not a second remote-delivery routing authority.\n\nOptional but recommended when you want derivative generation and media analysis off the pod request path:\n\n4. **`media-pipeline-emitter.service.js`** - Forward newly created pod file resources to `media-pipeline-sidecar`.\n\nSee `activitypods-integration/` for the integration helpers that are still owned here, and the paired ActivityPods APDM documentation for the authoritative Delivery Plan/observation producer.\n\nImportant architecture note:\n\n- Remote recipient expansion is performed once by ActivityPods and arrives at the sidecar only through the validated Delivery Plan handoff.\n- `activitypub-bridge-recipient-resolver.service.js` resolves bridge attachment bytes for AP->AT projection and link-preview flows.\n- `media-pipeline-emitter.service.js` is the asynchronous handoff into `media-pipeline-sidecar`.\n- These are complementary paths, not duplicate federation authorities.\n'''
+          if old_services not in text:
+              raise SystemExit('required-services anchor missing')
+          text = text.replace(old_services, new_services, 1)
+
+          text = text.replace('| `/webhook/outbox` | POST | Receive outbox events |\n', '| `/webhook/outbox` | POST | Receive authority-bound `ap.delivery-plan.v1` remote handoffs |\n| `/webhook/outbox-observation` | POST | Receive targetless native-mode committed/indexability observations; creates zero delivery jobs |\n')
+          p.write_text(text)
+          Path('.github/workflows/apdm-phase6-readme-patcher.yml').unlink()
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs(apdm): align sidecar README with Phase 6 authority [skip apdm-readme-patcher]"
+          git push origin HEAD:apdm/phase-6-retire-raw-routing
