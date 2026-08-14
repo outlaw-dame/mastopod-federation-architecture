@@ -10,13 +10,15 @@ const rampUpDuration = __ENV.RAMP_UP_DURATION || '1m';
 const rampDownDuration = __ENV.RAMP_DOWN_DURATION || '1m';
 const vus = Number.parseInt(__ENV.VUS || '20', 10);
 const rampTarget = Number.parseInt(__ENV.RAMP_TARGET || `${vus * 2}`, 10);
+const runNonce = __ENV.APDM_LOADTEST_RUN_NONCE
+  || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 const acceptedCounter = new Counter('fedify_loadtest_accepted_total');
 const expectedStatusRate = new Rate('fedify_loadtest_expected_status_rate');
 const appLatency = new Trend('fedify_loadtest_app_latency_ms', true);
 
 function webhookIntentId() {
-  return `apdm-loadtest-${__VU}-${__ITER}`;
+  return `apdm-loadtest-${runNonce}-${__VU}-${__ITER}`;
 }
 
 function inboxPayload() {
