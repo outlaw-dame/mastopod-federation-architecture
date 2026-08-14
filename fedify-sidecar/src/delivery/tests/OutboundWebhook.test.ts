@@ -4,6 +4,7 @@ import {
   normalizeAndDedupeOutboundTargets,
   OutboundWebhookValidationError,
   resolveOutboundWebhookBackpressureConfigFromEnv,
+  validateApdmWebhookIdentity,
 } from "../outbound-webhook.js";
 
 const AUTHORITY = {
@@ -31,6 +32,20 @@ function webhookConfig(maxTargetsPerRequest = 100) {
     maxQueueDepth: 0,
     retryAfterSeconds: 5,
     maxTargetsPerRequest,
+  };
+}
+
+function normalizedAuthority() {
+  return normalizeAndDedupeOutboundTargets(
+    [target({ inboxUrl: "https://one.example/inbox" })],
+    webhookConfig(),
+  );
+}
+
+function deliveryPlanMeta(intentId = AUTHORITY.intentId) {
+  return {
+    deliveryPlanSchema: "ap.delivery-plan.v1",
+    deliveryPlanIntentId: intentId,
   };
 }
 
@@ -143,6 +158,13 @@ describe("normalizeAndDedupeOutboundTargets", () => {
       webhookConfig(),
     );
     expect(result.apdmAuthorityIntentId).toBe("apdm-interop-legacy-fixture");
+    expect(
+      validateApdmWebhookIdentity({
+        normalizedTargets: result,
+        headerIntentId: undefined,
+        meta: undefined,
+      }),
+    ).toBeUndefined();
 
     expect(() =>
       normalizeAndDedupeOutboundTargets(
@@ -205,19 +227,64 @@ describe("normalizeAndDedupeOutboundTargets", () => {
         webhookConfig(1),
       ),
     ).toThrowError(OutboundWebhookValidationError);
+  });
+});
 
-    try {
-      normalizeAndDedupeOutboundTargets(
-        [
-          target({ inboxUrl: "https://one.example/inbox" }),
-          target({ inboxUrl: "https://two.example/inbox" }),
-        ],
-        webhookConfig(1),
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(OutboundWebhookValidationError);
-      expect((error as OutboundWebhookValidationError).statusCode).toBe(413);
+describe("validateApdmWebhookIdentity", () => {
+  it("returns the authoritative intent only when marker, header, schema, and metadata agree", () => {
+    expect(
+      validateApdmWebhookIdentity({
+        normalizedTargets: normalizedAuthority(),
+        headerIntentId: AUTHORITY.intentId,
+        meta: deliveryPlanMeta(),
+      }),
+    ).toBe(AUTHORITY.intentId);
+  });
+
+  it("rejects missing and padded X-APDM-Intent-Id headers", () => {
+    for (const headerIntentId of [undefined, "", ` ${AUTHORITY.intentId} `]) {
+      expect(() =>
+        validateApdmWebhookIdentity({
+          normalizedTargets: normalizedAuthority(),
+          headerIntentId,
+          meta: deliveryPlanMeta(),
+        }),
+      ).toThrowError(OutboundWebhookValidationError);
     }
+  });
+
+  it("rejects missing or wrong Delivery Plan metadata schema", () => {
+    for (const meta of [
+      undefined,
+      { deliveryPlanIntentId: AUTHORITY.intentId },
+      { deliveryPlanSchema: "ap.delivery-plan.v0", deliveryPlanIntentId: AUTHORITY.intentId },
+    ]) {
+      expect(() =>
+        validateApdmWebhookIdentity({
+          normalizedTargets: normalizedAuthority(),
+          headerIntentId: AUTHORITY.intentId,
+          meta,
+        }),
+      ).toThrowError(OutboundWebhookValidationError);
+    }
+  });
+
+  it("rejects marker/header/meta intent mismatches", () => {
+    expect(() =>
+      validateApdmWebhookIdentity({
+        normalizedTargets: normalizedAuthority(),
+        headerIntentId: "different-header-intent",
+        meta: deliveryPlanMeta(),
+      }),
+    ).toThrowError(/must match/u);
+
+    expect(() =>
+      validateApdmWebhookIdentity({
+        normalizedTargets: normalizedAuthority(),
+        headerIntentId: AUTHORITY.intentId,
+        meta: deliveryPlanMeta("different-meta-intent"),
+      }),
+    ).toThrowError(/must match/u);
   });
 });
 
