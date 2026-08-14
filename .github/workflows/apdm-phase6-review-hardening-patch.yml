@@ -1,0 +1,34 @@
+name: APDM Phase 6 review hardening patch
+
+on:
+  push:
+    branches:
+      - apdm/phase-6-retire-raw-routing
+    paths:
+      - scripts/apdm-phase6-review-hardening-patch.py
+      - .github/workflows/apdm-phase6-review-hardening-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[skip apdm-review-hardening-patcher]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply guarded review hardening
+        run: python scripts/apdm-phase6-review-hardening-patch.py
+      - name: Commit production/test changes only
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(apdm): scope observation provenance and interop allowlist [skip apdm-review-hardening-patcher]'
+          git push
