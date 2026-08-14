@@ -1,0 +1,58 @@
+name: APDM Phase 6 inbound loadtest nonce patch
+
+on:
+  push:
+    branches:
+      - apdm/phase-6-retire-raw-routing
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[skip apdm-inbound-loadtest-nonce-patcher]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: apdm/phase-6-retire-raw-routing
+          fetch-depth: 0
+      - name: Nonce inbound benchmark identities
+        shell: python
+        run: |
+          from pathlib import Path
+
+          sidecar = Path('fedify-sidecar/loadtest/sidecar-loadtest.js')
+          text = sidecar.read_text()
+          replacements = {
+            '`https://remote.example/notes/${__VU}-${__ITER}`': '`https://remote.example/notes/${runNonce}-${__VU}-${__ITER}`',
+            '`https://remote.example/activities/create-${__VU}-${__ITER}`': '`https://remote.example/activities/create-${runNonce}-${__VU}-${__ITER}`',
+          }
+          for old, new in replacements.items():
+              if new not in text:
+                  if old not in text:
+                      raise SystemExit(f'sidecar inbound identity anchor missing: {old}')
+                  text = text.replace(old, new)
+          sidecar.write_text(text)
+
+          relay = Path('fedify-sidecar/loadtest/relay-loadtest.js')
+          text = relay.read_text()
+          replacements = {
+            '`https://social.example.com/users/user-${__VU}/statuses/${__ITER}`': '`https://social.example.com/users/user-${__VU}/statuses/${runNonce}-${__ITER}`',
+            '`https://${RELAY_DOMAIN}/activities/announce-${__VU}-${__ITER}`': '`https://${RELAY_DOMAIN}/activities/announce-${runNonce}-${__VU}-${__ITER}`',
+          }
+          for old, new in replacements.items():
+              if new not in text:
+                  if old not in text:
+                      raise SystemExit(f'relay inbound identity anchor missing: {old}')
+                  text = text.replace(old, new)
+          relay.write_text(text)
+
+          Path('.github/workflows/apdm-phase6-inbound-loadtest-nonce-patcher.yml').unlink()
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "test(apdm): nonce inbound benchmark identities [skip apdm-inbound-loadtest-nonce-patcher]"
+          git push origin HEAD:apdm/phase-6-retire-raw-routing
