@@ -135,6 +135,7 @@ function relaySubscribePayload(idSuffix) {
   const suffix = idSuffix || `${__VU}-${__ITER}`;
   const activityId =
     `https://localhost/activities/follow-relay-${suffix}`;
+  const intentId = `apdm-relay-loadtest-${suffix}`;
 
   return JSON.stringify({
     actorUri: localRelayActorUri,
@@ -150,8 +151,16 @@ function relaySubscribePayload(idSuffix) {
       {
         targetDomain: RELAY_DOMAIN,
         inboxUrl: RELAY_INBOX_URL,
+        apdmAuthority: {
+          schema: 'ap.delivery-plan.v1',
+          intentId,
+        },
       },
     ],
+    meta: {
+      deliveryPlanSchema: 'ap.delivery-plan.v1',
+      deliveryPlanIntentId: intentId,
+    },
   });
 }
 
