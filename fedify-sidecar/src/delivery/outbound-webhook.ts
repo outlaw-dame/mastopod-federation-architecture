@@ -1,6 +1,8 @@
 import { isIP } from "node:net";
 
 const APDM_DELIVERY_PLAN_SCHEMA = "ap.delivery-plan.v1";
+const APDM_INTEROP_LEGACY_INTENT_ID = "apdm-interop-legacy-fixture";
+const EXPLICIT_NON_PRODUCTION_ENVIRONMENTS = new Set(["test", "development"]);
 
 export interface NormalizedOutboundTarget {
   inboxUrl: string;
@@ -80,9 +82,15 @@ export function normalizeAndDedupeOutboundTargets(
   // came from one stable ap.delivery-plan.v1 intent. Validate this before URL
   // filtering/dedupe so a mixed request cannot smuggle an unmarked target in
   // as a merely "invalid" entry while another marked target keeps it accepted.
+  //
+  // The only exception is the explicit containerized AP interoperability
+  // harness. It requires all three conditions: an explicit test/development
+  // NODE_ENV, APDM_ALLOW_UNMARKED_INTEROP_WEBHOOK=true, and a destination host
+  // listed in APDM_INTEROP_PRIVATE_HOSTS. Unset/unknown/production environments
+  // therefore remain fail-closed.
   let apdmAuthorityIntentId: string | undefined;
   for (const rawTarget of remoteTargets) {
-    const authority = parseApdmAuthority(rawTarget);
+    const authority = parseApdmAuthority(rawTarget) ?? parseExplicitInteropAuthority(rawTarget);
     if (!authority) {
       throw new OutboundWebhookValidationError(
         "OUTBOUND_APDM_AUTHORITY_REQUIRED",
@@ -200,6 +208,36 @@ function parseApdmAuthority(rawTarget: unknown): { intentId: string } | null {
   }
 
   return { intentId };
+}
+
+function parseExplicitInteropAuthority(rawTarget: unknown): { intentId: string } | null {
+  const environment = String(process.env["NODE_ENV"] ?? "").trim().toLowerCase();
+  if (!EXPLICIT_NON_PRODUCTION_ENVIRONMENTS.has(environment)) return null;
+  if (process.env["APDM_ALLOW_UNMARKED_INTEROP_WEBHOOK"] !== "true") return null;
+  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
+
+  const target = rawTarget as Record<string, unknown>;
+  const rawUrl = typeof target["sharedInboxUrl"] === "string"
+    ? target["sharedInboxUrl"]
+    : target["inboxUrl"];
+  if (typeof rawUrl !== "string") return null;
+
+  let hostname: string;
+  try {
+    hostname = new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+
+  const allowedHosts = new Set(
+    String(process.env["APDM_INTEROP_PRIVATE_HOSTS"] ?? "")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (!allowedHosts.has(hostname)) return null;
+
+  return { intentId: APDM_INTEROP_LEGACY_INTENT_ID };
 }
 
 function normalizeOutboundTarget(rawTarget: unknown): NormalizedOutboundTarget | null {
