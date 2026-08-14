@@ -44,6 +44,7 @@ function inboxPayload() {
 }
 
 function webhookPayload() {
+  const intentId = `apdm-loadtest-${__VU}-${__ITER}`;
   return JSON.stringify({
     activityId: `urn:loadtest:${__VU}:${__ITER}`,
     actorUri: 'https://pods.example/users/loadtest-actor',
@@ -62,8 +63,16 @@ function webhookPayload() {
       {
         targetDomain: 'remote.example',
         inboxUrl: 'https://remote.example/inbox',
+        apdmAuthority: {
+          schema: 'ap.delivery-plan.v1',
+          intentId,
+        },
       },
     ],
+    meta: {
+      deliveryPlanSchema: 'ap.delivery-plan.v1',
+      deliveryPlanIntentId: intentId,
+    },
   });
 }
 
