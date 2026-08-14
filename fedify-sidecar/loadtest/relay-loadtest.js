@@ -92,6 +92,8 @@ const rampUpDuration = __ENV.RAMP_UP_DURATION || '20s';
 const rampDownDuration = __ENV.RAMP_DOWN_DURATION || '20s';
 const vus = parseInt(__ENV.VUS || '20', 10);
 const rampTarget = parseInt(__ENV.RAMP_TARGET || String(vus * 2), 10);
+const runNonce = __ENV.APDM_LOADTEST_RUN_NONCE
+  || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 // ---------------------------------------------------------------------------
 // Custom metrics
@@ -118,7 +120,7 @@ const RELAY_INBOX_URL = `https://${RELAY_DOMAIN}/inbox`;
 // ---------------------------------------------------------------------------
 // Payload factories
 // Each factory produces a fully spec-compliant AP JSON-LD document.
-// VU+iteration pairs in IDs prevent idempotency deduplication across runs.
+// Per-run nonce + VU/iteration IDs prevent cross-run idempotency deduplication.
 // ---------------------------------------------------------------------------
 
 /**
@@ -134,8 +136,8 @@ const RELAY_INBOX_URL = `https://${RELAY_DOMAIN}/inbox`;
 function relaySubscribePayload(idSuffix) {
   const suffix = idSuffix || `${__VU}-${__ITER}`;
   const activityId =
-    `https://localhost/activities/follow-relay-${suffix}`;
-  const intentId = `apdm-relay-loadtest-${suffix}`;
+    `https://localhost/activities/follow-relay-${runNonce}-${suffix}`;
+  const intentId = `apdm-relay-loadtest-${runNonce}-${suffix}`;
 
   return JSON.stringify({
     actorUri: localRelayActorUri,
@@ -256,7 +258,7 @@ function signingApiPayload(idSuffix) {
 
 function relaySubscribeRequest(idSuffix) {
   const suffix = idSuffix || `${__VU}-${__ITER}`;
-  const intentId = `apdm-relay-loadtest-${suffix}`;
+  const intentId = `apdm-relay-loadtest-${runNonce}-${suffix}`;
   const res = http.post(
     `${baseUrl}/webhook/outbox`,
     relaySubscribePayload(suffix),
