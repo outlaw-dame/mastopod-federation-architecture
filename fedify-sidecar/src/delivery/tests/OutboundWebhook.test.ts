@@ -25,6 +25,15 @@ function target(input: Record<string, unknown>): Record<string, unknown> {
   return { ...input, apdmAuthority: AUTHORITY };
 }
 
+function webhookConfig(maxTargetsPerRequest = 100) {
+  return {
+    maxPending: 25_000,
+    maxQueueDepth: 0,
+    retryAfterSeconds: 5,
+    maxTargetsPerRequest,
+  };
+}
+
 describe("normalizeAndDedupeOutboundTargets", () => {
   it("dedupes repeated shared inbox targets and skips invalid URLs after APDM authority validation", () => {
     const result = normalizeAndDedupeOutboundTargets(
@@ -44,7 +53,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
           targetDomain: "10.0.0.5",
         }),
       ],
-      { maxTargetsPerRequest: 100 },
+      webhookConfig(),
     );
 
     expect(result.targets).toEqual([
@@ -86,19 +95,37 @@ describe("normalizeAndDedupeOutboundTargets", () => {
     expect(result.apdmAuthorityIntentId).toBeUndefined();
   });
 
+  it("does not let raw callers bypass authority by supplying normalized-looking target fields", () => {
+    delete process.env["APDM_INTEROP_PRIVATE_HOSTS"];
+    process.env["NODE_ENV"] = "production";
+
+    expect(() =>
+      normalizeAndDedupeOutboundTargets(
+        [
+          {
+            inboxUrl: "https://one.example/inbox",
+            deliveryUrl: "https://one.example/inbox",
+            targetDomain: "one.example",
+          },
+        ],
+        webhookConfig(),
+      ),
+    ).toThrowError(/ap\.delivery-plan\.v1 APDM authority marker/u);
+  });
+
   it("rejects the retired legacy raw-routing target shape by default", () => {
     delete process.env["APDM_INTEROP_PRIVATE_HOSTS"];
     expect(() =>
       normalizeAndDedupeOutboundTargets(
         [{ inboxUrl: "https://one.example/inbox" }],
-        { maxTargetsPerRequest: 100 },
+        webhookConfig(),
       ),
     ).toThrowError(/ap\.delivery-plan\.v1 APDM authority marker/u);
 
     try {
       normalizeAndDedupeOutboundTargets(
         [{ inboxUrl: "https://one.example/inbox" }],
-        { maxTargetsPerRequest: 100 },
+        webhookConfig(),
       );
     } catch (error) {
       expect(error).toBeInstanceOf(OutboundWebhookValidationError);
@@ -113,14 +140,14 @@ describe("normalizeAndDedupeOutboundTargets", () => {
 
     const result = normalizeAndDedupeOutboundTargets(
       [{ inboxUrl: "https://gotosocial/users/interop/inbox" }],
-      { maxTargetsPerRequest: 100 },
+      webhookConfig(),
     );
     expect(result.apdmAuthorityIntentId).toBe("apdm-interop-legacy-fixture");
 
     expect(() =>
       normalizeAndDedupeOutboundTargets(
         [{ inboxUrl: "https://attacker.example/inbox" }],
-        { maxTargetsPerRequest: 100 },
+        webhookConfig(),
       ),
     ).toThrowError(OutboundWebhookValidationError);
   });
@@ -132,7 +159,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
       expect(() =>
         normalizeAndDedupeOutboundTargets(
           [{ inboxUrl: "https://gotosocial/users/interop/inbox" }],
-          { maxTargetsPerRequest: 100 },
+          webhookConfig(),
         ),
       ).toThrowError(OutboundWebhookValidationError);
     }
@@ -149,7 +176,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
       expect(() =>
         normalizeAndDedupeOutboundTargets(
           [{ inboxUrl: "https://one.example/inbox", apdmAuthority }],
-          { maxTargetsPerRequest: 100 },
+          webhookConfig(),
         ),
       ).toThrowError(OutboundWebhookValidationError);
     }
@@ -163,7 +190,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
             apdmAuthority: { schema: "ap.delivery-plan.v1", intentId: "different-intent" },
           },
         ],
-        { maxTargetsPerRequest: 100 },
+        webhookConfig(),
       ),
     ).toThrowError(/same APDM Delivery Plan intentId/u);
   });
@@ -175,7 +202,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
           target({ inboxUrl: "https://one.example/inbox" }),
           target({ inboxUrl: "https://two.example/inbox" }),
         ],
-        { maxTargetsPerRequest: 1 },
+        webhookConfig(1),
       ),
     ).toThrowError(OutboundWebhookValidationError);
 
@@ -185,7 +212,7 @@ describe("normalizeAndDedupeOutboundTargets", () => {
           target({ inboxUrl: "https://one.example/inbox" }),
           target({ inboxUrl: "https://two.example/inbox" }),
         ],
-        { maxTargetsPerRequest: 1 },
+        webhookConfig(1),
       );
     } catch (error) {
       expect(error).toBeInstanceOf(OutboundWebhookValidationError);
