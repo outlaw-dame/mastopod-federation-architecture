@@ -133,6 +133,62 @@ describe("OutboxIntentWorker", () => {
     expect(queue.moveToDlq).not.toHaveBeenCalled();
   });
 
+  it("publishes observation-only intents and completes with an atomic zero-job fan-out", async () => {
+    const queue = makeQueue({
+      enqueueOutboundBatchForIntent: vi.fn().mockResolvedValue({ enqueued: true, jobCount: 0 }),
+    });
+    const redpanda = makeRedpanda();
+    const sharedInboxCache = {
+      enrichTargets: vi.fn().mockRejectedValue(new Error("must not run")),
+    } as any;
+    const worker = new TestOutboxIntentWorker(
+      queue,
+      redpanda,
+      makeConfig({ sharedInboxCache }),
+    );
+    const intent = makeIntent({
+      intentId: "apdm-observation:01TESTEVENT",
+      targets: [],
+      bridgeHints: { observationOnly: true },
+    });
+
+    await worker.runIntent("msg-observation", intent);
+
+    expect(redpanda.publishToStream1).toHaveBeenCalledTimes(1);
+    expect(redpanda.publishToStream1).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorUri: intent.actorUri,
+        outboxIntentId: intent.intentId,
+      }),
+    );
+    expect(queue.markOutboxIntentEventLogPublished).toHaveBeenCalledWith(intent.intentId);
+    expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledExactlyOnceWith(intent.intentId, []);
+    expect(queue.markOutboxIntentCompleted).toHaveBeenCalledWith(intent.intentId);
+    expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "msg-observation");
+    expect(sharedInboxCache.enrichTargets).not.toHaveBeenCalled();
+    expect(queue.moveToDlq).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an observation-only intent contains any delivery target", async () => {
+    const queue = makeQueue();
+    const redpanda = makeRedpanda();
+    const sharedInboxCache = { enrichTargets: vi.fn() } as any;
+    const worker = new TestOutboxIntentWorker(
+      queue,
+      redpanda,
+      makeConfig({ sharedInboxCache }),
+    );
+    const intent = makeIntent({ bridgeHints: { observationOnly: true } });
+
+    await worker.runIntent("msg-observation-invalid", intent);
+
+    expect(queue.moveToDlq).toHaveBeenCalledTimes(1);
+    expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "msg-observation-invalid");
+    expect(redpanda.publishToStream1).not.toHaveBeenCalled();
+    expect(sharedInboxCache.enrichTargets).not.toHaveBeenCalled();
+    expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
+  });
+
   it("persists a transient retry before acknowledging the source intent", async () => {
     const queue = makeQueue();
     const redpanda = makeRedpanda({
@@ -149,9 +205,7 @@ describe("OutboxIntentWorker", () => {
     expectCalledBefore(queue.enqueueOutboxIntent, queue.ack);
     const retryIntent = queue.enqueueOutboxIntent.mock.calls[0]?.[0] as OutboxIntent | undefined;
     expect(retryIntent).toBeDefined();
-    if (!retryIntent) {
-      throw new Error("Expected retry intent to be enqueued");
-    }
+    if (!retryIntent) throw new Error("Expected retry intent to be enqueued");
     expect(retryIntent.intentId).toBe(intent.intentId);
     expect(retryIntent.attempt).toBe(1);
     expect(retryIntent.lastError).toContain("broker unavailable");
