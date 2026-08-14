@@ -59,7 +59,7 @@ import {
 } from "@fedify/fedify/vocab";
 import type { SidecarLocalSigningService } from "../signing/SidecarLocalSigningService.js";
 import { isIP } from "node:net";
-import { request } from "undici";
+import { isUnsafeActivityPubTargetError, secureActivityPubRequest } from "../security/activitypub-egress-policy.js";
 import type {
   OutboundDeliveryMeta,
   FederationRuntimeAdapter,
@@ -273,7 +273,7 @@ function normalizeOutboundTargetUrl(value: string): URL | null {
     return null;
   }
 
-  targetUrl.hash = "";
+  if (targetUrl.hash) return null;
   return targetUrl;
 }
 
@@ -604,7 +604,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
 
     input.assertExternalPostAllowed();
     try {
-      const response = await request(targetUrl, {
+      const response = await secureActivityPubRequest(targetUrl, {
         method: "POST",
         headers: {
           "content-type": "application/activity+json",
@@ -618,7 +618,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
         body: input.activity,
         bodyTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
         headersTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
-      });
+      }, input.assertExternalPostAllowed);
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         await readLimitedResponseBody(response.body, this.outboundRuntimeConfig.maxErrorResponseBodyBytes);
@@ -648,11 +648,12 @@ ${responseBody}`;
         retryAfterMs: permanent ? undefined : parseRetryAfterMs(response.headers["retry-after"]),
       };
     } catch (error) {
+      const unsafeTarget = isUnsafeActivityPubTargetError(error);
       return {
         jobId: input.jobId,
         success: false,
-        error: `Network error: ${error instanceof Error ? error.message : String(error)}`,
-        permanent: false,
+        error: `${unsafeTarget ? "Unsafe target" : "Network error"}: ${error instanceof Error ? error.message : String(error)}`,
+        permanent: unsafeTarget,
       };
     }
   }
@@ -687,7 +688,7 @@ ${responseBody}`;
 
     input.assertExternalPostAllowed();
     try {
-      const response = await request(targetUrl, {
+      const response = await secureActivityPubRequest(targetUrl, {
         method: "POST",
         headers: {
           "content-type": "application/activity+json",
@@ -701,7 +702,7 @@ ${responseBody}`;
         body: input.activity,
         bodyTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
         headersTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
-      });
+      }, input.assertExternalPostAllowed);
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         await readLimitedResponseBody(response.body, this.outboundRuntimeConfig.maxErrorResponseBodyBytes);
@@ -724,11 +725,12 @@ ${responseBody}`,
         retryAfterMs: permanent ? undefined : parseRetryAfterMs(response.headers["retry-after"]),
       };
     } catch (err) {
+      const unsafeTarget = isUnsafeActivityPubTargetError(err);
       return {
         jobId: input.jobId,
         success: false,
-        error: `Network error (local-signed): ${err instanceof Error ? err.message : String(err)}`,
-        permanent: false,
+        error: `${unsafeTarget ? "Unsafe target" : "Network error (local-signed)"}: ${err instanceof Error ? err.message : String(err)}`,
+        permanent: unsafeTarget,
       };
     }
   }

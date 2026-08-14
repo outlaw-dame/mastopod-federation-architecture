@@ -4,9 +4,13 @@ vi.mock("../../utils/logger.js", () => {
   return { logger, default: logger };
 });
 
-vi.mock("undici", () => ({
-  request: vi.fn(),
-}));
+vi.mock("undici", async () => {
+  const actual = await vi.importActual<typeof import("undici")>("undici");
+  return {
+    ...actual,
+    request: vi.fn(),
+  };
+});
 
 import { Readable } from "node:stream";
 import { MemoryKvStore } from "@fedify/fedify";
@@ -48,8 +52,8 @@ function makeDeliveryInput(overrides: Partial<Parameters<ReturnType<typeof makeA
         content: "Hello",
       },
     }),
-    targetInbox: "https://remote.example/inbox",
-    targetDomain: "remote.example",
+    targetInbox: "http://localhost:8080/inbox",
+    targetDomain: "localhost",
     attempt: 0,
     maxAttempts: 10,
     requestTimeoutMs: 5_000,
@@ -81,21 +85,16 @@ describe("FedifyFederationAdapter outbound delivery", () => {
 
     const adapter = makeAdapter();
     const input = makeDeliveryInput();
-
     const result = await adapter.deliverOutbound(input);
 
-    expect(result).toMatchObject({
-      jobId: input.jobId,
-      success: true,
-      statusCode: 202,
-    });
+    expect(result).toMatchObject({ jobId: input.jobId, success: true, statusCode: 202 });
     expect(input.signHttpRequest).toHaveBeenCalledWith({
       actorUri: input.actorUri,
       method: "POST",
       targetUrl: input.targetInbox,
       body: input.activity,
     });
-    expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(1);
+    expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(2);
     expect(request).toHaveBeenCalledTimes(1);
   });
 
@@ -109,9 +108,26 @@ describe("FedifyFederationAdapter outbound delivery", () => {
     });
 
     await expect(adapter.deliverOutbound(input)).rejects.toBe(deadlineError);
-
     expect(input.signHttpRequest).toHaveBeenCalledTimes(1);
     expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the APDM deadline after DNS validation before external POST", async () => {
+    const adapter = makeAdapter();
+    const deadlineError = new Error("APDM outbound residence expired after DNS");
+    let checks = 0;
+    const input = makeDeliveryInput({
+      assertExternalPostAllowed: vi.fn(() => {
+        checks += 1;
+        if (checks === 2) throw deadlineError;
+      }),
+    });
+
+    const result = await adapter.deliverOutbound(input);
+    expect(result).toMatchObject({ jobId: input.jobId, success: false, permanent: false });
+    expect(result.error).toContain(deadlineError.message);
+    expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(2);
     expect(request).not.toHaveBeenCalled();
   });
 
@@ -122,9 +138,7 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       signature: "keyId=\"relay\",signature=\"abc\"",
     });
     const adapter = makeAdapter({
-      localSigningService: {
-        signHttpRequest: localSign,
-      },
+      localSigningService: { signHttpRequest: localSign },
       sidecarServiceActors: ["relay"],
     });
     const deadlineError = new Error("APDM outbound residence expired");
@@ -136,7 +150,6 @@ describe("FedifyFederationAdapter outbound delivery", () => {
     });
 
     await expect(adapter.deliverOutbound(input)).rejects.toBe(deadlineError);
-
     expect(localSign).toHaveBeenCalledTimes(1);
     expect(input.signHttpRequest).not.toHaveBeenCalled();
     expect(input.assertExternalPostAllowed).toHaveBeenCalledTimes(1);
@@ -149,10 +162,8 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       headers: {},
       body: makeBody("gone"),
     } as never);
-
     const adapter = makeAdapter();
     const input = makeDeliveryInput();
-
     const result = await adapter.deliverOutbound(input);
 
     expect(result).toMatchObject({
@@ -171,10 +182,8 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       headers: { "retry-after": "7" },
       body: makeBody("slow down"),
     } as never);
-
     const adapter = makeAdapter();
     const input = makeDeliveryInput();
-
     const result = await adapter.deliverOutbound(input);
 
     expect(result).toMatchObject({
@@ -193,14 +202,9 @@ describe("FedifyFederationAdapter outbound delivery", () => {
       targetInbox: "http://10.0.0.5/inbox",
       targetDomain: "10.0.0.5",
     });
-
     const result = await adapter.deliverOutbound(input);
 
-    expect(result).toMatchObject({
-      jobId: input.jobId,
-      success: false,
-      permanent: true,
-    });
+    expect(result).toMatchObject({ jobId: input.jobId, success: false, permanent: true });
     expect(result.error).toContain("safety validation");
     expect(input.signHttpRequest).not.toHaveBeenCalled();
     expect(input.assertExternalPostAllowed).not.toHaveBeenCalled();
