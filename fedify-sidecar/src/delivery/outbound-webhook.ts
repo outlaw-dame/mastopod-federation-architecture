@@ -1,5 +1,7 @@
 import { isIP } from "node:net";
 
+const APDM_DELIVERY_PLAN_SCHEMA = "ap.delivery-plan.v1";
+
 export interface NormalizedOutboundTarget {
   inboxUrl: string;
   sharedInboxUrl?: string;
@@ -12,6 +14,8 @@ export interface NormalizedOutboundTargetsResult {
   inputTargetCount: number;
   duplicateTargetCount: number;
   invalidTargetCount: number;
+  /** Stable ActivityPods Delivery Plan identity proven by every input target. */
+  apdmAuthorityIntentId: string;
 }
 
 export interface OutboundWebhookBackpressureConfig {
@@ -71,6 +75,32 @@ export function normalizeAndDedupeOutboundTargets(
     );
   }
 
+  // APDM Phase 6 retires the legacy raw-activity webhook as a routing
+  // authority. Every target accepted from ActivityPods must now prove that it
+  // came from one stable ap.delivery-plan.v1 intent. Validate this before URL
+  // filtering/dedupe so a mixed request cannot smuggle an unmarked target in
+  // as a merely "invalid" entry while another marked target keeps it accepted.
+  let apdmAuthorityIntentId: string | undefined;
+  for (const rawTarget of remoteTargets) {
+    const authority = parseApdmAuthority(rawTarget);
+    if (!authority) {
+      throw new OutboundWebhookValidationError(
+        "OUTBOUND_APDM_AUTHORITY_REQUIRED",
+        400,
+        "Every remote target must carry an ap.delivery-plan.v1 APDM authority marker.",
+      );
+    }
+    if (apdmAuthorityIntentId === undefined) {
+      apdmAuthorityIntentId = authority.intentId;
+    } else if (authority.intentId !== apdmAuthorityIntentId) {
+      throw new OutboundWebhookValidationError(
+        "OUTBOUND_APDM_AUTHORITY_MIXED",
+        400,
+        "All remote targets in one handoff must carry the same APDM Delivery Plan intentId.",
+      );
+    }
+  }
+
   const deduped = new Map<string, NormalizedOutboundTarget>();
   let invalidTargetCount = 0;
   let duplicateTargetCount = 0;
@@ -104,6 +134,7 @@ export function normalizeAndDedupeOutboundTargets(
     inputTargetCount: remoteTargets.length,
     duplicateTargetCount,
     invalidTargetCount,
+    apdmAuthorityIntentId: apdmAuthorityIntentId!,
   };
 }
 
@@ -146,6 +177,29 @@ export function resolveOutboundWebhookBackpressureConfigFromEnv(): OutboundWebho
     retryAfterSeconds: parsePositiveIntEnv("OUTBOUND_WEBHOOK_RETRY_AFTER_SECONDS", 5),
     maxTargetsPerRequest: parsePositiveIntEnv("OUTBOUND_WEBHOOK_MAX_TARGETS", 5_000),
   };
+}
+
+function parseApdmAuthority(rawTarget: unknown): { intentId: string } | null {
+  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) {
+    return null;
+  }
+
+  const authority = (rawTarget as Record<string, unknown>)["apdmAuthority"];
+  if (!authority || typeof authority !== "object" || Array.isArray(authority)) {
+    return null;
+  }
+
+  const record = authority as Record<string, unknown>;
+  if (record["schema"] !== APDM_DELIVERY_PLAN_SCHEMA) {
+    return null;
+  }
+
+  const intentId = record["intentId"];
+  if (typeof intentId !== "string" || intentId.trim().length === 0 || intentId !== intentId.trim()) {
+    return null;
+  }
+
+  return { intentId };
 }
 
 function normalizeOutboundTarget(rawTarget: unknown): NormalizedOutboundTarget | null {
