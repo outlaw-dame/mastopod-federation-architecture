@@ -83,11 +83,10 @@ export function normalizeAndDedupeOutboundTargets(
   // filtering/dedupe so a mixed request cannot smuggle an unmarked target in
   // as a merely "invalid" entry while another marked target keeps it accepted.
   //
-  // The only exception is the explicit containerized AP interoperability
-  // harness. It requires all three conditions: an explicit test/development
-  // NODE_ENV, APDM_ALLOW_UNMARKED_INTEROP_WEBHOOK=true, and a destination host
-  // listed in APDM_INTEROP_PRIVATE_HOSTS. Unset/unknown/production environments
-  // therefore remain fail-closed.
+  // The only exception is the containerized AP interoperability harness. It
+  // requires an explicit test/development NODE_ENV and a destination host in
+  // APDM_INTEROP_PRIVATE_HOSTS. Unset/unknown/production environments remain
+  // fail-closed even if that allowlist is accidentally present.
   let apdmAuthorityIntentId: string | undefined;
   for (const rawTarget of remoteTargets) {
     const authority = parseApdmAuthority(rawTarget) ?? parseExplicitInteropAuthority(rawTarget);
@@ -213,7 +212,6 @@ function parseApdmAuthority(rawTarget: unknown): { intentId: string } | null {
 function parseExplicitInteropAuthority(rawTarget: unknown): { intentId: string } | null {
   const environment = String(process.env["NODE_ENV"] ?? "").trim().toLowerCase();
   if (!EXPLICIT_NON_PRODUCTION_ENVIRONMENTS.has(environment)) return null;
-  if (process.env["APDM_ALLOW_UNMARKED_INTEROP_WEBHOOK"] !== "true") return null;
   if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return null;
 
   const target = rawTarget as Record<string, unknown>;
