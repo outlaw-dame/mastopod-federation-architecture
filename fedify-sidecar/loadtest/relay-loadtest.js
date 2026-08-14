@@ -476,7 +476,7 @@ export function setup() {
         headers: {
           'content-type': 'application/json',
           authorization: `Bearer ${sidecarToken}`,
-          'X-APDM-Intent-Id': 'apdm-relay-loadtest-setup-probe',
+          'X-APDM-Intent-Id': `apdm-relay-loadtest-${runNonce}-setup-probe`,
         },
         tags: { endpoint: 'relay_subscribe_probe' },
       },
