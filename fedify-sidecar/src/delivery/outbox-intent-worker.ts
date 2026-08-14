@@ -26,17 +26,6 @@ export interface OutboxIntentWorkerConfig {
   concurrency: number;
   outboundJobMaxAttempts: number;
   activityPubOutboundDeliveryPolicy: ActivityPubOutboundDeliveryPolicy;
-  /**
-   * Optional sidecar-side remote sharedInbox discovery cache.
-   *
-   * When present, outbound targets that lack a `sharedInboxUrl` are enriched
-   * by resolving the remote server's sharedInbox endpoint (fetched once per
-   * domain, then cached in Redis for 24 h).  After enrichment the standard
-   * deduplication collapses multiple recipients at the same remote host into a
-   * single delivery job — reducing outbound HTTP requests per activity.
-   *
-   * Absent (or on enrichment error): falls back silently to per-inbox delivery.
-   */
   sharedInboxCache?: RemoteSharedInboxCache;
 }
 
@@ -110,8 +99,6 @@ export class OutboxIntentWorker {
       this.assertIntentWithinReplayHorizon(intent, "processing start");
 
       if (intent.notBeforeMs > 0 && Date.now() < intent.notBeforeMs) {
-        // Persist the deferred replacement before ACKing the source message.
-        // If enqueue fails, the original remains pending and reclaimable.
         await this.queue.enqueueOutboxIntent(intent);
         await this.queue.ack("outbox_intent", messageId);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "deferred" });
@@ -139,10 +126,36 @@ export class OutboxIntentWorker {
 
       const activity = this.parseIntentActivity(intent);
 
-      // Enrich targets with remotely-discovered sharedInbox endpoints before
-      // deduplication so that multiple recipients on the same remote server
-      // collapse into a single delivery job (one POST per host per activity).
-      // Fault-isolated: enrichment errors fall back silently to per-inbox delivery.
+      if (this.isObservationOnlyIntent(intent)) {
+        if (intent.targets.length !== 0) {
+          throw new OutboxIntentProcessingError(
+            "Observation-only outbox intent must not contain delivery targets",
+            true,
+          );
+        }
+
+        if (!state.eventLogPublishedAt) {
+          await this.publishEventLog(intent, activity);
+          await this.queue.markOutboxIntentEventLogPublished(intent.intentId);
+        }
+
+        const enqueueResult = await this.queue.enqueueOutboundBatchForIntent(intent.intentId, []);
+        await this.queue.markOutboxIntentCompleted(intent.intentId);
+        await this.queue.ack("outbox_intent", messageId);
+        metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "observation" });
+        metrics.queueProcessingLatency.observe(
+          { topic: "outbox_intent" },
+          Math.max(0, (Date.now() - intent.createdAt) / 1000),
+        );
+        logger.info("Observation-only outbox intent completed", {
+          intentId: intent.intentId,
+          activityId: intent.activityId,
+          outboundEnqueued: enqueueResult.enqueued,
+          jobCount: enqueueResult.jobCount,
+        });
+        return;
+      }
+
       const enrichedTargets = this.sharedInboxCache
         ? await this.sharedInboxCache.enrichTargets(intent.targets).catch((err: Error) => {
             logger.warn("Outbound sharedInbox enrichment failed (using original targets)", {
@@ -183,9 +196,6 @@ export class OutboxIntentWorker {
         normalizedTargets.targets,
       );
 
-      // Enrichment and event-log publication are awaited and may stall. Check
-      // the original accepted-at clock again at the actual fan-out boundary so
-      // a fresh outbound Redis Stream timestamp cannot extend stale replay work.
       this.assertIntentWithinReplayHorizon(intent, "outbound fan-out");
 
       const enqueueResult = await this.queue.enqueueOutboundBatchForIntent(
@@ -218,8 +228,6 @@ export class OutboxIntentWorker {
       const nextAttempt = intent.attempt + 1;
 
       if (permanent || nextAttempt >= intent.maxAttempts) {
-        // DLQ is the durable recovery record. Write it before ACKing the source
-        // message so a crash or Redis error cannot make rejected work disappear.
         await this.queue.moveToDlq(
           "outbox_intent",
           {
@@ -239,8 +247,6 @@ export class OutboxIntentWorker {
         });
       } else {
         const delay = backoffMs(nextAttempt);
-        // Persist retry work before ACKing the source message. If enqueue fails,
-        // the original remains pending for Redis Stream recovery.
         await this.queue.enqueueOutboxIntent({
           ...intent,
           attempt: nextAttempt,
@@ -264,6 +270,15 @@ export class OutboxIntentWorker {
     } finally {
       this.activeJobs--;
     }
+  }
+
+  private isObservationOnlyIntent(intent: OutboxIntent): boolean {
+    return Boolean(
+      intent.bridgeHints &&
+      typeof intent.bridgeHints === "object" &&
+      !Array.isArray(intent.bridgeHints) &&
+      intent.bridgeHints["observationOnly"] === true,
+    );
   }
 
   private assertIntentWithinReplayHorizon(intent: OutboxIntent, boundary: string): void {
@@ -337,9 +352,7 @@ export class OutboxIntentWorker {
       intent.meta?.visibility === "public" ||
       intent.meta?.visibility === "unlisted";
 
-    if (!isPublicActivity) {
-      return;
-    }
+    if (!isPublicActivity) return;
 
     if (!this.redpanda) {
       throw new OutboxIntentProcessingError(
@@ -414,14 +427,10 @@ export class OutboxIntentWorker {
   }
 
   private isPermanentFailure(error: unknown): boolean {
-    if (error instanceof OutboxIntentProcessingError) {
-      return error.permanent;
-    }
-
+    if (error instanceof OutboxIntentProcessingError) return error.permanent;
     if (error instanceof OutboundWebhookValidationError) {
       return error.statusCode >= 400 && error.statusCode < 500;
     }
-
     return false;
   }
 
