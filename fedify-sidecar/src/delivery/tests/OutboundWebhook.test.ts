@@ -6,24 +6,33 @@ import {
   resolveOutboundWebhookBackpressureConfigFromEnv,
 } from "../outbound-webhook.js";
 
+const AUTHORITY = {
+  schema: "ap.delivery-plan.v1",
+  intentId: "apdm-phase6-test-intent",
+};
+
+function target(input: Record<string, unknown>): Record<string, unknown> {
+  return { ...input, apdmAuthority: AUTHORITY };
+}
+
 describe("normalizeAndDedupeOutboundTargets", () => {
-  it("dedupes repeated shared inbox targets and skips invalid entries", () => {
+  it("dedupes repeated shared inbox targets and skips invalid URLs after APDM authority validation", () => {
     const result = normalizeAndDedupeOutboundTargets(
       [
-        {
+        target({
           inboxUrl: "https://mastodon.example/users/alice/inbox",
           sharedInboxUrl: "https://mastodon.example/inbox",
           targetDomain: "mastodon.example",
-        },
-        {
+        }),
+        target({
           inboxUrl: "https://mastodon.example/users/bob/inbox",
           sharedInboxUrl: "https://mastodon.example/inbox",
           targetDomain: "mastodon.example",
-        },
-        {
+        }),
+        target({
           inboxUrl: "http://10.0.0.5/inbox",
           targetDomain: "10.0.0.5",
-        },
+        }),
       ],
       { maxTargetsPerRequest: 100 },
     );
@@ -39,14 +48,64 @@ describe("normalizeAndDedupeOutboundTargets", () => {
     expect(result.inputTargetCount).toBe(3);
     expect(result.duplicateTargetCount).toBe(1);
     expect(result.invalidTargetCount).toBe(1);
+    expect(result.apdmAuthorityIntentId).toBe(AUTHORITY.intentId);
+  });
+
+  it("rejects the retired legacy raw-routing target shape", () => {
+    expect(() =>
+      normalizeAndDedupeOutboundTargets(
+        [{ inboxUrl: "https://one.example/inbox" }],
+        { maxTargetsPerRequest: 100 },
+      ),
+    ).toThrowError(/ap\.delivery-plan\.v1 APDM authority marker/u);
+
+    try {
+      normalizeAndDedupeOutboundTargets(
+        [{ inboxUrl: "https://one.example/inbox" }],
+        { maxTargetsPerRequest: 100 },
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(OutboundWebhookValidationError);
+      expect((error as OutboundWebhookValidationError).code).toBe("OUTBOUND_APDM_AUTHORITY_REQUIRED");
+      expect((error as OutboundWebhookValidationError).statusCode).toBe(400);
+    }
+  });
+
+  it("rejects wrong schemas, blank intent IDs, and mixed Delivery Plan identities", () => {
+    for (const apdmAuthority of [
+      { schema: "ap.delivery-plan.v0", intentId: AUTHORITY.intentId },
+      { schema: "ap.delivery-plan.v1", intentId: "" },
+      { schema: "ap.delivery-plan.v1", intentId: " padded " },
+      null,
+    ]) {
+      expect(() =>
+        normalizeAndDedupeOutboundTargets(
+          [{ inboxUrl: "https://one.example/inbox", apdmAuthority }],
+          { maxTargetsPerRequest: 100 },
+        ),
+      ).toThrowError(OutboundWebhookValidationError);
+    }
+
+    expect(() =>
+      normalizeAndDedupeOutboundTargets(
+        [
+          target({ inboxUrl: "https://one.example/inbox" }),
+          {
+            inboxUrl: "https://two.example/inbox",
+            apdmAuthority: { schema: "ap.delivery-plan.v1", intentId: "different-intent" },
+          },
+        ],
+        { maxTargetsPerRequest: 100 },
+      ),
+    ).toThrowError(/same APDM Delivery Plan intentId/u);
   });
 
   it("rejects requests that exceed the configured maximum target count", () => {
     expect(() =>
       normalizeAndDedupeOutboundTargets(
         [
-          { inboxUrl: "https://one.example/inbox" },
-          { inboxUrl: "https://two.example/inbox" },
+          target({ inboxUrl: "https://one.example/inbox" }),
+          target({ inboxUrl: "https://two.example/inbox" }),
         ],
         { maxTargetsPerRequest: 1 },
       ),
@@ -55,8 +114,8 @@ describe("normalizeAndDedupeOutboundTargets", () => {
     try {
       normalizeAndDedupeOutboundTargets(
         [
-          { inboxUrl: "https://one.example/inbox" },
-          { inboxUrl: "https://two.example/inbox" },
+          target({ inboxUrl: "https://one.example/inbox" }),
+          target({ inboxUrl: "https://two.example/inbox" }),
         ],
         { maxTargetsPerRequest: 1 },
       );
