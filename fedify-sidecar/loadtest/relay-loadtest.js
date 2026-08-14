@@ -181,9 +181,9 @@ function relaySubscribePayload(idSuffix) {
 function relayInboundPayload() {
   const objectActor = `https://social.example.com/users/user-${__VU}`;
   const objectNoteId =
-    `https://social.example.com/users/user-${__VU}/statuses/${__ITER}`;
+    `https://social.example.com/users/user-${__VU}/statuses/${runNonce}-${__ITER}`;
   const announceId =
-    `https://${RELAY_DOMAIN}/activities/announce-${__VU}-${__ITER}`;
+    `https://${RELAY_DOMAIN}/activities/announce-${runNonce}-${__VU}-${__ITER}`;
   const ts = new Date().toISOString();
 
   return JSON.stringify({

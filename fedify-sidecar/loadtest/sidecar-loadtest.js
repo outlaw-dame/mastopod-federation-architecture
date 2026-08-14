@@ -23,8 +23,8 @@ function webhookIntentId() {
 
 function inboxPayload() {
   const actorUri = `https://remote.example/users/loadtest-${__VU}`;
-  const noteId = `https://remote.example/notes/${__VU}-${__ITER}`;
-  const activityId = `https://remote.example/activities/create-${__VU}-${__ITER}`;
+  const noteId = `https://remote.example/notes/${runNonce}-${__VU}-${__ITER}`;
+  const activityId = `https://remote.example/activities/create-${runNonce}-${__VU}-${__ITER}`;
   const ts = new Date().toISOString();
   return JSON.stringify({
     '@context': 'https://www.w3.org/ns/activitystreams',
