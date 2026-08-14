@@ -61,6 +61,31 @@ describe("normalizeAndDedupeOutboundTargets", () => {
     expect(result.apdmAuthorityIntentId).toBe(AUTHORITY.intentId);
   });
 
+  it("preserves already-normalized durable intent targets without transport authority metadata", () => {
+    delete process.env["APDM_INTEROP_PRIVATE_HOSTS"];
+    process.env["NODE_ENV"] = "production";
+
+    const result = normalizeAndDedupeOutboundTargets(
+      [
+        {
+          inboxUrl: "https://remote.example/users/alice/inbox",
+          deliveryUrl: "https://remote.example/users/alice/inbox",
+          targetDomain: "remote.example",
+        },
+      ],
+      { maxTargetsPerRequest: 100 },
+    );
+
+    expect(result.targets).toEqual([
+      {
+        inboxUrl: "https://remote.example/users/alice/inbox",
+        deliveryUrl: "https://remote.example/users/alice/inbox",
+        targetDomain: "remote.example",
+      },
+    ]);
+    expect(result.apdmAuthorityIntentId).toBeUndefined();
+  });
+
   it("rejects the retired legacy raw-routing target shape by default", () => {
     delete process.env["APDM_INTEROP_PRIVATE_HOSTS"];
     expect(() =>
