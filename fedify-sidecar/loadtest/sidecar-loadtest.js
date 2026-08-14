@@ -49,11 +49,11 @@ function inboxPayload() {
 function webhookPayload() {
   const intentId = webhookIntentId();
   return JSON.stringify({
-    activityId: `urn:loadtest:${__VU}:${__ITER}`,
+    activityId: `urn:loadtest:${runNonce}:${__VU}:${__ITER}`,
     actorUri: 'https://pods.example/users/loadtest-actor',
     activity: {
       '@context': 'https://www.w3.org/ns/activitystreams',
-      id: `urn:loadtest:activity:${__VU}:${__ITER}`,
+      id: `urn:loadtest:activity:${runNonce}:${__VU}:${__ITER}`,
       type: 'Create',
       actor: 'https://pods.example/users/loadtest-actor',
       object: {
