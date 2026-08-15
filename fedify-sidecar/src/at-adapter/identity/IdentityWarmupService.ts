@@ -158,37 +158,51 @@ export class IdentityWarmupService {
     );
     const cursorToPersist = selectNewestCursor(storedCursor, forwardNextCursor);
     const forwardSaturated = forwardResponse.items.length >= this.batchLimit;
+    const cursorAdvanced = Boolean(cursorToPersist && cursorToPersist !== storedCursor);
 
-    let newReplayState: IdentityWarmReplayState | null = null;
-    if (
-      !forwardSaturated &&
-      this.replayOverlapMs > 0 &&
-      cursorToPersist &&
-      !replayState
-    ) {
-      const replayStart = rewindCursor(cursorToPersist, this.replayOverlapMs);
-      if (replayStart && replayStart !== cursorToPersist) {
-        newReplayState = {
-          cursor: replayStart,
-          targetCursor: cursorToPersist,
-        };
+    let replayToPersist: IdentityWarmReplayState | null = null;
+    if (this.replayOverlapMs > 0 && cursorToPersist) {
+      if (replayState) {
+        // Forward progress can continue while replay execution is paused. Keep
+        // the oldest unfinished replay cursor, but extend the durable target to
+        // every newer high-water mark so a long saturated burst cannot leave an
+        // unreplayed gap between the old target and the final overlap window.
+        const extendedTarget = selectNewestCursor(replayState.targetCursor, cursorToPersist);
+        if (extendedTarget && extendedTarget !== replayState.targetCursor) {
+          replayToPersist = {
+            cursor: replayState.cursor,
+            targetCursor: extendedTarget,
+          };
+        }
+      } else if (cursorAdvanced || !forwardSaturated) {
+        // Start coverage from the previous durable high-water mark when one is
+        // available. During a saturated page this guarantees the entire range
+        // crossed by the burst remains replayable, not merely the final overlap
+        // window around the newest cursor.
+        const replayBase = storedCursor ?? cursorToPersist;
+        const replayStart = rewindCursor(replayBase, this.replayOverlapMs);
+        if (replayStart && replayStart !== cursorToPersist) {
+          replayToPersist = {
+            cursor: replayStart,
+            targetCursor: cursorToPersist,
+          };
+        }
       }
     }
 
-    const cursorAdvanced = Boolean(cursorToPersist && cursorToPersist !== storedCursor);
-    if (newReplayState && cursorAdvanced && this.cursorStore.setCursorAndReplay) {
+    if (replayToPersist && cursorAdvanced && this.cursorStore.setCursorAndReplay) {
       // Production Redis commits both pieces of recovery state in one MULTI/EXEC,
-      // removing the crash window between recording the replay obligation and
-      // advancing the forward high-water mark.
-      await this.cursorStore.setCursorAndReplay(cursorToPersist!, newReplayState);
-      replayState = newReplayState;
+      // removing the crash window between recording/extending the replay
+      // obligation and advancing the forward high-water mark.
+      await this.cursorStore.setCursorAndReplay(cursorToPersist!, replayToPersist);
+      replayState = replayToPersist;
     } else {
-      if (newReplayState) {
+      if (replayToPersist) {
         // Safe fallback for alternate stores: write replay first. If the process
         // dies before setCursor, the next run may repeat forward work but cannot
-        // forget the unfinished overlap interval.
-        await this.cursorStore.setReplayState(newReplayState);
-        replayState = newReplayState;
+        // forget or truncate the unfinished overlap interval.
+        await this.cursorStore.setReplayState(replayToPersist);
+        replayState = replayToPersist;
       }
       if (cursorAdvanced) {
         await this.cursorStore.setCursor(cursorToPersist!);
@@ -197,10 +211,10 @@ export class IdentityWarmupService {
 
     let replayItems = 0;
 
-    // If a forward backlog appears while a replay cycle is active, preserve the
-    // durable replay state but do no replay work in this poll. This guarantees
-    // backlog catch-up gets the full request/upsert budget and a slow replay
-    // retry cannot delay the next forward page.
+    // If a forward backlog appears while a replay cycle is active, preserve and
+    // extend the durable replay state but do no replay fetch work in this poll.
+    // This guarantees backlog catch-up gets the full request/upsert budget while
+    // every cursor range crossed by that backlog remains covered for later repair.
     if (!forwardSaturated && replayState) {
       const requestedReplayCursor = replayState.cursor;
       const replayResponse = await this.fetchChangesWithRetry(requestedReplayCursor);
