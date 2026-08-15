@@ -9,9 +9,26 @@ import {
 import { buildInternalIdentityChangesPath } from './InternalIdentityApi.js';
 import { traceIdentitySync, type IdentitySyncLogger } from './IdentitySyncTrace.js';
 
+export interface IdentityWarmReplayState {
+  /** Current page cursor. Null means the true start-of-stream boundary. */
+  cursor: string | null;
+  /** High-water boundary this replay obligation must cover. */
+  targetCursor: string;
+  /** Durable beginning of the covered interval. Null means start-of-stream. */
+  baseCursor?: string | null;
+  /** Wall-clock horizon through which completed passes must be repeated. */
+  settleUntilMs?: number;
+  /** Durable start time of the current full replay pass, recorded at the base. */
+  passStartedAtMs?: number;
+}
+
 export interface IdentityWarmCursorStore {
   getCursor(): Promise<string | null>;
   setCursor(cursor: string): Promise<void>;
+  getReplayState(): Promise<IdentityWarmReplayState | null>;
+  setReplayState(state: IdentityWarmReplayState): Promise<void>;
+  clearReplayState(): Promise<void>;
+  setCursorAndReplay?(cursor: string, state: IdentityWarmReplayState): Promise<void>;
 }
 
 export interface IdentityWarmupServiceConfig {
@@ -27,6 +44,8 @@ export interface IdentityWarmupServiceConfig {
   retryAttempts?: number;
   initialRetryDelayMs?: number;
   replayOverlapMs?: number;
+  /** Test seam for deterministic replay-settle horizon checks. */
+  now?: () => number;
 }
 
 export class IdentityWarmupService {
@@ -42,6 +61,7 @@ export class IdentityWarmupService {
   private readonly retryAttempts: number;
   private readonly initialRetryDelayMs: number;
   private readonly replayOverlapMs: number;
+  private readonly now: () => number;
 
   private started = false;
   private timer: NodeJS.Timeout | null = null;
@@ -64,6 +84,7 @@ export class IdentityWarmupService {
       0,
       300_000
     );
+    this.now = config.now ?? Date.now;
   }
 
   start(): void {
@@ -127,17 +148,179 @@ export class IdentityWarmupService {
 
   async pollOnce(): Promise<{ items: number; nextCursor: string | null }> {
     const storedCursor = sanitizeCursor(await this.cursorStore.getCursor());
-    const replayCursor = rewindCursor(storedCursor, this.replayOverlapMs);
+    let replayState = sanitizeReplayState(
+      await this.cursorStore.getReplayState(),
+      this.replayOverlapMs,
+      this.now()
+    );
 
     traceIdentitySync(this.logger, 'debug', 'warmup:poll-start', {
       since: storedCursor,
-      replayCursor,
+      replayCursor: replayState?.cursor ?? null,
+      replayBaseCursor: replayState?.baseCursor ?? null,
+      replayTargetCursor: replayState?.targetCursor ?? null,
+      replaySettleUntilMs: replayState?.settleUntilMs ?? null,
+      replayPassStartedAtMs: replayState?.passStartedAtMs ?? null,
       limit: this.batchLimit,
     });
 
-    const response = await this.fetchChangesWithRetry(replayCursor);
+    // The durable high-water mark is always read first. Dense overlap repair
+    // can never prevent the warmer from observing records newer than the last
+    // committed forward cursor.
+    const forwardResponse = await this.fetchChangesWithRetry(storedCursor);
+    await this.applyItems(forwardResponse.items);
 
-    for (const item of response.items) {
+    const forwardNextCursor = sanitizeCursor(
+      forwardResponse.nextCursor ??
+        forwardResponse.items[forwardResponse.items.length - 1]?.updatedAt ??
+        storedCursor
+    );
+    const cursorToPersist = selectNewestCursor(storedCursor, forwardNextCursor);
+    const forwardSaturated = forwardResponse.items.length >= this.batchLimit;
+    const cursorAdvanced = Boolean(cursorToPersist && cursorToPersist !== storedCursor);
+
+    let replayToPersist: IdentityWarmReplayState | null = null;
+    if (this.replayOverlapMs > 0 && cursorToPersist) {
+      if (replayState) {
+        const extendedTarget = selectNewestCursor(replayState.targetCursor, cursorToPersist);
+        if (extendedTarget && extendedTarget !== replayState.targetCursor) {
+          replayToPersist = {
+            ...replayState,
+            targetCursor: extendedTarget,
+            // A newly extended interval invalidates any proof about the current
+            // pass: it did not begin with the new target/horizon in force.
+            passStartedAtMs: undefined,
+            // A newly extended interval may receive delayed visibility relative
+            // to processing time even when its record timestamps are old. Extend
+            // the wall-clock settle horizon whenever coverage grows.
+            settleUntilMs: this.now() + this.replayOverlapMs,
+          };
+        }
+      } else if (cursorAdvanced || !forwardSaturated) {
+        // A missing stored cursor is a real start-of-stream boundary, not the
+        // ending cursor of the first page. Persist null as the replay base so a
+        // saturated bootstrap page cannot permanently omit its early portion.
+        const baseCursor = storedCursor
+          ? rewindCursor(storedCursor, this.replayOverlapMs)
+          : null;
+        if (baseCursor !== cursorToPersist) {
+          replayToPersist = {
+            cursor: baseCursor,
+            baseCursor,
+            targetCursor: cursorToPersist,
+            settleUntilMs: this.now() + this.replayOverlapMs,
+            passStartedAtMs: undefined,
+          };
+        }
+      }
+    }
+
+    if (replayToPersist && cursorAdvanced && this.cursorStore.setCursorAndReplay) {
+      await this.cursorStore.setCursorAndReplay(cursorToPersist!, replayToPersist);
+      replayState = replayToPersist;
+    } else {
+      if (replayToPersist) {
+        // Safe fallback for alternate stores: persist/extend the replay
+        // obligation before the high-water cursor. A crash may repeat work, but
+        // it cannot truncate coverage.
+        await this.cursorStore.setReplayState(replayToPersist);
+        replayState = replayToPersist;
+      }
+      if (cursorAdvanced) {
+        await this.cursorStore.setCursor(cursorToPersist!);
+      }
+    }
+
+    let replayItems = 0;
+
+    // Saturated forward catch-up gets the entire request/upsert budget. Replay
+    // execution is paused, but its durable target/horizon has already been
+    // extended above so no crossed interval is forgotten.
+    if (!forwardSaturated && replayState) {
+      const requestedReplayCursor = replayState.cursor ?? null;
+      const replayBaseCursor = replayState.baseCursor ?? null;
+
+      if (requestedReplayCursor === replayBaseCursor && replayState.passStartedAtMs === undefined) {
+        // Persist the pass start before fetching the base page. This makes the
+        // proof crash-safe: after restart, every page in this pass is known to
+        // have been fetched no earlier than this timestamp.
+        replayState = {
+          ...replayState,
+          passStartedAtMs: this.now(),
+        };
+        await this.cursorStore.setReplayState(replayState);
+      }
+
+      const replayResponse = await this.fetchChangesWithRetry(requestedReplayCursor);
+      await this.applyItems(replayResponse.items);
+      replayItems = replayResponse.items.length;
+
+      const replayNextCursor = sanitizeCursor(
+        replayResponse.nextCursor ??
+          replayResponse.items[replayResponse.items.length - 1]?.updatedAt ??
+          requestedReplayCursor
+      );
+
+      const replayPassComplete =
+        replayResponse.items.length === 0 ||
+        !replayNextCursor ||
+        replayNextCursor === requestedReplayCursor ||
+        isCursorAtOrAfter(replayNextCursor, replayState.targetCursor);
+
+      if (replayPassComplete) {
+        const passStartedAtOrAfterHorizon =
+          typeof replayState.passStartedAtMs === 'number' &&
+          replayState.passStartedAtMs >= (replayState.settleUntilMs ?? 0);
+
+        if (passStartedAtOrAfterHorizon) {
+          // Clearing is allowed only after an entire pass began from the durable
+          // base after the lateness horizon and then reached the current target.
+          await this.cursorStore.clearReplayState();
+          replayState = null;
+        } else {
+          // The completed pass began too early (or came from legacy state with no
+          // proof). Rewind and clear its start marker so the next base fetch
+          // establishes a fresh durable pass start.
+          replayState = {
+            ...replayState,
+            cursor: replayBaseCursor,
+            passStartedAtMs: undefined,
+          };
+          await this.cursorStore.setReplayState(replayState);
+        }
+      } else {
+        // Apply first, then durably advance only this pass's progress. Preserve
+        // passStartedAtMs across every page so a multi-page post-horizon pass can
+        // eventually prove that all of its pages were read after the horizon.
+        replayState = {
+          ...replayState,
+          cursor: replayNextCursor,
+        };
+        await this.cursorStore.setReplayState(replayState);
+      }
+    }
+
+    traceIdentitySync(this.logger, 'info', 'warmup:poll-success', {
+      since: storedCursor,
+      nextCursor: cursorToPersist,
+      forwardItems: forwardResponse.items.length,
+      replayItems,
+      replayPausedForForwardBacklog: forwardSaturated && Boolean(replayState),
+      replayCursor: replayState?.cursor ?? null,
+      replayBaseCursor: replayState?.baseCursor ?? null,
+      replayTargetCursor: replayState?.targetCursor ?? null,
+      replaySettleUntilMs: replayState?.settleUntilMs ?? null,
+      replayPassStartedAtMs: replayState?.passStartedAtMs ?? null,
+    });
+
+    return {
+      items: forwardResponse.items.length + replayItems,
+      nextCursor: cursorToPersist,
+    };
+  }
+
+  private async applyItems(items: BackendIdentityProjection[]): Promise<void> {
+    for (const item of items) {
       await applyIdentityProjectionLocally(
         item,
         {
@@ -153,30 +336,6 @@ export class IdentityWarmupService {
         }
       );
     }
-
-    const nextCursor = sanitizeCursor(
-      response.nextCursor ??
-        response.items[response.items.length - 1]?.updatedAt ??
-        storedCursor
-    );
-
-    const cursorToPersist = selectNewestCursor(storedCursor, nextCursor);
-
-    if (cursorToPersist && cursorToPersist !== storedCursor) {
-      await this.cursorStore.setCursor(cursorToPersist);
-    }
-
-    traceIdentitySync(this.logger, 'info', 'warmup:poll-success', {
-      since: storedCursor,
-      replayCursor,
-      nextCursor: cursorToPersist,
-      items: response.items.length,
-    });
-
-    return {
-      items: response.items.length,
-      nextCursor: cursorToPersist,
-    };
   }
 
   private async fetchChangesWithRetry(
@@ -255,6 +414,44 @@ function sanitizeCursor(cursor: string | null | undefined): string | null {
   return value.slice(0, 256);
 }
 
+function sanitizeReplayState(
+  state: IdentityWarmReplayState | null | undefined,
+  replayOverlapMs: number,
+  nowMs: number
+): IdentityWarmReplayState | null {
+  if (!state) return null;
+  const targetCursor = sanitizeCursor(state.targetCursor);
+  if (!targetCursor) return null;
+
+  const cursor = state.cursor === null ? null : sanitizeCursor(state.cursor);
+  if (state.cursor !== null && !cursor) return null;
+
+  const hasBaseCursor = Object.prototype.hasOwnProperty.call(state, 'baseCursor');
+  const baseCursor = hasBaseCursor
+    ? state.baseCursor === null
+      ? null
+      : sanitizeCursor(state.baseCursor)
+    : cursor;
+  if (hasBaseCursor && state.baseCursor !== null && !baseCursor) return null;
+
+  const settleUntilMs =
+    typeof state.settleUntilMs === 'number' && Number.isFinite(state.settleUntilMs)
+      ? Math.max(0, Math.trunc(state.settleUntilMs))
+      : nowMs + replayOverlapMs;
+  const passStartedAtMs =
+    typeof state.passStartedAtMs === 'number' && Number.isFinite(state.passStartedAtMs)
+      ? Math.max(0, Math.trunc(state.passStartedAtMs))
+      : undefined;
+
+  return {
+    cursor,
+    baseCursor,
+    targetCursor,
+    settleUntilMs,
+    passStartedAtMs,
+  };
+}
+
 function rewindCursor(cursor: string | null, overlapMs: number): string | null {
   if (!cursor || overlapMs <= 0) return cursor;
 
@@ -289,6 +486,10 @@ function selectNewestCursor(current: string | null, candidate: string | null): s
   return candidateParsed.canonicalAccountId.localeCompare(currentParsed.canonicalAccountId) > 0
     ? candidate
     : current;
+}
+
+function isCursorAtOrAfter(candidate: string, target: string): boolean {
+  return selectNewestCursor(target, candidate) === candidate;
 }
 
 function parseCursor(
