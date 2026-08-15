@@ -30,19 +30,13 @@ export function registerAtIdentityObservabilityFastifyRoutes(
 
     const query = req.query as { limit?: string | number };
     const limit = clampLimit(query.limit);
-    const [summary, topUnbound, topBound, recent] = await Promise.all([
-      deps.store.getSummary(),
-      deps.store.listTopUnbound(limit),
-      deps.store.listTopBound(limit),
-      deps.store.listRecent(limit),
-    ]);
+    const dashboard = deps.store.getDashboard
+      ? await deps.store.getDashboard(limit)
+      : await loadLegacyDashboard(deps.store, limit);
 
     reply.send({
       generatedAt: new Date().toISOString(),
-      summary,
-      topUnbound,
-      topBound,
-      recent,
+      ...dashboard,
       queries: {
         projected: 'sum by (reason) (fedify_protocol_bridge_projection_outcomes_total{direction="at_to_ap",outcome="projected"})',
         skipped: 'sum by (reason) (fedify_protocol_bridge_projection_outcomes_total{direction="at_to_ap",outcome="skipped"})',
@@ -50,6 +44,16 @@ export function registerAtIdentityObservabilityFastifyRoutes(
       },
     });
   });
+}
+
+async function loadLegacyDashboard(store: ObservedAtIdentityStore, limit: number) {
+  const [summary, topUnbound, topBound, recent] = await Promise.all([
+    store.getSummary(),
+    store.listTopUnbound(limit),
+    store.listTopBound(limit),
+    store.listRecent(limit),
+  ]);
+  return { summary, topUnbound, topBound, recent };
 }
 
 function isAuthorized(req: FastifyRequest, token: string): boolean {
