@@ -99,7 +99,8 @@ describe('IdentityWarmupService forward progress', () => {
 
     expect(requested).toEqual([stored]);
     expect(store.current).toBe(forward);
-    expect(store.replay).toBeNull();
+    expect(store.replay?.targetCursor).toBe(forward);
+    expect(store.replay?.cursor).not.toBeNull();
     expect(result.nextCursor).toBe(forward);
     expect(result.items).toBe(2);
     expect(repository.upsert).toHaveBeenCalledTimes(2);
@@ -165,7 +166,7 @@ describe('IdentityWarmupService forward progress', () => {
     const originalTarget = cursor('2026-08-14T20:00:00.000Z', 'https://pod.example/z/profile/card#me');
     const persistedReplay = cursor('2026-08-14T19:59:20.000Z', 'https://pod.example/b/profile/card#me');
     const newerHighWater = cursor('2026-08-14T20:01:00.000Z', 'https://pod.example/new/profile/card#me');
-    const replayDone = cursor('2026-08-14T20:00:00.000Z', 'https://pod.example/z/profile/card#me');
+    const replayDone = cursor('2026-08-14T20:01:00.000Z', 'https://pod.example/new/profile/card#me');
     const store = makeCursorStore(newerHighWater);
     store.replay = { cursor: persistedReplay, targetCursor: originalTarget };
 
@@ -184,7 +185,7 @@ describe('IdentityWarmupService forward progress', () => {
       if (since === newerHighWater) return { items: [], nextCursor: newerHighWater };
       if (since === persistedReplay) {
         return {
-          items: [projection('z', '2026-08-14T20:00:00.000Z')],
+          items: [projection('new', '2026-08-14T20:01:00.000Z')],
           nextCursor: replayDone,
         };
       }
@@ -198,7 +199,7 @@ describe('IdentityWarmupService forward progress', () => {
     expect(store.replay).toBeNull();
   });
 
-  it('pauses an active replay cycle whenever the forward page is saturated', async () => {
+  it('pauses replay execution but extends its target whenever the forward page is saturated', async () => {
     const highWater = cursor('2026-08-14T20:00:00.000Z', 'https://pod.example/z/profile/card#me');
     const forward = cursor('2026-08-14T20:00:02.000Z', 'https://pod.example/b/profile/card#me');
     const replayCursor = cursor('2026-08-14T19:59:20.000Z', 'https://pod.example/replay/profile/card#me');
@@ -232,7 +233,41 @@ describe('IdentityWarmupService forward progress', () => {
     expect(requested).toEqual([highWater]);
     expect(result.items).toBe(2);
     expect(store.current).toBe(forward);
-    expect(store.replay).toEqual({ cursor: replayCursor, targetCursor: highWater });
+    expect(store.replay).toEqual({ cursor: replayCursor, targetCursor: forward });
+  });
+
+  it('creates replay coverage before the first saturated page advances the durable cursor', async () => {
+    const highWater = cursor('2026-08-14T20:00:00.000Z', 'https://pod.example/z/profile/card#me');
+    const forward = cursor('2026-08-14T20:10:00.000Z', 'https://pod.example/b/profile/card#me');
+    const store = makeCursorStore(highWater);
+    const service = new IdentityWarmupService({
+      backendBaseUrl: 'http://127.0.0.1:3000',
+      bearerToken: 'test-token',
+      identityBindingRepository: makeRepository(),
+      cursorStore: store,
+      batchLimit: 2,
+      replayOverlapMs: 60_000,
+    });
+
+    (service as unknown as MutableWarmup).fetchChangesWithRetry = vi.fn(async since => {
+      expect(since).toBe(highWater);
+      return {
+        items: [
+          projection('a', '2026-08-14T20:05:00.000Z'),
+          projection('b', '2026-08-14T20:10:00.000Z'),
+        ],
+        nextCursor: forward,
+      };
+    });
+
+    await service.pollOnce();
+
+    expect(store.current).toBe(forward);
+    expect(store.replay?.targetCursor).toBe(forward);
+    const replayStart = JSON.parse(
+      Buffer.from(store.replay!.cursor, 'base64url').toString('utf8')
+    ) as { updatedAt: string };
+    expect(replayStart.updatedAt).toBe('2026-08-14T19:59:00.000Z');
   });
 
   it('never lets overlap replay regress the durable high-water mark', async () => {
