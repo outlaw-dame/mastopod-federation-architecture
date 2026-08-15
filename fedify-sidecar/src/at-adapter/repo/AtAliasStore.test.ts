@@ -43,6 +43,31 @@ describe('RedisAtAliasStore bounded enumeration', () => {
     expect(redis.get).not.toHaveBeenCalled();
   });
 
+  it('deduplicates a key repeated by SCAN on a later page', async () => {
+    const first = alias('first', 'did:plc:alice');
+    const second = alias('second', 'did:plc:alice');
+    const redis = {
+      scan: vi
+        .fn()
+        .mockResolvedValueOnce(['7', ['at:alias:canonical:first']])
+        .mockResolvedValueOnce([
+          '0',
+          ['at:alias:canonical:first', 'at:alias:canonical:second'],
+        ]),
+      mget: vi
+        .fn()
+        .mockResolvedValueOnce([JSON.stringify(first)])
+        .mockResolvedValueOnce([JSON.stringify(second)]),
+    };
+
+    const store = new RedisAtAliasStore(redis);
+    const result = await store.listActive();
+
+    expect(result).toEqual([first, second]);
+    expect(redis.mget).toHaveBeenNthCalledWith(1, 'at:alias:canonical:first');
+    expect(redis.mget).toHaveBeenNthCalledWith(2, 'at:alias:canonical:second');
+  });
+
   it('filters active aliases after bounded page reads', async () => {
     const active = alias('active', 'did:plc:alice');
     const deleted = alias('deleted', 'did:plc:alice', '2026-08-14T21:00:00.000Z');
