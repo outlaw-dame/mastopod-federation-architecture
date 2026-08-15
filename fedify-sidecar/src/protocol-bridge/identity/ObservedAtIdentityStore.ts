@@ -68,7 +68,12 @@ type RedisLike = {
   set(key: string, value: string): Promise<unknown>;
   sadd(key: string, ...members: string[]): Promise<unknown>;
   smembers(key: string): Promise<string[]>;
-  sscan?(key: string, cursor: string, ...args: Array<string | number>): Promise<[string, string[]]>;
+  sscan?(
+    key: string,
+    cursor: string,
+    countToken: "COUNT",
+    count: number,
+  ): Promise<[string, string[]]>;
   mget?(...keys: string[]): Promise<Array<string | null>>;
 };
 
