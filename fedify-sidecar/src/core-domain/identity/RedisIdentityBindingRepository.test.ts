@@ -237,10 +237,17 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     };
     const repository = new RedisIdentityBindingRepository(redis);
 
-    await expect(repository.create(binding('a'))).rejects.toMatchObject({
+    const error = await repository.create(binding('a')).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toMatchObject({
       code: RepositoryErrorCode.PERSISTENCE_ERROR,
     });
-    await expect(repository.create(binding('b'))).rejects.toThrow(/WRONGTYPE/u);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/WRONGTYPE/u);
+    expect(multi.exec).toHaveBeenCalledTimes(1);
   });
 
   it('wraps a rejected MULTI EXEC as a persistence error', async () => {
@@ -252,10 +259,17 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     };
     const repository = new RedisIdentityBindingRepository(redis);
 
-    await expect(repository.create(binding('a'))).rejects.toMatchObject({
+    const error = await repository.create(binding('a')).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toMatchObject({
       code: RepositoryErrorCode.PERSISTENCE_ERROR,
     });
-    await expect(repository.create(binding('b'))).rejects.toThrow(/ECONNRESET/u);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/ECONNRESET/u);
+    expect(multi.exec).toHaveBeenCalledTimes(1);
   });
 
   it('does not delete the binding when secondary-index cleanup reports a Redis command error', async () => {
