@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { IdentityBinding } from './IdentityBinding.js';
 import { RedisIdentityBindingRepository } from './RedisIdentityBindingRepository.js';
 
-function binding(id: string, contextId = 'ctx-a', status: 'active' | 'suspended' | 'deactivated' = 'active'): IdentityBinding {
+function binding(
+  id: string,
+  contextId = 'ctx-a',
+  status: 'active' | 'suspended' | 'deactivated' = 'active',
+): IdentityBinding {
   return {
     canonicalAccountId: id,
     contextId,
@@ -10,7 +14,7 @@ function binding(id: string, contextId = 'ctx-a', status: 'active' | 'suspended'
     activityPubActorUri: `https://pod.example/${id}`,
     atprotoDid: `did:plc:${id}`,
     atprotoHandle: `${id}.pod.example`,
-    canonicalDidMethod: 'did:plc',
+    canonicalDidMethod: null,
     atprotoPdsEndpoint: 'https://pds.example',
     apSigningKeyRef: `ap:${id}`,
     atSigningKeyRef: `at:${id}`,
@@ -21,12 +25,13 @@ function binding(id: string, contextId = 'ctx-a', status: 'active' | 'suspended'
       apAlsoKnownAs: [],
       atAlsoKnownAs: [],
       relMe: [],
-      sameAs: [],
+      webIdSameAs: [],
+      webIdAccounts: [],
     },
     status,
     createdAt: '2026-08-14T00:00:00.000Z',
     updatedAt: '2026-08-14T00:00:00.000Z',
-  } as IdentityBinding;
+  };
 }
 
 function makeScanRedis(
