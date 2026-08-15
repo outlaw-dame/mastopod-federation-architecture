@@ -20,6 +20,7 @@ export interface IdentityWarmCursorStore {
   getReplayState(): Promise<IdentityWarmReplayState | null>;
   setReplayState(state: IdentityWarmReplayState): Promise<void>;
   clearReplayState(): Promise<void>;
+  setCursorAndReplay?(cursor: string, state: IdentityWarmReplayState): Promise<void>;
 }
 
 export interface IdentityWarmupServiceConfig {
@@ -156,18 +157,9 @@ export class IdentityWarmupService {
         storedCursor
     );
     const cursorToPersist = selectNewestCursor(storedCursor, forwardNextCursor);
-
-    if (cursorToPersist && cursorToPersist !== storedCursor) {
-      await this.cursorStore.setCursor(cursorToPersist);
-    }
-
-    let replayItems = 0;
     const forwardSaturated = forwardResponse.items.length >= this.batchLimit;
 
-    // A replay cycle is created only after forward catch-up is unsaturated.
-    // Persist it before fetching the first replay page so a crash/restart can
-    // resume the exact unfinished interval rather than reconstructing from a
-    // newer high-water mark and skipping late-visible older records.
+    let newReplayState: IdentityWarmReplayState | null = null;
     if (
       !forwardSaturated &&
       this.replayOverlapMs > 0 &&
@@ -176,13 +168,34 @@ export class IdentityWarmupService {
     ) {
       const replayStart = rewindCursor(cursorToPersist, this.replayOverlapMs);
       if (replayStart && replayStart !== cursorToPersist) {
-        replayState = {
+        newReplayState = {
           cursor: replayStart,
           targetCursor: cursorToPersist,
         };
-        await this.cursorStore.setReplayState(replayState);
       }
     }
+
+    const cursorAdvanced = Boolean(cursorToPersist && cursorToPersist !== storedCursor);
+    if (newReplayState && cursorAdvanced && this.cursorStore.setCursorAndReplay) {
+      // Production Redis commits both pieces of recovery state in one MULTI/EXEC,
+      // removing the crash window between recording the replay obligation and
+      // advancing the forward high-water mark.
+      await this.cursorStore.setCursorAndReplay(cursorToPersist!, newReplayState);
+      replayState = newReplayState;
+    } else {
+      if (newReplayState) {
+        // Safe fallback for alternate stores: write replay first. If the process
+        // dies before setCursor, the next run may repeat forward work but cannot
+        // forget the unfinished overlap interval.
+        await this.cursorStore.setReplayState(newReplayState);
+        replayState = newReplayState;
+      }
+      if (cursorAdvanced) {
+        await this.cursorStore.setCursor(cursorToPersist!);
+      }
+    }
+
+    let replayItems = 0;
 
     // If a forward backlog appears while a replay cycle is active, preserve the
     // durable replay state but do no replay work in this poll. This guarantees
