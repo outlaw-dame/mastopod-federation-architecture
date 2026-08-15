@@ -58,12 +58,17 @@ export class RedisIdentityWarmCursorStore implements IdentityWarmCursorStore {
         typeof parsed.settleUntilMs === 'number' && Number.isFinite(parsed.settleUntilMs)
           ? Math.max(0, Math.trunc(parsed.settleUntilMs))
           : undefined;
+      const passStartedAtMs =
+        typeof parsed.passStartedAtMs === 'number' && Number.isFinite(parsed.passStartedAtMs)
+          ? Math.max(0, Math.trunc(parsed.passStartedAtMs))
+          : undefined;
 
       return {
         cursor,
         baseCursor,
         targetCursor,
         settleUntilMs,
+        passStartedAtMs,
       };
     } catch {
       return null;
@@ -123,11 +128,16 @@ function normalizeReplayState(state: IdentityWarmReplayState): IdentityWarmRepla
     typeof state.settleUntilMs === 'number' && Number.isFinite(state.settleUntilMs)
       ? Math.max(0, Math.trunc(state.settleUntilMs))
       : 0;
+  const passStartedAtMs =
+    typeof state.passStartedAtMs === 'number' && Number.isFinite(state.passStartedAtMs)
+      ? Math.max(0, Math.trunc(state.passStartedAtMs))
+      : undefined;
 
   return {
     cursor,
     baseCursor,
     targetCursor,
     settleUntilMs,
+    passStartedAtMs,
   };
 }
