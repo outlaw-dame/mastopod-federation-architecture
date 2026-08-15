@@ -83,7 +83,7 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     expect(redis.get).not.toHaveBeenCalled();
   });
 
-  it('keeps full counts memory-bounded and batches one MGET per scan page', async () => {
+  it('batches full counts and de-duplicates members repeated by SSCAN', async () => {
     const values = new Map<string, IdentityBinding>([
       ['a', binding('a', 'ctx-target')],
       ['b', binding('b', 'ctx-other')],
@@ -92,7 +92,7 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     ]);
     const redis = makeScanRedis(
       [
-        ['17', ['a', 'b']],
+        ['17', ['a', 'b', 'c']],
         ['0', ['c', 'd']],
       ],
       values,
@@ -104,6 +104,7 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     expect(count).toBe(3);
     expect(redis.sscan).toHaveBeenCalledTimes(2);
     expect(redis.mget).toHaveBeenCalledTimes(2);
+    expect(redis.mget.mock.calls[1]).toEqual(['identity:binding:d']);
     expect(redis.smembers).not.toHaveBeenCalled();
     expect(redis.get).not.toHaveBeenCalled();
   });
