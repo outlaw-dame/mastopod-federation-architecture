@@ -161,7 +161,7 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
       multi.set(this.webIdIndexKey(normalized.webId), normalized.canonicalAccountId);
     }
 
-    await multi.exec();
+    await this._execMultiOrThrow(multi, 'Identity binding upsert');
   }
 
   async delete(canonicalAccountId: string): Promise<boolean> {
@@ -275,7 +275,7 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
       multi.set(this.webIdIndexKey(binding.webId), binding.canonicalAccountId);
     }
 
-    await multi.exec();
+    await this._execMultiOrThrow(multi, 'Identity binding write');
   }
 
   private async _removeIndexes(binding: IdentityBinding): Promise<void> {
@@ -292,7 +292,29 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     if (binding.webId) {
       multi.del(this.webIdIndexKey(binding.webId));
     }
-    await multi.exec();
+    await this._execMultiOrThrow(multi, 'Identity index cleanup');
+  }
+
+  private async _execMultiOrThrow(multi: any, operation: string): Promise<void> {
+    const results = await multi.exec();
+    if (!Array.isArray(results)) {
+      throw new RepositoryError(
+        RepositoryErrorCode.PERSISTENCE_ERROR,
+        `${operation} returned no Redis results`,
+      );
+    }
+
+    for (const entry of results) {
+      if (!Array.isArray(entry)) continue;
+      const commandError = entry[0];
+      if (!commandError) continue;
+      const message = commandError instanceof Error ? commandError.message : String(commandError);
+      throw new RepositoryError(
+        RepositoryErrorCode.PERSISTENCE_ERROR,
+        `${operation} failed: ${message}`,
+        { redisError: message },
+      );
+    }
   }
 
   private async _collectMatches(
