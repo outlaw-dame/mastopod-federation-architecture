@@ -6,6 +6,7 @@ on:
       - 'fedify-sidecar/src/at-adapter/identity/IdentityWarmupService.ts'
       - 'fedify-sidecar/src/at-adapter/identity/IdentityWarmupService.test.ts'
       - 'fedify-sidecar/src/at-adapter/identity/IdentityWarmupCrashOrdering.test.ts'
+      - 'fedify-sidecar/src/at-adapter/identity/IdentityWarmupPassStart.test.ts'
       - 'fedify-sidecar/src/at-adapter/identity/RedisIdentityWarmCursorStore.ts'
       - 'fedify-sidecar/src/at-adapter/identity/RedisIdentityWarmCursorStore.test.ts'
       - '.github/workflows/identity-warmup-fast-checks.yml'
@@ -16,6 +17,7 @@ on:
       - 'fedify-sidecar/src/at-adapter/identity/IdentityWarmupService.ts'
       - 'fedify-sidecar/src/at-adapter/identity/IdentityWarmupService.test.ts'
       - 'fedify-sidecar/src/at-adapter/identity/IdentityWarmupCrashOrdering.test.ts'
+      - 'fedify-sidecar/src/at-adapter/identity/IdentityWarmupPassStart.test.ts'
       - 'fedify-sidecar/src/at-adapter/identity/RedisIdentityWarmCursorStore.ts'
       - 'fedify-sidecar/src/at-adapter/identity/RedisIdentityWarmCursorStore.test.ts'
       - '.github/workflows/identity-warmup-fast-checks.yml'
@@ -52,4 +54,5 @@ jobs:
           npm exec -- vitest run
           src/at-adapter/identity/IdentityWarmupService.test.ts
           src/at-adapter/identity/IdentityWarmupCrashOrdering.test.ts
+          src/at-adapter/identity/IdentityWarmupPassStart.test.ts
           src/at-adapter/identity/RedisIdentityWarmCursorStore.test.ts
