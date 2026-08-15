@@ -3,7 +3,7 @@ import type { CanonicalAsset } from '../contracts/CanonicalAsset';
 import { generateBlurPreview } from '../processing/blurPreview';
 import { processImageFile } from '../processing/image';
 import { renderVideoRenditions } from '../processing/video';
-import { replaceAsset, loadAllAssets } from '../storage/assetStore';
+import { replaceAsset, loadAllAssets, loadAsset } from '../storage/assetStore';
 import { buildCanonicalMediaUrl, objectKeyFromCanonicalMediaUrl } from '../storage/cdnUrlBuilder';
 import {
   downloadFromFilebaseToPath,
@@ -45,13 +45,16 @@ interface MissingVideoArtifacts {
 export async function reconcileCanonicalAssets(
   options: ReconcileOptions = {}
 ): Promise<ReconcileSummary> {
-  const assets = await loadAllAssets();
-  const selectedAssets = options.assetId
-    ? assets.filter((asset) => asset.assetId === options.assetId)
-    : assets;
+  let selectedAssets: CanonicalAsset[];
 
-  if (options.assetId && selectedAssets.length === 0) {
-    throw new Error(`Asset ${options.assetId} not found in canonical store`);
+  if (options.assetId) {
+    const asset = await loadAsset(options.assetId);
+    if (!asset) {
+      throw new Error(`Asset ${options.assetId} not found in canonical store`);
+    }
+    selectedAssets = [asset];
+  } else {
+    selectedAssets = await loadAllAssets();
   }
 
   const results: AssetReconcileResult[] = [];
