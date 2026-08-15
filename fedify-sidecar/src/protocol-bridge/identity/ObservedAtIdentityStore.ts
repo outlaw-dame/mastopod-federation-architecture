@@ -45,6 +45,13 @@ export interface ObservedAtIdentitySummary {
   failedCount: number;
 }
 
+export interface ObservedAtIdentityDashboard {
+  summary: ObservedAtIdentitySummary;
+  topUnbound: ObservedAtIdentityRecord[];
+  topBound: ObservedAtIdentityRecord[];
+  recent: ObservedAtIdentityRecord[];
+}
+
 export interface ObservedAtIdentityStore {
   observe(input: ObserveAtIdentityInput): Promise<ObservedAtIdentityRecord>;
   getByDid(did: string): Promise<ObservedAtIdentityRecord | null>;
@@ -53,6 +60,7 @@ export interface ObservedAtIdentityStore {
   listTopUnbound(limit: number): Promise<ObservedAtIdentityRecord[]>;
   listTopBound(limit: number): Promise<ObservedAtIdentityRecord[]>;
   listRecent(limit: number): Promise<ObservedAtIdentityRecord[]>;
+  getDashboard?(limit: number): Promise<ObservedAtIdentityDashboard>;
 }
 
 type RedisLike = {
@@ -60,7 +68,16 @@ type RedisLike = {
   set(key: string, value: string): Promise<unknown>;
   sadd(key: string, ...members: string[]): Promise<unknown>;
   smembers(key: string): Promise<string[]>;
+  sscan?(
+    key: string,
+    cursor: string,
+    countToken: "COUNT",
+    count: number,
+  ): Promise<[string, string[]]>;
+  mget?(...keys: string[]): Promise<Array<string | null>>;
 };
+
+const DASHBOARD_SCAN_COUNT = 128;
 
 export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
   private readonly keyPrefix: string;
@@ -81,35 +98,7 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
   }
 
   public async getByDid(did: string): Promise<ObservedAtIdentityRecord | null> {
-    const raw = await this.redis.get(this.buildDidKey(did));
-    if (!raw) {
-      return null;
-    }
-
-    try {
-      const parsed = JSON.parse(raw) as Partial<ObservedAtIdentityRecord>;
-      if (typeof parsed.did !== "string") {
-        return null;
-      }
-      return {
-        did: parsed.did,
-        handle: typeof parsed.handle === "string" ? parsed.handle : null,
-        pdsEndpoint: typeof parsed.pdsEndpoint === "string" ? parsed.pdsEndpoint : null,
-        canonicalAccountId: typeof parsed.canonicalAccountId === "string" ? parsed.canonicalAccountId : null,
-        activityPubActorUri: typeof parsed.activityPubActorUri === "string" ? parsed.activityPubActorUri : null,
-        bound: parsed.bound === true,
-        firstSeenAt: typeof parsed.firstSeenAt === "string" ? parsed.firstSeenAt : new Date(0).toISOString(),
-        lastSeenAt: typeof parsed.lastSeenAt === "string" ? parsed.lastSeenAt : new Date(0).toISOString(),
-        totalSeen: toCount(parsed.totalSeen),
-        projectedCount: toCount(parsed.projectedCount),
-        skippedUnboundActorCount: toCount(parsed.skippedUnboundActorCount),
-        skippedOtherCount: toCount(parsed.skippedOtherCount),
-        failedCount: toCount(parsed.failedCount),
-        lastOutcome: isOutcome(parsed.lastOutcome) ? parsed.lastOutcome : "skipped_unsupported",
-      };
-    } catch {
-      return null;
-    }
+    return parseObservedIdentityRecord(await this.redis.get(this.buildDidKey(did)));
   }
 
   public async listAll(): Promise<ObservedAtIdentityRecord[]> {
@@ -120,27 +109,7 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
 
   public async getSummary(): Promise<ObservedAtIdentitySummary> {
     const records = await this.listAll();
-    return records.reduce<ObservedAtIdentitySummary>((summary, record) => {
-      summary.totalObserved += 1;
-      if (record.bound) {
-        summary.boundObserved += 1;
-      } else {
-        summary.unboundObserved += 1;
-      }
-      summary.projectedCount += record.projectedCount;
-      summary.skippedUnboundActorCount += record.skippedUnboundActorCount;
-      summary.skippedOtherCount += record.skippedOtherCount;
-      summary.failedCount += record.failedCount;
-      return summary;
-    }, {
-      totalObserved: 0,
-      boundObserved: 0,
-      unboundObserved: 0,
-      projectedCount: 0,
-      skippedUnboundActorCount: 0,
-      skippedOtherCount: 0,
-      failedCount: 0,
-    });
+    return summarizeObservedIdentities(records);
   }
 
   public async listTopUnbound(limit: number): Promise<ObservedAtIdentityRecord[]> {
@@ -155,6 +124,28 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
     return this.listFiltered(limit, () => true, byLastSeenDesc);
   }
 
+  public async getDashboard(limit: number): Promise<ObservedAtIdentityDashboard> {
+    const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+    const summary = emptySummary();
+    let topUnbound: ObservedAtIdentityRecord[] = [];
+    let topBound: ObservedAtIdentityRecord[] = [];
+    let recent: ObservedAtIdentityRecord[] = [];
+
+    for await (const batch of this.scanRecordBatches()) {
+      for (const record of batch) {
+        addRecordToSummary(summary, record);
+        if (record.bound) {
+          topBound = retainTop(topBound, record, safeLimit, bySeenCountDesc);
+        } else {
+          topUnbound = retainTop(topUnbound, record, safeLimit, bySeenCountDesc);
+        }
+        recent = retainTop(recent, record, safeLimit, byLastSeenDesc);
+      }
+    }
+
+    return { summary, topUnbound, topBound, recent };
+  }
+
   private async listFiltered(
     limit: number,
     predicate: (record: ObservedAtIdentityRecord) => boolean,
@@ -165,6 +156,41 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
     return records.filter(predicate).sort(sorter).slice(0, safeLimit);
   }
 
+  private async *scanRecordBatches(): AsyncGenerator<ObservedAtIdentityRecord[]> {
+    if (!this.redis.sscan || !this.redis.mget) {
+      const records = await this.listAll();
+      if (records.length > 0) yield records;
+      return;
+    }
+
+    let cursor = "0";
+    const seenDids = new Set<string>();
+
+    do {
+      const [nextCursor, scannedDids] = await this.redis.sscan(
+        this.buildAllKey(),
+        cursor,
+        "COUNT",
+        DASHBOARD_SCAN_COUNT,
+      );
+      const dids = scannedDids.filter((did) => {
+        if (seenDids.has(did)) return false;
+        seenDids.add(did);
+        return true;
+      });
+
+      if (dids.length > 0) {
+        const raws = await this.redis.mget(...dids.map((did) => this.buildDidKey(did)));
+        const records = raws
+          .map((raw) => parseObservedIdentityRecord(raw))
+          .filter((record): record is ObservedAtIdentityRecord => !!record);
+        if (records.length > 0) yield records;
+      }
+
+      cursor = String(nextCursor);
+    } while (cursor !== "0");
+  }
+
   private buildDidKey(did: string): string {
     return `${this.keyPrefix}:did:${did}`;
   }
@@ -172,6 +198,74 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
   private buildAllKey(): string {
     return `${this.keyPrefix}:all`;
   }
+}
+
+function parseObservedIdentityRecord(raw: string | null): ObservedAtIdentityRecord | null {
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<ObservedAtIdentityRecord>;
+    if (typeof parsed.did !== "string") {
+      return null;
+    }
+    return {
+      did: parsed.did,
+      handle: typeof parsed.handle === "string" ? parsed.handle : null,
+      pdsEndpoint: typeof parsed.pdsEndpoint === "string" ? parsed.pdsEndpoint : null,
+      canonicalAccountId: typeof parsed.canonicalAccountId === "string" ? parsed.canonicalAccountId : null,
+      activityPubActorUri: typeof parsed.activityPubActorUri === "string" ? parsed.activityPubActorUri : null,
+      bound: parsed.bound === true,
+      firstSeenAt: typeof parsed.firstSeenAt === "string" ? parsed.firstSeenAt : new Date(0).toISOString(),
+      lastSeenAt: typeof parsed.lastSeenAt === "string" ? parsed.lastSeenAt : new Date(0).toISOString(),
+      totalSeen: toCount(parsed.totalSeen),
+      projectedCount: toCount(parsed.projectedCount),
+      skippedUnboundActorCount: toCount(parsed.skippedUnboundActorCount),
+      skippedOtherCount: toCount(parsed.skippedOtherCount),
+      failedCount: toCount(parsed.failedCount),
+      lastOutcome: isOutcome(parsed.lastOutcome) ? parsed.lastOutcome : "skipped_unsupported",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function emptySummary(): ObservedAtIdentitySummary {
+  return {
+    totalObserved: 0,
+    boundObserved: 0,
+    unboundObserved: 0,
+    projectedCount: 0,
+    skippedUnboundActorCount: 0,
+    skippedOtherCount: 0,
+    failedCount: 0,
+  };
+}
+
+function addRecordToSummary(summary: ObservedAtIdentitySummary, record: ObservedAtIdentityRecord): void {
+  summary.totalObserved += 1;
+  if (record.bound) summary.boundObserved += 1;
+  else summary.unboundObserved += 1;
+  summary.projectedCount += record.projectedCount;
+  summary.skippedUnboundActorCount += record.skippedUnboundActorCount;
+  summary.skippedOtherCount += record.skippedOtherCount;
+  summary.failedCount += record.failedCount;
+}
+
+function summarizeObservedIdentities(records: ObservedAtIdentityRecord[]): ObservedAtIdentitySummary {
+  const summary = emptySummary();
+  for (const record of records) addRecordToSummary(summary, record);
+  return summary;
+}
+
+function retainTop(
+  records: ObservedAtIdentityRecord[],
+  candidate: ObservedAtIdentityRecord,
+  limit: number,
+  sorter: (left: ObservedAtIdentityRecord, right: ObservedAtIdentityRecord) => number,
+): ObservedAtIdentityRecord[] {
+  const next = [...records, candidate].sort(sorter);
+  if (next.length > limit) next.length = limit;
+  return next;
 }
 
 function mergeObservation(
