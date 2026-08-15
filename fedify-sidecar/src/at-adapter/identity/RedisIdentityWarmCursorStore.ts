@@ -1,12 +1,17 @@
-import type { IdentityWarmCursorStore } from './IdentityWarmupService.js';
+import type {
+  IdentityWarmCursorStore,
+  IdentityWarmReplayState,
+} from './IdentityWarmupService.js';
 
 const CURSOR_KEY = 'identity:warm:cursor';
+const REPLAY_KEY = 'identity:warm:replay';
 
 export class RedisIdentityWarmCursorStore implements IdentityWarmCursorStore {
   constructor(
     private readonly redis: {
       get(key: string): Promise<string | null>;
       set(key: string, value: string): Promise<unknown>;
+      del(key: string): Promise<unknown>;
     }
   ) {}
 
@@ -25,5 +30,35 @@ export class RedisIdentityWarmCursorStore implements IdentityWarmCursorStore {
     }
 
     await this.redis.set(CURSOR_KEY, sanitized);
+  }
+
+  async getReplayState(): Promise<IdentityWarmReplayState | null> {
+    const value = await this.redis.get(REPLAY_KEY);
+    if (!value) return null;
+
+    try {
+      const parsed = JSON.parse(value) as Partial<IdentityWarmReplayState>;
+      const cursor = typeof parsed.cursor === 'string' ? parsed.cursor.trim() : '';
+      const targetCursor =
+        typeof parsed.targetCursor === 'string' ? parsed.targetCursor.trim() : '';
+      if (!cursor || !targetCursor) return null;
+      return { cursor, targetCursor };
+    } catch {
+      return null;
+    }
+  }
+
+  async setReplayState(state: IdentityWarmReplayState): Promise<void> {
+    const cursor = state.cursor.trim();
+    const targetCursor = state.targetCursor.trim();
+    if (!cursor || !targetCursor) {
+      throw new Error('Identity warm replay state cannot contain empty cursors');
+    }
+
+    await this.redis.set(REPLAY_KEY, JSON.stringify({ cursor, targetCursor }));
+  }
+
+  async clearReplayState(): Promise<void> {
+    await this.redis.del(REPLAY_KEY);
   }
 }
