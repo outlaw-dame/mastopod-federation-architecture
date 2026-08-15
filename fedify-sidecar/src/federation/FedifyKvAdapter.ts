@@ -24,16 +24,6 @@ import type {
   KvStoreSetOptions,
 } from "@fedify/fedify";
 
-// ---------------------------------------------------------------------------
-// Fedify 2.x KvStore interface
-// Imported from the installed package so the adapter stays aligned with the
-// exact runtime contract.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Adapter implementation
-// ---------------------------------------------------------------------------
-
 const DEFAULT_NAMESPACE = "fedify:kv";
 const SCAN_COUNT = 100;
 
@@ -47,10 +37,6 @@ export class FedifyKvAdapter implements KvStore {
     this.namespace = namespace;
   }
 
-  // --------------------------------------------------------------------------
-  // Internal helpers
-  // --------------------------------------------------------------------------
-
   private encodeKey(key: KvKey): string {
     return `${this.namespace}:${key.map(encodeURIComponent).join(":")}`;
   }
@@ -63,7 +49,6 @@ export class FedifyKvAdapter implements KvStore {
 
   private ttlSeconds(ttl: unknown): number | null {
     if (ttl == null) return null;
-    // Temporal.Duration (TC39 stage 3 — available in Node 22+)
     if (
       typeof ttl === "object" &&
       ttl !== null &&
@@ -75,14 +60,9 @@ export class FedifyKvAdapter implements KvStore {
       );
       return secs > 0 ? secs : null;
     }
-    // Fallback: numeric seconds
     if (typeof ttl === "number" && ttl > 0) return Math.ceil(ttl);
     return null;
   }
-
-  // --------------------------------------------------------------------------
-  // KvStore interface
-  // --------------------------------------------------------------------------
 
   async get<T = unknown>(key: KvKey): Promise<T | undefined> {
     const raw = await this.redis.get(this.encodeKey(key));
@@ -130,8 +110,7 @@ export class FedifyKvAdapter implements KvStore {
       if (keys.length === 0) continue;
 
       const values = await this.redis.mget(...keys);
-      for (let index = 0; index < keys.length; index += 1) {
-        const rawKey = keys[index];
+      for (const [index, rawKey] of keys.entries()) {
         const raw = values[index];
         if (raw == null) continue;
 
