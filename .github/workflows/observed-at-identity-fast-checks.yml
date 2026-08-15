@@ -1,0 +1,59 @@
+name: Observed AT Identity Fast Checks
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/src/protocol-bridge/identity/ObservedAtIdentityStore.ts'
+      - 'fedify-sidecar/src/protocol-bridge/identity/ObservedAtIdentityStore.test.ts'
+      - '.github/workflows/observed-at-identity-fast-checks.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'fedify-sidecar/src/protocol-bridge/identity/ObservedAtIdentityStore.ts'
+      - 'fedify-sidecar/src/protocol-bridge/identity/ObservedAtIdentityStore.test.ts'
+      - '.github/workflows/observed-at-identity-fast-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fast-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+
+    env:
+      OBSERVED_IDENTITY_TEST_REDIS_URL: redis://127.0.0.1:6379
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install Sidecar Dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Typecheck
+        working-directory: fedify-sidecar
+        run: npm exec -- tsc -p tsconfig.json --noEmit
+
+      - name: Run Observed Identity Regressions
+        working-directory: fedify-sidecar
+        run: npm exec -- vitest run src/protocol-bridge/identity/ObservedAtIdentityStore.test.ts

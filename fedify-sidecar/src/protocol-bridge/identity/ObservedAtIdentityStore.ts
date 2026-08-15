@@ -68,6 +68,11 @@ type RedisLike = {
   set(key: string, value: string): Promise<unknown>;
   sadd(key: string, ...members: string[]): Promise<unknown>;
   smembers(key: string): Promise<string[]>;
+  eval?(
+    script: string,
+    numberOfKeys: number,
+    ...args: Array<string | number>
+  ): Promise<unknown>;
   sscan?(
     key: string,
     cursor: string,
@@ -78,6 +83,88 @@ type RedisLike = {
 };
 
 const DASHBOARD_SCAN_COUNT = 128;
+
+/**
+ * Atomically merges one observation into the existing JSON record and indexes
+ * the DID. Keeping the record as JSON preserves the current storage schema and
+ * all dashboard readers while removing the GET/merge/SET lost-update window.
+ *
+ * ARGV[1] is a JSON-encoded ObserveAtIdentityInput. Undefined optional fields
+ * are omitted by JSON.stringify, so the script can distinguish "not supplied"
+ * from an explicit JSON null in the same way the TypeScript merge uses `??`.
+ */
+const OBSERVE_AT_IDENTITY_LUA = `
+local raw = redis.call('GET', KEYS[1])
+local input = cjson.decode(ARGV[1])
+local record = nil
+
+if raw then
+  local ok, decoded = pcall(cjson.decode, raw)
+  if ok and type(decoded) == 'table' and type(decoded.did) == 'string' then
+    record = decoded
+  end
+end
+
+local function count(value)
+  local parsed = tonumber(value)
+  if not parsed or parsed < 0 then return 0 end
+  return math.floor(parsed)
+end
+
+local function supplied(value)
+  return value ~= nil and value ~= cjson.null
+end
+
+if not record then
+  record = {
+    did = input.did,
+    handle = cjson.null,
+    pdsEndpoint = cjson.null,
+    canonicalAccountId = cjson.null,
+    activityPubActorUri = cjson.null,
+    bound = false,
+    firstSeenAt = input.observedAt,
+    lastSeenAt = input.observedAt,
+    totalSeen = 0,
+    projectedCount = 0,
+    skippedUnboundActorCount = 0,
+    skippedOtherCount = 0,
+    failedCount = 0,
+    lastOutcome = input.outcome
+  }
+end
+
+record.did = input.did
+if supplied(input.handle) then record.handle = input.handle end
+if supplied(input.pdsEndpoint) then record.pdsEndpoint = input.pdsEndpoint end
+if supplied(input.canonicalAccountId) then record.canonicalAccountId = input.canonicalAccountId end
+if supplied(input.activityPubActorUri) then record.activityPubActorUri = input.activityPubActorUri end
+record.bound = record.bound == true or input.bound == true
+if type(record.firstSeenAt) ~= 'string' then record.firstSeenAt = input.observedAt end
+record.lastSeenAt = input.observedAt
+
+record.totalSeen = count(record.totalSeen) + 1
+record.projectedCount = count(record.projectedCount)
+record.skippedUnboundActorCount = count(record.skippedUnboundActorCount)
+record.skippedOtherCount = count(record.skippedOtherCount)
+record.failedCount = count(record.failedCount)
+
+if input.outcome == 'projected' then
+  record.projectedCount = record.projectedCount + 1
+elseif input.outcome == 'skipped_unbound_actor' then
+  record.skippedUnboundActorCount = record.skippedUnboundActorCount + 1
+elseif input.outcome == 'failed_projection_error' then
+  record.failedCount = record.failedCount + 1
+else
+  record.skippedOtherCount = record.skippedOtherCount + 1
+end
+record.lastOutcome = input.outcome
+
+local encoded = cjson.encode(record)
+redis.call('SET', KEYS[1], encoded)
+redis.call('SADD', KEYS[2], input.did)
+return encoded
+`;
 
 export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
   private readonly keyPrefix: string;
@@ -90,11 +177,34 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
   }
 
   public async observe(input: ObserveAtIdentityInput): Promise<ObservedAtIdentityRecord> {
-    const existing = await this.getByDid(input.did);
-    const next = mergeObservation(existing, input);
-    await this.redis.set(this.buildDidKey(input.did), JSON.stringify(next));
-    await this.redis.sadd(this.buildAllKey(), input.did);
-    return next;
+    if (!this.redis.eval) {
+      // Compatibility fallback for lightweight/custom Redis-like adapters. The
+      // production ioredis client exposes EVAL and therefore always takes the
+      // atomic path. Keeping this fallback avoids turning the optimization into
+      // an interface break for existing test/dry-run stores.
+      const existing = await this.getByDid(input.did);
+      const next = mergeObservation(existing, input);
+      await this.redis.set(this.buildDidKey(input.did), JSON.stringify(next));
+      await this.redis.sadd(this.buildAllKey(), input.did);
+      return next;
+    }
+
+    const encoded = await this.redis.eval(
+      OBSERVE_AT_IDENTITY_LUA,
+      2,
+      this.buildDidKey(input.did),
+      this.buildAllKey(),
+      JSON.stringify(input),
+    );
+    if (typeof encoded !== "string") {
+      throw new Error("Observed AT identity atomic update returned an invalid payload");
+    }
+
+    const record = parseObservedIdentityRecord(encoded);
+    if (!record || record.did !== input.did) {
+      throw new Error("Observed AT identity atomic update returned an invalid record");
+    }
+    return record;
   }
 
   public async getByDid(did: string): Promise<ObservedAtIdentityRecord | null> {
