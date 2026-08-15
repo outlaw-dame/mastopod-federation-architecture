@@ -153,6 +153,11 @@ export class RedisAtAliasStore implements AtAliasStore {
   private async *scanAliases(): AsyncIterable<AtAliasRecord> {
     let cursor = '0';
     const pattern = `${this.prefix}canonical:*`;
+    // Redis SCAN may return the same key more than once while the hash table is
+    // changing. The public list methods return materialized arrays anyway, so
+    // remembering emitted keys does not worsen their O(total aliases) memory
+    // bound and preserves the duplicate-free semantics of the old KEYS path.
+    const seenKeys = new Set<string>();
 
     do {
       const [nextCursor, keys] = await this.redis.scan(
@@ -166,7 +171,14 @@ export class RedisAtAliasStore implements AtAliasStore {
 
       if (!Array.isArray(keys) || keys.length === 0) continue;
 
-      const values = await this.redis.mget(...keys);
+      const uniqueKeys = keys.filter((key: string) => {
+        if (seenKeys.has(key)) return false;
+        seenKeys.add(key);
+        return true;
+      });
+      if (uniqueKeys.length === 0) continue;
+
+      const values = await this.redis.mget(...uniqueKeys);
       for (const raw of values) {
         // A key may expire or be deleted between SCAN and MGET.
         if (raw == null) continue;
