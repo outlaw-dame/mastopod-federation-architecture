@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { IdentityBinding } from './IdentityBinding.js';
+import {
+  RepositoryErrorCode,
+} from './IdentityBindingRepository.js';
 import { RedisIdentityBindingRepository } from './RedisIdentityBindingRepository.js';
 
 function binding(
@@ -39,6 +42,8 @@ function makeScanRedis(
   values: Map<string, IdentityBinding>,
 ) {
   let page = 0;
+  const scanSessions = new Map<string, Set<string>>();
+
   return {
     sscan: vi.fn(async () => pages[page++] ?? ['0', []]),
     mget: vi.fn(async (...keys: string[]) =>
@@ -53,6 +58,35 @@ function makeScanRedis(
     }),
     get: vi.fn(async () => {
       throw new Error('per-binding GET must not be used by bounded scans');
+    }),
+    sadd: vi.fn(async (key: string, member: string) => {
+      const set = scanSessions.get(key) ?? new Set<string>();
+      const before = set.size;
+      set.add(member);
+      scanSessions.set(key, set);
+      return set.size === before ? 0 : 1;
+    }),
+    pexpire: vi.fn(async (key: string) => Number(scanSessions.has(key))),
+    del: vi.fn(async (key: string) => Number(scanSessions.delete(key))),
+    eval: vi.fn(async (
+      _script: string,
+      _numberOfKeys: number,
+      key: string,
+      sentinel: string,
+      _ttl: string,
+      ...ids: string[]
+    ) => {
+      const set = scanSessions.get(key);
+      if (!set || !set.has(sentinel)) {
+        throw new Error('IDENTITY_SCAN_SESSION_EXPIRED');
+      }
+      const fresh: string[] = [];
+      for (const id of ids) {
+        if (set.has(id)) continue;
+        set.add(id);
+        fresh.push(id);
+      }
+      return fresh;
     }),
   };
 }
@@ -71,7 +105,7 @@ function makeMulti(results: unknown[]) {
 }
 
 describe('RedisIdentityBindingRepository bounded reads', () => {
-  it('stops scanning as soon as a paginated filtered result is satisfied', async () => {
+  it('stops scanning as soon as a paginated filtered result is satisfied and cleans the scan session', async () => {
     const values = new Map<string, IdentityBinding>([
       ['a', binding('a', 'ctx-target')],
       ['b', binding('b', 'ctx-other')],
@@ -94,9 +128,10 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     expect(redis.mget).toHaveBeenCalledTimes(1);
     expect(redis.smembers).not.toHaveBeenCalled();
     expect(redis.get).not.toHaveBeenCalled();
+    expect(redis.del).toHaveBeenCalledTimes(1);
   });
 
-  it('batches full counts and de-duplicates members repeated by SSCAN', async () => {
+  it('batches full counts and de-duplicates members repeated across SSCAN pages in Redis', async () => {
     const values = new Map<string, IdentityBinding>([
       ['a', binding('a', 'ctx-target')],
       ['b', binding('b', 'ctx-other')],
@@ -118,8 +153,55 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     expect(redis.sscan).toHaveBeenCalledTimes(2);
     expect(redis.mget).toHaveBeenCalledTimes(2);
     expect(redis.mget.mock.calls[1]).toEqual(['identity:binding:d']);
+    expect(redis.eval).toHaveBeenCalledTimes(2);
     expect(redis.smembers).not.toHaveBeenCalled();
     expect(redis.get).not.toHaveBeenCalled();
+    expect(redis.del).toHaveBeenCalledTimes(1);
+  });
+
+  it('chunks an oversized SSCAN response before de-duplication and MGET', async () => {
+    const ids = Array.from({ length: 260 }, (_, index) => `account-${index}`);
+    const values = new Map(ids.map(id => [id, binding(id, 'ctx-target')]));
+    const redis = makeScanRedis([['0', ids]], values);
+    const repository = new RedisIdentityBindingRepository(redis);
+
+    const count = await repository.countByContext('ctx-target');
+
+    expect(count).toBe(260);
+    expect(redis.sscan).toHaveBeenCalledTimes(1);
+    expect(redis.eval).toHaveBeenCalledTimes(3);
+    expect(redis.mget).toHaveBeenCalledTimes(3);
+    expect(redis.mget.mock.calls.map(call => call.length)).toEqual([128, 128, 4]);
+  });
+
+  it('fails closed if the Redis-side scan session disappears mid-scan', async () => {
+    const values = new Map<string, IdentityBinding>([
+      ['a', binding('a', 'ctx-target')],
+      ['b', binding('b', 'ctx-target')],
+    ]);
+    const redis = makeScanRedis(
+      [
+        ['17', ['a']],
+        ['0', ['b']],
+      ],
+      values,
+    );
+    redis.eval
+      .mockImplementationOnce(async (
+        _script: string,
+        _numberOfKeys: number,
+        _key: string,
+        _sentinel: string,
+        _ttl: string,
+        ...ids: string[]
+      ) => ids)
+      .mockRejectedValueOnce(new Error('IDENTITY_SCAN_SESSION_EXPIRED'));
+    const repository = new RedisIdentityBindingRepository(redis);
+
+    await expect(repository.countByContext('ctx-target')).rejects.toMatchObject({
+      code: RepositoryErrorCode.QUERY_ERROR,
+    });
+    expect(redis.del).toHaveBeenCalledTimes(1);
   });
 
   it('chunks getBatch instead of creating one Redis lookup per account', async () => {
@@ -155,8 +237,25 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     };
     const repository = new RedisIdentityBindingRepository(redis);
 
-    await expect(repository.create(binding('a'))).rejects.toThrow(/WRONGTYPE/u);
-    expect(multi.exec).toHaveBeenCalledTimes(1);
+    await expect(repository.create(binding('a'))).rejects.toMatchObject({
+      code: RepositoryErrorCode.PERSISTENCE_ERROR,
+    });
+    await expect(repository.create(binding('b'))).rejects.toThrow(/WRONGTYPE/u);
+  });
+
+  it('wraps a rejected MULTI EXEC as a persistence error', async () => {
+    const multi = makeMulti([]);
+    multi.exec.mockRejectedValueOnce(new Error('ECONNRESET during EXEC'));
+    const redis = {
+      exists: vi.fn(async () => 0),
+      multi: vi.fn(() => multi),
+    };
+    const repository = new RedisIdentityBindingRepository(redis);
+
+    await expect(repository.create(binding('a'))).rejects.toMatchObject({
+      code: RepositoryErrorCode.PERSISTENCE_ERROR,
+    });
+    await expect(repository.create(binding('b'))).rejects.toThrow(/ECONNRESET/u);
   });
 
   it('does not delete the binding when secondary-index cleanup reports a Redis command error', async () => {
