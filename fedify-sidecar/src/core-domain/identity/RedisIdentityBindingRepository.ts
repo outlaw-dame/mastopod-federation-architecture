@@ -34,6 +34,19 @@ const SCAN_SESSION_PREFIX = 'identity:scan:seen:';
 const SCAN_SESSION_SENTINEL = '\u0000identity-scan-session';
 const SCAN_SESSION_TTL_MS = 5 * 60_000;
 
+const OPEN_SCAN_SESSION_LUA = `
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then
+  return redis.error_reply('IDENTITY_SCAN_SESSION_INVALID_TTL')
+end
+
+redis.call('SADD', KEYS[1], ARGV[1])
+if redis.call('PEXPIRE', KEYS[1], ttl) ~= 1 then
+  return redis.error_reply('IDENTITY_SCAN_SESSION_TTL_FAILED')
+end
+return 1
+`;
+
 const DEDUPE_SCAN_IDS_LUA = `
 if redis.call('SISMEMBER', KEYS[1], ARGV[1]) ~= 1 then
   return redis.error_reply('IDENTITY_SCAN_SESSION_EXPIRED')
@@ -426,16 +439,22 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
 
   private async _openScanSession(scanSessionKey: string): Promise<void> {
     try {
-      await this.redis.sadd(scanSessionKey, SCAN_SESSION_SENTINEL);
-      const expirySet = await this.redis.pexpire(scanSessionKey, SCAN_SESSION_TTL_MS);
-      if (Number(expirySet) !== 1) {
-        throw new Error('Redis did not apply scan-session TTL');
+      const opened = await this.redis.eval(
+        OPEN_SCAN_SESSION_LUA,
+        1,
+        scanSessionKey,
+        SCAN_SESSION_SENTINEL,
+        String(SCAN_SESSION_TTL_MS),
+      );
+      if (Number(opened) !== 1) {
+        throw new Error('Redis did not initialize scan session');
       }
     } catch (error) {
       try {
         await this.redis.del(scanSessionKey);
       } catch {
-        // Best effort only; if TTL was successfully applied Redis self-cleans.
+        // Best effort only. The Lua creation is atomic, so any created session
+        // already has a TTL and Redis will self-clean it after a crash.
       }
       throw this._redisRepositoryError(
         RepositoryErrorCode.QUERY_ERROR,
