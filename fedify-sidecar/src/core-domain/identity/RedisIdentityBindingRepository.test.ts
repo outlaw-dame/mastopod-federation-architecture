@@ -57,6 +57,19 @@ function makeScanRedis(
   };
 }
 
+function makeMulti(results: unknown[]) {
+  const multi = {
+    set: vi.fn(),
+    sadd: vi.fn(),
+    del: vi.fn(),
+    exec: vi.fn(async () => results),
+  };
+  multi.set.mockReturnValue(multi);
+  multi.sadd.mockReturnValue(multi);
+  multi.del.mockReturnValue(multi);
+  return multi;
+}
+
 describe('RedisIdentityBindingRepository bounded reads', () => {
   it('stops scanning as soon as a paginated filtered result is satisfied', async () => {
     const values = new Map<string, IdentityBinding>([
@@ -127,5 +140,39 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     expect(result.size).toBe(260);
     expect(redis.mget).toHaveBeenCalledTimes(3);
     expect(redis.mget.mock.calls.map(call => call.length)).toEqual([128, 128, 4]);
+  });
+
+  it('rejects a create when Redis MULTI returns a per-command error', async () => {
+    const wrongType = new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
+    const multi = makeMulti([
+      [null, 'OK'],
+      [wrongType, null],
+      [null, 'OK'],
+    ]);
+    const redis = {
+      exists: vi.fn(async () => 0),
+      multi: vi.fn(() => multi),
+    };
+    const repository = new RedisIdentityBindingRepository(redis);
+
+    await expect(repository.create(binding('a'))).rejects.toThrow(/WRONGTYPE/u);
+    expect(multi.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not delete the binding when secondary-index cleanup reports a Redis command error', async () => {
+    const existing = binding('a');
+    const wrongType = new Error('WRONGTYPE index cleanup failed');
+    const multi = makeMulti([[wrongType, null]]);
+    const redis = {
+      get: vi.fn(async () => JSON.stringify(existing)),
+      multi: vi.fn(() => multi),
+      del: vi.fn(async () => 1),
+      srem: vi.fn(async () => 1),
+    };
+    const repository = new RedisIdentityBindingRepository(redis);
+
+    await expect(repository.delete('a')).rejects.toThrow(/WRONGTYPE/u);
+    expect(redis.del).not.toHaveBeenCalled();
+    expect(redis.srem).not.toHaveBeenCalled();
   });
 });
