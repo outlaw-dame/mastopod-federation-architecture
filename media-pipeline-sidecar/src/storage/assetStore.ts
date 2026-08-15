@@ -7,6 +7,14 @@ import { mergePlaybackVariants, mergeStreamingManifests } from '../utils/playbac
 
 const redisIndexKey = `${config.assetStoreRedisPrefix}:ids`;
 const redisReadBatchSize = 128;
+const pruneStaleIndexLua = `
+for i = 2, #KEYS do
+  if redis.call('EXISTS', KEYS[i]) == 0 then
+    redis.call('SREM', KEYS[1], ARGV[i - 1])
+  end
+end
+return 1
+`;
 
 function getFilePath(): string {
   return path.join(config.mediaDataDir, 'canonical-assets.json');
@@ -73,6 +81,20 @@ function mergeCanonicalAsset(existing: CanonicalAsset, incoming: CanonicalAsset)
 
 function redisAssetKey(assetId: string): string {
   return `${config.assetStoreRedisPrefix}:${assetId}`;
+}
+
+async function pruneStaleRedisAssetIds(assetIds: string[]): Promise<void> {
+  if (assetIds.length === 0) return;
+
+  // The initial MGET is only a hint that an index member may be stale. A writer
+  // can recreate the backing asset before cleanup runs, so re-check key
+  // existence and remove the set member in one atomic Lua execution. If a
+  // writer wins first, EXISTS is true and the restored index member survives;
+  // if cleanup wins first, the writer's subsequent SADD restores it.
+  await redis.eval(pruneStaleIndexLua, {
+    keys: [redisIndexKey, ...assetIds.map(redisAssetKey)],
+    arguments: assetIds,
+  });
 }
 
 async function saveRedisAsset(asset: CanonicalAsset): Promise<CanonicalAsset> {
@@ -206,9 +228,7 @@ export async function loadAllAssets(): Promise<CanonicalAsset[]> {
         assets.push(JSON.parse(row) as CanonicalAsset);
       }
 
-      if (staleIds.length > 0) {
-        await redis.sRem(redisIndexKey, staleIds);
-      }
+      await pruneStaleRedisAssetIds(staleIds);
     };
 
     for await (const assetId of redis.sScanIterator(redisIndexKey, { COUNT: redisReadBatchSize })) {
