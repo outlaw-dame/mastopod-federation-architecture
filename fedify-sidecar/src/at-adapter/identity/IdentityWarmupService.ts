@@ -47,6 +47,14 @@ export class IdentityWarmupService {
   private timer: NodeJS.Timeout | null = null;
   private inFlight: Promise<{ items: number; nextCursor: string | null }> | null = null;
 
+  // Replay repair is deliberately independent of the durable forward cursor.
+  // If the overlap window contains >= batchLimit records, rewinding the durable
+  // cursor on every poll would otherwise fetch the same old page forever and
+  // starve newer identity changes. The durable cursor always moves forward;
+  // this transient cursor drains one bounded overlap page per caught-up poll.
+  private replayCursor: string | null = null;
+  private replayTargetCursor: string | null = null;
+
   constructor(config: IdentityWarmupServiceConfig) {
     this.backendBaseUrl = config.backendBaseUrl.replace(/\/$/, '');
     this.bearerToken = config.bearerToken;
@@ -127,17 +135,94 @@ export class IdentityWarmupService {
 
   async pollOnce(): Promise<{ items: number; nextCursor: string | null }> {
     const storedCursor = sanitizeCursor(await this.cursorStore.getCursor());
-    const replayCursor = rewindCursor(storedCursor, this.replayOverlapMs);
 
     traceIdentitySync(this.logger, 'debug', 'warmup:poll-start', {
       since: storedCursor,
-      replayCursor,
+      replayCursor: this.replayCursor,
+      replayTargetCursor: this.replayTargetCursor,
       limit: this.batchLimit,
     });
 
-    const response = await this.fetchChangesWithRetry(replayCursor);
+    // Forward progress owns the durable high-water mark. Never rewind this
+    // request: a dense overlap window must not prevent reading records newer
+    // than the cursor already committed to Redis.
+    const forwardResponse = await this.fetchChangesWithRetry(storedCursor);
+    await this.applyItems(forwardResponse.items);
 
-    for (const item of response.items) {
+    const forwardNextCursor = sanitizeCursor(
+      forwardResponse.nextCursor ??
+        forwardResponse.items[forwardResponse.items.length - 1]?.updatedAt ??
+        storedCursor
+    );
+    const cursorToPersist = selectNewestCursor(storedCursor, forwardNextCursor);
+
+    if (cursorToPersist && cursorToPersist !== storedCursor) {
+      await this.cursorStore.setCursor(cursorToPersist);
+    }
+
+    let replayItems = 0;
+
+    // Start overlap repair only after the forward page is no longer saturated.
+    // Backlog catch-up therefore spends every poll on advancing the durable
+    // cursor; once caught up, replay repair consumes at most one additional
+    // bounded page per poll and cannot monopolize a polling interval.
+    if (
+      this.replayOverlapMs > 0 &&
+      cursorToPersist &&
+      !this.replayCursor &&
+      !this.replayTargetCursor &&
+      forwardResponse.items.length < this.batchLimit
+    ) {
+      const replayStart = rewindCursor(cursorToPersist, this.replayOverlapMs);
+      if (replayStart && replayStart !== cursorToPersist) {
+        this.replayCursor = replayStart;
+        this.replayTargetCursor = cursorToPersist;
+      }
+    }
+
+    if (this.replayCursor && this.replayTargetCursor) {
+      const requestedReplayCursor = this.replayCursor;
+      const replayResponse = await this.fetchChangesWithRetry(requestedReplayCursor);
+      await this.applyItems(replayResponse.items);
+      replayItems = replayResponse.items.length;
+
+      const replayNextCursor = sanitizeCursor(
+        replayResponse.nextCursor ??
+          replayResponse.items[replayResponse.items.length - 1]?.updatedAt ??
+          requestedReplayCursor
+      );
+
+      const replayComplete =
+        replayResponse.items.length === 0 ||
+        !replayNextCursor ||
+        replayNextCursor === requestedReplayCursor ||
+        isCursorAtOrAfter(replayNextCursor, this.replayTargetCursor);
+
+      if (replayComplete) {
+        this.replayCursor = null;
+        this.replayTargetCursor = null;
+      } else {
+        this.replayCursor = replayNextCursor;
+      }
+    }
+
+    traceIdentitySync(this.logger, 'info', 'warmup:poll-success', {
+      since: storedCursor,
+      nextCursor: cursorToPersist,
+      forwardItems: forwardResponse.items.length,
+      replayItems,
+      replayCursor: this.replayCursor,
+      replayTargetCursor: this.replayTargetCursor,
+    });
+
+    return {
+      items: forwardResponse.items.length + replayItems,
+      nextCursor: cursorToPersist,
+    };
+  }
+
+  private async applyItems(items: BackendIdentityProjection[]): Promise<void> {
+    for (const item of items) {
       await applyIdentityProjectionLocally(
         item,
         {
@@ -153,30 +238,6 @@ export class IdentityWarmupService {
         }
       );
     }
-
-    const nextCursor = sanitizeCursor(
-      response.nextCursor ??
-        response.items[response.items.length - 1]?.updatedAt ??
-        storedCursor
-    );
-
-    const cursorToPersist = selectNewestCursor(storedCursor, nextCursor);
-
-    if (cursorToPersist && cursorToPersist !== storedCursor) {
-      await this.cursorStore.setCursor(cursorToPersist);
-    }
-
-    traceIdentitySync(this.logger, 'info', 'warmup:poll-success', {
-      since: storedCursor,
-      replayCursor,
-      nextCursor: cursorToPersist,
-      items: response.items.length,
-    });
-
-    return {
-      items: response.items.length,
-      nextCursor: cursorToPersist,
-    };
   }
 
   private async fetchChangesWithRetry(
@@ -289,6 +350,10 @@ function selectNewestCursor(current: string | null, candidate: string | null): s
   return candidateParsed.canonicalAccountId.localeCompare(currentParsed.canonicalAccountId) > 0
     ? candidate
     : current;
+}
+
+function isCursorAtOrAfter(candidate: string, target: string): boolean {
+  return selectNewestCursor(target, candidate) === candidate;
 }
 
 function parseCursor(
