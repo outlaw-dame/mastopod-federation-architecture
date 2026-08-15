@@ -10,8 +10,14 @@ import { buildInternalIdentityChangesPath } from './InternalIdentityApi.js';
 import { traceIdentitySync, type IdentitySyncLogger } from './IdentitySyncTrace.js';
 
 export interface IdentityWarmReplayState {
-  cursor: string;
+  /** Current page cursor. Null means the true start-of-stream boundary. */
+  cursor: string | null;
+  /** High-water boundary this replay obligation must cover. */
   targetCursor: string;
+  /** Durable beginning of the covered interval. Null means start-of-stream. */
+  baseCursor?: string | null;
+  /** Wall-clock horizon through which completed passes must be repeated. */
+  settleUntilMs?: number;
 }
 
 export interface IdentityWarmCursorStore {
@@ -36,6 +42,8 @@ export interface IdentityWarmupServiceConfig {
   retryAttempts?: number;
   initialRetryDelayMs?: number;
   replayOverlapMs?: number;
+  /** Test seam for deterministic replay-settle horizon checks. */
+  now?: () => number;
 }
 
 export class IdentityWarmupService {
@@ -51,6 +59,7 @@ export class IdentityWarmupService {
   private readonly retryAttempts: number;
   private readonly initialRetryDelayMs: number;
   private readonly replayOverlapMs: number;
+  private readonly now: () => number;
 
   private started = false;
   private timer: NodeJS.Timeout | null = null;
@@ -73,6 +82,7 @@ export class IdentityWarmupService {
       0,
       300_000
     );
+    this.now = config.now ?? Date.now;
   }
 
   start(): void {
@@ -136,12 +146,18 @@ export class IdentityWarmupService {
 
   async pollOnce(): Promise<{ items: number; nextCursor: string | null }> {
     const storedCursor = sanitizeCursor(await this.cursorStore.getCursor());
-    let replayState = sanitizeReplayState(await this.cursorStore.getReplayState());
+    let replayState = sanitizeReplayState(
+      await this.cursorStore.getReplayState(),
+      this.replayOverlapMs,
+      this.now()
+    );
 
     traceIdentitySync(this.logger, 'debug', 'warmup:poll-start', {
       since: storedCursor,
       replayCursor: replayState?.cursor ?? null,
+      replayBaseCursor: replayState?.baseCursor ?? null,
       replayTargetCursor: replayState?.targetCursor ?? null,
+      replaySettleUntilMs: replayState?.settleUntilMs ?? null,
       limit: this.batchLimit,
     });
 
@@ -163,44 +179,43 @@ export class IdentityWarmupService {
     let replayToPersist: IdentityWarmReplayState | null = null;
     if (this.replayOverlapMs > 0 && cursorToPersist) {
       if (replayState) {
-        // Forward progress can continue while replay execution is paused. Keep
-        // the oldest unfinished replay cursor, but extend the durable target to
-        // every newer high-water mark so a long saturated burst cannot leave an
-        // unreplayed gap between the old target and the final overlap window.
         const extendedTarget = selectNewestCursor(replayState.targetCursor, cursorToPersist);
         if (extendedTarget && extendedTarget !== replayState.targetCursor) {
           replayToPersist = {
-            cursor: replayState.cursor,
+            ...replayState,
             targetCursor: extendedTarget,
+            // A newly extended interval may receive delayed visibility relative
+            // to processing time even when its record timestamps are old. Extend
+            // the wall-clock settle horizon whenever coverage grows.
+            settleUntilMs: this.now() + this.replayOverlapMs,
           };
         }
       } else if (cursorAdvanced || !forwardSaturated) {
-        // Start coverage from the previous durable high-water mark when one is
-        // available. During a saturated page this guarantees the entire range
-        // crossed by the burst remains replayable, not merely the final overlap
-        // window around the newest cursor.
-        const replayBase = storedCursor ?? cursorToPersist;
-        const replayStart = rewindCursor(replayBase, this.replayOverlapMs);
-        if (replayStart && replayStart !== cursorToPersist) {
+        // A missing stored cursor is a real start-of-stream boundary, not the
+        // ending cursor of the first page. Persist null as the replay base so a
+        // saturated bootstrap page cannot permanently omit its early portion.
+        const baseCursor = storedCursor
+          ? rewindCursor(storedCursor, this.replayOverlapMs)
+          : null;
+        if (baseCursor !== cursorToPersist) {
           replayToPersist = {
-            cursor: replayStart,
+            cursor: baseCursor,
+            baseCursor,
             targetCursor: cursorToPersist,
+            settleUntilMs: this.now() + this.replayOverlapMs,
           };
         }
       }
     }
 
     if (replayToPersist && cursorAdvanced && this.cursorStore.setCursorAndReplay) {
-      // Production Redis commits both pieces of recovery state in one MULTI/EXEC,
-      // removing the crash window between recording/extending the replay
-      // obligation and advancing the forward high-water mark.
       await this.cursorStore.setCursorAndReplay(cursorToPersist!, replayToPersist);
       replayState = replayToPersist;
     } else {
       if (replayToPersist) {
-        // Safe fallback for alternate stores: write replay first. If the process
-        // dies before setCursor, the next run may repeat forward work but cannot
-        // forget or truncate the unfinished overlap interval.
+        // Safe fallback for alternate stores: persist/extend the replay
+        // obligation before the high-water cursor. A crash may repeat work, but
+        // it cannot truncate coverage.
         await this.cursorStore.setReplayState(replayToPersist);
         replayState = replayToPersist;
       }
@@ -211,12 +226,11 @@ export class IdentityWarmupService {
 
     let replayItems = 0;
 
-    // If a forward backlog appears while a replay cycle is active, preserve and
-    // extend the durable replay state but do no replay fetch work in this poll.
-    // This guarantees backlog catch-up gets the full request/upsert budget while
-    // every cursor range crossed by that backlog remains covered for later repair.
+    // Saturated forward catch-up gets the entire request/upsert budget. Replay
+    // execution is paused, but its durable target/horizon has already been
+    // extended above so no crossed interval is forgotten.
     if (!forwardSaturated && replayState) {
-      const requestedReplayCursor = replayState.cursor;
+      const requestedReplayCursor = replayState.cursor ?? null;
       const replayResponse = await this.fetchChangesWithRetry(requestedReplayCursor);
       await this.applyItems(replayResponse.items);
       replayItems = replayResponse.items.length;
@@ -227,22 +241,33 @@ export class IdentityWarmupService {
           requestedReplayCursor
       );
 
-      const replayComplete =
+      const replayPassComplete =
         replayResponse.items.length === 0 ||
         !replayNextCursor ||
         replayNextCursor === requestedReplayCursor ||
         isCursorAtOrAfter(replayNextCursor, replayState.targetCursor);
 
-      if (replayComplete) {
-        await this.cursorStore.clearReplayState();
-        replayState = null;
+      if (replayPassComplete) {
+        if (this.now() < (replayState.settleUntilMs ?? 0)) {
+          // Do not discard the sole pointer capable of seeing a late-visible
+          // record behind the current page cursor. Rewind to the durable base
+          // and repeat the covered interval on later caught-up polls until the
+          // lateness horizon has closed.
+          replayState = {
+            ...replayState,
+            cursor: replayState.baseCursor ?? null,
+          };
+          await this.cursorStore.setReplayState(replayState);
+        } else {
+          await this.cursorStore.clearReplayState();
+          replayState = null;
+        }
       } else {
-        // Apply first, then durably advance replay progress. A crash before this
-        // write replays the same page (safe/idempotent); a crash after this write
-        // resumes after an already-applied page and cannot skip unfinished work.
+        // Apply first, then durably advance only this pass's progress. The base
+        // remains unchanged so a later full re-sweep can revisit older pages.
         replayState = {
+          ...replayState,
           cursor: replayNextCursor,
-          targetCursor: replayState.targetCursor,
         };
         await this.cursorStore.setReplayState(replayState);
       }
@@ -255,7 +280,9 @@ export class IdentityWarmupService {
       replayItems,
       replayPausedForForwardBacklog: forwardSaturated && Boolean(replayState),
       replayCursor: replayState?.cursor ?? null,
+      replayBaseCursor: replayState?.baseCursor ?? null,
       replayTargetCursor: replayState?.targetCursor ?? null,
+      replaySettleUntilMs: replayState?.settleUntilMs ?? null,
     });
 
     return {
@@ -360,13 +387,36 @@ function sanitizeCursor(cursor: string | null | undefined): string | null {
 }
 
 function sanitizeReplayState(
-  state: IdentityWarmReplayState | null | undefined
+  state: IdentityWarmReplayState | null | undefined,
+  replayOverlapMs: number,
+  nowMs: number
 ): IdentityWarmReplayState | null {
   if (!state) return null;
-  const cursor = sanitizeCursor(state.cursor);
   const targetCursor = sanitizeCursor(state.targetCursor);
-  if (!cursor || !targetCursor) return null;
-  return { cursor, targetCursor };
+  if (!targetCursor) return null;
+
+  const cursor = state.cursor === null ? null : sanitizeCursor(state.cursor);
+  if (state.cursor !== null && !cursor) return null;
+
+  const hasBaseCursor = Object.prototype.hasOwnProperty.call(state, 'baseCursor');
+  const baseCursor = hasBaseCursor
+    ? state.baseCursor === null
+      ? null
+      : sanitizeCursor(state.baseCursor)
+    : cursor;
+  if (hasBaseCursor && state.baseCursor !== null && !baseCursor) return null;
+
+  const settleUntilMs =
+    typeof state.settleUntilMs === 'number' && Number.isFinite(state.settleUntilMs)
+      ? Math.max(0, Math.trunc(state.settleUntilMs))
+      : nowMs + replayOverlapMs;
+
+  return {
+    cursor,
+    baseCursor,
+    targetCursor,
+    settleUntilMs,
+  };
 }
 
 function rewindCursor(cursor: string | null, overlapMs: number): string | null {
