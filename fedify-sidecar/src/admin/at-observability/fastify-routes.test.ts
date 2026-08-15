@@ -1,16 +1,11 @@
 import Fastify from "fastify";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { registerAtIdentityObservabilityFastifyRoutes } from "./fastify-routes.js";
 import type { ObservedAtIdentityStore } from "../../protocol-bridge/identity/ObservedAtIdentityStore.js";
 
 function createStore(): ObservedAtIdentityStore {
-  return {
-    observe: async () => {
-      throw new Error("not used");
-    },
-    getByDid: async () => null,
-    listAll: async () => [],
-    getSummary: async () => ({
+  const dashboard = {
+    summary: {
       totalObserved: 2,
       boundObserved: 1,
       unboundObserved: 1,
@@ -18,8 +13,8 @@ function createStore(): ObservedAtIdentityStore {
       skippedUnboundActorCount: 7,
       skippedOtherCount: 1,
       failedCount: 0,
-    }),
-    listTopUnbound: async () => [{
+    },
+    topUnbound: [{
       did: "did:plc:external",
       handle: "external.example",
       pdsEndpoint: "https://pds.example",
@@ -33,9 +28,9 @@ function createStore(): ObservedAtIdentityStore {
       skippedUnboundActorCount: 10,
       skippedOtherCount: 0,
       failedCount: 0,
-      lastOutcome: "skipped_unbound_actor",
+      lastOutcome: "skipped_unbound_actor" as const,
     }],
-    listTopBound: async () => [{
+    topBound: [{
       did: "did:plc:local",
       handle: "local.example",
       pdsEndpoint: "https://pds.local",
@@ -49,9 +44,22 @@ function createStore(): ObservedAtIdentityStore {
       skippedUnboundActorCount: 0,
       skippedOtherCount: 0,
       failedCount: 0,
-      lastOutcome: "projected",
+      lastOutcome: "projected" as const,
     }],
-    listRecent: async () => [],
+    recent: [],
+  };
+
+  return {
+    observe: async () => {
+      throw new Error("not used");
+    },
+    getByDid: async () => null,
+    listAll: vi.fn(async () => []),
+    getSummary: vi.fn(async () => dashboard.summary),
+    listTopUnbound: vi.fn(async () => dashboard.topUnbound),
+    listTopBound: vi.fn(async () => dashboard.topBound),
+    listRecent: vi.fn(async () => dashboard.recent),
+    getDashboard: vi.fn(async () => dashboard),
   };
 }
 
@@ -95,11 +103,12 @@ describe("registerAtIdentityObservabilityFastifyRoutes", () => {
     await app.close();
   });
 
-  it("returns summary and top lists when authorized", async () => {
+  it("uses one aggregate dashboard read when authorized", async () => {
     const app = Fastify();
+    const store = createStore();
     registerAtIdentityObservabilityFastifyRoutes(app, {
       adminToken: "secret-token",
-      store: createStore(),
+      store,
     });
 
     const response = await app.inject({
@@ -117,6 +126,12 @@ describe("registerAtIdentityObservabilityFastifyRoutes", () => {
     expect(payload.topUnbound[0].did).toBe("did:plc:external");
     expect(payload.topBound[0].activityPubActorUri).toBe("https://example.com/users/local");
     expect(payload.queries.skipped).toContain("outcome=\"skipped\"");
+    expect(store.getDashboard).toHaveBeenCalledTimes(1);
+    expect(store.getDashboard).toHaveBeenCalledWith(10);
+    expect(store.getSummary).not.toHaveBeenCalled();
+    expect(store.listTopUnbound).not.toHaveBeenCalled();
+    expect(store.listTopBound).not.toHaveBeenCalled();
+    expect(store.listRecent).not.toHaveBeenCalled();
     await app.close();
   });
 });
