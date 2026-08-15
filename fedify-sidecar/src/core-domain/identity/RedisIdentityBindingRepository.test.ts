@@ -59,14 +59,12 @@ function makeScanRedis(
     get: vi.fn(async () => {
       throw new Error('per-binding GET must not be used by bounded scans');
     }),
-    sadd: vi.fn(async (key: string, member: string) => {
-      const set = scanSessions.get(key) ?? new Set<string>();
-      const before = set.size;
-      set.add(member);
-      scanSessions.set(key, set);
-      return set.size === before ? 0 : 1;
+    sadd: vi.fn(async () => {
+      throw new Error('scan-session creation must not use a separate SADD');
     }),
-    pexpire: vi.fn(async (key: string) => Number(scanSessions.has(key))),
+    pexpire: vi.fn(async () => {
+      throw new Error('scan-session creation must not use a separate PEXPIRE');
+    }),
     del: vi.fn(async (key: string) => Number(scanSessions.delete(key))),
     eval: vi.fn(async (
       _script: string,
@@ -76,6 +74,12 @@ function makeScanRedis(
       _ttl: string,
       ...ids: string[]
     ) => {
+      if (ids.length === 0) {
+        const set = new Set<string>([sentinel]);
+        scanSessions.set(key, set);
+        return 1;
+      }
+
       const set = scanSessions.get(key);
       if (!set || !set.has(sentinel)) {
         throw new Error('IDENTITY_SCAN_SESSION_EXPIRED');
@@ -131,6 +135,22 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     expect(redis.del).toHaveBeenCalledTimes(1);
   });
 
+  it('initializes the Redis scan session atomically instead of splitting SADD and expiry', async () => {
+    const values = new Map<string, IdentityBinding>([
+      ['a', binding('a', 'ctx-target')],
+    ]);
+    const redis = makeScanRedis([['0', ['a']]], values);
+    const repository = new RedisIdentityBindingRepository(redis);
+
+    await repository.countByContext('ctx-target');
+
+    expect(redis.eval).toHaveBeenCalledTimes(2);
+    expect(redis.eval.mock.calls[0]).toHaveLength(6);
+    expect(redis.sadd).not.toHaveBeenCalled();
+    expect(redis.pexpire).not.toHaveBeenCalled();
+    expect(redis.del).toHaveBeenCalledTimes(1);
+  });
+
   it('batches full counts and de-duplicates members repeated across SSCAN pages in Redis', async () => {
     const values = new Map<string, IdentityBinding>([
       ['a', binding('a', 'ctx-target')],
@@ -153,7 +173,7 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     expect(redis.sscan).toHaveBeenCalledTimes(2);
     expect(redis.mget).toHaveBeenCalledTimes(2);
     expect(redis.mget.mock.calls[1]).toEqual(['identity:binding:d']);
-    expect(redis.eval).toHaveBeenCalledTimes(2);
+    expect(redis.eval).toHaveBeenCalledTimes(3);
     expect(redis.smembers).not.toHaveBeenCalled();
     expect(redis.get).not.toHaveBeenCalled();
     expect(redis.del).toHaveBeenCalledTimes(1);
@@ -169,7 +189,7 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
 
     expect(count).toBe(260);
     expect(redis.sscan).toHaveBeenCalledTimes(1);
-    expect(redis.eval).toHaveBeenCalledTimes(3);
+    expect(redis.eval).toHaveBeenCalledTimes(4);
     expect(redis.mget).toHaveBeenCalledTimes(3);
     expect(redis.mget.mock.calls.map(call => call.length)).toEqual([128, 128, 4]);
   });
@@ -187,6 +207,7 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
       values,
     );
     redis.eval
+      .mockImplementationOnce(async () => 1)
       .mockImplementationOnce(async (
         _script: string,
         _numberOfKeys: number,
