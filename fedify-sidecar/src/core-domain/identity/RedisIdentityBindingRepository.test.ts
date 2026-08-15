@@ -145,7 +145,14 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     await repository.countByContext('ctx-target');
 
     expect(redis.eval).toHaveBeenCalledTimes(2);
-    expect(redis.eval.mock.calls[0]).toHaveLength(6);
+    expect(redis.eval.mock.calls[0]).toHaveLength(5);
+    expect(typeof redis.eval.mock.calls[0]?.[0]).toBe('string');
+    expect(redis.eval.mock.calls[0]?.slice(1)).toEqual([
+      1,
+      expect.stringMatching(/^identity:scan:seen:/u),
+      '\u0000identity-scan-session',
+      '300000',
+    ]);
     expect(redis.sadd).not.toHaveBeenCalled();
     expect(redis.pexpire).not.toHaveBeenCalled();
     expect(redis.del).toHaveBeenCalledTimes(1);
