@@ -18,6 +18,8 @@ export interface IdentityWarmReplayState {
   baseCursor?: string | null;
   /** Wall-clock horizon through which completed passes must be repeated. */
   settleUntilMs?: number;
+  /** Durable start time of the current full replay pass, recorded at the base. */
+  passStartedAtMs?: number;
 }
 
 export interface IdentityWarmCursorStore {
@@ -158,6 +160,7 @@ export class IdentityWarmupService {
       replayBaseCursor: replayState?.baseCursor ?? null,
       replayTargetCursor: replayState?.targetCursor ?? null,
       replaySettleUntilMs: replayState?.settleUntilMs ?? null,
+      replayPassStartedAtMs: replayState?.passStartedAtMs ?? null,
       limit: this.batchLimit,
     });
 
@@ -184,6 +187,9 @@ export class IdentityWarmupService {
           replayToPersist = {
             ...replayState,
             targetCursor: extendedTarget,
+            // A newly extended interval invalidates any proof about the current
+            // pass: it did not begin with the new target/horizon in force.
+            passStartedAtMs: undefined,
             // A newly extended interval may receive delayed visibility relative
             // to processing time even when its record timestamps are old. Extend
             // the wall-clock settle horizon whenever coverage grows.
@@ -203,6 +209,7 @@ export class IdentityWarmupService {
             baseCursor,
             targetCursor: cursorToPersist,
             settleUntilMs: this.now() + this.replayOverlapMs,
+            passStartedAtMs: undefined,
           };
         }
       }
@@ -231,9 +238,19 @@ export class IdentityWarmupService {
     // extended above so no crossed interval is forgotten.
     if (!forwardSaturated && replayState) {
       const requestedReplayCursor = replayState.cursor ?? null;
-      const replayPassStartedAtOrAfterHorizon =
-        requestedReplayCursor === (replayState.baseCursor ?? null) &&
-        this.now() >= (replayState.settleUntilMs ?? 0);
+      const replayBaseCursor = replayState.baseCursor ?? null;
+
+      if (requestedReplayCursor === replayBaseCursor && replayState.passStartedAtMs === undefined) {
+        // Persist the pass start before fetching the base page. This makes the
+        // proof crash-safe: after restart, every page in this pass is known to
+        // have been fetched no earlier than this timestamp.
+        replayState = {
+          ...replayState,
+          passStartedAtMs: this.now(),
+        };
+        await this.cursorStore.setReplayState(replayState);
+      }
+
       const replayResponse = await this.fetchChangesWithRetry(requestedReplayCursor);
       await this.applyItems(replayResponse.items);
       replayItems = replayResponse.items.length;
@@ -251,25 +268,30 @@ export class IdentityWarmupService {
         isCursorAtOrAfter(replayNextCursor, replayState.targetCursor);
 
       if (replayPassComplete) {
-        if (replayPassStartedAtOrAfterHorizon) {
+        const passStartedAtOrAfterHorizon =
+          typeof replayState.passStartedAtMs === 'number' &&
+          replayState.passStartedAtMs >= (replayState.settleUntilMs ?? 0);
+
+        if (passStartedAtOrAfterHorizon) {
           // Clearing is allowed only after an entire pass began from the durable
-          // base after the lateness horizon. A pass that merely finished after
-          // the horizon may have traversed its early pages too soon.
+          // base after the lateness horizon and then reached the current target.
           await this.cursorStore.clearReplayState();
           replayState = null;
         } else {
-          // Do not discard the sole pointer capable of seeing a late-visible
-          // record behind the current page cursor. Rewind to the durable base
-          // and repeat the covered interval on later caught-up polls.
+          // The completed pass began too early (or came from legacy state with no
+          // proof). Rewind and clear its start marker so the next base fetch
+          // establishes a fresh durable pass start.
           replayState = {
             ...replayState,
-            cursor: replayState.baseCursor ?? null,
+            cursor: replayBaseCursor,
+            passStartedAtMs: undefined,
           };
           await this.cursorStore.setReplayState(replayState);
         }
       } else {
-        // Apply first, then durably advance only this pass's progress. The base
-        // remains unchanged so a later full re-sweep can revisit older pages.
+        // Apply first, then durably advance only this pass's progress. Preserve
+        // passStartedAtMs across every page so a multi-page post-horizon pass can
+        // eventually prove that all of its pages were read after the horizon.
         replayState = {
           ...replayState,
           cursor: replayNextCursor,
@@ -288,6 +310,7 @@ export class IdentityWarmupService {
       replayBaseCursor: replayState?.baseCursor ?? null,
       replayTargetCursor: replayState?.targetCursor ?? null,
       replaySettleUntilMs: replayState?.settleUntilMs ?? null,
+      replayPassStartedAtMs: replayState?.passStartedAtMs ?? null,
     });
 
     return {
@@ -415,12 +438,17 @@ function sanitizeReplayState(
     typeof state.settleUntilMs === 'number' && Number.isFinite(state.settleUntilMs)
       ? Math.max(0, Math.trunc(state.settleUntilMs))
       : nowMs + replayOverlapMs;
+  const passStartedAtMs =
+    typeof state.passStartedAtMs === 'number' && Number.isFinite(state.passStartedAtMs)
+      ? Math.max(0, Math.trunc(state.passStartedAtMs))
+      : undefined;
 
   return {
     cursor,
     baseCursor,
     targetCursor,
     settleUntilMs,
+    passStartedAtMs,
   };
 }
 
