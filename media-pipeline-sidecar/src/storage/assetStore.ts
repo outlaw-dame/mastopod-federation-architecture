@@ -6,6 +6,15 @@ import { initRedis, redis } from '../queue/redisClient';
 import { mergePlaybackVariants, mergeStreamingManifests } from '../utils/playbackVariants';
 
 const redisIndexKey = `${config.assetStoreRedisPrefix}:ids`;
+const redisReadBatchSize = 128;
+const pruneStaleIndexLua = `
+for i = 2, #KEYS do
+  if redis.call('EXISTS', KEYS[i]) == 0 then
+    redis.call('SREM', KEYS[1], ARGV[i - 1])
+  end
+end
+return 1
+`;
 
 function getFilePath(): string {
   return path.join(config.mediaDataDir, 'canonical-assets.json');
@@ -70,8 +79,26 @@ function mergeCanonicalAsset(existing: CanonicalAsset, incoming: CanonicalAsset)
   };
 }
 
+function redisAssetKey(assetId: string): string {
+  return `${config.assetStoreRedisPrefix}:${assetId}`;
+}
+
+async function pruneStaleRedisAssetIds(assetIds: string[]): Promise<void> {
+  if (assetIds.length === 0) return;
+
+  // The initial MGET is only a hint that an index member may be stale. A writer
+  // can recreate the backing asset before cleanup runs, so re-check key
+  // existence and remove the set member in one atomic Lua execution. If a
+  // writer wins first, EXISTS is true and the restored index member survives;
+  // if cleanup wins first, the writer's subsequent SADD restores it.
+  await redis.eval(pruneStaleIndexLua, {
+    keys: [redisIndexKey, ...assetIds.map(redisAssetKey)],
+    arguments: assetIds,
+  });
+}
+
 async function saveRedisAsset(asset: CanonicalAsset): Promise<CanonicalAsset> {
-  const key = `${config.assetStoreRedisPrefix}:${asset.assetId}`;
+  const key = redisAssetKey(asset.assetId);
   const payload = JSON.stringify(asset);
   const setResult = await redis.set(key, payload, { NX: true });
   if (setResult === 'OK') {
@@ -113,7 +140,7 @@ async function saveRedisAsset(asset: CanonicalAsset): Promise<CanonicalAsset> {
 }
 
 async function replaceRedisAsset(asset: CanonicalAsset): Promise<CanonicalAsset> {
-  const key = `${config.assetStoreRedisPrefix}:${asset.assetId}`;
+  const key = redisAssetKey(asset.assetId);
   await redis.set(key, JSON.stringify(asset));
   await redis.sAdd(redisIndexKey, asset.assetId);
   return asset;
@@ -164,20 +191,57 @@ export async function replaceAsset(asset: CanonicalAsset): Promise<CanonicalAsse
   return asset;
 }
 
+export async function loadAsset(assetId: string): Promise<CanonicalAsset | null> {
+  if (config.assetStoreBackend === 'redis') {
+    await initRedis();
+    const row = await redis.get(redisAssetKey(assetId));
+    return row ? JSON.parse(row) as CanonicalAsset : null;
+  }
+
+  await ensureStore();
+  const filePath = getFilePath();
+  const raw = await fs.readFile(filePath, 'utf-8');
+  const parsed = JSON.parse(raw) as { assets: CanonicalAsset[] };
+  return parsed.assets.find((asset) => asset.assetId === assetId) ?? null;
+}
+
 export async function loadAllAssets(): Promise<CanonicalAsset[]> {
   if (config.assetStoreBackend === 'redis') {
     await initRedis();
-    const ids = await redis.sMembers(redisIndexKey);
-    if (ids.length === 0) {
-      return [];
+    const assets: CanonicalAsset[] = [];
+    const seenIds = new Set<string>();
+    let batch: string[] = [];
+
+    const flushBatch = async (): Promise<void> => {
+      if (batch.length === 0) return;
+      const ids = batch;
+      batch = [];
+      const rows = await redis.mGet(ids.map(redisAssetKey));
+      const staleIds: string[] = [];
+
+      for (let index = 0; index < ids.length; index += 1) {
+        const row = rows[index];
+        if (!row) {
+          staleIds.push(ids[index]);
+          continue;
+        }
+        assets.push(JSON.parse(row) as CanonicalAsset);
+      }
+
+      await pruneStaleRedisAssetIds(staleIds);
+    };
+
+    for await (const assetId of redis.sScanIterator(redisIndexKey, { COUNT: redisReadBatchSize })) {
+      if (seenIds.has(assetId)) continue;
+      seenIds.add(assetId);
+      batch.push(assetId);
+      if (batch.length >= redisReadBatchSize) {
+        await flushBatch();
+      }
     }
 
-    const keys = ids.map((id) => `${config.assetStoreRedisPrefix}:${id}`);
-    const rows = await redis.mGet(keys);
-    return rows.flatMap((row) => {
-      if (!row) return [];
-      return [JSON.parse(row) as CanonicalAsset];
-    });
+    await flushBatch();
+    return assets;
   }
 
   await ensureStore();
