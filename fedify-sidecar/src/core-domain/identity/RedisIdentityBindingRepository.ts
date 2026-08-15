@@ -32,10 +32,6 @@ const MGET_BATCH = 128;
 export class RedisIdentityBindingRepository implements IdentityBindingRepository {
   constructor(private readonly redis: any) {}
 
-  // ---------------------------------------------------------------------------
-  // Primary lookups
-  // ---------------------------------------------------------------------------
-
   async getByCanonicalAccountId(canonicalAccountId: string): Promise<IdentityBinding | null> {
     const raw = await this.redis.get(this.bindingKey(canonicalAccountId));
     return raw ? (JSON.parse(raw) as IdentityBinding) : null;
@@ -88,10 +84,6 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     return null;
   }
 
-  // ---------------------------------------------------------------------------
-  // Writes
-  // ---------------------------------------------------------------------------
-
   async create(binding: IdentityBinding): Promise<void> {
     const key = `${PREFIX}${binding.canonicalAccountId}`;
     const exists = await this.redis.exists(key);
@@ -113,7 +105,6 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
         `Identity binding not found: ${binding.canonicalAccountId}`,
       );
     }
-    // Clean up stale secondary indexes before writing new ones
     const old = JSON.parse(existing) as IdentityBinding;
     await this._removeIndexes(old);
     await this._write(binding);
@@ -184,10 +175,6 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     return true;
   }
 
-  // ---------------------------------------------------------------------------
-  // List / count
-  // ---------------------------------------------------------------------------
-
   async listByContext(contextId: string, limit = 100, offset = 0): Promise<IdentityBinding[]> {
     return this._collectMatches(binding => binding.contextId === contextId, limit, offset);
   }
@@ -220,10 +207,6 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     return count;
   }
 
-  // ---------------------------------------------------------------------------
-  // Existence checks
-  // ---------------------------------------------------------------------------
-
   async exists(canonicalAccountId: string): Promise<boolean> {
     return (await this.redis.exists(`${PREFIX}${canonicalAccountId}`)) > 0;
   }
@@ -239,10 +222,6 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   async actorUriExists(actorUri: string): Promise<boolean> {
     return (await this.redis.exists(`${IDX_ACTOR}${actorUri}`)) > 0;
   }
-
-  // ---------------------------------------------------------------------------
-  // Batch
-  // ---------------------------------------------------------------------------
 
   async getBatch(canonicalAccountIds: string[]): Promise<Map<string, IdentityBinding>> {
     const result = new Map<string, IdentityBinding>();
@@ -265,17 +244,9 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     return result;
   }
 
-  // ---------------------------------------------------------------------------
-  // Transaction (pass-through; true atomicity deferred)
-  // ---------------------------------------------------------------------------
-
   async transaction<T>(callback: (repo: IdentityBindingRepository) => Promise<T>): Promise<T> {
     return callback(this);
   }
-
-  // ---------------------------------------------------------------------------
-  // Health
-  // ---------------------------------------------------------------------------
 
   async health(): Promise<boolean> {
     try {
@@ -285,10 +256,6 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
       return false;
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // Internal helpers
-  // ---------------------------------------------------------------------------
 
   private async _write(binding: IdentityBinding): Promise<void> {
     const multi = this.redis.multi();
@@ -358,11 +325,17 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
 
   private async *_scanBatches(): AsyncGenerator<IdentityBinding[]> {
     let cursor = '0';
+    const seenIds = new Set<string>();
 
     do {
       const response = await this.redis.sscan(ALL_SET, cursor, 'COUNT', SCAN_COUNT);
       const nextCursor = String(response?.[0] ?? '0');
-      const ids: string[] = Array.isArray(response?.[1]) ? response[1] : [];
+      const scannedIds: string[] = Array.isArray(response?.[1]) ? response[1] : [];
+      const ids = scannedIds.filter(id => {
+        if (seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
+      });
 
       if (ids.length > 0) {
         const raws: Array<string | null> = await this.redis.mget(
