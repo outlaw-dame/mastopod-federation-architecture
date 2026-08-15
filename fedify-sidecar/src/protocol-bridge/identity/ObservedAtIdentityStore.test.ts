@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { Redis } from "ioredis";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   RedisObservedAtIdentityStore,
   type ObservedAtIdentityRecord,
@@ -106,5 +108,88 @@ describe("RedisObservedAtIdentityStore dashboard", () => {
     expect(dashboard.topUnbound.map((item) => item.totalSeen)).toEqual([5, 3]);
     expect(dashboard.topUnbound).toHaveLength(2);
     expect(dashboard.recent).toHaveLength(2);
+  });
+});
+
+const redisUrl = process.env["OBSERVED_IDENTITY_TEST_REDIS_URL"];
+const describeRedis = redisUrl ? describe : describe.skip;
+
+describeRedis("RedisObservedAtIdentityStore atomic observations", () => {
+  let redis: Redis;
+  let prefix: string;
+
+  beforeAll(async () => {
+    redis = new Redis(redisUrl!, {
+      lazyConnect: true,
+      maxRetriesPerRequest: 1,
+    });
+    await redis.connect();
+    prefix = `test:observed-at:${randomUUID()}`;
+  });
+
+  afterAll(async () => {
+    if (redis) {
+      const keys = await redis.keys(`${prefix}:*`);
+      if (keys.length > 0) await redis.del(...keys);
+      await redis.quit();
+    }
+  });
+
+  it("does not lose counters when many observations for one DID arrive concurrently", async () => {
+    const store = new RedisObservedAtIdentityStore(redis, prefix);
+    const did = "did:plc:atomic-observation";
+    const observations = Array.from({ length: 120 }, (_, index) => ({
+      did,
+      handle: index === 119 ? "atomic.example" : undefined,
+      pdsEndpoint: index === 119 ? "https://pds.example" : undefined,
+      canonicalAccountId: index === 119 ? "account:atomic" : undefined,
+      activityPubActorUri: index === 119 ? "https://example.com/users/atomic" : undefined,
+      bound: index === 119,
+      observedAt: `2026-08-15T03:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+      outcome:
+        index % 4 === 0
+          ? "projected" as const
+          : index % 4 === 1
+            ? "skipped_unbound_actor" as const
+            : index % 4 === 2
+              ? "failed_projection_error" as const
+              : "skipped_policy_denied" as const,
+    }));
+
+    await Promise.all(observations.map((observation) => store.observe(observation)));
+
+    const observed = await store.getByDid(did);
+    expect(observed).not.toBeNull();
+    expect(observed?.totalSeen).toBe(120);
+    expect(observed?.projectedCount).toBe(30);
+    expect(observed?.skippedUnboundActorCount).toBe(30);
+    expect(observed?.failedCount).toBe(30);
+    expect(observed?.skippedOtherCount).toBe(30);
+    expect(observed?.bound).toBe(true);
+    expect(observed?.handle).toBe("atomic.example");
+    expect(observed?.pdsEndpoint).toBe("https://pds.example");
+    expect(observed?.canonicalAccountId).toBe("account:atomic");
+    expect(observed?.activityPubActorUri).toBe("https://example.com/users/atomic");
+
+    const members = await redis.smembers(`${prefix}:all`);
+    expect(members).toEqual([did]);
+  });
+
+  it("repairs a malformed stored record atomically instead of failing the ingestion path", async () => {
+    const store = new RedisObservedAtIdentityStore(redis, prefix);
+    const did = "did:plc:malformed-observation";
+    await redis.set(`${prefix}:did:${did}`, "{not-json");
+
+    const observed = await store.observe({
+      did,
+      bound: false,
+      observedAt: "2026-08-15T03:30:00.000Z",
+      outcome: "skipped_unsupported",
+    });
+
+    expect(observed.totalSeen).toBe(1);
+    expect(observed.skippedOtherCount).toBe(1);
+    expect(observed.did).toBe(did);
+    await expect(store.getByDid(did)).resolves.toEqual(observed);
   });
 });
