@@ -110,7 +110,8 @@ export class FedifyKvAdapter implements KvStore {
   }
 
   // list() is required in Fedify 2.x (was optional in 1.x).
-  // Uses Redis SCAN to page through keys matching the given prefix.
+  // Redis SCAN keeps enumeration memory-bounded. Values are fetched once per
+  // SCAN page with MGET instead of issuing one sequential GET round-trip per key.
   async *list(prefix?: KvKey): AsyncIterable<KvStoreListEntry> {
     const prefixKey = this.encodeKey(prefix ?? [""]);
     const pattern = `${prefixKey}*`;
@@ -126,9 +127,14 @@ export class FedifyKvAdapter implements KvStore {
       );
       cursor = nextCursor;
 
-      for (const rawKey of keys) {
-        const raw = await this.redis.get(rawKey);
+      if (keys.length === 0) continue;
+
+      const values = await this.redis.mget(...keys);
+      for (let index = 0; index < keys.length; index += 1) {
+        const rawKey = keys[index];
+        const raw = values[index];
         if (raw == null) continue;
+
         let value: unknown;
         try {
           value = JSON.parse(raw);
