@@ -8,7 +8,7 @@ on:
       - ".github/workflows/fedify-sidecar-fast-checks.yml"
   push:
     branches:
-      - main
+      - master
     paths:
       - "fedify-sidecar/**"
       - ".github/workflows/fedify-sidecar-fast-checks.yml"
