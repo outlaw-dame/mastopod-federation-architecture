@@ -140,13 +140,8 @@ if supplied(input.pdsEndpoint) then record.pdsEndpoint = input.pdsEndpoint end
 if supplied(input.canonicalAccountId) then record.canonicalAccountId = input.canonicalAccountId end
 if supplied(input.activityPubActorUri) then record.activityPubActorUri = input.activityPubActorUri end
 record.bound = record.bound == true or input.bound == true
-
-if type(record.firstSeenAt) ~= 'string' or input.observedAt < record.firstSeenAt then
-  record.firstSeenAt = input.observedAt
-end
-if type(record.lastSeenAt) ~= 'string' or input.observedAt > record.lastSeenAt then
-  record.lastSeenAt = input.observedAt
-end
+if type(record.firstSeenAt) ~= 'string' then record.firstSeenAt = input.observedAt end
+record.lastSeenAt = input.observedAt
 
 record.totalSeen = count(record.totalSeen) + 1
 record.projectedCount = count(record.projectedCount)
@@ -412,10 +407,8 @@ function mergeObservation(
     canonicalAccountId: input.canonicalAccountId ?? base.canonicalAccountId,
     activityPubActorUri: input.activityPubActorUri ?? base.activityPubActorUri,
     bound: input.bound || base.bound,
-    firstSeenAt:
-      input.observedAt < base.firstSeenAt ? input.observedAt : base.firstSeenAt,
-    lastSeenAt:
-      input.observedAt > base.lastSeenAt ? input.observedAt : base.lastSeenAt,
+    firstSeenAt: base.firstSeenAt,
+    lastSeenAt: input.observedAt,
     totalSeen: base.totalSeen + 1,
     projectedCount: base.projectedCount,
     skippedUnboundActorCount: base.skippedUnboundActorCount,
