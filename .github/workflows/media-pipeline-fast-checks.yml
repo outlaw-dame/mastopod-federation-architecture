@@ -1,0 +1,47 @@
+name: Media Pipeline Fast Checks
+
+on:
+  pull_request:
+    paths:
+      - 'media-pipeline-sidecar/**'
+      - '.github/workflows/media-pipeline-fast-checks.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'media-pipeline-sidecar/**'
+      - '.github/workflows/media-pipeline-fast-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fast-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: media-pipeline-sidecar
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: media-pipeline-sidecar/package-lock.json
+
+      - name: Install Media Pipeline Dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Run Deterministic Local Smoke
+        run: npm run smoke:runtime
