@@ -26,6 +26,8 @@ const IDX_HANDLE = 'identity:idx:handle:';
 const IDX_ACTOR  = 'identity:idx:actor:';
 const IDX_WEBID  = 'identity:idx:webid:';
 const ALL_SET    = 'identity:all';
+const SCAN_COUNT = 128;
+const MGET_BATCH = 128;
 
 export class RedisIdentityBindingRepository implements IdentityBindingRepository {
   constructor(private readonly redis: any) {}
@@ -76,13 +78,12 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   }
 
   async getByContextAndUsername(contextId: string, username: string): Promise<IdentityBinding | null> {
-    // Scan all bindings in the context looking for a matching username derived
-    // from the activityPubActorUri (last path segment).
-    const all = await this._scanAll();
-    for (const b of all) {
-      if (b.contextId !== contextId) continue;
-      const slug = b.activityPubActorUri.split('/').filter(Boolean).pop();
-      if (slug === username) return b;
+    for await (const batch of this._scanBatches()) {
+      for (const binding of batch) {
+        if (binding.contextId !== contextId) continue;
+        const slug = binding.activityPubActorUri.split('/').filter(Boolean).pop();
+        if (slug === username) return binding;
+      }
     }
     return null;
   }
@@ -188,8 +189,7 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   // ---------------------------------------------------------------------------
 
   async listByContext(contextId: string, limit = 100, offset = 0): Promise<IdentityBinding[]> {
-    const all = await this._scanAll();
-    return all.filter(b => b.contextId === contextId).slice(offset, offset + limit);
+    return this._collectMatches(binding => binding.contextId === contextId, limit, offset);
   }
 
   async listByStatus(
@@ -197,20 +197,27 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     limit = 100,
     offset = 0,
   ): Promise<IdentityBinding[]> {
-    const all = await this._scanAll();
-    return all.filter(b => b.status === status).slice(offset, offset + limit);
+    return this._collectMatches(binding => binding.status === status, limit, offset);
   }
 
   async listWithPendingPlcUpdates(limit = 100, offset = 0): Promise<IdentityBinding[]> {
-    const all = await this._scanAll();
-    return all
-      .filter(b => b.plc?.plcUpdateState === 'PENDING_SUBMISSION' || b.plc?.plcUpdateState === 'SUBMITTED')
-      .slice(offset, offset + limit);
+    return this._collectMatches(
+      binding =>
+        binding.plc?.plcUpdateState === 'PENDING_SUBMISSION' ||
+        binding.plc?.plcUpdateState === 'SUBMITTED',
+      limit,
+      offset,
+    );
   }
 
   async countByContext(contextId: string): Promise<number> {
-    const all = await this._scanAll();
-    return all.filter(b => b.contextId === contextId).length;
+    let count = 0;
+    for await (const batch of this._scanBatches()) {
+      for (const binding of batch) {
+        if (binding.contextId === contextId) count += 1;
+      }
+    }
+    return count;
   }
 
   // ---------------------------------------------------------------------------
@@ -239,12 +246,22 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
 
   async getBatch(canonicalAccountIds: string[]): Promise<Map<string, IdentityBinding>> {
     const result = new Map<string, IdentityBinding>();
-    await Promise.all(
-      canonicalAccountIds.map(async id => {
-        const b = await this.getByCanonicalAccountId(id);
-        if (b) result.set(id, b);
-      }),
-    );
+
+    for (let start = 0; start < canonicalAccountIds.length; start += MGET_BATCH) {
+      const ids = canonicalAccountIds.slice(start, start + MGET_BATCH);
+      if (ids.length === 0) continue;
+      const raws: Array<string | null> = await this.redis.mget(
+        ...ids.map(id => this.bindingKey(id)),
+      );
+
+      for (let index = 0; index < ids.length; index += 1) {
+        const id = ids[index];
+        const raw = raws[index];
+        if (!id || !raw) continue;
+        result.set(id, JSON.parse(raw) as IdentityBinding);
+      }
+    }
+
     return result;
   }
 
@@ -274,46 +291,95 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   // ---------------------------------------------------------------------------
 
   private async _write(binding: IdentityBinding): Promise<void> {
-    await this.redis.set(this.bindingKey(binding.canonicalAccountId), JSON.stringify(binding));
-    await this.redis.sadd(ALL_SET, binding.canonicalAccountId);
+    const multi = this.redis.multi();
+    multi.set(this.bindingKey(binding.canonicalAccountId), JSON.stringify(binding));
+    multi.sadd(ALL_SET, binding.canonicalAccountId);
 
     if (binding.atprotoDid) {
-      await this.redis.set(this.didIndexKey(binding.atprotoDid), binding.canonicalAccountId);
+      multi.set(this.didIndexKey(binding.atprotoDid), binding.canonicalAccountId);
     }
     if (binding.atprotoHandle) {
-      await this.redis.set(this.handleIndexKey(binding.atprotoHandle), binding.canonicalAccountId);
+      multi.set(this.handleIndexKey(binding.atprotoHandle), binding.canonicalAccountId);
     }
     if (binding.activityPubActorUri) {
-      await this.redis.set(this.actorIndexKey(binding.activityPubActorUri), binding.canonicalAccountId);
+      multi.set(this.actorIndexKey(binding.activityPubActorUri), binding.canonicalAccountId);
     }
     if (binding.webId) {
-      await this.redis.set(this.webIdIndexKey(binding.webId), binding.canonicalAccountId);
+      multi.set(this.webIdIndexKey(binding.webId), binding.canonicalAccountId);
     }
+
+    await multi.exec();
   }
 
   private async _removeIndexes(binding: IdentityBinding): Promise<void> {
+    const multi = this.redis.multi();
     if (binding.atprotoDid) {
-      await this.redis.del(this.didIndexKey(binding.atprotoDid));
+      multi.del(this.didIndexKey(binding.atprotoDid));
     }
     if (binding.atprotoHandle) {
-      await this.redis.del(this.handleIndexKey(binding.atprotoHandle));
+      multi.del(this.handleIndexKey(binding.atprotoHandle));
     }
     if (binding.activityPubActorUri) {
-      await this.redis.del(this.actorIndexKey(binding.activityPubActorUri));
+      multi.del(this.actorIndexKey(binding.activityPubActorUri));
     }
     if (binding.webId) {
-      await this.redis.del(this.webIdIndexKey(binding.webId));
+      multi.del(this.webIdIndexKey(binding.webId));
     }
+    await multi.exec();
   }
 
-  private async _scanAll(): Promise<IdentityBinding[]> {
-    const ids: string[] = await this.redis.smembers(ALL_SET);
+  private async _collectMatches(
+    predicate: (binding: IdentityBinding) => boolean,
+    limit: number,
+    offset: number,
+  ): Promise<IdentityBinding[]> {
+    const safeLimit = Math.max(0, Math.trunc(limit));
+    const safeOffset = Math.max(0, Math.trunc(offset));
+    if (safeLimit === 0) return [];
+
     const results: IdentityBinding[] = [];
-    for (const id of ids) {
-      const raw = await this.redis.get(this.bindingKey(id));
-      if (raw) results.push(JSON.parse(raw) as IdentityBinding);
+    let matched = 0;
+
+    for await (const batch of this._scanBatches()) {
+      for (const binding of batch) {
+        if (!predicate(binding)) continue;
+        if (matched < safeOffset) {
+          matched += 1;
+          continue;
+        }
+        results.push(binding);
+        matched += 1;
+        if (results.length >= safeLimit) return results;
+      }
     }
+
     return results;
+  }
+
+  private async *_scanBatches(): AsyncGenerator<IdentityBinding[]> {
+    let cursor = '0';
+
+    do {
+      const response = await this.redis.sscan(ALL_SET, cursor, 'COUNT', SCAN_COUNT);
+      const nextCursor = String(response?.[0] ?? '0');
+      const ids: string[] = Array.isArray(response?.[1]) ? response[1] : [];
+
+      if (ids.length > 0) {
+        const raws: Array<string | null> = await this.redis.mget(
+          ...ids.map(id => this.bindingKey(id)),
+        );
+        const batch: IdentityBinding[] = [];
+
+        for (const raw of raws) {
+          if (!raw) continue;
+          batch.push(JSON.parse(raw) as IdentityBinding);
+        }
+
+        if (batch.length > 0) yield batch;
+      }
+
+      cursor = nextCursor;
+    } while (cursor !== '0');
   }
 
   private bindingKey(canonicalAccountId: string): string {
