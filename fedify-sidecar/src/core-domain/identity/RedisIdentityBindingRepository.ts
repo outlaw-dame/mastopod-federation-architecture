@@ -9,10 +9,12 @@
  *   identity:idx:webid:{webId}             →  canonicalAccountId
  *   identity:all                           →  Set<canonicalAccountId>
  *
- * Transactions are not yet atomic (Redis MULTI support deferred).
- * Single-process writes are safe; multi-replica writers need coordination.
+ * Individual binding/index write groups use Redis MULTI. The repository-level
+ * transaction(callback) helper remains callback-scoped rather than a Redis
+ * transaction spanning arbitrary asynchronous repository calls.
  */
 
+import { randomUUID } from 'node:crypto';
 import {
   IdentityBindingRepository,
   RepositoryError,
@@ -28,6 +30,29 @@ const IDX_WEBID  = 'identity:idx:webid:';
 const ALL_SET    = 'identity:all';
 const SCAN_COUNT = 128;
 const MGET_BATCH = 128;
+const SCAN_SESSION_PREFIX = 'identity:scan:seen:';
+const SCAN_SESSION_SENTINEL = '\u0000identity-scan-session';
+const SCAN_SESSION_TTL_MS = 5 * 60_000;
+
+const DEDUPE_SCAN_IDS_LUA = `
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) ~= 1 then
+  return redis.error_reply('IDENTITY_SCAN_SESSION_EXPIRED')
+end
+
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then
+  return redis.error_reply('IDENTITY_SCAN_SESSION_INVALID_TTL')
+end
+
+local fresh = {}
+for i = 3, #ARGV do
+  if redis.call('SADD', KEYS[1], ARGV[i]) == 1 then
+    table.insert(fresh, ARGV[i])
+  end
+end
+redis.call('PEXPIRE', KEYS[1], ttl)
+return fresh
+`;
 
 export class RedisIdentityBindingRepository implements IdentityBindingRepository {
   constructor(private readonly redis: any) {}
@@ -296,7 +321,17 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   }
 
   private async _execMultiOrThrow(multi: any, operation: string): Promise<void> {
-    const results = await multi.exec();
+    let results: unknown;
+    try {
+      results = await multi.exec();
+    } catch (error) {
+      throw this._redisRepositoryError(
+        RepositoryErrorCode.PERSISTENCE_ERROR,
+        `${operation} failed`,
+        error,
+      );
+    }
+
     if (!Array.isArray(results)) {
       throw new RepositoryError(
         RepositoryErrorCode.PERSISTENCE_ERROR,
@@ -308,11 +343,10 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
       if (!Array.isArray(entry)) continue;
       const commandError = entry[0];
       if (!commandError) continue;
-      const message = commandError instanceof Error ? commandError.message : String(commandError);
-      throw new RepositoryError(
+      throw this._redisRepositoryError(
         RepositoryErrorCode.PERSISTENCE_ERROR,
-        `${operation} failed: ${message}`,
-        { redisError: message },
+        `${operation} failed`,
+        commandError,
       );
     }
   }
@@ -347,34 +381,122 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
 
   private async *_scanBatches(): AsyncGenerator<IdentityBinding[]> {
     let cursor = '0';
-    const seenIds = new Set<string>();
+    const scanSessionKey = `${SCAN_SESSION_PREFIX}${randomUUID()}`;
+    let scanSessionOpened = false;
 
-    do {
-      const response = await this.redis.sscan(ALL_SET, cursor, 'COUNT', SCAN_COUNT);
-      const nextCursor = String(response?.[0] ?? '0');
-      const scannedIds: string[] = Array.isArray(response?.[1]) ? response[1] : [];
-      const ids = scannedIds.filter(id => {
-        if (seenIds.has(id)) return false;
-        seenIds.add(id);
-        return true;
-      });
+    try {
+      await this._openScanSession(scanSessionKey);
+      scanSessionOpened = true;
 
-      if (ids.length > 0) {
-        const raws: Array<string | null> = await this.redis.mget(
-          ...ids.map(id => this.bindingKey(id)),
-        );
-        const batch: IdentityBinding[] = [];
+      do {
+        const response = await this.redis.sscan(ALL_SET, cursor, 'COUNT', SCAN_COUNT);
+        const nextCursor = String(response?.[0] ?? '0');
+        const scannedIds: string[] = Array.isArray(response?.[1])
+          ? response[1].filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+          : [];
 
-        for (const raw of raws) {
-          if (!raw) continue;
-          batch.push(JSON.parse(raw) as IdentityBinding);
+        // COUNT is only a work hint. Bound both de-duplication commands and MGET
+        // payloads even if Redis returns a much larger scan page.
+        for (let start = 0; start < scannedIds.length; start += MGET_BATCH) {
+          const scanChunk = scannedIds.slice(start, start + MGET_BATCH);
+          const ids = await this._dedupeScanIds(scanSessionKey, scanChunk);
+          if (ids.length === 0) continue;
+
+          const raws: Array<string | null> = await this.redis.mget(
+            ...ids.map(id => this.bindingKey(id)),
+          );
+          const batch: IdentityBinding[] = [];
+
+          for (const raw of raws) {
+            if (!raw) continue;
+            batch.push(JSON.parse(raw) as IdentityBinding);
+          }
+
+          if (batch.length > 0) yield batch;
         }
 
-        if (batch.length > 0) yield batch;
+        cursor = nextCursor;
+      } while (cursor !== '0');
+    } finally {
+      if (scanSessionOpened) {
+        await this._cleanupScanSession(scanSessionKey);
       }
+    }
+  }
 
-      cursor = nextCursor;
-    } while (cursor !== '0');
+  private async _openScanSession(scanSessionKey: string): Promise<void> {
+    try {
+      await this.redis.sadd(scanSessionKey, SCAN_SESSION_SENTINEL);
+      const expirySet = await this.redis.pexpire(scanSessionKey, SCAN_SESSION_TTL_MS);
+      if (Number(expirySet) !== 1) {
+        throw new Error('Redis did not apply scan-session TTL');
+      }
+    } catch (error) {
+      try {
+        await this.redis.del(scanSessionKey);
+      } catch {
+        // Best effort only; if TTL was successfully applied Redis self-cleans.
+      }
+      throw this._redisRepositoryError(
+        RepositoryErrorCode.QUERY_ERROR,
+        'Identity scan session initialization failed',
+        error,
+      );
+    }
+  }
+
+  private async _dedupeScanIds(scanSessionKey: string, ids: string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    if (ids.length > MGET_BATCH) {
+      throw new RepositoryError(
+        RepositoryErrorCode.QUERY_ERROR,
+        'Identity scan de-duplication batch exceeded the configured bound',
+      );
+    }
+
+    let result: unknown;
+    try {
+      result = await this.redis.eval(
+        DEDUPE_SCAN_IDS_LUA,
+        1,
+        scanSessionKey,
+        SCAN_SESSION_SENTINEL,
+        String(SCAN_SESSION_TTL_MS),
+        ...ids,
+      );
+    } catch (error) {
+      throw this._redisRepositoryError(
+        RepositoryErrorCode.QUERY_ERROR,
+        'Identity scan de-duplication failed',
+        error,
+      );
+    }
+
+    if (!Array.isArray(result) || result.some(id => typeof id !== 'string')) {
+      throw new RepositoryError(
+        RepositoryErrorCode.QUERY_ERROR,
+        'Identity scan de-duplication returned an invalid Redis response',
+      );
+    }
+
+    return result as string[];
+  }
+
+  private async _cleanupScanSession(scanSessionKey: string): Promise<void> {
+    try {
+      await this.redis.del(scanSessionKey);
+    } catch {
+      // Best effort: the refreshed TTL is the crash/error self-healing path.
+    }
+  }
+
+  private _redisRepositoryError(
+    code: RepositoryErrorCode,
+    message: string,
+    error: unknown,
+  ): RepositoryError {
+    const redisError = error instanceof Error ? error.message : String(error);
+    return new RepositoryError(code, `${message}: ${redisError}`, { redisError });
   }
 
   private bindingKey(canonicalAccountId: string): string {
