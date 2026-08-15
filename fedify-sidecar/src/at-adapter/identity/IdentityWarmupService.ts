@@ -231,6 +231,9 @@ export class IdentityWarmupService {
     // extended above so no crossed interval is forgotten.
     if (!forwardSaturated && replayState) {
       const requestedReplayCursor = replayState.cursor ?? null;
+      const replayPassStartedAtOrAfterHorizon =
+        requestedReplayCursor === (replayState.baseCursor ?? null) &&
+        this.now() >= (replayState.settleUntilMs ?? 0);
       const replayResponse = await this.fetchChangesWithRetry(requestedReplayCursor);
       await this.applyItems(replayResponse.items);
       replayItems = replayResponse.items.length;
@@ -248,19 +251,21 @@ export class IdentityWarmupService {
         isCursorAtOrAfter(replayNextCursor, replayState.targetCursor);
 
       if (replayPassComplete) {
-        if (this.now() < (replayState.settleUntilMs ?? 0)) {
+        if (replayPassStartedAtOrAfterHorizon) {
+          // Clearing is allowed only after an entire pass began from the durable
+          // base after the lateness horizon. A pass that merely finished after
+          // the horizon may have traversed its early pages too soon.
+          await this.cursorStore.clearReplayState();
+          replayState = null;
+        } else {
           // Do not discard the sole pointer capable of seeing a late-visible
           // record behind the current page cursor. Rewind to the durable base
-          // and repeat the covered interval on later caught-up polls until the
-          // lateness horizon has closed.
+          // and repeat the covered interval on later caught-up polls.
           replayState = {
             ...replayState,
             cursor: replayState.baseCursor ?? null,
           };
           await this.cursorStore.setReplayState(replayState);
-        } else {
-          await this.cursorStore.clearReplayState();
-          replayState = null;
         }
       } else {
         // Apply first, then durably advance only this pass's progress. The base
