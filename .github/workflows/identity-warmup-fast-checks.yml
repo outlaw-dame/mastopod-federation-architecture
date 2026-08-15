@@ -43,11 +43,13 @@ jobs:
         run: npm ci --prefix fedify-sidecar
 
       - name: Typecheck
-        run: npm exec --prefix fedify-sidecar -- tsc -p tsconfig.json --noEmit
+        working-directory: fedify-sidecar
+        run: npm exec -- tsc -p tsconfig.json --noEmit
 
       - name: Run Identity Warmup Regressions
+        working-directory: fedify-sidecar
         run: >-
-          npm exec --prefix fedify-sidecar -- vitest run
+          npm exec -- vitest run
           src/at-adapter/identity/IdentityWarmupService.test.ts
           src/at-adapter/identity/IdentityWarmupCrashOrdering.test.ts
           src/at-adapter/identity/RedisIdentityWarmCursorStore.test.ts
