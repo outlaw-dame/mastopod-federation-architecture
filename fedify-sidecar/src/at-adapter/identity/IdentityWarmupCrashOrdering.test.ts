@@ -36,7 +36,7 @@ describe('IdentityWarmupService crash ordering', () => {
   it('persists a new replay obligation before a fallback store advances the cursor', async () => {
     const stored = cursor('2026-08-14T20:00:00.000Z', 'https://pod.example/a/profile/card#me');
     const forward = cursor('2026-08-14T20:00:01.000Z', 'https://pod.example/b/profile/card#me');
-    let replayState: IdentityWarmReplayState | null = null;
+    const replay = { value: null as IdentityWarmReplayState | null };
     const calls: string[] = [];
 
     const cursorStore: IdentityWarmCursorStore = {
@@ -48,14 +48,14 @@ describe('IdentityWarmupService crash ordering', () => {
         throw new Error('simulated cursor persistence failure');
       },
       async getReplayState() {
-        return replayState;
+        return replay.value;
       },
       async setReplayState(state) {
         calls.push('replay');
-        replayState = state;
+        replay.value = state;
       },
       async clearReplayState() {
-        replayState = null;
+        replay.value = null;
       },
     };
 
@@ -82,8 +82,8 @@ describe('IdentityWarmupService crash ordering', () => {
     await expect(service.pollOnce()).rejects.toThrow('simulated cursor persistence failure');
 
     expect(calls).toEqual(['replay', 'cursor']);
-    expect(replayState).not.toBeNull();
-    expect(replayState?.targetCursor).toBe(forward);
+    expect(replay.value).not.toBeNull();
+    expect(replay.value?.targetCursor).toBe(forward);
     expect(repository.upsert).toHaveBeenCalledTimes(1);
   });
 });
