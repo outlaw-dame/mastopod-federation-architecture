@@ -31,7 +31,6 @@ const ALL_SET    = 'identity:all';
 const SCAN_COUNT = 128;
 const MGET_BATCH = 128;
 const SCAN_SESSION_PREFIX = 'identity:scan:seen:';
-const SCAN_SESSION_SENTINEL = '\u0000identity-scan-session';
 const SCAN_SESSION_TTL_MS = 5 * 60_000;
 
 const OPEN_SCAN_SESSION_LUA = `
@@ -395,10 +394,14 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   private async *_scanBatches(): AsyncGenerator<IdentityBinding[]> {
     let cursor = '0';
     const scanSessionKey = `${SCAN_SESSION_PREFIX}${randomUUID()}`;
+    // Liveness and de-duplication share one Redis set for bounded server-side
+    // state, but the liveness marker is unique to this scan. No static string
+    // is reserved from the canonicalAccountId namespace.
+    const scanSessionSentinel = `\u0000identity-scan-session:${randomUUID()}`;
     let scanSessionOpened = false;
 
     try {
-      await this._openScanSession(scanSessionKey);
+      await this._openScanSession(scanSessionKey, scanSessionSentinel);
       scanSessionOpened = true;
 
       do {
@@ -412,7 +415,7 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
         // payloads even if Redis returns a much larger scan page.
         for (let start = 0; start < scannedIds.length; start += MGET_BATCH) {
           const scanChunk = scannedIds.slice(start, start + MGET_BATCH);
-          const ids = await this._dedupeScanIds(scanSessionKey, scanChunk);
+          const ids = await this._dedupeScanIds(scanSessionKey, scanSessionSentinel, scanChunk);
           if (ids.length === 0) continue;
 
           const raws: Array<string | null> = await this.redis.mget(
@@ -437,13 +440,13 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     }
   }
 
-  private async _openScanSession(scanSessionKey: string): Promise<void> {
+  private async _openScanSession(scanSessionKey: string, scanSessionSentinel: string): Promise<void> {
     try {
       const opened = await this.redis.eval(
         OPEN_SCAN_SESSION_LUA,
         1,
         scanSessionKey,
-        SCAN_SESSION_SENTINEL,
+        scanSessionSentinel,
         String(SCAN_SESSION_TTL_MS),
       );
       if (Number(opened) !== 1) {
@@ -464,7 +467,11 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     }
   }
 
-  private async _dedupeScanIds(scanSessionKey: string, ids: string[]): Promise<string[]> {
+  private async _dedupeScanIds(
+    scanSessionKey: string,
+    scanSessionSentinel: string,
+    ids: string[],
+  ): Promise<string[]> {
     if (ids.length === 0) return [];
     if (ids.length > MGET_BATCH) {
       throw new RepositoryError(
@@ -479,7 +486,7 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
         DEDUPE_SCAN_IDS_LUA,
         1,
         scanSessionKey,
-        SCAN_SESSION_SENTINEL,
+        scanSessionSentinel,
         String(SCAN_SESSION_TTL_MS),
         ...ids,
       );
