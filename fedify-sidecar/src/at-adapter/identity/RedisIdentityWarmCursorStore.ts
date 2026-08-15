@@ -30,7 +30,7 @@ export class RedisIdentityWarmCursorStore implements IdentityWarmCursorStore {
   }
 
   async setCursor(cursor: string): Promise<void> {
-    const sanitized = sanitizeCursor(cursor, 'Identity warm cursor cannot be empty');
+    const sanitized = sanitizeRequiredCursor(cursor, 'Identity warm cursor cannot be empty');
     await this.redis.set(CURSOR_KEY, sanitized);
   }
 
@@ -40,11 +40,31 @@ export class RedisIdentityWarmCursorStore implements IdentityWarmCursorStore {
 
     try {
       const parsed = JSON.parse(value) as Partial<IdentityWarmReplayState>;
-      const cursor = typeof parsed.cursor === 'string' ? parsed.cursor.trim() : '';
-      const targetCursor =
-        typeof parsed.targetCursor === 'string' ? parsed.targetCursor.trim() : '';
-      if (!cursor || !targetCursor) return null;
-      return { cursor, targetCursor };
+      const targetCursor = normalizeRequiredCursor(parsed.targetCursor);
+      if (!targetCursor) return null;
+
+      const cursor = normalizeNullableCursor(parsed.cursor);
+      if (parsed.cursor !== null && typeof parsed.cursor !== 'string') return null;
+
+      const hasBaseCursor = Object.prototype.hasOwnProperty.call(parsed, 'baseCursor');
+      const baseCursor = hasBaseCursor
+        ? normalizeNullableCursor(parsed.baseCursor)
+        : cursor;
+      if (hasBaseCursor && parsed.baseCursor !== null && typeof parsed.baseCursor !== 'string') {
+        return null;
+      }
+
+      const settleUntilMs =
+        typeof parsed.settleUntilMs === 'number' && Number.isFinite(parsed.settleUntilMs)
+          ? Math.max(0, Math.trunc(parsed.settleUntilMs))
+          : undefined;
+
+      return {
+        cursor,
+        baseCursor,
+        targetCursor,
+        settleUntilMs,
+      };
     } catch {
       return null;
     }
@@ -56,7 +76,7 @@ export class RedisIdentityWarmCursorStore implements IdentityWarmCursorStore {
   }
 
   async setCursorAndReplay(cursor: string, state: IdentityWarmReplayState): Promise<void> {
-    const normalizedCursor = sanitizeCursor(cursor, 'Identity warm cursor cannot be empty');
+    const normalizedCursor = sanitizeRequiredCursor(cursor, 'Identity warm cursor cannot be empty');
     const normalizedReplay = normalizeReplayState(state);
 
     await this.redis
@@ -71,17 +91,43 @@ export class RedisIdentityWarmCursorStore implements IdentityWarmCursorStore {
   }
 }
 
-function sanitizeCursor(value: string, message: string): string {
+function sanitizeRequiredCursor(value: string, message: string): string {
   const sanitized = value.trim();
   if (!sanitized) throw new Error(message);
   return sanitized;
 }
 
+function normalizeRequiredCursor(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const sanitized = value.trim();
+  return sanitized || null;
+}
+
+function normalizeNullableCursor(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') return null;
+  const sanitized = value.trim();
+  return sanitized || null;
+}
+
 function normalizeReplayState(state: IdentityWarmReplayState): IdentityWarmReplayState {
-  const cursor = state.cursor.trim();
-  const targetCursor = state.targetCursor.trim();
-  if (!cursor || !targetCursor) {
-    throw new Error('Identity warm replay state cannot contain empty cursors');
-  }
-  return { cursor, targetCursor };
+  const targetCursor = sanitizeRequiredCursor(
+    state.targetCursor,
+    'Identity warm replay state requires a target cursor'
+  );
+  const cursor = normalizeNullableCursor(state.cursor);
+  const baseCursor = Object.prototype.hasOwnProperty.call(state, 'baseCursor')
+    ? normalizeNullableCursor(state.baseCursor)
+    : cursor;
+  const settleUntilMs =
+    typeof state.settleUntilMs === 'number' && Number.isFinite(state.settleUntilMs)
+      ? Math.max(0, Math.trunc(state.settleUntilMs))
+      : 0;
+
+  return {
+    cursor,
+    baseCursor,
+    targetCursor,
+    settleUntilMs,
+  };
 }
