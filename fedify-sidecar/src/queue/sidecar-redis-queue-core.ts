@@ -220,9 +220,9 @@ export class RedisStreamsQueue {
     });
   }
 
-  // ==========================================================================
+  // ============================================================================
   // Connection Management
-  // ==========================================================================
+  // ============================================================================
 
   async connect(): Promise<void> {
     if (this.isConnected) return;
@@ -261,9 +261,9 @@ export class RedisStreamsQueue {
     logger.info("Redis Streams Queue disconnected");
   }
 
-  // ==========================================================================
+  // ============================================================================
   // Inbound Queue Operations
-  // ==========================================================================
+  // ============================================================================
 
   async enqueueInbound(envelope: InboundEnvelope): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -301,7 +301,7 @@ export class RedisStreamsQueue {
           this.consumerId,
           this.claimIdleTimeMs,
           "0-0",
-          { COUNT: 10 }
+          { COUNT: this.claimBatchCount }
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
@@ -314,7 +314,7 @@ export class RedisStreamsQueue {
           this.consumerGroup,
           this.consumerId,
           { key: this.inboundStreamKey, id: ">" },
-          { COUNT: 10, BLOCK: this.blockTimeoutMs }
+          { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs }
         );
 
         if (!messages || messages.length === 0) {
