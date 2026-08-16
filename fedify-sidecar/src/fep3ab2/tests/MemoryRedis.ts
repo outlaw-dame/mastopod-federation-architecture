@@ -167,17 +167,26 @@ export class MemoryRedis {
     numberOfKeys: number,
     ...args: Array<string | number>
   ): Promise<unknown> {
-    if (!script.includes("fep3ab2:add-topics-bounded:v1") || numberOfKeys !== 1) {
+    if (!script.includes("fep3ab2:add-topics-bounded:v2") || numberOfKeys !== 2) {
       throw new Error("MemoryRedis received an unsupported Lua script");
     }
 
-    const key = String(args[0] ?? "");
-    const maxTopics = Number(args[1]);
-    const ttl = Number(args[2]);
+    const sessionKey = String(args[0] ?? "");
+    const topicsKey = String(args[1] ?? "");
+    const maxTopics = Number(args[2]);
     const members = args.slice(3).map(String);
-    let record = this.readRecord(key);
+    const sessionRecord = this.readRecord(sessionKey);
+    if (!sessionRecord) {
+      return [-3, 0];
+    }
+    const ttl = await this.ttl(sessionKey);
+    if (ttl < 1) {
+      return [-3, 0];
+    }
+
+    let record = this.readRecord(topicsKey);
     if (record && record.kind !== "set") {
-      throw new Error(`Key ${key} is not a set`);
+      throw new Error(`Key ${topicsKey} is not a set`);
     }
 
     const current = record?.value.size ?? 0;
@@ -193,15 +202,13 @@ export class MemoryRedis {
     if (newMembers.size > 0) {
       if (!record) {
         record = { kind: "set", value: new Set<string>(), expiresAt: null };
-        this.shared.values.set(key, record);
+        this.shared.values.set(topicsKey, record);
       }
       for (const member of newMembers) {
         record.value.add(member);
       }
-      if (ttl > 0) {
-        record.expiresAt = Date.now() + ttl * 1000;
-      }
-    } else if (record && ttl > 0) {
+    }
+    if (record) {
       record.expiresAt = Date.now() + ttl * 1000;
     }
 
