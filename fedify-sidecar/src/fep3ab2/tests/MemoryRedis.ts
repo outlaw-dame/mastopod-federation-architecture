@@ -4,6 +4,7 @@ type ValueRecord =
   | { kind: "string"; value: string; expiresAt: number | null }
   | { kind: "set"; value: Set<string>; expiresAt: number | null }
   | { kind: "sortedSet"; value: Map<string, number>; expiresAt: number | null };
+type SetValueRecord = Extract<ValueRecord, { kind: "set" }>;
 
 interface SharedState {
   values: Map<string, ValueRecord>;
@@ -184,17 +185,19 @@ export class MemoryRedis {
       return [-3, 0];
     }
 
-    let record = this.readRecord(topicsKey);
-    if (record && record.kind !== "set") {
+    const rawRecord = this.readRecord(topicsKey);
+    if (rawRecord && rawRecord.kind !== "set") {
       throw new Error(`Key ${topicsKey} is not a set`);
     }
+    let record: SetValueRecord | null = rawRecord?.kind === "set" ? rawRecord : null;
 
     const current = record?.value.size ?? 0;
     if (current > maxTopics) {
       return [-2, current];
     }
 
-    const newMembers = new Set(members.filter((member) => !record?.value.has(member)));
+    const existingMembers = record?.value;
+    const newMembers = new Set(members.filter((member) => !existingMembers?.has(member)));
     if (current + newMembers.size > maxTopics) {
       return [-1, current];
     }
