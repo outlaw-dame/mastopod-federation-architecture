@@ -12,24 +12,27 @@
  *
  * Authentication: We extract the requesting server base URI from the `keyId`
  * field of the HTTP `Signature` header. Full cryptographic verification of the
- * signature is performed using the cached actor document store to resist
- * unauthenticated fishing for follower data.
+ * signature is performed only after the remote key document has crossed the
+ * shared ActivityPub egress policy and bounded response parser.
  *
  * Spec: https://codeberg.org/fediverse/fep/src/branch/main/fep/8fcf/fep-8fcf.md
  */
 
 import { createVerify, createHash } from "node:crypto";
-import { request } from "undici";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { FollowersSyncService } from "./FollowersSyncService.js";
+import { fetchRemoteKeyDocument } from "./RemoteKeyDocumentFetcher.js";
 import { logger } from "../../utils/logger.js";
 
 // ============================================================================
-// Identifier validation (mirrors inbound-worker.ts)
+// Identifier and header validation
 // ============================================================================
 
 /** Permitted characters for a local actor identifier. */
 const IDENTIFIER_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
+const MAX_SIGNATURE_HEADER_BYTES = 32 * 1024;
+const MAX_SIGNATURE_VALUE_BYTES = 16 * 1024;
+const MAX_SIGNED_HEADERS_BYTES = 1024;
 
 // ============================================================================
 // HTTP-Signature parsing (minimal — only what we need to verify + extract keyId)
@@ -59,48 +62,13 @@ function extractServerBaseUriFromKeyId(keyId: string): string | null {
   }
 }
 
-// ============================================================================
-// Signature verification helpers (mirrors inbound-worker.ts approach)
-// ============================================================================
-
-async function fetchActorDocumentForKey(
-  keyId: string,
-  userAgent: string,
-  timeoutMs: number,
-): Promise<Record<string, unknown> | null> {
-  const fetchUrl = keyId.includes("#") ? keyId.split("#")[0]! : keyId;
-  try {
-    const resp = await request(fetchUrl, {
-      method: "GET",
-      headers: {
-        accept: "application/activity+json, application/ld+json",
-        "user-agent": userAgent,
-      },
-      bodyTimeout: timeoutMs,
-      headersTimeout: timeoutMs,
-      maxRedirections: 3,
-    });
-    if (resp.statusCode < 200 || resp.statusCode >= 300) {
-      await resp.body.text();
-      return null;
-    }
-    return await resp.body.json() as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+function withinUtf8Limit(value: string, maxBytes: number): boolean {
+  return Buffer.byteLength(value, "utf8") <= maxBytes;
 }
 
-function extractPublicKeyPem(doc: Record<string, unknown>): string | null {
-  // Key document (keyId pointed directly at a key object)
-  const pk = doc["publicKey"];
-  if (typeof pk === "object" && pk !== null) {
-    const pem = (pk as Record<string, unknown>)["publicKeyPem"];
-    if (typeof pem === "string") return pem;
-  }
-  // Actor document with embedded publicKey
-  if (typeof doc["publicKeyPem"] === "string") return doc["publicKeyPem"];
-  return null;
-}
+// ============================================================================
+// Signature verification helper
+// ============================================================================
 
 function buildSigningString(
   method: string,
@@ -158,9 +126,13 @@ export function registerFollowersSyncRoutes(
         return;
       }
 
-      // --- Require a Signature header ---
+      // --- Require and bound the Signature header before parsing ---
       const rawSignature = req.headers["signature"];
-      if (typeof rawSignature !== "string" || rawSignature.length === 0) {
+      if (
+        typeof rawSignature !== "string"
+        || rawSignature.length === 0
+        || !withinUtf8Limit(rawSignature, MAX_SIGNATURE_HEADER_BYTES)
+      ) {
         reply.status(401).send({ error: "HTTP Signature required" });
         return;
       }
@@ -174,24 +146,24 @@ export function registerFollowersSyncRoutes(
       if (
         typeof keyId !== "string" || keyId.length === 0 ||
         typeof signatureB64 !== "string" ||
-        typeof signedHeadersRaw !== "string"
+        typeof signedHeadersRaw !== "string" ||
+        !withinUtf8Limit(signatureB64, MAX_SIGNATURE_VALUE_BYTES) ||
+        !withinUtf8Limit(signedHeadersRaw, MAX_SIGNED_HEADERS_BYTES)
       ) {
         reply.status(401).send({ error: "Malformed HTTP Signature" });
         return;
       }
 
-      // --- Fetch the actor/key document to get the public key ---
-      const actorDoc = await fetchActorDocumentForKey(keyId, userAgent, timeoutMs);
-      if (!actorDoc) {
+      // --- Fetch the key document through the shared pinned-DNS egress policy ---
+      const keyDocument = await fetchRemoteKeyDocument(keyId, {
+        userAgent,
+        timeoutMs,
+      });
+      if (!keyDocument) {
         reply.status(401).send({ error: "Could not fetch signing key document" });
         return;
       }
-
-      const publicKeyPem = extractPublicKeyPem(actorDoc);
-      if (!publicKeyPem) {
-        reply.status(401).send({ error: "No public key in key document" });
-        return;
-      }
+      const publicKeyPem = keyDocument.publicKeyPem;
 
       // --- Verify Digest header if present ---
       const digestHeader = req.headers["digest"];
