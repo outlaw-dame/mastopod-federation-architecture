@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { Redis } from "ioredis";
 import type { DurableStreamSubscriptionService } from "../feed/DurableStreamSubscriptionService.js";
 import { Fep3ab2ActivityPodsClient } from "./Fep3ab2ActivityPodsClient.js";
+import { installFep3ab2ClientIpBoundary } from "./Fep3ab2ClientIpBoundary.js";
 import { Fep3ab2Dispatcher } from "./Fep3ab2Dispatcher.js";
 import { Fep3ab2EventHub } from "./Fep3ab2EventHub.js";
 import { registerFep3ab2Routes } from "./Fep3ab2FastifyRoutes.js";
@@ -96,6 +97,11 @@ export class Fep3ab2Runtime {
     this.unregisterObserver = options.streamSubscriptionService.registerEnvelopeObserver((envelope) => {
       this.topicRouter.handleStreamEnvelope(envelope);
     });
+
+    // FEP principal resolution forwards request metadata across an internal
+    // authority boundary. Normalize the client address from the direct socket
+    // and explicit trusted-proxy policy before any /streaming/* route sees it.
+    installFep3ab2ClientIpBoundary(options.app);
 
     registerFep3ab2Routes(options.app, {
       authorityClient: this.authorityClient,
