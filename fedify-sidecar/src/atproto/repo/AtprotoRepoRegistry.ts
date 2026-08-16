@@ -162,14 +162,15 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
       );
     }
 
+    const nsids = collectionNsids(state);
     const tx = this.redis
       .multi()
       .set(key, JSON.stringify(state), 'EX', 86400 * 30)
       .sadd(this.indexKey, state.did);
-    for (const nsid of collectionNsids(state)) {
+    for (const nsid of nsids) {
       tx.sadd(this.collectionIndexKey(nsid), state.did);
     }
-    await tx.exec();
+    await this.execIndexMutation(tx, nsids, 'register repository');
   }
 
   async getByDid(did: string): Promise<RepositoryState | null> {
@@ -196,6 +197,7 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
     const previous = parseRepositoryStateBestEffort(rawPrevious);
     const previousCollections = new Set(previous ? collectionNsids(previous) : []);
     const nextCollections = new Set(collectionNsids(state));
+    const affectedCollections = new Set([...previousCollections, ...nextCollections]);
     const tx = this.redis.multi().set(key, JSON.stringify(state), 'EX', 86400 * 30);
 
     for (const nsid of nextCollections) {
@@ -207,19 +209,20 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
       }
     }
 
-    await tx.exec();
+    await this.execIndexMutation(tx, affectedCollections, 'update repository');
   }
 
   async delete(did: string): Promise<boolean> {
     const key = `${this.keyPrefix}${did}`;
     const rawPrevious = await this.redis.get(key);
     const previous = parseRepositoryStateBestEffort(rawPrevious);
+    const previousCollections = previous ? collectionNsids(previous) : [];
     const tx = this.redis.multi().del(key).srem(this.indexKey, did);
-    for (const nsid of previous ? collectionNsids(previous) : []) {
+    for (const nsid of previousCollections) {
       tx.srem(this.collectionIndexKey(nsid), did);
     }
-    const result = await tx.exec();
-    const deleted = Number(result?.[0]?.[1] ?? 0);
+    const result = await this.execIndexMutation(tx, previousCollections, 'delete repository');
+    const deleted = Number(result[0]?.[1] ?? 0);
     return deleted > 0;
   }
 
@@ -276,6 +279,76 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private async execIndexMutation(
+    tx: any,
+    affectedNsids: Iterable<string>,
+    operation: string
+  ): Promise<Array<[unknown, unknown]>> {
+    const nsids = Array.from(new Set(affectedNsids));
+    let result: unknown;
+
+    try {
+      result = await tx.exec();
+    } catch (error) {
+      await this.invalidateCollectionIndexCompleteness(nsids).catch(() => undefined);
+      throw new RegistryError(
+        RegistryErrorCode.PERSISTENCE_ERROR,
+        `Redis transaction failed while attempting to ${operation}`,
+        { cause: error instanceof Error ? error.message : String(error) }
+      );
+    }
+
+    if (!Array.isArray(result)) {
+      await this.invalidateCollectionIndexCompleteness(nsids).catch(() => undefined);
+      throw new RegistryError(
+        RegistryErrorCode.PERSISTENCE_ERROR,
+        `Redis transaction returned an invalid response while attempting to ${operation}`
+      );
+    }
+
+    const commandErrors: string[] = [];
+    for (let index = 0; index < result.length; index += 1) {
+      const entry = result[index];
+      if (!Array.isArray(entry) || entry.length < 2) {
+        commandErrors.push(`command ${index}: invalid response`);
+        continue;
+      }
+      const error = entry[0];
+      if (error) {
+        commandErrors.push(
+          `command ${index}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (commandErrors.length > 0) {
+      let invalidationError: string | undefined;
+      try {
+        await this.invalidateCollectionIndexCompleteness(nsids);
+      } catch (error) {
+        invalidationError = error instanceof Error ? error.message : String(error);
+      }
+      throw new RegistryError(
+        RegistryErrorCode.PERSISTENCE_ERROR,
+        `Redis transaction partially failed while attempting to ${operation}`,
+        {
+          commandErrors,
+          ...(invalidationError ? { invalidationError } : {})
+        }
+      );
+    }
+
+    return result as Array<[unknown, unknown]>;
+  }
+
+  private async invalidateCollectionIndexCompleteness(nsids: Iterable<string>): Promise<void> {
+    const keys = Array.from(new Set(nsids)).map((nsid) => this.collectionIndexCompleteKey(nsid));
+    for (let start = 0; start < keys.length; start += REPO_MGET_BATCH) {
+      const batch = keys.slice(start, start + REPO_MGET_BATCH);
+      if (batch.length > 0) await this.redis.del(...batch);
     }
   }
 
