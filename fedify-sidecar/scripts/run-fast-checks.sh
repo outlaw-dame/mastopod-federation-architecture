@@ -19,6 +19,7 @@ npm exec -- vitest run \
   src/security/tests/ActivityPubEgressPolicyPhase5Regression.test.ts \
   src/security/tests/ActivityPubPinnedDns.test.ts \
   src/at-adapter/external/ExternalAtSessionStore.test.ts \
+  src/at-adapter/oauth/OAuthRefreshTokenStore.scalability.test.ts \
   src/atproto/repo/AtprotoRepoRegistry.scalability.test.ts \
   src/protocol-bridge/identity/ObservedAtIdentityStore.scalability.test.ts \
   src/admin/mrf/routes.registry.test.ts \
