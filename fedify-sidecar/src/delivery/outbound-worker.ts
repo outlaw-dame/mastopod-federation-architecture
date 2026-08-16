@@ -33,6 +33,7 @@ import type { CapabilityGateResult } from "../capabilities/gates.js";
 import type { FollowersSyncService } from "../federation/fep8fcf/FollowersSyncService.js";
 import { extractActorIdentifier } from "../federation/fep8fcf/PartialFollowersDigest.js";
 import { COLLECTION_SYNC_HEADER } from "../federation/fep8fcf/CollectionSyncHeader.js";
+import { isFollowersAddressedActivity } from "../federation/fep8fcf/FollowersSyncOutboundEligibility.js";
 import {
   RedisOutboundDeliveryClaimStore,
   type OutboundDeliveryClaimStore,
@@ -64,9 +65,10 @@ export interface OutboundWorkerConfig {
   /** Injected adapter — defaults to NoopFederationRuntimeAdapter when flag is off. */
   adapter?: FederationRuntimeAdapter;
   /**
-   * FEP-8fcf followers sync service.  When present and the outbound job has
-   * `meta.visibility === "followers"`, the worker appends a
-   * Collection-Synchronization header to the HTTP delivery request.
+   * FEP-8fcf followers sync service. When present and the serialized ActivityPub
+   * activity addresses the local actor's followers collection, the worker may
+   * append a Collection-Synchronization header. Sync remains optional and never
+   * determines whether the underlying ActivityPub delivery is attempted.
    */
   followersSyncService?: FollowersSyncService;
   /**
@@ -91,6 +93,12 @@ export interface DeliveryResult extends OutboundDeliveryResult {}
 const MAX_RETRY_AFTER_MS = 60 * 60 * 1000;
 const MAX_ERROR_TEXT_LENGTH = 512;
 const MAX_RESPONSE_BODY_LOG_LENGTH = 2048;
+export const MAX_RESPONSE_BODY_READ_BYTES = 8 * 1024;
+
+type DestroyableResponseBody = AsyncIterable<Uint8Array> & {
+  destroy?: () => void;
+};
+
 /**
  * Keep short scheduling waits on the original pending Stream entry. This is
  * intentionally well below the queue's normal 60s XAUTOCLAIM idle threshold,
@@ -120,6 +128,42 @@ export function sanitizeResponseBodySnippet(value: unknown): string | undefined 
   const compact = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]+/g, "").trim();
   if (!compact) return undefined;
   return compact.slice(0, MAX_RESPONSE_BODY_LOG_LENGTH);
+}
+
+export async function readBoundedResponseBody(
+  body: DestroyableResponseBody | null | undefined,
+  maxBytes: number = MAX_RESPONSE_BODY_READ_BYTES,
+): Promise<string> {
+  if (!body || maxBytes <= 0) {
+    body?.destroy?.();
+    return "";
+  }
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let truncated = false;
+
+  for await (const chunk of body) {
+    const bytes = Buffer.from(chunk);
+    const remaining = maxBytes - totalBytes;
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+
+    if (bytes.byteLength > remaining) {
+      chunks.push(bytes.subarray(0, remaining));
+      totalBytes += remaining;
+      truncated = true;
+      break;
+    }
+
+    chunks.push(bytes);
+    totalBytes += bytes.byteLength;
+  }
+
+  if (truncated) body.destroy?.();
+  return Buffer.concat(chunks, totalBytes).toString("utf8");
 }
 
 export function parseRetryAfterMs(
@@ -694,13 +738,19 @@ export class OutboundWorker {
         headers["digest"] = successResult.signedHeaders.digest;
       }
 
-      if (this.followersSyncService && job.meta?.visibility === "followers" && this.config.domain) {
+      if (
+        this.followersSyncService
+        && this.config.domain
+        && isFollowersAddressedActivity(job.activity, job.actorUri)
+      ) {
         const actorIdentifier = extractActorIdentifier(job.actorUri, this.config.domain);
         if (actorIdentifier) {
-          const followersUri = `${job.actorUri}/followers`;
+          const normalizedActorUri = job.actorUri.endsWith("/")
+            ? job.actorUri.slice(0, -1)
+            : job.actorUri;
           const syncHeaderValue = await this.followersSyncService.buildSenderHeader(
             actorIdentifier,
-            followersUri,
+            `${normalizedActorUri}/followers`,
             job.targetInbox,
           ).catch(() => null);
           if (syncHeaderValue) headers[COLLECTION_SYNC_HEADER] = syncHeaderValue;
@@ -725,7 +775,9 @@ export class OutboundWorker {
             ? response.headers["retry-after"][0]
             : undefined,
       );
-      const responseBody = sanitizeResponseBodySnippet(await response.body.text());
+      const responseBody = sanitizeResponseBodySnippet(
+        await readBoundedResponseBody(response.body as DestroyableResponseBody),
+      );
 
       if (statusCode >= 200 && statusCode < 300) {
         return { jobId: job.jobId, success: true, statusCode };
