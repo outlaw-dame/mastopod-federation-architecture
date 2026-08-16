@@ -14,6 +14,8 @@ const REPO_SCAN_COUNT = 128;
 const REPO_MGET_BATCH = 128;
 const REPO_SCAN_SESSION_TTL_MS = 5 * 60_000;
 const REPO_SCAN_SESSION_PREFIX = 'atproto:repos:list:seen:';
+const COLLECTION_INDEX_PREFIX = 'atproto:repos:collection:';
+const COLLECTION_INDEX_COMPLETE_PREFIX = 'atproto:repos:collection-complete:';
 
 const OPEN_REPO_SCAN_SESSION_LUA = `
 local ttl = tonumber(ARGV[2])
@@ -45,34 +47,13 @@ redis.call('PEXPIRE', KEYS[1], ttl)
 return fresh
 `;
 
-/**
- * Repository registry error codes
- */
 export enum RegistryErrorCode {
-  /**
-   * Repository not found
-   */
   NOT_FOUND = 'NOT_FOUND',
-
-  /**
-   * Repository already exists
-   */
   ALREADY_EXISTS = 'ALREADY_EXISTS',
-
-  /**
-   * Persistence error
-   */
   PERSISTENCE_ERROR = 'PERSISTENCE_ERROR',
-
-  /**
-   * Validation error
-   */
   VALIDATION_ERROR = 'VALIDATION_ERROR',
 }
 
-/**
- * Registry error
- */
 export class RegistryError extends Error {
   constructor(
     public code: RegistryErrorCode,
@@ -84,11 +65,6 @@ export class RegistryError extends Error {
   }
 }
 
-/**
- * ATProto Repository Registry
- *
- * Manages repository state across multiple DIDs.
- */
 export interface AtprotoRepoRegistry {
   register(state: RepositoryState): Promise<void>;
   getByDid(did: string): Promise<RepositoryState | null>;
@@ -104,9 +80,6 @@ export interface AtprotoRepoRegistry {
   getRepoState(did: string): Promise<RepositoryState | null>;
 }
 
-/**
- * In-memory repository registry (for testing/caching)
- */
 export class InMemoryAtprotoRepoRegistry implements AtprotoRepoRegistry {
   private repositories = new Map<string, RepositoryState>();
 
@@ -173,9 +146,6 @@ export class InMemoryAtprotoRepoRegistry implements AtprotoRepoRegistry {
   }
 }
 
-/**
- * Redis-backed repository registry
- */
 export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
   private readonly keyPrefix = 'atproto:repo:';
   private readonly indexKey = 'atproto:repos';
@@ -192,8 +162,14 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
       );
     }
 
-    await this.redis.set(key, JSON.stringify(state), 'EX', 86400 * 30);
-    await this.redis.sadd(this.indexKey, state.did);
+    const tx = this.redis
+      .multi()
+      .set(key, JSON.stringify(state), 'EX', 86400 * 30)
+      .sadd(this.indexKey, state.did);
+    for (const nsid of collectionNsids(state)) {
+      tx.sadd(this.collectionIndexKey(nsid), state.did);
+    }
+    await tx.exec();
   }
 
   async getByDid(did: string): Promise<RepositoryState | null> {
@@ -209,20 +185,41 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
 
   async update(state: RepositoryState): Promise<void> {
     const key = `${this.keyPrefix}${state.did}`;
-    const exists = await this.redis.exists(key);
-    if (!exists) {
+    const rawPrevious = await this.redis.get(key);
+    if (!rawPrevious) {
       throw new RegistryError(
         RegistryErrorCode.NOT_FOUND,
         `Repository not found: ${state.did}`
       );
     }
-    await this.redis.set(key, JSON.stringify(state), 'EX', 86400 * 30);
+
+    const previous = parseRepositoryStateBestEffort(rawPrevious);
+    const previousCollections = new Set(previous ? collectionNsids(previous) : []);
+    const nextCollections = new Set(collectionNsids(state));
+    const tx = this.redis.multi().set(key, JSON.stringify(state), 'EX', 86400 * 30);
+
+    for (const nsid of nextCollections) {
+      tx.sadd(this.collectionIndexKey(nsid), state.did);
+    }
+    for (const nsid of previousCollections) {
+      if (!nextCollections.has(nsid)) {
+        tx.srem(this.collectionIndexKey(nsid), state.did);
+      }
+    }
+
+    await tx.exec();
   }
 
   async delete(did: string): Promise<boolean> {
     const key = `${this.keyPrefix}${did}`;
-    const deleted = await this.redis.del(key);
-    await this.redis.srem(this.indexKey, did);
+    const rawPrevious = await this.redis.get(key);
+    const previous = parseRepositoryStateBestEffort(rawPrevious);
+    const tx = this.redis.multi().del(key).srem(this.indexKey, did);
+    for (const nsid of previous ? collectionNsids(previous) : []) {
+      tx.srem(this.collectionIndexKey(nsid), did);
+    }
+    const result = await tx.exec();
+    const deleted = Number(result?.[0]?.[1] ?? 0);
     return deleted > 0;
   }
 
@@ -258,20 +255,11 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
   }
 
   async getByCollection(nsid: string): Promise<RepositoryState[]> {
-    // This API returns the complete matching population. Keep the current
-    // authority semantics until a collection secondary index has an explicit
-    // migration/backfill design; changing it here could make legacy repos invisible.
-    const dids = await this.redis.smembers(this.indexKey);
-    const results: RepositoryState[] = [];
-
-    for (const did of dids) {
-      const state = await this.getByDid(did);
-      if (state && state.collections.some((c) => c.nsid === nsid)) {
-        results.push(state);
-      }
+    const completeKey = this.collectionIndexCompleteKey(nsid);
+    if ((await this.redis.get(completeKey)) !== '1') {
+      await this.backfillCollectionIndex(nsid);
     }
-
-    return results;
+    return this.loadCollectionIndex(nsid);
   }
 
   async getWithPendingCommits(): Promise<RepositoryState[]> {
@@ -289,6 +277,93 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
     } catch {
       return false;
     }
+  }
+
+  private async backfillCollectionIndex(nsid: string): Promise<void> {
+    let cursor = '0';
+    const collectionKey = this.collectionIndexKey(nsid);
+
+    try {
+      do {
+        const response = await this.redis.sscan(this.indexKey, cursor, 'COUNT', REPO_SCAN_COUNT);
+        const nextCursor = String(response?.[0] ?? '0');
+        const scanned: string[] = Array.isArray(response?.[1])
+          ? response[1].filter((value: unknown): value is string => typeof value === 'string' && value.length > 0)
+          : [];
+
+        // SSCAN COUNT is only a hint. Bound both state reads and index writes if
+        // Redis returns an oversized compact-encoding page.
+        for (let start = 0; start < scanned.length; start += REPO_MGET_BATCH) {
+          const dids = scanned.slice(start, start + REPO_MGET_BATCH);
+          if (dids.length === 0) continue;
+          const rawStates: Array<string | null> = await this.redis.mget(
+            ...dids.map((did) => `${this.keyPrefix}${did}`)
+          );
+          const matchingDids: string[] = [];
+          for (let index = 0; index < dids.length; index += 1) {
+            const raw = rawStates[index];
+            if (!raw) continue;
+            const state = JSON.parse(raw) as RepositoryState;
+            if (state.collections.some((collection) => collection.nsid === nsid)) {
+              matchingDids.push(dids[index]!);
+            }
+          }
+          if (matchingDids.length > 0) {
+            await this.redis.sadd(collectionKey, ...matchingDids);
+          }
+        }
+
+        cursor = nextCursor;
+      } while (cursor !== '0');
+
+      // This marker is written only after a complete authoritative scan. All
+      // subsequent register/update/delete operations maintain the index.
+      await this.redis.set(this.collectionIndexCompleteKey(nsid), '1');
+    } catch (error) {
+      throw new RegistryError(
+        RegistryErrorCode.PERSISTENCE_ERROR,
+        `Repository collection index backfill failed for ${nsid}`,
+        { cause: error instanceof Error ? error.message : String(error) }
+      );
+    }
+  }
+
+  private async loadCollectionIndex(nsid: string): Promise<RepositoryState[]> {
+    const collectionKey = this.collectionIndexKey(nsid);
+    const dids: string[] = await this.redis.smembers(collectionKey);
+    const results: RepositoryState[] = [];
+    const staleDids: string[] = [];
+
+    for (let start = 0; start < dids.length; start += REPO_MGET_BATCH) {
+      const batch = dids.slice(start, start + REPO_MGET_BATCH);
+      if (batch.length === 0) continue;
+      const rawStates: Array<string | null> = await this.redis.mget(
+        ...batch.map((did) => `${this.keyPrefix}${did}`)
+      );
+      for (let index = 0; index < batch.length; index += 1) {
+        const did = batch[index]!;
+        const raw = rawStates[index];
+        if (!raw) {
+          staleDids.push(did);
+          continue;
+        }
+        const state = JSON.parse(raw) as RepositoryState;
+        if (state.collections.some((collection) => collection.nsid === nsid)) {
+          results.push(state);
+        } else {
+          // Authoritative state wins over a stale secondary-index member. This
+          // also makes concurrent backfill/update/delete races correctness-safe.
+          staleDids.push(did);
+        }
+      }
+    }
+
+    for (let start = 0; start < staleDids.length; start += REPO_MGET_BATCH) {
+      const batch = staleDids.slice(start, start + REPO_MGET_BATCH);
+      if (batch.length > 0) await this.redis.srem(collectionKey, ...batch);
+    }
+
+    return results;
   }
 
   private async scanRepositoryPage(limit: number, offset: number): Promise<string[]> {
@@ -319,8 +394,6 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
           ? response[1].filter((value: unknown): value is string => typeof value === 'string' && value.length > 0)
           : [];
 
-        // COUNT is only a work hint. Bound the de-duplication command even when
-        // Redis returns an oversized compact-encoding page.
         for (let start = 0; start < scanned.length; start += REPO_MGET_BATCH) {
           const chunk = scanned.slice(start, start + REPO_MGET_BATCH);
           const fresh = await this.dedupeScanDids(sessionKey, sentinel, chunk);
@@ -378,5 +451,30 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
       throw new Error('Repository scan de-duplication returned invalid Redis response');
     }
     return result as string[];
+  }
+
+  private collectionIndexKey(nsid: string): string {
+    return `${COLLECTION_INDEX_PREFIX}${encodeURIComponent(nsid)}`;
+  }
+
+  private collectionIndexCompleteKey(nsid: string): string {
+    return `${COLLECTION_INDEX_COMPLETE_PREFIX}${encodeURIComponent(nsid)}`;
+  }
+}
+
+function collectionNsids(state: RepositoryState): string[] {
+  return Array.from(new Set(
+    state.collections
+      .map((collection) => collection.nsid)
+      .filter((nsid): nsid is string => typeof nsid === 'string' && nsid.length > 0)
+  ));
+}
+
+function parseRepositoryStateBestEffort(raw: string | null): RepositoryState | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as RepositoryState;
+  } catch {
+    return null;
   }
 }
