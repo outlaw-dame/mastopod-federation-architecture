@@ -150,7 +150,7 @@ describe('RedisIdentityBindingRepository bounded reads', () => {
     expect(redis.eval.mock.calls[0]?.slice(1)).toEqual([
       1,
       expect.stringMatching(/^identity:scan:seen:/u),
-      '\u0000identity-scan-session',
+      expect.stringMatching(/^\u0000identity-scan-session:/u),
       '300000',
     ]);
     expect(redis.sadd).not.toHaveBeenCalled();
