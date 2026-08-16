@@ -35,25 +35,39 @@ function client(overrides: Partial<ConstructorParameters<typeof FollowersSyncAct
 }
 
 describe("FollowersSyncActivityPodsClient authority reads", () => {
-  it("preserves a valid empty partial followers collection", async () => {
+  it("preserves a valid empty partial followers collection and sends the precise server base URI", async () => {
     requestMock.mockResolvedValueOnce({
       statusCode: 200,
       body: responseBody([JSON.stringify({ followers: [] })]),
     } as any);
 
-    await expect(client().getPartialFollowers("alice", "remote.example")).resolves.toEqual([]);
+    await expect(client().getPartialFollowers("alice", "https://remote.example:8443/inbox"))
+      .resolves.toEqual([]);
+
+    const requestedUrl = String(requestMock.mock.calls[0]?.[0]);
+    const parsed = new URL(requestedUrl);
+    expect(parsed.pathname).toBe("/api/internal/followers-sync-v2/partial-collection");
+    expect(parsed.searchParams.get("actorIdentifier")).toBe("alice");
+    expect(parsed.searchParams.get("baseUri")).toBe("https://remote.example:8443/");
+    expect(parsed.searchParams.has("domain")).toBe(false);
   });
 
   it("does not collapse an unavailable endpoint into authoritative empty state", async () => {
     const body = responseBody(["not used"]);
     requestMock.mockResolvedValueOnce({ statusCode: 501, body } as any);
 
-    await expect(client().getPartialFollowers("alice", "remote.example")).rejects.toMatchObject({
+    await expect(client().getPartialFollowers("alice", "https://remote.example")).rejects.toMatchObject({
       name: "FollowersSyncAuthorityError",
       code: "authority_unavailable",
       statusCode: 501,
     });
     expect(body.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an invalid server base input before calling ActivityPods", async () => {
+    await expect(client().getPartialFollowers("alice", "not-a-url"))
+      .rejects.toMatchObject({ code: "invalid_server_base_uri" });
+    expect(requestMock).not.toHaveBeenCalled();
   });
 
   it("rejects an oversized authority response before JSON materialization", async () => {
@@ -63,7 +77,7 @@ describe("FollowersSyncActivityPodsClient authority reads", () => {
     ]);
     requestMock.mockResolvedValueOnce({ statusCode: 200, body } as any);
 
-    await expect(client({ maxResponseBytes: 65_536 }).getPartialFollowers("alice", "remote.example"))
+    await expect(client({ maxResponseBytes: 65_536 }).getPartialFollowers("alice", "https://remote.example"))
       .rejects.toMatchObject({ code: "response_too_large" });
     expect(body.destroy).toHaveBeenCalledTimes(1);
   });
@@ -74,7 +88,7 @@ describe("FollowersSyncActivityPodsClient authority reads", () => {
       body: responseBody([JSON.stringify({ followers: ["https://remote.example/users/bob", 42] })]),
     } as any);
 
-    await expect(client().getPartialFollowers("alice", "remote.example"))
+    await expect(client().getPartialFollowers("alice", "https://remote.example"))
       .rejects.toMatchObject({ code: "invalid_response" });
   });
 
@@ -90,7 +104,7 @@ describe("FollowersSyncActivityPodsClient authority reads", () => {
       })]),
     } as any);
 
-    await expect(client({ maxCollectionItems: 2 }).getPartialFollowers("alice", "remote.example"))
+    await expect(client({ maxCollectionItems: 2 }).getPartialFollowers("alice", "https://remote.example"))
       .rejects.toMatchObject({ code: "collection_too_large" });
   });
 
