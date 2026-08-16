@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export type AtIdentityObservationOutcome =
   | "projected"
   | "skipped_unbound_actor"
@@ -68,6 +70,7 @@ type RedisLike = {
   set(key: string, value: string): Promise<unknown>;
   sadd(key: string, ...members: string[]): Promise<unknown>;
   smembers(key: string): Promise<string[]>;
+  del?(...keys: string[]): Promise<unknown>;
   eval?(
     script: string,
     numberOfKeys: number,
@@ -83,6 +86,38 @@ type RedisLike = {
 };
 
 const DASHBOARD_SCAN_COUNT = 128;
+const DASHBOARD_MGET_BATCH = 128;
+const DASHBOARD_SCAN_SESSION_TTL_MS = 5 * 60_000;
+
+const OPEN_DASHBOARD_SCAN_SESSION_LUA = `
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then
+  return redis.error_reply('OBSERVED_AT_SCAN_SESSION_INVALID_TTL')
+end
+redis.call('SADD', KEYS[1], ARGV[1])
+if redis.call('PEXPIRE', KEYS[1], ttl) ~= 1 then
+  return redis.error_reply('OBSERVED_AT_SCAN_SESSION_TTL_FAILED')
+end
+return 1
+`;
+
+const DEDUPE_DASHBOARD_SCAN_IDS_LUA = `
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) ~= 1 then
+  return redis.error_reply('OBSERVED_AT_SCAN_SESSION_EXPIRED')
+end
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then
+  return redis.error_reply('OBSERVED_AT_SCAN_SESSION_INVALID_TTL')
+end
+local fresh = {}
+for i = 3, #ARGV do
+  if redis.call('SADD', KEYS[1], ARGV[i]) == 1 then
+    table.insert(fresh, ARGV[i])
+  end
+end
+redis.call('PEXPIRE', KEYS[1], ttl)
+return fresh
+`;
 
 /**
  * Atomically merges one observation into the existing JSON record and indexes
@@ -211,6 +246,7 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
     return parseObservedIdentityRecord(await this.redis.get(this.buildDidKey(did)));
   }
 
+  /** Explicit complete-population API. Derived views intentionally do not call this. */
   public async listAll(): Promise<ObservedAtIdentityRecord[]> {
     const dids = await this.redis.smembers(this.buildAllKey());
     const results = await Promise.all(dids.map(async (did) => this.getByDid(did)));
@@ -218,8 +254,11 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
   }
 
   public async getSummary(): Promise<ObservedAtIdentitySummary> {
-    const records = await this.listAll();
-    return summarizeObservedIdentities(records);
+    const summary = emptySummary();
+    for await (const batch of this.scanRecordBatches()) {
+      for (const record of batch) addRecordToSummary(summary, record);
+    }
+    return summary;
   }
 
   public async listTopUnbound(limit: number): Promise<ObservedAtIdentityRecord[]> {
@@ -262,8 +301,13 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
     sorter: (left: ObservedAtIdentityRecord, right: ObservedAtIdentityRecord) => number,
   ): Promise<ObservedAtIdentityRecord[]> {
     const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
-    const records = await this.listAll();
-    return records.filter(predicate).sort(sorter).slice(0, safeLimit);
+    let results: ObservedAtIdentityRecord[] = [];
+    for await (const batch of this.scanRecordBatches()) {
+      for (const record of batch) {
+        if (predicate(record)) results = retainTop(results, record, safeLimit, sorter);
+      }
+    }
+    return results;
   }
 
   private async *scanRecordBatches(): AsyncGenerator<ObservedAtIdentityRecord[]> {
@@ -273,32 +317,132 @@ export class RedisObservedAtIdentityStore implements ObservedAtIdentityStore {
       return;
     }
 
+    if (this.redis.eval && this.redis.del) {
+      for await (const records of this.scanRecordBatchesWithRedisSession()) {
+        yield records;
+      }
+      return;
+    }
+
+    for await (const records of this.scanRecordBatchesWithMemoryFallback()) {
+      yield records;
+    }
+  }
+
+  private async *scanRecordBatchesWithRedisSession(): AsyncGenerator<ObservedAtIdentityRecord[]> {
+    const redis = this.redis as RedisLike & Required<Pick<RedisLike, "eval" | "del" | "sscan" | "mget">>;
+    let cursor = "0";
+    const sessionKey = `${this.keyPrefix}:scan-seen:${randomUUID()}`;
+    const sentinel = `\u0000observed-at-scan:${randomUUID()}`;
+    let opened = false;
+
+    try {
+      const openResult = await redis.eval(
+        OPEN_DASHBOARD_SCAN_SESSION_LUA,
+        1,
+        sessionKey,
+        sentinel,
+        String(DASHBOARD_SCAN_SESSION_TTL_MS),
+      );
+      if (Number(openResult) !== 1) {
+        throw new Error("Redis did not initialize observed identity scan session");
+      }
+      opened = true;
+
+      do {
+        const response = await redis.sscan(
+          this.buildAllKey(),
+          cursor,
+          "COUNT",
+          DASHBOARD_SCAN_COUNT,
+        );
+        const nextCursor = String(response?.[0] ?? "0");
+        const scanned = Array.isArray(response?.[1])
+          ? response[1].filter((did): did is string => typeof did === "string" && did.length > 0)
+          : [];
+
+        for (let start = 0; start < scanned.length; start += DASHBOARD_MGET_BATCH) {
+          const chunk = scanned.slice(start, start + DASHBOARD_MGET_BATCH);
+          const fresh = await this.dedupeScanDids(redis, sessionKey, sentinel, chunk);
+          if (fresh.length === 0) continue;
+          const records = await this.loadRecordBatch(redis, fresh);
+          if (records.length > 0) yield records;
+        }
+
+        cursor = nextCursor;
+      } while (cursor !== "0");
+    } finally {
+      if (opened) {
+        await redis.del(sessionKey).catch(() => undefined);
+      }
+    }
+  }
+
+  private async *scanRecordBatchesWithMemoryFallback(): AsyncGenerator<ObservedAtIdentityRecord[]> {
+    const redis = this.redis as RedisLike & Required<Pick<RedisLike, "sscan" | "mget">>;
     let cursor = "0";
     const seenDids = new Set<string>();
 
     do {
-      const [nextCursor, scannedDids] = await this.redis.sscan(
+      const response = await redis.sscan(
         this.buildAllKey(),
         cursor,
         "COUNT",
         DASHBOARD_SCAN_COUNT,
       );
-      const dids = scannedDids.filter((did) => {
-        if (seenDids.has(did)) return false;
-        seenDids.add(did);
-        return true;
-      });
+      const nextCursor = String(response?.[0] ?? "0");
+      const scanned = Array.isArray(response?.[1])
+        ? response[1].filter((did): did is string => typeof did === "string" && did.length > 0)
+        : [];
 
-      if (dids.length > 0) {
-        const raws = await this.redis.mget(...dids.map((did) => this.buildDidKey(did)));
-        const records = raws
-          .map((raw) => parseObservedIdentityRecord(raw))
-          .filter((record): record is ObservedAtIdentityRecord => !!record);
+      for (let start = 0; start < scanned.length; start += DASHBOARD_MGET_BATCH) {
+        const chunk = scanned.slice(start, start + DASHBOARD_MGET_BATCH);
+        const fresh = chunk.filter((did) => {
+          if (seenDids.has(did)) return false;
+          seenDids.add(did);
+          return true;
+        });
+        if (fresh.length === 0) continue;
+        const records = await this.loadRecordBatch(redis, fresh);
         if (records.length > 0) yield records;
       }
 
-      cursor = String(nextCursor);
+      cursor = nextCursor;
     } while (cursor !== "0");
+  }
+
+  private async dedupeScanDids(
+    redis: RedisLike & Required<Pick<RedisLike, "eval">>,
+    sessionKey: string,
+    sentinel: string,
+    dids: string[],
+  ): Promise<string[]> {
+    if (dids.length === 0) return [];
+    const result = await redis.eval(
+      DEDUPE_DASHBOARD_SCAN_IDS_LUA,
+      1,
+      sessionKey,
+      sentinel,
+      String(DASHBOARD_SCAN_SESSION_TTL_MS),
+      ...dids,
+    );
+    if (!Array.isArray(result) || result.some((value) => typeof value !== "string")) {
+      throw new Error("Observed identity scan de-duplication returned an invalid payload");
+    }
+    return result as string[];
+  }
+
+  private async loadRecordBatch(
+    redis: RedisLike & Required<Pick<RedisLike, "mget">>,
+    dids: string[],
+  ): Promise<ObservedAtIdentityRecord[]> {
+    if (dids.length > DASHBOARD_MGET_BATCH) {
+      throw new Error("Observed identity MGET batch exceeded configured bound");
+    }
+    const raws = await redis.mget(...dids.map((did) => this.buildDidKey(did)));
+    return raws
+      .map((raw) => parseObservedIdentityRecord(raw))
+      .filter((record): record is ObservedAtIdentityRecord => !!record);
   }
 
   private buildDidKey(did: string): string {
