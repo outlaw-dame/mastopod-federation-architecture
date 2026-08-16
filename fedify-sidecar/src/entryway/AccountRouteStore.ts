@@ -7,6 +7,8 @@ import type {
   AccountRouteStore,
 } from "./types.js";
 
+const STALE_ROUTE_MGET_BATCH_SIZE = 256;
+
 export class InMemoryAccountRouteStore implements AccountRouteStore {
   private readonly routesByAccountId = new Map<string, AccountRoute>();
   private readonly accountIdByUsername = new Map<string, string>();
@@ -140,20 +142,33 @@ export class RedisAccountRouteStore implements AccountRouteStore {
       return [];
     }
 
+    const boundedLimit = clampLimit(limit);
     const accountIds = await this.redis.zrangebyscore(
       this.indexKey(),
       "-inf",
       String(beforeMs),
       "LIMIT",
       0,
-      clampLimit(limit) * 3,
+      boundedLimit * 3,
     );
-    const routes = await Promise.all(accountIds.map((accountId) => this.getByAccountId(accountId)));
+    const routes = await this.loadRoutesByAccountIds(accountIds);
     return routes
       .filter((route): route is AccountRoute => !!route && route.status === "provisioning")
       .filter((route) => Date.parse(route.updatedAt) < beforeMs)
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
-      .slice(0, clampLimit(limit));
+      .slice(0, boundedLimit);
+  }
+
+  private async loadRoutesByAccountIds(accountIds: readonly string[]): Promise<Array<AccountRoute | null>> {
+    const routes: Array<AccountRoute | null> = [];
+    for (let offset = 0; offset < accountIds.length; offset += STALE_ROUTE_MGET_BATCH_SIZE) {
+      const batch = accountIds.slice(offset, offset + STALE_ROUTE_MGET_BATCH_SIZE);
+      const rawRoutes = await this.redis.mget(...batch.map((accountId) => this.routeKey(accountId)));
+      for (let index = 0; index < batch.length; index += 1) {
+        routes.push(safeJsonParse<AccountRoute>(rawRoutes[index] ?? null));
+      }
+    }
+    return routes;
   }
 
   private routeKey(accountId: string): string {
