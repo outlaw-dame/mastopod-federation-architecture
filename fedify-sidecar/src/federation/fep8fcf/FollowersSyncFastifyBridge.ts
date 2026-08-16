@@ -10,9 +10,10 @@
  * Response: ActivityStreams OrderedCollection containing the follower URIs
  * for the requesting instance.
  *
- * Authentication: We derive the requesting server base URI from the verified
- * `keyId` field of the HTTP `Signature` header. Full cryptographic verification
- * is performed before that base URI is used to select follower data.
+ * Authentication: We extract the requesting server base URI from the `keyId`
+ * field of the HTTP `Signature` header. Full cryptographic verification of the
+ * signature is performed using the cached actor document store to resist
+ * unauthenticated fishing for follower data.
  *
  * Spec: https://codeberg.org/fediverse/fep/src/branch/main/fep/8fcf/fep-8fcf.md
  */
@@ -23,7 +24,16 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { FollowersSyncService } from "./FollowersSyncService.js";
 import { logger } from "../../utils/logger.js";
 
+// ============================================================================
+// Identifier validation (mirrors inbound-worker.ts)
+// ============================================================================
+
+/** Permitted characters for a local actor identifier. */
 const IDENTIFIER_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
+
+// ============================================================================
+// HTTP-Signature parsing (minimal — only what we need to verify + extract keyId)
+// ============================================================================
 
 function parseSignatureHeader(raw: string): Record<string, string> {
   const params: Record<string, string> = {};
@@ -48,6 +58,10 @@ function extractServerBaseUriFromKeyId(keyId: string): string | null {
     return null;
   }
 }
+
+// ============================================================================
+// Signature verification helpers (mirrors inbound-worker.ts approach)
+// ============================================================================
 
 async function fetchActorDocumentForKey(
   keyId: string,
@@ -77,11 +91,13 @@ async function fetchActorDocumentForKey(
 }
 
 function extractPublicKeyPem(doc: Record<string, unknown>): string | null {
+  // Key document (keyId pointed directly at a key object)
   const pk = doc["publicKey"];
   if (typeof pk === "object" && pk !== null) {
     const pem = (pk as Record<string, unknown>)["publicKeyPem"];
     if (typeof pem === "string") return pem;
   }
+  // Actor document with embedded publicKey
   if (typeof doc["publicKeyPem"] === "string") return doc["publicKeyPem"];
   return null;
 }
@@ -107,6 +123,10 @@ function buildSigningString(
   return lines.join("\n");
 }
 
+// ============================================================================
+// Route handler
+// ============================================================================
+
 interface FollowersSyncRouteOptions {
   service: FollowersSyncService;
   domain: string;
@@ -114,6 +134,12 @@ interface FollowersSyncRouteOptions {
   requestTimeoutMs?: number;
 }
 
+/**
+ * Register `GET /users/:identifier/followers_synchronization` on the Fastify
+ * instance.
+ *
+ * Must be registered BEFORE the Fedify catch-all route so it takes priority.
+ */
 export function registerFollowersSyncRoutes(
   app: FastifyInstance,
   opts: FollowersSyncRouteOptions,
@@ -126,17 +152,20 @@ export function registerFollowersSyncRoutes(
     async (req: FastifyRequest<{ Params: { identifier: string } }>, reply: FastifyReply) => {
       const { identifier } = req.params;
 
+      // --- Input validation ---
       if (!IDENTIFIER_PATTERN.test(identifier)) {
         reply.status(400).send({ error: "Invalid actor identifier" });
         return;
       }
 
+      // --- Require a Signature header ---
       const rawSignature = req.headers["signature"];
       if (typeof rawSignature !== "string" || rawSignature.length === 0) {
         reply.status(401).send({ error: "HTTP Signature required" });
         return;
       }
 
+      // --- Parse the Signature header to extract keyId ---
       const sigParams = parseSignatureHeader(rawSignature);
       const keyId = sigParams["keyId"];
       const signatureB64 = sigParams["signature"];
@@ -151,6 +180,7 @@ export function registerFollowersSyncRoutes(
         return;
       }
 
+      // --- Fetch the actor/key document to get the public key ---
       const actorDoc = await fetchActorDocumentForKey(keyId, userAgent, timeoutMs);
       if (!actorDoc) {
         reply.status(401).send({ error: "Could not fetch signing key document" });
@@ -163,8 +193,11 @@ export function registerFollowersSyncRoutes(
         return;
       }
 
+      // --- Verify Digest header if present ---
       const digestHeader = req.headers["digest"];
       if (typeof digestHeader === "string") {
+        // GET requests have no body, so a Digest header would be unusual, but
+        // validate it anyway if present.
         const expectedDigest = `SHA-256=${createHash("sha256").update("").digest("base64")}`;
         if (digestHeader !== expectedDigest) {
           reply.status(401).send({ error: "Digest mismatch" });
@@ -172,6 +205,7 @@ export function registerFollowersSyncRoutes(
         }
       }
 
+      // --- Build the signing string and verify ---
       const path = req.url;
       const rawHeaders = req.headers as Record<string, string | string[] | undefined>;
       const signingString = buildSigningString(
@@ -194,29 +228,33 @@ export function registerFollowersSyncRoutes(
         return;
       }
 
+      // --- Determine requesting server base URI from verified keyId ---
       const requestingBaseUri = extractServerBaseUriFromKeyId(keyId);
       if (!requestingBaseUri) {
         reply.status(400).send({ error: "Cannot determine requesting server base URI from keyId" });
         return;
       }
 
+      // --- Fetch partial followers from ActivityPods ---
       let followers: string[];
       try {
         followers = await opts.service.getPartialFollowersCollection(
           identifier,
           requestingBaseUri,
         );
-      } catch (err) {
+      } catch (err: any) {
         logger.error("[fep8fcf] followers_synchronization: error fetching partial collection", {
           identifier,
           requestingBaseUri,
-          error: err instanceof Error ? err.message : String(err),
+          error: err.message,
         });
         reply.status(500).send({ error: "Internal server error" });
         return;
       }
 
+      // --- Serialize as ActivityStreams OrderedCollection ---
       const collectionId = `https://${opts.domain}/users/${encodeURIComponent(identifier)}/followers_synchronization`;
+
       const collection = {
         "@context": "https://www.w3.org/ns/activitystreams",
         "type": "OrderedCollection",
