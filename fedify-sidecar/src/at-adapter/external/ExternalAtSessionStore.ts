@@ -50,6 +50,18 @@ interface RedisLike {
   del(key: string): Promise<unknown>;
 }
 
+/**
+ * Repository-known development value that was historically used as the
+ * entrypoint fallback when EXTERNAL_AT_SESSION_KEY_HEX was omitted. It must
+ * never become production key material. Local fixture mode may encounter this
+ * legacy caller value; in that explicitly non-production mode we replace it
+ * with process-ephemeral CSPRNG material rather than accepting the public key.
+ */
+const LEGACY_INSECURE_PLACEHOLDER_KEY =
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+let fixtureEphemeralKey: Buffer | null = null;
+
 export class RedisExternalAtSessionStore implements ExternalAtSessionStore {
   private readonly ttlSeconds: number;
   private readonly encryptionKey: Buffer;
@@ -91,6 +103,10 @@ export class RedisExternalAtSessionStore implements ExternalAtSessionStore {
       const plaintext = this.decrypt(encrypted);
       return JSON.parse(plaintext) as StoredExternalAtSession;
     } catch {
+      // Authentication/decryption failures are treated as corrupt or stale
+      // credential material. Remove it rather than retrying indefinitely or
+      // returning partially trusted session data. This also self-heals fixture
+      // sessions created under a previous process-ephemeral key after restart.
       await this.redis.del(key);
       return null;
     }
@@ -184,8 +200,33 @@ function deriveEncryptionKey(encryptionKeyHex: string): Buffer {
     );
   }
 
+  if (trimmed === LEGACY_INSECURE_PLACEHOLDER_KEY) {
+    // The entrypoint historically supplied this public fallback. Preserve the
+    // documented local fixture workflow without ever accepting that public
+    // value as a key: only explicit non-production fixture mode may substitute
+    // one CSPRNG key shared by all stores in this process. Production fails
+    // closed even if AT_LOCAL_FIXTURE is accidentally set alongside it.
+    if (process.env['AT_LOCAL_FIXTURE'] === 'true' && process.env['NODE_ENV'] !== 'production') {
+      fixtureEphemeralKey ??= randomBytes(32);
+      return fixtureEphemeralKey;
+    }
+    throw new Error(
+      'EXTERNAL_AT_SESSION_KEY_HEX must be explicitly configured; the repository placeholder key is forbidden'
+    );
+  }
+
+  const rawKey = Buffer.from(trimmed, 'hex');
+  // Reject a second class of obvious placeholder/misconfiguration without
+  // pretending to estimate entropy. A production key should be generated from
+  // a cryptographically secure RNG; a repeated single byte is never acceptable.
+  if (rawKey.every(byte => byte === rawKey[0])) {
+    throw new Error(
+      'EXTERNAL_AT_SESSION_KEY_HEX must be generated from cryptographically random key material'
+    );
+  }
+
   return createHash('sha256')
-    .update(Buffer.from(trimmed, 'hex'))
+    .update(rawKey)
     .digest();
 }
 
