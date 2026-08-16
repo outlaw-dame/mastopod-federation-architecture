@@ -22,4 +22,5 @@ npm exec -- vitest run \
   src/federation/tests/FedifyFederationAdapterOutbound.test.ts \
   src/federation/tests/Phase5OutboundProtocolMatrix.test.ts \
   src/delivery/tests/FederationRuntimeAdapterParity.test.ts \
-  src/signing/tests/ActivityPubHttpSignatureGoldenVectors.test.ts
+  src/signing/tests/ActivityPubHttpSignatureGoldenVectors.test.ts \
+  src/core-domain/identity/RedisIdentityBindingRepository.test.ts

@@ -9,10 +9,12 @@
  *   identity:idx:webid:{webId}             →  canonicalAccountId
  *   identity:all                           →  Set<canonicalAccountId>
  *
- * Transactions are not yet atomic (Redis MULTI support deferred).
- * Single-process writes are safe; multi-replica writers need coordination.
+ * Individual binding/index write groups use Redis MULTI. The repository-level
+ * transaction(callback) helper remains callback-scoped rather than a Redis
+ * transaction spanning arbitrary asynchronous repository calls.
  */
 
+import { randomUUID } from 'node:crypto';
 import {
   IdentityBindingRepository,
   RepositoryError,
@@ -26,13 +28,46 @@ const IDX_HANDLE = 'identity:idx:handle:';
 const IDX_ACTOR  = 'identity:idx:actor:';
 const IDX_WEBID  = 'identity:idx:webid:';
 const ALL_SET    = 'identity:all';
+const SCAN_COUNT = 128;
+const MGET_BATCH = 128;
+const SCAN_SESSION_PREFIX = 'identity:scan:seen:';
+const SCAN_SESSION_TTL_MS = 5 * 60_000;
+
+const OPEN_SCAN_SESSION_LUA = `
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then
+  return redis.error_reply('IDENTITY_SCAN_SESSION_INVALID_TTL')
+end
+
+redis.call('SADD', KEYS[1], ARGV[1])
+if redis.call('PEXPIRE', KEYS[1], ttl) ~= 1 then
+  return redis.error_reply('IDENTITY_SCAN_SESSION_TTL_FAILED')
+end
+return 1
+`;
+
+const DEDUPE_SCAN_IDS_LUA = `
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) ~= 1 then
+  return redis.error_reply('IDENTITY_SCAN_SESSION_EXPIRED')
+end
+
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then
+  return redis.error_reply('IDENTITY_SCAN_SESSION_INVALID_TTL')
+end
+
+local fresh = {}
+for i = 3, #ARGV do
+  if redis.call('SADD', KEYS[1], ARGV[i]) == 1 then
+    table.insert(fresh, ARGV[i])
+  end
+end
+redis.call('PEXPIRE', KEYS[1], ttl)
+return fresh
+`;
 
 export class RedisIdentityBindingRepository implements IdentityBindingRepository {
   constructor(private readonly redis: any) {}
-
-  // ---------------------------------------------------------------------------
-  // Primary lookups
-  // ---------------------------------------------------------------------------
 
   async getByCanonicalAccountId(canonicalAccountId: string): Promise<IdentityBinding | null> {
     const raw = await this.redis.get(this.bindingKey(canonicalAccountId));
@@ -76,20 +111,15 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
   }
 
   async getByContextAndUsername(contextId: string, username: string): Promise<IdentityBinding | null> {
-    // Scan all bindings in the context looking for a matching username derived
-    // from the activityPubActorUri (last path segment).
-    const all = await this._scanAll();
-    for (const b of all) {
-      if (b.contextId !== contextId) continue;
-      const slug = b.activityPubActorUri.split('/').filter(Boolean).pop();
-      if (slug === username) return b;
+    for await (const batch of this._scanBatches()) {
+      for (const binding of batch) {
+        if (binding.contextId !== contextId) continue;
+        const slug = binding.activityPubActorUri.split('/').filter(Boolean).pop();
+        if (slug === username) return binding;
+      }
     }
     return null;
   }
-
-  // ---------------------------------------------------------------------------
-  // Writes
-  // ---------------------------------------------------------------------------
 
   async create(binding: IdentityBinding): Promise<void> {
     const key = `${PREFIX}${binding.canonicalAccountId}`;
@@ -112,7 +142,6 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
         `Identity binding not found: ${binding.canonicalAccountId}`,
       );
     }
-    // Clean up stale secondary indexes before writing new ones
     const old = JSON.parse(existing) as IdentityBinding;
     await this._removeIndexes(old);
     await this._write(binding);
@@ -169,7 +198,7 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
       multi.set(this.webIdIndexKey(normalized.webId), normalized.canonicalAccountId);
     }
 
-    await multi.exec();
+    await this._execMultiOrThrow(multi, 'Identity binding upsert');
   }
 
   async delete(canonicalAccountId: string): Promise<boolean> {
@@ -183,13 +212,8 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     return true;
   }
 
-  // ---------------------------------------------------------------------------
-  // List / count
-  // ---------------------------------------------------------------------------
-
   async listByContext(contextId: string, limit = 100, offset = 0): Promise<IdentityBinding[]> {
-    const all = await this._scanAll();
-    return all.filter(b => b.contextId === contextId).slice(offset, offset + limit);
+    return this._collectMatches(binding => binding.contextId === contextId, limit, offset);
   }
 
   async listByStatus(
@@ -197,25 +221,28 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     limit = 100,
     offset = 0,
   ): Promise<IdentityBinding[]> {
-    const all = await this._scanAll();
-    return all.filter(b => b.status === status).slice(offset, offset + limit);
+    return this._collectMatches(binding => binding.status === status, limit, offset);
   }
 
   async listWithPendingPlcUpdates(limit = 100, offset = 0): Promise<IdentityBinding[]> {
-    const all = await this._scanAll();
-    return all
-      .filter(b => b.plc?.plcUpdateState === 'PENDING_SUBMISSION' || b.plc?.plcUpdateState === 'SUBMITTED')
-      .slice(offset, offset + limit);
+    return this._collectMatches(
+      binding =>
+        binding.plc?.plcUpdateState === 'PENDING_SUBMISSION' ||
+        binding.plc?.plcUpdateState === 'SUBMITTED',
+      limit,
+      offset,
+    );
   }
 
   async countByContext(contextId: string): Promise<number> {
-    const all = await this._scanAll();
-    return all.filter(b => b.contextId === contextId).length;
+    let count = 0;
+    for await (const batch of this._scanBatches()) {
+      for (const binding of batch) {
+        if (binding.contextId === contextId) count += 1;
+      }
+    }
+    return count;
   }
-
-  // ---------------------------------------------------------------------------
-  // Existence checks
-  // ---------------------------------------------------------------------------
 
   async exists(canonicalAccountId: string): Promise<boolean> {
     return (await this.redis.exists(`${PREFIX}${canonicalAccountId}`)) > 0;
@@ -233,32 +260,30 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     return (await this.redis.exists(`${IDX_ACTOR}${actorUri}`)) > 0;
   }
 
-  // ---------------------------------------------------------------------------
-  // Batch
-  // ---------------------------------------------------------------------------
-
   async getBatch(canonicalAccountIds: string[]): Promise<Map<string, IdentityBinding>> {
     const result = new Map<string, IdentityBinding>();
-    await Promise.all(
-      canonicalAccountIds.map(async id => {
-        const b = await this.getByCanonicalAccountId(id);
-        if (b) result.set(id, b);
-      }),
-    );
+
+    for (let start = 0; start < canonicalAccountIds.length; start += MGET_BATCH) {
+      const ids = canonicalAccountIds.slice(start, start + MGET_BATCH);
+      if (ids.length === 0) continue;
+      const raws: Array<string | null> = await this.redis.mget(
+        ...ids.map(id => this.bindingKey(id)),
+      );
+
+      for (let index = 0; index < ids.length; index += 1) {
+        const id = ids[index];
+        const raw = raws[index];
+        if (!id || !raw) continue;
+        result.set(id, JSON.parse(raw) as IdentityBinding);
+      }
+    }
+
     return result;
   }
-
-  // ---------------------------------------------------------------------------
-  // Transaction (pass-through; true atomicity deferred)
-  // ---------------------------------------------------------------------------
 
   async transaction<T>(callback: (repo: IdentityBindingRepository) => Promise<T>): Promise<T> {
     return callback(this);
   }
-
-  // ---------------------------------------------------------------------------
-  // Health
-  // ---------------------------------------------------------------------------
 
   async health(): Promise<boolean> {
     try {
@@ -269,51 +294,235 @@ export class RedisIdentityBindingRepository implements IdentityBindingRepository
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Internal helpers
-  // ---------------------------------------------------------------------------
-
   private async _write(binding: IdentityBinding): Promise<void> {
-    await this.redis.set(this.bindingKey(binding.canonicalAccountId), JSON.stringify(binding));
-    await this.redis.sadd(ALL_SET, binding.canonicalAccountId);
+    const multi = this.redis.multi();
+    multi.set(this.bindingKey(binding.canonicalAccountId), JSON.stringify(binding));
+    multi.sadd(ALL_SET, binding.canonicalAccountId);
 
     if (binding.atprotoDid) {
-      await this.redis.set(this.didIndexKey(binding.atprotoDid), binding.canonicalAccountId);
+      multi.set(this.didIndexKey(binding.atprotoDid), binding.canonicalAccountId);
     }
     if (binding.atprotoHandle) {
-      await this.redis.set(this.handleIndexKey(binding.atprotoHandle), binding.canonicalAccountId);
+      multi.set(this.handleIndexKey(binding.atprotoHandle), binding.canonicalAccountId);
     }
     if (binding.activityPubActorUri) {
-      await this.redis.set(this.actorIndexKey(binding.activityPubActorUri), binding.canonicalAccountId);
+      multi.set(this.actorIndexKey(binding.activityPubActorUri), binding.canonicalAccountId);
     }
     if (binding.webId) {
-      await this.redis.set(this.webIdIndexKey(binding.webId), binding.canonicalAccountId);
+      multi.set(this.webIdIndexKey(binding.webId), binding.canonicalAccountId);
     }
+
+    await this._execMultiOrThrow(multi, 'Identity binding write');
   }
 
   private async _removeIndexes(binding: IdentityBinding): Promise<void> {
+    const multi = this.redis.multi();
     if (binding.atprotoDid) {
-      await this.redis.del(this.didIndexKey(binding.atprotoDid));
+      multi.del(this.didIndexKey(binding.atprotoDid));
     }
     if (binding.atprotoHandle) {
-      await this.redis.del(this.handleIndexKey(binding.atprotoHandle));
+      multi.del(this.handleIndexKey(binding.atprotoHandle));
     }
     if (binding.activityPubActorUri) {
-      await this.redis.del(this.actorIndexKey(binding.activityPubActorUri));
+      multi.del(this.actorIndexKey(binding.activityPubActorUri));
     }
     if (binding.webId) {
-      await this.redis.del(this.webIdIndexKey(binding.webId));
+      multi.del(this.webIdIndexKey(binding.webId));
+    }
+    await this._execMultiOrThrow(multi, 'Identity index cleanup');
+  }
+
+  private async _execMultiOrThrow(multi: any, operation: string): Promise<void> {
+    let results: unknown;
+    try {
+      results = await multi.exec();
+    } catch (error) {
+      throw this._redisRepositoryError(
+        RepositoryErrorCode.PERSISTENCE_ERROR,
+        `${operation} failed`,
+        error,
+      );
+    }
+
+    if (!Array.isArray(results)) {
+      throw new RepositoryError(
+        RepositoryErrorCode.PERSISTENCE_ERROR,
+        `${operation} returned no Redis results`,
+      );
+    }
+
+    for (const entry of results) {
+      if (!Array.isArray(entry)) continue;
+      const commandError = entry[0];
+      if (!commandError) continue;
+      throw this._redisRepositoryError(
+        RepositoryErrorCode.PERSISTENCE_ERROR,
+        `${operation} failed`,
+        commandError,
+      );
     }
   }
 
-  private async _scanAll(): Promise<IdentityBinding[]> {
-    const ids: string[] = await this.redis.smembers(ALL_SET);
+  private async _collectMatches(
+    predicate: (binding: IdentityBinding) => boolean,
+    limit: number,
+    offset: number,
+  ): Promise<IdentityBinding[]> {
+    const safeLimit = Math.max(0, Math.trunc(limit));
+    const safeOffset = Math.max(0, Math.trunc(offset));
+    if (safeLimit === 0) return [];
+
     const results: IdentityBinding[] = [];
-    for (const id of ids) {
-      const raw = await this.redis.get(this.bindingKey(id));
-      if (raw) results.push(JSON.parse(raw) as IdentityBinding);
+    let matched = 0;
+
+    for await (const batch of this._scanBatches()) {
+      for (const binding of batch) {
+        if (!predicate(binding)) continue;
+        if (matched < safeOffset) {
+          matched += 1;
+          continue;
+        }
+        results.push(binding);
+        matched += 1;
+        if (results.length >= safeLimit) return results;
+      }
     }
+
     return results;
+  }
+
+  private async *_scanBatches(): AsyncGenerator<IdentityBinding[]> {
+    let cursor = '0';
+    const scanSessionKey = `${SCAN_SESSION_PREFIX}${randomUUID()}`;
+    // Liveness and de-duplication share one Redis set for bounded server-side
+    // state, but the liveness marker is unique to this scan. No static string
+    // is reserved from the canonicalAccountId namespace.
+    const scanSessionSentinel = `\u0000identity-scan-session:${randomUUID()}`;
+    let scanSessionOpened = false;
+
+    try {
+      await this._openScanSession(scanSessionKey, scanSessionSentinel);
+      scanSessionOpened = true;
+
+      do {
+        const response = await this.redis.sscan(ALL_SET, cursor, 'COUNT', SCAN_COUNT);
+        const nextCursor = String(response?.[0] ?? '0');
+        const scannedIds: string[] = Array.isArray(response?.[1])
+          ? response[1].filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+          : [];
+
+        // COUNT is only a work hint. Bound both de-duplication commands and MGET
+        // payloads even if Redis returns a much larger scan page.
+        for (let start = 0; start < scannedIds.length; start += MGET_BATCH) {
+          const scanChunk = scannedIds.slice(start, start + MGET_BATCH);
+          const ids = await this._dedupeScanIds(scanSessionKey, scanSessionSentinel, scanChunk);
+          if (ids.length === 0) continue;
+
+          const raws: Array<string | null> = await this.redis.mget(
+            ...ids.map(id => this.bindingKey(id)),
+          );
+          const batch: IdentityBinding[] = [];
+
+          for (const raw of raws) {
+            if (!raw) continue;
+            batch.push(JSON.parse(raw) as IdentityBinding);
+          }
+
+          if (batch.length > 0) yield batch;
+        }
+
+        cursor = nextCursor;
+      } while (cursor !== '0');
+    } finally {
+      if (scanSessionOpened) {
+        await this._cleanupScanSession(scanSessionKey);
+      }
+    }
+  }
+
+  private async _openScanSession(scanSessionKey: string, scanSessionSentinel: string): Promise<void> {
+    try {
+      const opened = await this.redis.eval(
+        OPEN_SCAN_SESSION_LUA,
+        1,
+        scanSessionKey,
+        scanSessionSentinel,
+        String(SCAN_SESSION_TTL_MS),
+      );
+      if (Number(opened) !== 1) {
+        throw new Error('Redis did not initialize scan session');
+      }
+    } catch (error) {
+      try {
+        await this.redis.del(scanSessionKey);
+      } catch {
+        // Best effort only. The Lua creation is atomic, so any created session
+        // already has a TTL and Redis will self-clean it after a crash.
+      }
+      throw this._redisRepositoryError(
+        RepositoryErrorCode.QUERY_ERROR,
+        'Identity scan session initialization failed',
+        error,
+      );
+    }
+  }
+
+  private async _dedupeScanIds(
+    scanSessionKey: string,
+    scanSessionSentinel: string,
+    ids: string[],
+  ): Promise<string[]> {
+    if (ids.length === 0) return [];
+    if (ids.length > MGET_BATCH) {
+      throw new RepositoryError(
+        RepositoryErrorCode.QUERY_ERROR,
+        'Identity scan de-duplication batch exceeded the configured bound',
+      );
+    }
+
+    let result: unknown;
+    try {
+      result = await this.redis.eval(
+        DEDUPE_SCAN_IDS_LUA,
+        1,
+        scanSessionKey,
+        scanSessionSentinel,
+        String(SCAN_SESSION_TTL_MS),
+        ...ids,
+      );
+    } catch (error) {
+      throw this._redisRepositoryError(
+        RepositoryErrorCode.QUERY_ERROR,
+        'Identity scan de-duplication failed',
+        error,
+      );
+    }
+
+    if (!Array.isArray(result) || result.some(id => typeof id !== 'string')) {
+      throw new RepositoryError(
+        RepositoryErrorCode.QUERY_ERROR,
+        'Identity scan de-duplication returned an invalid Redis response',
+      );
+    }
+
+    return result as string[];
+  }
+
+  private async _cleanupScanSession(scanSessionKey: string): Promise<void> {
+    try {
+      await this.redis.del(scanSessionKey);
+    } catch {
+      // Best effort: the refreshed TTL is the crash/error self-healing path.
+    }
+  }
+
+  private _redisRepositoryError(
+    code: RepositoryErrorCode,
+    message: string,
+    error: unknown,
+  ): RepositoryError {
+    const redisError = error instanceof Error ? error.message : String(error);
+    return new RepositoryError(code, `${message}: ${redisError}`, { redisError });
   }
 
   private bindingKey(canonicalAccountId: string): string {
