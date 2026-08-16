@@ -6,6 +6,9 @@ on:
       - 'fedify-sidecar/src/security/EffectiveClientIp.ts'
       - 'fedify-sidecar/src/security/EffectiveClientIp.test.ts'
       - 'fedify-sidecar/src/admin/moderation/fastify-routes.ts'
+      - 'fedify-sidecar/src/admin/mrf/fastify-routes.ts'
+      - 'fedify-sidecar/src/admin/mrf/integration.ts'
+      - 'fedify-sidecar/src/admin/mrf/routes.registry.test.ts'
       - 'fedify-sidecar/.env.local.example'
       - '.github/workflows/client-ip-security-fast-checks.yml'
   push:
@@ -15,6 +18,9 @@ on:
       - 'fedify-sidecar/src/security/EffectiveClientIp.ts'
       - 'fedify-sidecar/src/security/EffectiveClientIp.test.ts'
       - 'fedify-sidecar/src/admin/moderation/fastify-routes.ts'
+      - 'fedify-sidecar/src/admin/mrf/fastify-routes.ts'
+      - 'fedify-sidecar/src/admin/mrf/integration.ts'
+      - 'fedify-sidecar/src/admin/mrf/routes.registry.test.ts'
       - 'fedify-sidecar/.env.local.example'
       - '.github/workflows/client-ip-security-fast-checks.yml'
 
@@ -46,4 +52,4 @@ jobs:
 
       - name: Run Client IP Security Regressions
         working-directory: fedify-sidecar
-        run: npm exec -- vitest run src/security/EffectiveClientIp.test.ts
+        run: npm exec -- vitest run src/security/EffectiveClientIp.test.ts src/admin/mrf/routes.registry.test.ts

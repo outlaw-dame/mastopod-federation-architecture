@@ -18,8 +18,14 @@ import {
 import { errorToResponse } from "./utils.js";
 import { assertRateLimit, InMemoryRateLimiter, type RateLimitRule } from "./rate-limit.js";
 import type { MRFAdminDeps } from "./types.js";
+import {
+  createEffectiveClientIpResolver,
+  type EffectiveClientIpResolver,
+} from "../../security/EffectiveClientIp.js";
 
-function toRequest(req: FastifyRequest): Request {
+export const MRF_EFFECTIVE_CLIENT_IP_HEADER = "x-sidecar-effective-client-ip";
+
+function toRequest(req: FastifyRequest, effectiveClientIp: string): Request {
   const protocolHeader = req.headers["x-forwarded-proto"];
   const protocol = typeof protocolHeader === "string" && (protocolHeader === "http" || protocolHeader === "https")
     ? protocolHeader
@@ -37,6 +43,9 @@ function toRequest(req: FastifyRequest): Request {
       headers.set(key, String(value));
     }
   }
+  // This header is an internal adapter seam, not caller authority. Set it only
+  // after copying request headers so an attacker-supplied value is overwritten.
+  headers.set(MRF_EFFECTIVE_CLIENT_IP_HEADER, effectiveClientIp);
 
   const body = req.body === undefined
     ? undefined
@@ -65,22 +74,33 @@ async function sendResponse(reply: any, response: Response): Promise<void> {
   }
 }
 
-export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdminDeps): void {
+export function registerMRFAdminFastifyRoutes(
+  app: FastifyInstance,
+  deps: MRFAdminDeps,
+  options: { clientIpResolver?: EffectiveClientIpResolver } = {},
+): void {
   const limiter = new InMemoryRateLimiter();
   const registryRule: RateLimitRule = { limit: 120, windowMs: 60_000 };
   const traceRule: RateLimitRule = { limit: 120, windowMs: 60_000 };
   const patchRule: RateLimitRule = { limit: 20, windowMs: 60_000 };
   const simulationRule: RateLimitRule = { limit: 5, windowMs: 60_000 };
+  // Parse trusted-proxy configuration once during route registration. Invalid
+  // configuration fails startup rather than silently trusting forwarded input.
+  const resolveClientIp = options.clientIpResolver ?? createEffectiveClientIpResolver();
 
-  const applyRateLimit = (req: FastifyRequest, namespace: string, rule: RateLimitRule): void => {
-    const key = `${namespace}:${req.ip}`;
-    assertRateLimit(limiter, key, rule);
+  const adaptRequest = (req: FastifyRequest): { request: Request; clientIp: string } => {
+    const clientIp = resolveClientIp(req);
+    return { request: toRequest(req, clientIp), clientIp };
+  };
+
+  const applyRateLimit = (clientIp: string, namespace: string, rule: RateLimitRule): void => {
+    assertRateLimit(limiter, `${namespace}:${clientIp}`, rule);
   };
 
   app.get("/internal/admin/mrf/registry", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     try {
-      applyRateLimit(req, "list-registry", registryRule);
+      applyRateLimit(clientIp, "list-registry", registryRule);
       await sendResponse(reply, await handleListRegistry(request, deps));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -88,10 +108,10 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/registry/:id", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "get-registry-item", registryRule);
+      applyRateLimit(clientIp, "get-registry-item", registryRule);
       await sendResponse(reply, await handleGetRegistryItem(request, deps, params.id));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -99,7 +119,7 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/modules", async (req, reply) => {
-    const request = toRequest(req);
+    const { request } = adaptRequest(req);
     try {
       await sendResponse(reply, await handleListModules(request, deps));
     } catch (err) {
@@ -108,7 +128,7 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/modules/:id", async (req, reply) => {
-    const request = toRequest(req);
+    const { request } = adaptRequest(req);
     const params = req.params as { id: string };
     try {
       await sendResponse(reply, await handleGetModule(request, deps, params.id));
@@ -118,10 +138,10 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.patch("/internal/admin/mrf/modules/:id", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "patch-module", patchRule);
+      applyRateLimit(clientIp, "patch-module", patchRule);
       await sendResponse(reply, await handlePatchModule(request, deps, params.id));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -129,7 +149,7 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/chain", async (req, reply) => {
-    const request = toRequest(req);
+    const { request } = adaptRequest(req);
     try {
       await sendResponse(reply, await handleGetChain(request, deps));
     } catch (err) {
@@ -138,9 +158,9 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.patch("/internal/admin/mrf/chain", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     try {
-      applyRateLimit(req, "patch-chain", patchRule);
+      applyRateLimit(clientIp, "patch-chain", patchRule);
       await sendResponse(reply, await handlePatchChain(request, deps));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -148,9 +168,9 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/traces", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     try {
-      applyRateLimit(req, "list-traces", traceRule);
+      applyRateLimit(clientIp, "list-traces", traceRule);
       await sendResponse(reply, await handleListTraces(request, deps));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -158,10 +178,10 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/traces/:id", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "get-trace", traceRule);
+      applyRateLimit(clientIp, "get-trace", traceRule);
       await sendResponse(reply, await handleGetTrace(request, deps, params.id));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -169,10 +189,10 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/traces/:id/chain", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "get-trace-chain", traceRule);
+      applyRateLimit(clientIp, "get-trace-chain", traceRule);
       await sendResponse(reply, await handleGetTraceDecisionChain(request, deps, params.id));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -180,10 +200,10 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/traces/:id/suggestions", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "get-trace-suggestions", traceRule);
+      applyRateLimit(clientIp, "get-trace-suggestions", traceRule);
       await sendResponse(reply, await handleGetTraceSuggestions(request, deps, params.id));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -191,9 +211,9 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/metrics", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     try {
-      applyRateLimit(req, "get-metrics", traceRule);
+      applyRateLimit(clientIp, "get-metrics", traceRule);
       await sendResponse(reply, await handleGetMetrics(request, deps));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -201,9 +221,9 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.post("/internal/admin/mrf/simulations", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     try {
-      applyRateLimit(req, "create-simulation", simulationRule);
+      applyRateLimit(clientIp, "create-simulation", simulationRule);
       await sendResponse(reply, await handleCreateSimulation(request, deps));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
@@ -211,10 +231,10 @@ export function registerMRFAdminFastifyRoutes(app: FastifyInstance, deps: MRFAdm
   });
 
   app.get("/internal/admin/mrf/simulations/:id", async (req, reply) => {
-    const request = toRequest(req);
+    const { request, clientIp } = adaptRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "get-simulation", simulationRule);
+      applyRateLimit(clientIp, "get-simulation", simulationRule);
       await sendResponse(reply, await handleGetSimulation(request, deps, params.id));
     } catch (err) {
       await sendResponse(reply, errorToResponse(err, request.headers.get("x-request-id") || undefined));
