@@ -128,6 +128,17 @@ export class MemoryRedis {
     return added;
   }
 
+  public async scard(key: string): Promise<number> {
+    const record = this.readRecord(key);
+    if (!record) {
+      return 0;
+    }
+    if (record.kind !== "set") {
+      throw new Error(`Key ${key} is not a set`);
+    }
+    return record.value.size;
+  }
+
   public async smembers(key: string): Promise<string[]> {
     const record = this.readRecord(key);
     if (!record || record.kind !== "set") {
@@ -149,6 +160,52 @@ export class MemoryRedis {
       }
     }
     return removed;
+  }
+
+  public async eval(
+    script: string,
+    numberOfKeys: number,
+    ...args: Array<string | number>
+  ): Promise<unknown> {
+    if (!script.includes("fep3ab2:add-topics-bounded:v1") || numberOfKeys !== 1) {
+      throw new Error("MemoryRedis received an unsupported Lua script");
+    }
+
+    const key = String(args[0] ?? "");
+    const maxTopics = Number(args[1]);
+    const ttl = Number(args[2]);
+    const members = args.slice(3).map(String);
+    let record = this.readRecord(key);
+    if (record && record.kind !== "set") {
+      throw new Error(`Key ${key} is not a set`);
+    }
+
+    const current = record?.value.size ?? 0;
+    if (current > maxTopics) {
+      return [-2, current];
+    }
+
+    const newMembers = new Set(members.filter((member) => !record?.value.has(member)));
+    if (current + newMembers.size > maxTopics) {
+      return [-1, current];
+    }
+
+    if (newMembers.size > 0) {
+      if (!record) {
+        record = { kind: "set", value: new Set<string>(), expiresAt: null };
+        this.shared.values.set(key, record);
+      }
+      for (const member of newMembers) {
+        record.value.add(member);
+      }
+      if (ttl > 0) {
+        record.expiresAt = Date.now() + ttl * 1000;
+      }
+    } else if (record && ttl > 0) {
+      record.expiresAt = Date.now() + ttl * 1000;
+    }
+
+    return [1, current + newMembers.size];
   }
 
   public async publish(channel: string, message: string): Promise<number> {
