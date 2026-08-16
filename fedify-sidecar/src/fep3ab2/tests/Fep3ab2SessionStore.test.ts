@@ -145,6 +145,25 @@ describe("Fep3ab2SessionStore", () => {
     expect(new Set(topics).size).toBe(2);
   });
 
+  it("checks session existence inside atomic topic admission and does not create orphan topics", async () => {
+    const redis = new MemoryRedis();
+    const store = new Fep3ab2SessionStore(redis as any, {
+      prefix: "atomic-session-test",
+      ticketSecret: "test-secret",
+      maxTopicsPerSession: 2,
+    });
+    const created = await store.createSession({ principal: PRINCIPAL });
+    const sessionKey = `atomic-session-test:session:${created.sessionId}`;
+    const topicsKey = `${sessionKey}:topics`;
+    await redis.del(sessionKey);
+
+    await expect(store.addTopics(created.sessionId, [TOPIC_A])).rejects.toMatchObject({
+      code: "invalid_ticket",
+      statusCode: 401,
+    } satisfies Partial<FepSessionStoreError>);
+    await expect(redis.scard(topicsKey)).resolves.toBe(0);
+  });
+
   it("does not allow replaceTopics to bypass the cumulative topic cap", async () => {
     const redis = new MemoryRedis();
     const store = new Fep3ab2SessionStore(redis as any, {
