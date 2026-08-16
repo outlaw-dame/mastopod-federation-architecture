@@ -8,6 +8,9 @@ import type {
   OAuthRefreshTokenRecord,
 } from './OAuthTypes.js';
 
+const REFRESH_FAMILY_SCAN_COUNT = 128;
+const REFRESH_FAMILY_BATCH_SIZE = 128;
+
 function parseJson<T>(raw: string | null): T | null {
   if (!raw) return null;
   try {
@@ -126,21 +129,55 @@ export class OAuthRefreshTokenStore {
 
   async revokeFamily(familyId: string, revokedAtEpochSec: number): Promise<void> {
     const familyKey = `${this.familyPrefix}:${familyId}`;
-    const tokenKeys = await this.redis.smembers(familyKey);
-    if (!tokenKeys.length) return;
+    let cursor = '0';
 
-    for (const tokenKey of tokenKeys) {
-      const raw = await this.redis.get(tokenKey);
-      const parsed = parseJson<OAuthRefreshTokenRecord>(raw);
-      if (!parsed) continue;
-      const ttlSec = Math.max(1, parsed.expiresAtEpochSec - Math.floor(Date.now() / 1000));
-      await this.redis.set(
-        tokenKey,
-        JSON.stringify({ ...parsed, revokedAtEpochSec }),
-        'EX',
-        ttlSec,
+    do {
+      const response = await this.redis.sscan(
+        familyKey,
+        cursor,
+        'COUNT',
+        REFRESH_FAMILY_SCAN_COUNT,
       );
-    }
+      const nextCursor = String(response?.[0] ?? '0');
+      const scannedKeys = Array.isArray(response?.[1])
+        ? response[1].filter((value): value is string => typeof value === 'string' && value.length > 0)
+        : [];
+
+      // SSCAN COUNT is a work hint, not a hard response bound. Explicitly cap
+      // both MGET and MULTI/EXEC payloads even when Redis returns an oversized
+      // compact-encoding page. Duplicate SSCAN members are safe to process more
+      // than once because family revocation writes the same timestamp.
+      for (let start = 0; start < scannedKeys.length; start += REFRESH_FAMILY_BATCH_SIZE) {
+        const tokenKeys = scannedKeys.slice(start, start + REFRESH_FAMILY_BATCH_SIZE);
+        if (tokenKeys.length === 0) continue;
+
+        const rawTokens = await this.redis.mget(...tokenKeys);
+        const tx = this.redis.multi();
+        let writes = 0;
+        const now = Math.floor(Date.now() / 1000);
+
+        for (let index = 0; index < tokenKeys.length; index += 1) {
+          const tokenKey = tokenKeys[index];
+          const parsed = parseJson<OAuthRefreshTokenRecord>(rawTokens[index] ?? null);
+          if (!tokenKey || !parsed) continue;
+
+          const ttlSec = Math.max(1, parsed.expiresAtEpochSec - now);
+          tx.set(
+            tokenKey,
+            JSON.stringify({ ...parsed, revokedAtEpochSec }),
+            'EX',
+            ttlSec,
+          );
+          writes += 1;
+        }
+
+        if (writes > 0) {
+          await tx.exec();
+        }
+      }
+
+      cursor = nextCursor;
+    } while (cursor !== '0');
   }
 }
 
