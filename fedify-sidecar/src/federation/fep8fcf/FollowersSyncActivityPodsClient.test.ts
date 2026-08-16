@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { request } from "undici";
 import {
   FollowersSyncActivityPodsClient,
@@ -35,6 +35,10 @@ function client(overrides: Partial<ConstructorParameters<typeof FollowersSyncAct
 }
 
 describe("FollowersSyncActivityPodsClient authority reads", () => {
+  beforeEach(() => {
+    requestMock.mockReset();
+  });
+
   it("preserves valid empty state and sends the precise server base URI", async () => {
     requestMock.mockResolvedValueOnce({
       statusCode: 200,
