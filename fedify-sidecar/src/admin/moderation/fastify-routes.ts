@@ -18,6 +18,10 @@ import { assertRateLimit, InMemoryRateLimiter, type RateLimitRule } from "../mrf
 import { internal } from "../mrf/errors.js";
 import type { ModerationBridgeDeps } from "./types.js";
 import type { CanonicalIntentPublisher } from "../../protocol-bridge/canonical/CanonicalIntentPublisher.js";
+import {
+  createEffectiveClientIpResolver,
+  type EffectiveClientIpResolver,
+} from "../../security/EffectiveClientIp.js";
 
 // ---------------------------------------------------------------------------
 // Shared toRequest / sendResponse helpers
@@ -78,11 +82,9 @@ function applyRateLimit(
   key: string,
   rule: RateLimitRule,
   limiter: InMemoryRateLimiter,
+  resolveClientIp: EffectiveClientIpResolver,
 ): void {
-  const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
-    || req.socket.remoteAddress
-    || "unknown";
-  assertRateLimit(limiter, `${key}:${ip}`, rule);
+  assertRateLimit(limiter, `${key}:${resolveClientIp(req)}`, rule);
 }
 
 // ---------------------------------------------------------------------------
@@ -98,9 +100,13 @@ export function registerModerationBridgeFastifyRoutes(
     activityPubReportForwardingService?: Pick<ActivityPubReportForwardingService, "handleCanonicalEvent">;
     atprotoReportForwardingService?: Pick<AtprotoReportForwardingService, "handleCanonicalEvent">;
     now?: () => string;
+    clientIpResolver?: EffectiveClientIpResolver;
   } = {},
 ): void {
   const limiter = new InMemoryRateLimiter();
+  // Parse proxy trust once during route registration. Invalid trust configuration
+  // fails startup instead of silently weakening rate-limit identity semantics.
+  const resolveClientIp = options.clientIpResolver ?? createEffectiveClientIpResolver();
 
   // 30 applies per minute per IP
   const applyRule: RateLimitRule = { limit: 30, windowMs: 60_000 };
@@ -116,7 +122,7 @@ export function registerModerationBridgeFastifyRoutes(
   app.post("/internal/admin/moderation/decisions", async (req, reply) => {
     const request = toRequest(req);
     try {
-      applyRateLimit(req, "moderation-apply", applyRule, limiter);
+      applyRateLimit(req, "moderation-apply", applyRule, limiter, resolveClientIp);
       await sendResponse(reply, await handleApplyDecision(request, deps));
     } catch (err) {
       await sendResponse(
@@ -129,7 +135,7 @@ export function registerModerationBridgeFastifyRoutes(
   app.get("/internal/admin/moderation/decisions", async (req, reply) => {
     const request = toRequest(req);
     try {
-      applyRateLimit(req, "moderation-list", readRule, limiter);
+      applyRateLimit(req, "moderation-list", readRule, limiter, resolveClientIp);
       await sendResponse(reply, await handleListDecisions(request, deps));
     } catch (err) {
       await sendResponse(
@@ -143,7 +149,7 @@ export function registerModerationBridgeFastifyRoutes(
     const request = toRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "moderation-get", readRule, limiter);
+      applyRateLimit(req, "moderation-get", readRule, limiter, resolveClientIp);
       await sendResponse(reply, await handleGetDecision(request, deps, params.id));
     } catch (err) {
       await sendResponse(
@@ -156,7 +162,7 @@ export function registerModerationBridgeFastifyRoutes(
   app.get("/internal/admin/moderation/cases", async (req, reply) => {
     const request = toRequest(req);
     try {
-      applyRateLimit(req, "moderation-cases", readRule, limiter);
+      applyRateLimit(req, "moderation-cases", readRule, limiter, resolveClientIp);
       await sendResponse(reply, await handleListCases(request, deps));
     } catch (err) {
       await sendResponse(
@@ -170,7 +176,7 @@ export function registerModerationBridgeFastifyRoutes(
     const request = toRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "moderation-case-get", readRule, limiter);
+      applyRateLimit(req, "moderation-case-get", readRule, limiter, resolveClientIp);
       await sendResponse(reply, await handleGetCase(request, deps, params.id));
     } catch (err) {
       await sendResponse(
@@ -184,7 +190,7 @@ export function registerModerationBridgeFastifyRoutes(
     const request = toRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "moderation-case-forwarding-retry", applyRule, limiter);
+      applyRateLimit(req, "moderation-case-forwarding-retry", applyRule, limiter, resolveClientIp);
       await sendResponse(
         reply,
         await handleRetryReportForwarding(request, deps, {
@@ -206,7 +212,7 @@ export function registerModerationBridgeFastifyRoutes(
     const request = toRequest(req);
     const params = req.params as { id: string };
     try {
-      applyRateLimit(req, "moderation-revoke", applyRule, limiter);
+      applyRateLimit(req, "moderation-revoke", applyRule, limiter, resolveClientIp);
       await sendResponse(reply, await handleRevokeDecision(request, deps, params.id));
     } catch (err) {
       await sendResponse(
@@ -219,7 +225,7 @@ export function registerModerationBridgeFastifyRoutes(
   app.get("/internal/admin/moderation/labels", async (req, reply) => {
     const request = toRequest(req);
     try {
-      applyRateLimit(req, "moderation-labels", readRule, limiter);
+      applyRateLimit(req, "moderation-labels", readRule, limiter, resolveClientIp);
       await sendResponse(reply, await handleListAtLabels(request, deps));
     } catch (err) {
       await sendResponse(
@@ -232,7 +238,7 @@ export function registerModerationBridgeFastifyRoutes(
   app.get("/internal/admin/moderation/at-labels/known", async (req, reply) => {
     const request = toRequest(req);
     try {
-      applyRateLimit(req, "moderation-known-labels", readRule, limiter);
+      applyRateLimit(req, "moderation-known-labels", readRule, limiter, resolveClientIp);
       await sendResponse(reply, await handleListKnownAtLabels(request, deps));
     } catch (err) {
       await sendResponse(
@@ -245,7 +251,7 @@ export function registerModerationBridgeFastifyRoutes(
   app.post("/internal/bridge/moderation/reports", async (req, reply) => {
     const request = toRequest(req);
     try {
-      applyRateLimit(req, "moderation-report-bridge", applyRule, limiter);
+      applyRateLimit(req, "moderation-report-bridge", applyRule, limiter, resolveClientIp);
       if (!options.internalBridgeToken) {
         throw internal("Internal moderation bridge token is not configured");
       }
@@ -274,7 +280,7 @@ export function registerModerationBridgeFastifyRoutes(
   app.get("/xrpc/com.atproto.label.queryLabels", async (req, reply) => {
     const request = toRequest(req);
     try {
-      applyRateLimit(req, "xrpc-query-labels", xrpcRule, limiter);
+      applyRateLimit(req, "xrpc-query-labels", xrpcRule, limiter, resolveClientIp);
       await sendResponse(reply, await handleXrpcQueryLabels(request, deps));
     } catch (err) {
       await sendResponse(

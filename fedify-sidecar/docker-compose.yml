@@ -76,6 +76,7 @@ services:
       - VERSION=5.0.0
       - DOMAIN=${DOMAIN:-localhost}
       - BASE_URL=${BASE_URL:-http://localhost:8080}
+      - SIDECAR_TRUSTED_PROXY_IPS=${SIDECAR_TRUSTED_PROXY_IPS:-}
       
       # Redis - work queues and control data
       - REDIS_URL=redis://redis:6379
