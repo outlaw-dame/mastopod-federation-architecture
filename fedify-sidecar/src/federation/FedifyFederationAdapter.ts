@@ -67,6 +67,11 @@ import type {
   OutboundDeliveryModerationReportMeta,
   OutboundDeliveryResult,
 } from "../core-domain/contracts/SigningContracts.js";
+import { COLLECTION_SYNC_HEADER } from "./fep8fcf/CollectionSyncHeader.js";
+import {
+  createFedifyFollowersSyncSender,
+  type FollowersSyncHeaderBuilder,
+} from "./fep8fcf/FedifyFollowersSyncSender.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -216,8 +221,8 @@ async function importPublicKeyPem(pem: string): Promise<CryptoKey | null> {
       "spki",
       der,
       { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-      /* extractable */ true, // required for JSON-LD serialisation
-      ["verify"]              // never sign; this is a public key only
+      /* extractable */ true,
+      ["verify"]
     );
   } catch {
     // Deliberate: import errors are non-fatal; actor dispatch continues.
@@ -398,6 +403,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
   private readonly outboundRuntimeConfig: FedifyOutboundRuntimeConfig;
   private readonly localSigningService: SidecarLocalSigningService | undefined;
   private readonly sidecarServiceActors: Set<string>;
+  private readonly followersSyncSender: FollowersSyncHeaderBuilder | null;
 
   constructor(
     kv: KvStore,
@@ -408,6 +414,13 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
     this.outboundRuntimeConfig = resolveOutboundRuntimeConfig(config);
     this.localSigningService = config.localSigningService;
     this.sidecarServiceActors = new Set(config.sidecarServiceActors ?? ["relay"]);
+    this.followersSyncSender = createFedifyFollowersSyncSender(kv, {
+      domain: config.domain,
+      activityPodsUrl: config.activityPodsUrl,
+      activityPodsToken: config.activityPodsToken,
+      requestTimeoutMs: config.requestTimeoutMs,
+      userAgent: config.userAgent,
+    });
     this.federation = this.buildFederation(kv);
   }
 
@@ -602,6 +615,12 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
       };
     }
 
+    const collectionSyncHeader = await this.followersSyncSender?.buildHeader({
+      actorUri: input.actorUri,
+      activity: input.activity,
+      targetInbox: targetUrl.href,
+    }).catch(() => null) ?? null;
+
     input.assertExternalPostAllowed();
     try {
       const response = await secureActivityPubRequest(targetUrl, {
@@ -614,6 +633,7 @@ export class FedifyFederationAdapter implements FederationRuntimeAdapter {
           signature: signResult.signedHeaders.signature,
           host: targetUrl.host,
           ...(signResult.signedHeaders.digest ? { digest: signResult.signedHeaders.digest } : {}),
+          ...(collectionSyncHeader ? { [COLLECTION_SYNC_HEADER]: collectionSyncHeader } : {}),
         },
         body: input.activity,
         bodyTimeout: input.requestTimeoutMs || this.outboundRuntimeConfig.requestTimeoutMs,
@@ -778,7 +798,7 @@ ${responseBody}`,
         // the identifier into the ActivityPods internal API URL.
         if (!IDENTIFIER_PATTERN.test(identifier)) {
           this.logger.warn("[fedify] actor dispatcher: rejected invalid identifier", {
-            identifier: identifier.slice(0, 64), // truncate in log; never log unbounded user input
+            identifier: identifier.slice(0, 64),
           });
           return null;
         }
@@ -809,7 +829,7 @@ ${responseBody}`,
               inbox: new URL(`https://${ctx.data.domain}/users/${identifier}/inbox`),
               outbox: new URL(`https://${ctx.data.domain}/users/${identifier}/outbox`),
               // followers/following are user-social constructs not meaningful for
-              // sidecar service actors (relay, provider).  Omitting them prevents
+              // sidecar service actors (relay, provider). Omitting them prevents
               // advertising collection endpoints that contain no real data.
               url: new URL(actorId),
               ...(publicKey != null ? { publicKey } : {}),
@@ -935,11 +955,11 @@ ${responseBody}`,
     }
 
     // Sidecar-owned service actors (relay, provider, moderation legacy alias)
-    // have no record in ActivityPods.  Calling fetchActivityPodsActorDocument
+    // have no record in ActivityPods. Calling fetchActivityPodsActorDocument
     // returns null → 404, so all their collection endpoints would fail.
     // Return a valid empty collection directly — the outbox carries no sensitive
     // report data by default; followers/following are not meaningful for service
-    // actors.  Actual outbox content exposure is a separate privacy decision.
+    // actors. Actual outbox content exposure is a separate privacy decision.
     if (this.sidecarServiceActors.has(identifier)) {
       return { items: [] };
     }
