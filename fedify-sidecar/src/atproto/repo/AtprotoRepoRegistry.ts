@@ -7,7 +7,43 @@
  * Uses Redis for persistence and in-memory cache for performance.
  */
 
+import { randomUUID } from 'node:crypto';
 import { RepositoryState } from './AtprotoRepoState.js';
+
+const REPO_SCAN_COUNT = 128;
+const REPO_MGET_BATCH = 128;
+const REPO_SCAN_SESSION_TTL_MS = 5 * 60_000;
+const REPO_SCAN_SESSION_PREFIX = 'atproto:repos:list:seen:';
+
+const OPEN_REPO_SCAN_SESSION_LUA = `
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then
+  return redis.error_reply('ATPROTO_REPO_SCAN_SESSION_INVALID_TTL')
+end
+redis.call('SADD', KEYS[1], ARGV[1])
+if redis.call('PEXPIRE', KEYS[1], ttl) ~= 1 then
+  return redis.error_reply('ATPROTO_REPO_SCAN_SESSION_TTL_FAILED')
+end
+return 1
+`;
+
+const DEDUPE_REPO_SCAN_IDS_LUA = `
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) ~= 1 then
+  return redis.error_reply('ATPROTO_REPO_SCAN_SESSION_EXPIRED')
+end
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then
+  return redis.error_reply('ATPROTO_REPO_SCAN_SESSION_INVALID_TTL')
+end
+local fresh = {}
+for i = 3, #ARGV do
+  if redis.call('SADD', KEYS[1], ARGV[i]) == 1 then
+    table.insert(fresh, ARGV[i])
+  end
+end
+redis.call('PEXPIRE', KEYS[1], ttl)
+return fresh
+`;
 
 /**
  * Repository registry error codes
@@ -54,102 +90,17 @@ export class RegistryError extends Error {
  * Manages repository state across multiple DIDs.
  */
 export interface AtprotoRepoRegistry {
-  /**
-   * Register a new repository
-   *
-   * @param state - Repository state
-   * @throws RegistryError if already exists or persistence fails
-   */
   register(state: RepositoryState): Promise<void>;
-
-  /**
-   * Get repository by DID
-   *
-   * @param did - Repository DID
-   * @returns Repository state or null if not found
-   * @throws RegistryError on persistence error
-   */
   getByDid(did: string): Promise<RepositoryState | null>;
-
-  /**
-   * Update repository state
-   *
-   * @param state - Updated repository state
-   * @throws RegistryError if not found or persistence fails
-   */
   update(state: RepositoryState): Promise<void>;
-
-  /**
-   * Delete repository
-   *
-   * @param did - Repository DID
-   * @returns true if deleted, false if not found
-   * @throws RegistryError on persistence error
-   */
   delete(did: string): Promise<boolean>;
-
-  /**
-   * List all repositories
-   *
-   * @param limit - Maximum results (default 100)
-   * @param offset - Pagination offset (default 0)
-   * @returns Array of repository states
-   * @throws RegistryError on persistence error
-   */
   list(limit?: number, offset?: number): Promise<RepositoryState[]>;
-
-  /**
-   * Count total repositories
-   *
-   * @returns Total count
-   * @throws RegistryError on persistence error
-   */
   count(): Promise<number>;
-
-  /**
-   * Check if repository exists
-   *
-   * @param did - Repository DID
-   * @returns true if exists
-   * @throws RegistryError on persistence error
-   */
   exists(did: string): Promise<boolean>;
-
-  /**
-   * Get repositories by collection
-   *
-   * @param nsid - Collection NSID
-   * @returns Array of repository states
-   * @throws RegistryError on persistence error
-   */
   getByCollection(nsid: string): Promise<RepositoryState[]>;
-
-  /**
-   * Get repositories with pending commits
-   *
-   * @returns Array of repository states
-   * @throws RegistryError on persistence error
-   */
   getWithPendingCommits(): Promise<RepositoryState[]>;
-
-  /**
-   * Transaction support
-   *
-   * @param callback - Function to execute within transaction
-   * @throws RegistryError on transaction failure
-   */
   transaction<T>(callback: (registry: AtprotoRepoRegistry) => Promise<T>): Promise<T>;
-
-  /**
-   * Health check
-   *
-   * @returns true if registry is healthy
-   */
   health(): Promise<boolean>;
-  
-  /**
-   * Get repository state (alias for getByDid used in Phase 3/4/5)
-   */
   getRepoState(did: string): Promise<RepositoryState | null>;
 }
 
@@ -172,7 +123,7 @@ export class InMemoryAtprotoRepoRegistry implements AtprotoRepoRegistry {
   async getByDid(did: string): Promise<RepositoryState | null> {
     return this.repositories.get(did) || null;
   }
-  
+
   async getRepoState(did: string): Promise<RepositoryState | null> {
     return this.getByDid(did);
   }
@@ -210,7 +161,6 @@ export class InMemoryAtprotoRepoRegistry implements AtprotoRepoRegistry {
   }
 
   async getWithPendingCommits(): Promise<RepositoryState[]> {
-    // In-memory implementation doesn't track pending commits
     return [];
   }
 
@@ -234,8 +184,6 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
 
   async register(state: RepositoryState): Promise<void> {
     const key = `${this.keyPrefix}${state.did}`;
-
-    // Check if already exists
     const exists = await this.redis.exists(key);
     if (exists) {
       throw new RegistryError(
@@ -244,32 +192,23 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
       );
     }
 
-    // Store repository state
-    await this.redis.set(key, JSON.stringify(state), 'EX', 86400 * 30); // 30 days TTL
-
-    // Add to index
+    await this.redis.set(key, JSON.stringify(state), 'EX', 86400 * 30);
     await this.redis.sadd(this.indexKey, state.did);
   }
 
   async getByDid(did: string): Promise<RepositoryState | null> {
     const key = `${this.keyPrefix}${did}`;
     const data = await this.redis.get(key);
-
-    if (!data) {
-      return null;
-    }
-
+    if (!data) return null;
     return JSON.parse(data);
   }
-  
+
   async getRepoState(did: string): Promise<RepositoryState | null> {
     return this.getByDid(did);
   }
 
   async update(state: RepositoryState): Promise<void> {
     const key = `${this.keyPrefix}${state.did}`;
-
-    // Check if exists
     const exists = await this.redis.exists(key);
     if (!exists) {
       throw new RegistryError(
@@ -277,8 +216,6 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
         `Repository not found: ${state.did}`
       );
     }
-
-    // Update repository state
     await this.redis.set(key, JSON.stringify(state), 'EX', 86400 * 30);
   }
 
@@ -290,14 +227,21 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
   }
 
   async list(limit: number = 100, offset: number = 0): Promise<RepositoryState[]> {
-    const dids = await this.redis.smembers(this.indexKey);
-    const slice = dids.slice(offset, offset + limit);
+    const safeLimit = Math.max(0, Math.trunc(limit));
+    const safeOffset = Math.max(0, Math.trunc(offset));
+    if (safeLimit === 0) return [];
 
+    const dids = await this.scanRepositoryPage(safeLimit, safeOffset);
     const results: RepositoryState[] = [];
-    for (const did of slice) {
-      const state = await this.getByDid(did);
-      if (state) {
-        results.push(state);
+
+    for (let start = 0; start < dids.length; start += REPO_MGET_BATCH) {
+      const batch = dids.slice(start, start + REPO_MGET_BATCH);
+      if (batch.length === 0) continue;
+      const rawStates: Array<string | null> = await this.redis.mget(
+        ...batch.map((did) => `${this.keyPrefix}${did}`)
+      );
+      for (const raw of rawStates) {
+        if (raw) results.push(JSON.parse(raw));
       }
     }
 
@@ -314,6 +258,9 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
   }
 
   async getByCollection(nsid: string): Promise<RepositoryState[]> {
+    // This API returns the complete matching population. Keep the current
+    // authority semantics until a collection secondary index has an explicit
+    // migration/backfill design; changing it here could make legacy repos invisible.
     const dids = await this.redis.smembers(this.indexKey);
     const results: RepositoryState[] = [];
 
@@ -328,12 +275,10 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
   }
 
   async getWithPendingCommits(): Promise<RepositoryState[]> {
-    // Would require additional tracking in Redis
     return [];
   }
 
   async transaction<T>(callback: (registry: AtprotoRepoRegistry) => Promise<T>): Promise<T> {
-    // Redis transactions would be implemented here
     return callback(this);
   }
 
@@ -344,5 +289,94 @@ export class RedisAtprotoRepoRegistry implements AtprotoRepoRegistry {
     } catch {
       return false;
     }
+  }
+
+  private async scanRepositoryPage(limit: number, offset: number): Promise<string[]> {
+    let cursor = '0';
+    let uniqueIndex = 0;
+    const selected: string[] = [];
+    const sessionKey = `${REPO_SCAN_SESSION_PREFIX}${randomUUID()}`;
+    const sentinel = `\u0000atproto-repo-scan:${randomUUID()}`;
+    let opened = false;
+
+    try {
+      const openResult = await this.redis.eval(
+        OPEN_REPO_SCAN_SESSION_LUA,
+        1,
+        sessionKey,
+        sentinel,
+        String(REPO_SCAN_SESSION_TTL_MS)
+      );
+      if (Number(openResult) !== 1) {
+        throw new Error('Redis did not initialize repository scan session');
+      }
+      opened = true;
+
+      do {
+        const response = await this.redis.sscan(this.indexKey, cursor, 'COUNT', REPO_SCAN_COUNT);
+        const nextCursor = String(response?.[0] ?? '0');
+        const scanned: string[] = Array.isArray(response?.[1])
+          ? response[1].filter((value: unknown): value is string => typeof value === 'string' && value.length > 0)
+          : [];
+
+        // COUNT is only a work hint. Bound the de-duplication command even when
+        // Redis returns an oversized compact-encoding page.
+        for (let start = 0; start < scanned.length; start += REPO_MGET_BATCH) {
+          const chunk = scanned.slice(start, start + REPO_MGET_BATCH);
+          const fresh = await this.dedupeScanDids(sessionKey, sentinel, chunk);
+          for (const did of fresh) {
+            if (uniqueIndex < offset) {
+              uniqueIndex += 1;
+              continue;
+            }
+            selected.push(did);
+            uniqueIndex += 1;
+            if (selected.length >= limit) return selected;
+          }
+        }
+
+        cursor = nextCursor;
+      } while (cursor !== '0');
+
+      return selected;
+    } catch (error) {
+      throw new RegistryError(
+        RegistryErrorCode.PERSISTENCE_ERROR,
+        'Repository registry scan failed',
+        { cause: error instanceof Error ? error.message : String(error) }
+      );
+    } finally {
+      if (opened) {
+        try {
+          await this.redis.del(sessionKey);
+        } catch {
+          // Best effort: the atomic open operation always attaches a TTL.
+        }
+      }
+    }
+  }
+
+  private async dedupeScanDids(
+    sessionKey: string,
+    sentinel: string,
+    dids: string[]
+  ): Promise<string[]> {
+    if (dids.length === 0) return [];
+    if (dids.length > REPO_MGET_BATCH) {
+      throw new Error('Repository scan de-duplication batch exceeded configured bound');
+    }
+
+    const result = await this.redis.eval(
+      DEDUPE_REPO_SCAN_IDS_LUA,
+      1,
+      sessionKey,
+      sentinel,
+      String(REPO_SCAN_SESSION_TTL_MS),
+      ...dids
+    );
+    if (!Array.isArray(result) || result.some((did) => typeof did !== 'string')) {
+      throw new Error('Repository scan de-duplication returned invalid Redis response');
+    }
+    return result as string[];
   }
 }
