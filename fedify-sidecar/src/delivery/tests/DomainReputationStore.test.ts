@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { Redis } from "ioredis";
 import {
   sanitizeDomain,
   InMemoryDomainReputationStore,
+  RedisDomainReputationStore,
 } from "../DomainReputationStore.js";
 
 // ---------------------------------------------------------------------------
@@ -123,5 +125,70 @@ describe("InMemoryDomainReputationStore", () => {
   it("returns false without throwing for an empty domain (fail-open safety)", async () => {
     const store = new InMemoryDomainReputationStore();
     expect(await store.isDomainBlocked("")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RedisDomainReputationStore
+// ---------------------------------------------------------------------------
+
+function redisWithPipelineResults(results: Array<[Error | null, unknown]>) {
+  const exec = vi.fn(async () => results);
+  const smismember = vi.fn(() => ({ exec }));
+  const sismember = vi.fn(() => ({ smismember, exec }));
+  const pipeline = vi.fn(() => ({ sismember }));
+  const redis = { pipeline } as unknown as Redis;
+  return { redis, pipeline, sismember, smismember, exec };
+}
+
+describe("RedisDomainReputationStore", () => {
+  it("checks exact and all parent-domain memberships in one Redis pipeline", async () => {
+    const mock = redisWithPipelineResults([
+      [null, 0],
+      [null, [0, 1, 0]],
+    ]);
+    const store = new RedisDomainReputationStore(mock.redis);
+
+    await expect(store.isDomainBlocked("a.b.example.com")).resolves.toBe(true);
+
+    expect(mock.pipeline).toHaveBeenCalledTimes(1);
+    expect(mock.sismember).toHaveBeenCalledWith("spam:domain-block:exact:v1", "a.b.example.com");
+    expect(mock.smismember).toHaveBeenCalledWith(
+      "spam:domain-block:sub:v1",
+      "a.b.example.com",
+      "b.example.com",
+      "example.com",
+    );
+    expect(mock.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves exact-match blocking in the batched lookup", async () => {
+    const mock = redisWithPipelineResults([
+      [null, 1],
+      [null, [0, 0]],
+    ]);
+    const store = new RedisDomainReputationStore(mock.redis);
+
+    await expect(store.isDomainBlocked("spam.example.com")).resolves.toBe(true);
+  });
+
+  it("returns false when neither exact nor parent-domain membership matches", async () => {
+    const mock = redisWithPipelineResults([
+      [null, 0],
+      [null, [0, 0, 0]],
+    ]);
+    const store = new RedisDomainReputationStore(mock.redis);
+
+    await expect(store.isDomainBlocked("a.b.example.com")).resolves.toBe(false);
+  });
+
+  it("remains fail-open when a pipelined membership command reports an error", async () => {
+    const mock = redisWithPipelineResults([
+      [null, 0],
+      [new Error("redis unavailable"), null],
+    ]);
+    const store = new RedisDomainReputationStore(mock.redis);
+
+    await expect(store.isDomainBlocked("a.b.example.com")).resolves.toBe(false);
   });
 });
