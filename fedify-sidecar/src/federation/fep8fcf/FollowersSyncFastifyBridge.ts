@@ -10,8 +10,8 @@
  * Response: ActivityStreams OrderedCollection containing the follower URIs
  * for the requesting instance.
  *
- * Authentication: We extract the requesting domain from the `keyId` field of
- * the HTTP `Signature` header.  Full cryptographic verification of the
+ * Authentication: We extract the requesting server base URI from the `keyId`
+ * field of the HTTP `Signature` header. Full cryptographic verification of the
  * signature is performed using the cached actor document store to resist
  * unauthenticated fishing for follower data.
  *
@@ -47,9 +47,13 @@ function parseSignatureHeader(raw: string): Record<string, string> {
   return params;
 }
 
-function extractDomainFromKeyId(keyId: string): string | null {
+function extractServerBaseUriFromKeyId(keyId: string): string | null {
   try {
-    return new URL(keyId).hostname;
+    const parsed = new URL(keyId);
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+      return null;
+    }
+    return `${parsed.origin}/`;
   } catch {
     return null;
   }
@@ -224,10 +228,10 @@ export function registerFollowersSyncRoutes(
         return;
       }
 
-      // --- Determine requesting domain from verified keyId ---
-      const requestingDomain = extractDomainFromKeyId(keyId);
-      if (!requestingDomain) {
-        reply.status(400).send({ error: "Cannot determine requesting domain from keyId" });
+      // --- Determine requesting server base URI from verified keyId ---
+      const requestingBaseUri = extractServerBaseUriFromKeyId(keyId);
+      if (!requestingBaseUri) {
+        reply.status(400).send({ error: "Cannot determine requesting server base URI from keyId" });
         return;
       }
 
@@ -236,12 +240,12 @@ export function registerFollowersSyncRoutes(
       try {
         followers = await opts.service.getPartialFollowersCollection(
           identifier,
-          requestingDomain,
+          requestingBaseUri,
         );
       } catch (err: any) {
         logger.error("[fep8fcf] followers_synchronization: error fetching partial collection", {
           identifier,
-          requestingDomain,
+          requestingBaseUri,
           error: err.message,
         });
         reply.status(500).send({ error: "Internal server error" });
@@ -266,7 +270,7 @@ export function registerFollowersSyncRoutes(
 
       logger.debug("[fep8fcf] followers_synchronization served", {
         identifier,
-        requestingDomain,
+        requestingBaseUri,
         followerCount: followers.length,
       });
     },
