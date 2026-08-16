@@ -38,6 +38,11 @@ import {
   type LocalActorFollowerRecord,
 } from "./FollowersSyncActivityPodsClient.js";
 
+const DEFAULT_MAX_REMOTE_COLLECTION_BYTES = 2 * 1024 * 1024;
+const DEFAULT_MAX_REMOTE_COLLECTION_ITEMS = 10_000;
+const DEFAULT_MAX_REMOTE_FOLLOWER_URI_BYTES = 4096;
+const DEFAULT_STALE_CLEANUP_CONCURRENCY = 8;
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -63,6 +68,14 @@ export interface FollowersSyncServiceConfig {
    * ActivityPods to pick up new followers/unfollows.
    */
   digestCacheTtlSeconds?: number;
+  /** Maximum bytes accepted from a remote partial followers response. */
+  maxRemoteCollectionBytes?: number;
+  /** Maximum complete follower entries accepted from a remote partial collection. */
+  maxRemoteCollectionItems?: number;
+  /** Maximum UTF-8 byte length of one remote follower URI. */
+  maxRemoteFollowerUriBytes?: number;
+  /** Maximum concurrent stale-entry cleanup callbacks. */
+  staleCleanupConcurrency?: number;
   /**
    * Called when reconciliation finds that the remote collection claims a local
    * actor follows the sender, but ActivityPods has no record of that follow.
@@ -86,6 +99,10 @@ interface CachedDigest {
   computedAt: number;
 }
 
+type BoundedResponseBody = AsyncIterable<Uint8Array> & {
+  destroy?: (error?: Error) => void;
+};
+
 // ============================================================================
 // Service
 // ============================================================================
@@ -97,6 +114,10 @@ export class FollowersSyncService {
   private readonly digestCacheTtlSeconds: number;
   private readonly requestTimeoutMs: number;
   private readonly userAgent: string;
+  private readonly maxRemoteCollectionBytes: number;
+  private readonly maxRemoteCollectionItems: number;
+  private readonly maxRemoteFollowerUriBytes: number;
+  private readonly staleCleanupConcurrency: number;
   private readonly onStaleRemoteEntry?: (localActorUri: string, remoteActorUri: string) => Promise<void>;
 
   constructor(config: FollowersSyncServiceConfig) {
@@ -105,6 +126,30 @@ export class FollowersSyncService {
     this.userAgent = config.userAgent ?? "Fedify-Sidecar/5.0 (ActivityPods)";
     this.redis = config.redisCache ?? null;
     this.digestCacheTtlSeconds = config.digestCacheTtlSeconds ?? 300;
+    this.maxRemoteCollectionBytes = clampInteger(
+      config.maxRemoteCollectionBytes,
+      DEFAULT_MAX_REMOTE_COLLECTION_BYTES,
+      64 * 1024,
+      32 * 1024 * 1024,
+    );
+    this.maxRemoteCollectionItems = clampInteger(
+      config.maxRemoteCollectionItems,
+      DEFAULT_MAX_REMOTE_COLLECTION_ITEMS,
+      1,
+      100_000,
+    );
+    this.maxRemoteFollowerUriBytes = clampInteger(
+      config.maxRemoteFollowerUriBytes,
+      DEFAULT_MAX_REMOTE_FOLLOWER_URI_BYTES,
+      256,
+      16 * 1024,
+    );
+    this.staleCleanupConcurrency = clampInteger(
+      config.staleCleanupConcurrency,
+      DEFAULT_STALE_CLEANUP_CONCURRENCY,
+      1,
+      64,
+    );
     this.onStaleRemoteEntry = config.onStaleRemoteEntry;
     this.apClient = new FollowersSyncActivityPodsClient({
       activityPodsUrl: config.activityPodsUrl,
@@ -314,7 +359,9 @@ export class FollowersSyncService {
    * Perform an authenticated GET to `url` and parse the result as an
    * ActivityStreams (Ordered)Collection of follower URIs.
    *
-   * Returns `null` on any fetch or parse error.
+   * Returns `null` on any fetch or parse error.  Oversized responses are never
+   * truncated because reconciliation must only act on a complete authoritative
+   * partial collection.
    */
   private async fetchRemotePartialCollection(
     url: string,
@@ -354,7 +401,7 @@ export class FollowersSyncService {
       });
 
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
-        await resp.body.text();
+        resp.body.destroy();
         logger.warn("[fep8fcf] fetchRemotePartialCollection: non-OK response", {
           url,
           status: resp.statusCode,
@@ -362,22 +409,15 @@ export class FollowersSyncService {
         return null;
       }
 
-      const body = await resp.body.json() as Record<string, unknown>;
-      const items = (body["orderedItems"] ?? body["items"]);
-      if (!Array.isArray(items)) return null;
-
-      return items.reduce<string[]>((acc, item) => {
-        if (typeof item === "string") {
-          acc.push(item);
-        } else if (
-          typeof item === "object" &&
-          item !== null &&
-          typeof (item as Record<string, unknown>)["id"] === "string"
-        ) {
-          acc.push((item as Record<string, unknown>)["id"] as string);
-        }
-        return acc;
-      }, []);
+      const body = await readBoundedJsonBody(
+        resp.body as unknown as BoundedResponseBody,
+        this.maxRemoteCollectionBytes,
+      );
+      return parseCompleteRemoteFollowersCollection(
+        body,
+        this.maxRemoteCollectionItems,
+        this.maxRemoteFollowerUriBytes,
+      );
     } catch (err: any) {
       logger.warn("[fep8fcf] fetchRemotePartialCollection: request error", {
         url,
@@ -420,8 +460,7 @@ export class FollowersSyncService {
     const localMap = new Map(localFollowers.map((f) => [f.actorUri, f]));
 
     let removedCount = 0;
-    let staleCount = 0;
-    const staleCleanupTasks: Promise<void>[] = [];
+    const staleRemoteUris: string[] = [];
 
     // 1. Local actors not listed in remote → remove from local follow graph.
     for (const [actorUri, record] of localMap) {
@@ -442,31 +481,120 @@ export class FollowersSyncService {
     //    they never affect normal inbox processing.
     for (const uri of remoteLocalUris) {
       if (!localMap.has(uri)) {
-        staleCount++;
+        staleRemoteUris.push(uri);
         logger.info("[fep8fcf] reconcile: remote has unknown local follower (stale remote entry)", {
           senderActorUri,
           unknownLocalFollower: uri,
         });
-        if (this.onStaleRemoteEntry) {
-          staleCleanupTasks.push(this.onStaleRemoteEntry(uri, senderActorUri).catch((err) => {
+      }
+    }
+
+    if (this.onStaleRemoteEntry && staleRemoteUris.length > 0) {
+      await runBoundedConcurrency(
+        staleRemoteUris,
+        this.staleCleanupConcurrency,
+        async (uri) => {
+          try {
+            await this.onStaleRemoteEntry!(uri, senderActorUri);
+          } catch (err) {
             logger.error("[fep8fcf] reconcile: onStaleRemoteEntry callback failed", {
               senderActorUri,
               unknownLocalFollower: uri,
               error: err instanceof Error ? err.message : String(err),
             });
-          }));
-        }
-      }
+          }
+        },
+      );
     }
-
-    await Promise.all(staleCleanupTasks);
 
     logger.info("[fep8fcf] reconcile: done", {
       senderActorUri,
       localCount: localFollowers.length,
       remoteLocalCount: remoteLocalUris.length,
       removedCount,
-      staleRemoteCount: staleCount,
+      staleRemoteCount: staleRemoteUris.length,
     });
   }
+}
+
+async function readBoundedJsonBody(
+  body: BoundedResponseBody,
+  maxBytes: number,
+): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of body) {
+    const buffer = Buffer.from(chunk);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > maxBytes) {
+      body.destroy?.(new Error("FEP-8fcf remote partial collection exceeds response byte limit"));
+      throw new Error("FEP-8fcf remote partial collection exceeds response byte limit");
+    }
+    chunks.push(buffer);
+  }
+
+  const parsed = JSON.parse(Buffer.concat(chunks, totalBytes).toString("utf8")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("FEP-8fcf remote partial collection body must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseCompleteRemoteFollowersCollection(
+  body: Record<string, unknown>,
+  maxItems: number,
+  maxUriBytes: number,
+): string[] | null {
+  const items = body["orderedItems"] ?? body["items"];
+  if (!Array.isArray(items) || items.length > maxItems) {
+    return null;
+  }
+
+  const followers: string[] = [];
+  for (const item of items) {
+    let uri: string | null = null;
+    if (typeof item === "string") {
+      uri = item;
+    } else if (
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Record<string, unknown>)["id"] === "string"
+    ) {
+      uri = (item as Record<string, unknown>)["id"] as string;
+    }
+
+    if (uri === null) {
+      continue;
+    }
+    if (uri.length === 0 || Buffer.byteLength(uri, "utf8") > maxUriBytes) {
+      return null;
+    }
+    followers.push(uri);
+  }
+  return followers;
+}
+
+async function runBoundedConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let nextIndex = 0;
+  const workerCount = Math.min(items.length, Math.max(1, concurrency));
+
+  async function runWorker(): Promise<void> {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      await worker(items[index]!);
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+}
+
+function clampInteger(value: number | undefined, fallback: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(value as number)));
 }
