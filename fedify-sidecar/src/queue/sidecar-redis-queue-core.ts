@@ -220,9 +220,9 @@ export class RedisStreamsQueue {
     });
   }
 
-  // ==========================================================================
+  // ============================================================================
   // Connection Management
-  // ==========================================================================
+  // ============================================================================
 
   async connect(): Promise<void> {
     if (this.isConnected) return;
@@ -261,9 +261,9 @@ export class RedisStreamsQueue {
     logger.info("Redis Streams Queue disconnected");
   }
 
-  // ==========================================================================
+  // ============================================================================
   // Inbound Queue Operations
-  // ==========================================================================
+  // ============================================================================
 
   async enqueueInbound(envelope: InboundEnvelope): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -378,9 +378,9 @@ export class RedisStreamsQueue {
     }
   }
 
-  // ============================================================================
+  // ==========================================================================
   // Outbound Queue Operations
-  // ============================================================================
+  // ==========================================================================
 
   async enqueueOutbound(job: OutboundJob): Promise<void> {
     await this.enqueueOutboundBatch([job]);
@@ -476,9 +476,9 @@ export class RedisStreamsQueue {
     }
   }
 
-  // ============================================================================
+  // ==========================================================================
   // Outbox Intent Queue Operations
-  // ============================================================================
+  // ==========================================================================
 
   async enqueueOutboxIntent(intent: OutboxIntent): Promise<string> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -546,9 +546,9 @@ export class RedisStreamsQueue {
     }
   }
 
-  // ============================================================================
+  // ==========================================================================
   // Origin Reconciliation Queue Operations
-  // ============================================================================
+  // ==========================================================================
 
   async enqueueOriginReconciliation(job: OriginReconciliationJob): Promise<string> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -742,9 +742,9 @@ export class RedisStreamsQueue {
     return normalized;
   }
 
-  // ============================================================================
+  // ==========================================================================
   // Message Acknowledgment
-  // ============================================================================
+  // ==========================================================================
 
   async ack(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile", messageId: string): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -761,9 +761,9 @@ export class RedisStreamsQueue {
     logger.debug("Message acknowledged", { type, messageId });
   }
 
-  // ============================================================================
+  // ==========================================================================
   // Idempotency Control
-  // ============================================================================
+  // ==========================================================================
 
   async checkIdempotency(job: OutboundJob): Promise<boolean> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -861,9 +861,9 @@ export class RedisStreamsQueue {
     return typeof length === "number" ? length : 0;
   }
 
-  // ============================================================================
+  // ==========================================================================
   // Domain Control (Blocklist, Rate Limiting, Concurrency)
-  // ============================================================================
+  // ==========================================================================
 
   async isDomainBlocked(domain: string): Promise<boolean> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -942,9 +942,9 @@ export class RedisStreamsQueue {
     await this.redis.decr(key);
   }
 
-  // ============================================================================
+  // ==========================================================================
   // Dead Letter Queue
-  // ============================================================================
+  // ==========================================================================
 
   async moveToDlq(
     type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile",
@@ -992,9 +992,9 @@ export class RedisStreamsQueue {
     logger.warn("Message moved to DLQ", { type, id: entry.id, reason });
   }
 
-  // ============================================================================
+  // ==========================================================================
   // Configuration Helpers
-  // ============================================================================
+  // ==========================================================================
 
   async getMetrics(): Promise<Record<string, number>> {
     if (!this.isConnected) throw new Error("Queue not connected");
