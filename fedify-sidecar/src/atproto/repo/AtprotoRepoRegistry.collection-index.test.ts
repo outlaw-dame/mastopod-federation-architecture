@@ -186,7 +186,6 @@ describe('RedisAtprotoRepoRegistry collection secondary index', () => {
     const result = await registry.getByCollection(POST);
 
     expect(result).toHaveLength(260);
-    // Three bounded reads during backfill plus three bounded reads from the completed index.
     expect(redis.mgetCalls.map((batch) => batch.length)).toEqual([128, 128, 4, 128, 128, 4]);
     expect(redis.saddCalls.filter(([key]) => key === collectionKey(POST)).map((call) => call.length - 1))
       .toEqual([128, 128, 4]);
@@ -194,17 +193,16 @@ describe('RedisAtprotoRepoRegistry collection secondary index', () => {
 
   it('maintains collection memberships across register, update, and delete', async () => {
     const redis = new MemoryRedis();
-    // Pretend both collection indexes were already fully migrated.
     redis.strings.set(completeKey(POST), '1');
     redis.strings.set(completeKey(LIKE), '1');
     const registry = new RedisAtprotoRepoRegistry(redis as any);
 
     await registry.register(repoState('did:plc:a', [POST]));
-    expect(redis.sets.get(collectionKey(POST))).toContain('did:plc:a');
+    expect(redis.sets.get(collectionKey(POST))?.has('did:plc:a')).toBe(true);
 
     await registry.update(repoState('did:plc:a', [LIKE]));
     expect(redis.sets.get(collectionKey(POST))?.has('did:plc:a')).toBe(false);
-    expect(redis.sets.get(collectionKey(LIKE))).toContain('did:plc:a');
+    expect(redis.sets.get(collectionKey(LIKE))?.has('did:plc:a')).toBe(true);
 
     await registry.delete('did:plc:a');
     expect(redis.sets.get(collectionKey(LIKE))?.has('did:plc:a')).toBe(false);
