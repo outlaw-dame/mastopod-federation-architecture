@@ -194,7 +194,11 @@ export function registerFep3ab2Routes(app: FastifyInstance, options: Fep3ab2Rout
       reply.send({ topics });
     } catch (error) {
       metrics.fepStreamingControlRequestsTotal.inc({ endpoint: "subscriptions_add", outcome: "error" });
-      handleAuthorityError(reply, error);
+      if (error instanceof FepSessionStoreError) {
+        handleSessionStoreError(reply, error);
+      } else {
+        handleAuthorityError(reply, error);
+      }
     }
   });
 

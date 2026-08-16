@@ -4,6 +4,7 @@ type ValueRecord =
   | { kind: "string"; value: string; expiresAt: number | null }
   | { kind: "set"; value: Set<string>; expiresAt: number | null }
   | { kind: "sortedSet"; value: Map<string, number>; expiresAt: number | null };
+type SetValueRecord = Extract<ValueRecord, { kind: "set" }>;
 
 interface SharedState {
   values: Map<string, ValueRecord>;
@@ -128,6 +129,17 @@ export class MemoryRedis {
     return added;
   }
 
+  public async scard(key: string): Promise<number> {
+    const record = this.readRecord(key);
+    if (!record) {
+      return 0;
+    }
+    if (record.kind !== "set") {
+      throw new Error(`Key ${key} is not a set`);
+    }
+    return record.value.size;
+  }
+
   public async smembers(key: string): Promise<string[]> {
     const record = this.readRecord(key);
     if (!record || record.kind !== "set") {
@@ -149,6 +161,61 @@ export class MemoryRedis {
       }
     }
     return removed;
+  }
+
+  public async eval(
+    script: string,
+    numberOfKeys: number,
+    ...args: Array<string | number>
+  ): Promise<unknown> {
+    if (!script.includes("fep3ab2:add-topics-bounded:v2") || numberOfKeys !== 2) {
+      throw new Error("MemoryRedis received an unsupported Lua script");
+    }
+
+    const sessionKey = String(args[0] ?? "");
+    const topicsKey = String(args[1] ?? "");
+    const maxTopics = Number(args[2]);
+    const members = args.slice(3).map(String);
+    const sessionRecord = this.readRecord(sessionKey);
+    if (!sessionRecord) {
+      return [-3, 0];
+    }
+    const ttl = await this.ttl(sessionKey);
+    if (ttl < 1) {
+      return [-3, 0];
+    }
+
+    const rawRecord = this.readRecord(topicsKey);
+    if (rawRecord && rawRecord.kind !== "set") {
+      throw new Error(`Key ${topicsKey} is not a set`);
+    }
+    let record: SetValueRecord | null = rawRecord?.kind === "set" ? rawRecord : null;
+
+    const current = record?.value.size ?? 0;
+    if (current > maxTopics) {
+      return [-2, current];
+    }
+
+    const existingMembers = record?.value;
+    const newMembers = new Set(members.filter((member) => !existingMembers?.has(member)));
+    if (current + newMembers.size > maxTopics) {
+      return [-1, current];
+    }
+
+    if (newMembers.size > 0) {
+      if (!record) {
+        record = { kind: "set", value: new Set<string>(), expiresAt: null };
+        this.shared.values.set(topicsKey, record);
+      }
+      for (const member of newMembers) {
+        record.value.add(member);
+      }
+    }
+    if (record) {
+      record.expiresAt = Date.now() + ttl * 1000;
+    }
+
+    return [1, current + newMembers.size];
   }
 
   public async publish(channel: string, message: string): Promise<number> {
