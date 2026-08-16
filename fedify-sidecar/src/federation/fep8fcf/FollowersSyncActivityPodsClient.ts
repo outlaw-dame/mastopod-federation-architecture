@@ -8,8 +8,8 @@
  *
  * ActivityPods routes:
  *
- *   GET  /api/internal/followers-sync/partial-collection
- *          ?actorIdentifier={id}&domain={domain}
+ *   GET  /api/internal/followers-sync-v2/partial-collection
+ *          ?actorIdentifier={id}&baseUri={serverBaseUri}
  *        → { followers: string[] }
  *
  *   GET  /api/internal/followers-sync/local-followers-of-remote
@@ -115,17 +115,23 @@ export class FollowersSyncActivityPodsClient {
   // --------------------------------------------------------------------------
 
   /**
-   * Return the complete bounded set of follower URIs for one remote domain.
+   * Return the complete bounded follower set for one FEP-8fcf server base URI.
+   * The base URI is scheme + authority (including an explicit port) + root '/'.
    *
    * A valid empty collection returns `[]`. Authority unavailability, malformed
    * data, or an oversized response throws FollowersSyncAuthorityError so the
    * optional FEP path can abort instead of reconciling against false empty state.
    */
-  async getPartialFollowers(actorIdentifier: string, domain: string): Promise<string[]> {
+  async getPartialFollowers(actorIdentifier: string, serverBaseUriValue: string): Promise<string[]> {
+    const serverBaseUri = normalizeServerBaseUri(serverBaseUriValue);
+    if (!serverBaseUri) {
+      throw authorityError("FEP-8fcf server base URI is invalid", "invalid_server_base_uri");
+    }
+
     const url =
-      `${this.baseUrl}/api/internal/followers-sync/partial-collection` +
+      `${this.baseUrl}/api/internal/followers-sync-v2/partial-collection` +
       `?actorIdentifier=${encodeURIComponent(actorIdentifier)}` +
-      `&domain=${encodeURIComponent(domain)}`;
+      `&baseUri=${encodeURIComponent(serverBaseUri)}`;
 
     try {
       const body = await this.getAuthorityJson(url, "getPartialFollowers");
@@ -147,7 +153,7 @@ export class FollowersSyncActivityPodsClient {
       const normalized = normalizeAuthorityError(err, "getPartialFollowers");
       logger.warn("[fep8fcf] getPartialFollowers: authority read failed", {
         actorIdentifier,
-        domain,
+        serverBaseUri,
         code: normalized.code,
         status: normalized.statusCode,
         error: normalized.message,
@@ -327,6 +333,19 @@ function parseAuthorityBaseUrl(value: string): string {
   parsed.hash = "";
   parsed.search = "";
   return parsed.toString().replace(/\/$/, "");
+}
+
+function normalizeServerBaseUri(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  try {
+    const parsed = new URL(value);
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+      return null;
+    }
+    return `${parsed.origin}/`;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeHttpUri(value: unknown, maxBytes: number): string | null {
