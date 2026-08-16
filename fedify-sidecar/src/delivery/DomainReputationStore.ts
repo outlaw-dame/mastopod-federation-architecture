@@ -120,19 +120,30 @@ export class RedisDomainReputationStore implements DomainReputationStore {
       const d = sanitizeDomain(domain);
       if (!d) return false;
 
-      // Exact match
-      if (await this.redis.sismember(EXACT_KEY, d)) return true;
-
-      // Subdomain match: walk from d upward toward TLD, checking sub set.
-      // e.g. "a.b.c.example.com" checks "a.b.c.example.com", "b.c.example.com",
-      //      "c.example.com", "example.com" — stops before TLD-only.
+      // Exact and subdomain-inclusive membership are independent sets, but both
+      // can be evaluated in one Redis pipeline round trip. SMISMEMBER preserves
+      // the previous parent-walk semantics while avoiding one network exchange
+      // per hostname label.
       const parts = d.split(".");
+      const subdomainCandidates: string[] = [];
       for (let i = 0; i < parts.length - 1; i++) {
-        const candidate = parts.slice(i).join(".");
-        if (await this.redis.sismember(SUB_KEY, candidate)) return true;
+        subdomainCandidates.push(parts.slice(i).join("."));
       }
 
-      return false;
+      const results = await this.redis
+        .pipeline()
+        .sismember(EXACT_KEY, d)
+        .smismember(SUB_KEY, ...subdomainCandidates)
+        .exec();
+
+      if (!results || results.length !== 2) return false;
+      const exactResult = results[0];
+      const subResult = results[1];
+      if (!exactResult || !subResult || exactResult[0] || subResult[0]) return false;
+
+      const exactBlocked = Number(exactResult[1]) === 1;
+      const subMembership = Array.isArray(subResult[1]) ? subResult[1] : [];
+      return exactBlocked || subMembership.some((value) => Number(value) === 1);
     } catch {
       // Fail-open: infrastructure error must not cause false blocks.
       return false;
