@@ -10,19 +10,28 @@ import {
 const DEFAULT_MAX_TOPICS_PER_SESSION = 256;
 const MAX_CONFIGURED_TOPICS_PER_SESSION = 4096;
 const ADD_TOPICS_BOUNDED_SCRIPT = `
--- fep3ab2:add-topics-bounded:v1
-local key = KEYS[1]
+-- fep3ab2:add-topics-bounded:v2
+local sessionKey = KEYS[1]
+local topicsKey = KEYS[2]
 local maxTopics = tonumber(ARGV[1])
-local ttl = tonumber(ARGV[2])
-local current = redis.call("SCARD", key)
 
+if redis.call("EXISTS", sessionKey) ~= 1 then
+  return {-3, 0}
+end
+
+local ttl = redis.call("TTL", sessionKey)
+if ttl < 1 then
+  return {-3, 0}
+end
+
+local current = redis.call("SCARD", topicsKey)
 if current > maxTopics then
   return {-2, current}
 end
 
 local newCount = 0
-for index = 3, #ARGV do
-  if redis.call("SISMEMBER", key, ARGV[index]) == 0 then
+for index = 2, #ARGV do
+  if redis.call("SISMEMBER", topicsKey, ARGV[index]) == 0 then
     newCount = newCount + 1
   end
 end
@@ -31,11 +40,11 @@ if current + newCount > maxTopics then
   return {-1, current}
 end
 
-if #ARGV >= 3 then
-  redis.call("SADD", key, unpack(ARGV, 3))
+if #ARGV >= 2 then
+  redis.call("SADD", topicsKey, unpack(ARGV, 2))
 end
-if ttl > 0 and redis.call("EXISTS", key) == 1 then
-  redis.call("EXPIRE", key, ttl)
+if redis.call("EXISTS", topicsKey) == 1 then
+  redis.call("EXPIRE", topicsKey, ttl)
 end
 
 return {1, current + newCount}
@@ -247,19 +256,21 @@ export class Fep3ab2SessionStore {
       return this.listTopics(sessionId);
     }
 
-    const ttl = await this.ensureSessionExists(sessionId);
     this.assertTopicCountWithinLimit(normalized.length);
     const rawResult = await this.redis.eval(
       ADD_TOPICS_BOUNDED_SCRIPT,
-      1,
+      2,
+      this.sessionKey(sessionId),
       this.topicsKey(sessionId),
       this.maxTopicsPerSession,
-      ttl,
       ...normalized,
     );
     const result = Array.isArray(rawResult) ? rawResult : [];
     const status = Number(result[0]);
     const observedCount = Number(result[1]);
+    if (status === -3) {
+      throw new FepSessionStoreError("Streaming ticket is missing or expired", "invalid_ticket", 401);
+    }
     if (status !== 1) {
       throw this.topicLimitError(Number.isFinite(observedCount) ? observedCount : undefined);
     }
