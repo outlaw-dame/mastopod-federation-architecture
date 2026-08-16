@@ -21,6 +21,7 @@ npm exec -- vitest run \
   src/at-adapter/external/ExternalAtSessionStore.test.ts \
   src/at-adapter/oauth/OAuthRefreshTokenStore.scalability.test.ts \
   src/atproto/repo/AtprotoRepoRegistry.scalability.test.ts \
+  src/atproto/repo/AtprotoRepoRegistry.collection-index.test.ts \
   src/protocol-bridge/identity/ObservedAtIdentityStore.scalability.test.ts \
   src/admin/mrf/routes.registry.test.ts \
   src/fep3ab2/tests/Fep3ab2ClientIpBoundary.test.ts \
