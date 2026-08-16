@@ -107,6 +107,27 @@ describe("FollowersSyncService reconciliation", () => {
     expect(maxActive).toBeLessThanOrEqual(3);
   });
 
+  it("deduplicates repeated stale remote entries before cleanup", async () => {
+    const senderActorUri = "https://remote.example/users/bob";
+    const staleCleanup = vi.fn().mockResolvedValue(undefined);
+    const service = new FollowersSyncService({
+      domain: "pods.example",
+      activityPodsUrl: "https://activitypods.example",
+      activityPodsToken: "test-token",
+      onStaleRemoteEntry: staleCleanup,
+    });
+    (service as any).apClient = { removeLocalFollow: vi.fn().mockResolvedValue(true) };
+
+    await (service as any).reconcile(senderActorUri, [], [
+      "https://pods.example/users/charlie",
+      "https://pods.example/users/charlie",
+      "https://pods.example/users/charlie",
+    ]);
+
+    expect(staleCleanup).toHaveBeenCalledTimes(1);
+    expect(staleCleanup).toHaveBeenCalledWith("https://pods.example/users/charlie", senderActorUri);
+  });
+
   it("rejects a remote partial collection that exceeds the response byte limit without truncating it", async () => {
     const body = createResponseBody([
       Buffer.alloc(40_000, 0x20),
@@ -174,6 +195,31 @@ describe("FollowersSyncService reconciliation", () => {
       activityPodsUrl: "https://activitypods.example",
       activityPodsToken: "test-token",
       maxRemoteFollowerUriBytes: 256,
+    });
+
+    await expect((service as any).fetchRemotePartialCollection(
+      "https://remote.example/users/bob/followers_synchronization",
+      "https://pods.example/users/alice",
+      signingClient(),
+    )).resolves.toBeNull();
+  });
+
+  it("rejects malformed follower entries rather than treating the collection as complete", async () => {
+    const payload = JSON.stringify({
+      type: "OrderedCollection",
+      orderedItems: [
+        "https://pods.example/users/a",
+        { unexpected: "missing-id" },
+      ],
+    });
+    requestMock.mockResolvedValueOnce({
+      statusCode: 200,
+      body: createResponseBody([payload]),
+    } as any);
+    const service = new FollowersSyncService({
+      domain: "pods.example",
+      activityPodsUrl: "https://activitypods.example",
+      activityPodsToken: "test-token",
     });
 
     await expect((service as any).fetchRemotePartialCollection(
