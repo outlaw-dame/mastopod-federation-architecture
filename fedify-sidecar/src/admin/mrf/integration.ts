@@ -3,7 +3,10 @@ import { ulid } from "ulid";
 import type { Logger } from "pino";
 import { ensureDefaultModuleConfigs } from "./bootstrap.js";
 import { LoggerMRFAuditSink } from "./audit-sinks.js";
-import { registerMRFAdminFastifyRoutes } from "./fastify-routes.js";
+import {
+  MRF_EFFECTIVE_CLIENT_IP_HEADER,
+  registerMRFAdminFastifyRoutes,
+} from "./fastify-routes.js";
 import { runSimulationJob } from "./simulator.js";
 import { InMemoryMRFAdminStore } from "./store.memory.js";
 import { RedisMRFAdminStore } from "./store.redis.js";
@@ -81,11 +84,11 @@ export async function registerMrfAdminIntegration(options: RegisterOptions): Pro
     now,
     uuid: () => ulid(),
     actorFromRequest: (req: Request) => sanitizeActor(req.headers.get("x-provider-actor")),
-    sourceIpFromRequest: (req: Request) => {
-      const forwarded = req.headers.get("x-forwarded-for") || "";
-      const first = forwarded.split(",")[0]?.trim();
-      return first || undefined;
-    },
+    // Fastify resolves this value from the direct socket plus the explicit
+    // trusted-proxy policy before adapting to a Web Request. Never reconstruct
+    // audit identity from caller-controlled X-Forwarded-For here.
+    sourceIpFromRequest: (req: Request) =>
+      req.headers.get(MRF_EFFECTIVE_CLIENT_IP_HEADER) || undefined,
     authorize: (req: Request, permission: MRFPermission) => {
       const permissions = parsePermissions(req);
       if (!permissions.has(permission)) {
