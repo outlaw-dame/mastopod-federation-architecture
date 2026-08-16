@@ -7,6 +7,40 @@ import {
   type FepSubscriptionTopic,
 } from "./contracts.js";
 
+const DEFAULT_MAX_TOPICS_PER_SESSION = 256;
+const MAX_CONFIGURED_TOPICS_PER_SESSION = 4096;
+const ADD_TOPICS_BOUNDED_SCRIPT = `
+-- fep3ab2:add-topics-bounded:v1
+local key = KEYS[1]
+local maxTopics = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local current = redis.call("SCARD", key)
+
+if current > maxTopics then
+  return {-2, current}
+end
+
+local newCount = 0
+for index = 3, #ARGV do
+  if redis.call("SISMEMBER", key, ARGV[index]) == 0 then
+    newCount = newCount + 1
+  end
+end
+
+if current + newCount > maxTopics then
+  return {-1, current}
+end
+
+if #ARGV >= 3 then
+  redis.call("SADD", key, unpack(ARGV, 3))
+end
+if ttl > 0 and redis.call("EXISTS", key) == 1 then
+  redis.call("EXPIRE", key, ttl)
+end
+
+return {1, current + newCount}
+`;
+
 interface PersistedSessionRecord {
   sessionId: string;
   principal: string;
@@ -48,6 +82,7 @@ export interface Fep3ab2SessionStoreOptions {
   prefix?: string;
   ticketSecret: string;
   ticketTtlSec?: number;
+  maxTopicsPerSession?: number;
   sessionMutationChannel?: string;
 }
 
@@ -67,6 +102,7 @@ export class Fep3ab2SessionStore {
   private readonly prefix: string;
   private readonly ticketSecret: string;
   private readonly ticketTtlSec: number;
+  private readonly maxTopicsPerSession: number;
   private readonly sessionMutationChannel: string;
 
   public constructor(
@@ -80,12 +116,17 @@ export class Fep3ab2SessionStore {
     this.prefix = options.prefix ?? "fep3ab2";
     this.ticketSecret = options.ticketSecret;
     this.ticketTtlSec = Math.max(60, Math.min(options.ticketTtlSec ?? 900, 3600));
+    this.maxTopicsPerSession = normalizeTopicLimit(options.maxTopicsPerSession);
     this.sessionMutationChannel =
       options.sessionMutationChannel ?? `${this.prefix}:session-events`;
   }
 
   public get ttlSeconds(): number {
     return this.ticketTtlSec;
+  }
+
+  public get topicLimit(): number {
+    return this.maxTopicsPerSession;
   }
 
   public get mutationChannel(): string {
@@ -172,13 +213,17 @@ export class Fep3ab2SessionStore {
 
   public async listTopics(sessionId: string): Promise<FepSubscriptionTopic[]> {
     await this.ensureSessionExists(sessionId);
+    const topicCount = await this.redis.scard(this.topicsKey(sessionId));
+    this.assertTopicCountWithinLimit(topicCount);
     const raw = await this.redis.smembers(this.topicsKey(sessionId));
+    this.assertTopicCountWithinLimit(raw.length);
     return normalizeTopics(raw);
   }
 
   public async replaceTopics(sessionId: string, topics: readonly FepSubscriptionTopic[]): Promise<FepSubscriptionTopic[]> {
     const normalized = normalizeTopics(topics);
     const ttl = await this.ensureSessionExists(sessionId);
+    this.assertTopicCountWithinLimit(normalized.length);
     const tx = this.redis.multi();
     tx.del(this.topicsKey(sessionId));
     if (normalized.length > 0) {
@@ -203,20 +248,29 @@ export class Fep3ab2SessionStore {
     }
 
     const ttl = await this.ensureSessionExists(sessionId);
-    const tx = this.redis.multi();
-    tx.sadd(this.topicsKey(sessionId), ...normalized);
-    if (ttl > 0) {
-      tx.expire(this.topicsKey(sessionId), ttl);
+    this.assertTopicCountWithinLimit(normalized.length);
+    const rawResult = await this.redis.eval(
+      ADD_TOPICS_BOUNDED_SCRIPT,
+      1,
+      this.topicsKey(sessionId),
+      this.maxTopicsPerSession,
+      ttl,
+      ...normalized,
+    );
+    const result = Array.isArray(rawResult) ? rawResult : [];
+    const status = Number(result[0]);
+    const observedCount = Number(result[1]);
+    if (status !== 1) {
+      throw this.topicLimitError(Number.isFinite(observedCount) ? observedCount : undefined);
     }
-    await tx.exec();
 
-    const result = await this.listTopics(sessionId);
+    const topicsAfterAdd = await this.listTopics(sessionId);
     await this.publishMutation({
       type: "subscriptions_updated",
       sessionId,
-      topics: result,
+      topics: topicsAfterAdd,
     });
-    return result;
+    return topicsAfterAdd;
   }
 
   public async removeTopic(sessionId: string, topic: FepSubscriptionTopic): Promise<FepSubscriptionTopic[]> {
@@ -315,6 +369,21 @@ export class Fep3ab2SessionStore {
     return ttl;
   }
 
+  private assertTopicCountWithinLimit(topicCount: number): void {
+    if (!Number.isSafeInteger(topicCount) || topicCount < 0 || topicCount > this.maxTopicsPerSession) {
+      throw this.topicLimitError(Number.isSafeInteger(topicCount) && topicCount >= 0 ? topicCount : undefined);
+    }
+  }
+
+  private topicLimitError(observedCount?: number): FepSessionStoreError {
+    const suffix = observedCount === undefined ? "" : ` (observed ${observedCount})`;
+    return new FepSessionStoreError(
+      `Streaming session topic limit of ${this.maxTopicsPerSession} exceeded${suffix}`,
+      "topic_limit_exceeded",
+      409,
+    );
+  }
+
   private sessionKey(sessionId: string): string {
     return `${this.prefix}:session:${sessionId}`;
   }
@@ -330,6 +399,13 @@ export class Fep3ab2SessionStore {
   private consumedKey(ticketHash: string): string {
     return `${this.prefix}:ticket-consumed:${ticketHash}`;
   }
+}
+
+function normalizeTopicLimit(value: number | undefined): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_MAX_TOPICS_PER_SESSION;
+  }
+  return Math.max(1, Math.min(Math.floor(value as number), MAX_CONFIGURED_TOPICS_PER_SESSION));
 }
 
 function normalizePrincipal(value: string): string | null {
