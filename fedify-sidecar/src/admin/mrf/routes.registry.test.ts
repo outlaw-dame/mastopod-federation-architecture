@@ -1,6 +1,9 @@
 import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { registerMRFAdminFastifyRoutes } from "./fastify-routes.js";
+import {
+  MRF_EFFECTIVE_CLIENT_IP_HEADER,
+  registerMRFAdminFastifyRoutes,
+} from "./fastify-routes.js";
 import type { MRFAdminDeps, MRFModuleManifest } from "./types.js";
 
 function makeDeps(): MRFAdminDeps {
@@ -42,6 +45,14 @@ function makeDeps(): MRFAdminDeps {
   };
 }
 
+function adminHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    authorization: "Bearer token-123",
+    "x-provider-permissions": "provider:read",
+    ...extra,
+  };
+}
+
 describe("registry routes", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -54,10 +65,7 @@ describe("registry routes", () => {
     const response = await app.inject({
       method: "GET",
       url: "/internal/admin/mrf/registry",
-      headers: {
-        authorization: "Bearer token-123",
-        "x-provider-permissions": "provider:read",
-      },
+      headers: adminHeaders(),
     });
 
     expect(response.statusCode).toBe(200);
@@ -72,11 +80,7 @@ describe("registry routes", () => {
     const response = await app.inject({
       method: "GET",
       url: "/internal/admin/mrf/registry/unknown-module",
-      headers: {
-        authorization: "Bearer token-123",
-        "x-provider-permissions": "provider:read",
-        "x-request-id": "req-registry-404",
-      },
+      headers: adminHeaders({ "x-request-id": "req-registry-404" }),
     });
 
     expect(response.statusCode).toBe(404);
@@ -86,6 +90,52 @@ describe("registry routes", () => {
       };
     };
     expect(payload.error.requestId).toBe("req-registry-404");
+    await app.close();
+  });
+
+  it("overwrites caller-supplied effective client identity before Web Request handlers", async () => {
+    const app = Fastify({ logger: false, trustProxy: true });
+    const deps = makeDeps();
+    const observed = vi.fn();
+    deps.authorize = (request) => {
+      observed(request.headers.get(MRF_EFFECTIVE_CLIENT_IP_HEADER));
+    };
+    registerMRFAdminFastifyRoutes(app, deps, {
+      clientIpResolver: () => "203.0.113.44",
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/internal/admin/mrf/registry",
+      headers: adminHeaders({
+        [MRF_EFFECTIVE_CLIENT_IP_HEADER]: "198.51.100.200",
+        "x-forwarded-for": "192.0.2.88",
+      }),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(observed).toHaveBeenCalledWith("203.0.113.44");
+    await app.close();
+  });
+
+  it("uses resolver-derived identity for rate limits even when Fastify trusts rotating X-Forwarded-For", async () => {
+    const app = Fastify({ logger: false, trustProxy: true });
+    registerMRFAdminFastifyRoutes(app, makeDeps(), {
+      clientIpResolver: () => "203.0.113.44",
+    });
+
+    let response;
+    for (let index = 0; index < 121; index += 1) {
+      response = await app.inject({
+        method: "GET",
+        url: "/internal/admin/mrf/registry",
+        headers: adminHeaders({
+          "x-forwarded-for": `198.51.100.${(index % 250) + 1}`,
+        }),
+      });
+    }
+
+    expect(response?.statusCode).toBe(429);
     await app.close();
   });
 });
