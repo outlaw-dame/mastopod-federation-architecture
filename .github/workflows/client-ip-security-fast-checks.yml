@@ -1,0 +1,49 @@
+name: Client IP Security Fast Checks
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/src/security/EffectiveClientIp.ts'
+      - 'fedify-sidecar/src/security/EffectiveClientIp.test.ts'
+      - 'fedify-sidecar/src/admin/moderation/fastify-routes.ts'
+      - 'fedify-sidecar/.env.local.example'
+      - '.github/workflows/client-ip-security-fast-checks.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'fedify-sidecar/src/security/EffectiveClientIp.ts'
+      - 'fedify-sidecar/src/security/EffectiveClientIp.test.ts'
+      - 'fedify-sidecar/src/admin/moderation/fastify-routes.ts'
+      - 'fedify-sidecar/.env.local.example'
+      - '.github/workflows/client-ip-security-fast-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fast-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install Sidecar Dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Typecheck
+        working-directory: fedify-sidecar
+        run: npm exec -- tsc -p tsconfig.json --noEmit
+
+      - name: Run Client IP Security Regressions
+        working-directory: fedify-sidecar
+        run: npm exec -- vitest run src/security/EffectiveClientIp.test.ts
