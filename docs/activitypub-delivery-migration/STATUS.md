@@ -34,7 +34,7 @@ This file is the live cross-repository evidence ledger. `PHASES.md` defines the 
 | APDM-P1 | PR #14 merged; hardening PR #23 merged | PR #9 merged; hardening PR #18 merged | PASS |
 | APDM-P2 | PR #15 merged; hardening PR #22 merged | PR #10 merged; hardening PR #16 merged; closeout #17 | PASS |
 | APDM-P3 | PR #16 merged; hardening PR #21 merged | PR #11 merged; hardening PR #14 merged; closeout #15 | PASS |
-| APDM-P4 | PR #17 merged; replay-horizon producer hardening later merged | PR #12 merged; closeout #13; replay hardening #25 | PASS |
+| APDM-P4 | PR #17 merged; replay-horizon hardening PR #25 merged (`1e110861256f419fef9d55af1bcca36627814b88`) | PR #12 merged; closeout #13; replay hardening #25 | PASS |
 | APDM-P5 | PR #26 merged (`427d3d3258382f91355ff08c33cfd40360087d84`) | PR #28 merged (`a6f6af242c11e098cfc6692c42988016d7b5a2a3`) | PASS |
 | APDM-P6 | PR #27 merged (`8f6a1bd244015c58698d92a9b9fd939a602d6b96`) | PR #30 merged (`0e350e0baa51d94d874ee99a18ee3140fc85d3a3`) | PASS |
 | APDM-P7 | PR #28 merged (`6d65b2375b9860229dda3d081446f890bfa8699e`) | not required | PASS |
@@ -56,7 +56,7 @@ These earlier phases are fully closed even though their detailed evidence is spr
 - **P1:** ActivityPods producer and federation consumer agreed on `ap.delivery-plan.v1`; fixtures/schema semantics were hardened in both repos.
 - **P2:** ActivityPods introduced the fail-closed pre-`remotePost` native/external strategy seam while keeping native rollback; paired federation documentation/hardening recorded the seam assumptions.
 - **P3:** recipient expansion/planning became ActivityPods-authoritative and the sidecar consumed concrete resolved targets instead of independently treating raw addressing as authority.
-- **P4:** ActivityPods → sidecar handoff became durable/idempotent; crash/retry/replay behavior was hardened, including the bounded replay/completion-marker horizon.
+- **P4:** ActivityPods → sidecar handoff became durable/idempotent; crash/retry/replay behavior was hardened. ActivityPods PR #25 caps automatic producer reconciliation at 48 hours, preserving a 24-hour margin inside the 72-hour blind-recipient recovery snapshot; paired federation completion-marker retention remains longer than that producer replay horizon.
 
 No later optimization changes those authority decisions.
 
