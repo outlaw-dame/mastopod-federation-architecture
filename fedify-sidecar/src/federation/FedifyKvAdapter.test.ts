@@ -1,4 +1,5 @@
 import type { Redis } from "ioredis";
+import type { KvKey } from "@fedify/fedify";
 import { describe, expect, it, vi } from "vitest";
 import { FedifyKvAdapter } from "./FedifyKvAdapter.js";
 
@@ -101,7 +102,7 @@ describe("FedifyKvAdapter.list", () => {
     ]);
   });
 
-  it.each([
+  it.each<[string, KvKey | undefined]>([
     ["omitted", undefined],
     ["empty", []],
   ])("treats %s prefix as root enumeration", async (_label, prefix) => {
@@ -117,7 +118,7 @@ describe("FedifyKvAdapter.list", () => {
     const adapter = new FedifyKvAdapter(redis);
     const entries = [];
 
-    for await (const entry of adapter.list(prefix as any)) {
+    for await (const entry of adapter.list(prefix)) {
       entries.push(entry);
     }
 
