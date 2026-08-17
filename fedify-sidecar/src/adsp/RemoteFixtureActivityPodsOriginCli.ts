@@ -33,8 +33,10 @@ export async function runActivityPodsRemoteOriginCli(
     if (argv.length !== 1) {
       throw new Error("usage: adsp-p0-activitypods-origin prepare");
     }
-    const prepared = await prepareActivityPodsRemoteOriginFixture(config);
-    return { ok: true, ...prepared };
+    // Keep the persisted prepared-evidence file exactly compatible with the
+    // strict parser consumed by `settle`; unlike a terminal status envelope it
+    // is itself an evidence artifact and must not gain an extra `ok` field.
+    return await prepareActivityPodsRemoteOriginFixture(config);
   }
 
   if (command === "settle") {
