@@ -11,8 +11,10 @@ npm exec -- vitest run \
   src/adsp/tests/ControlledActivityPubTarget.test.ts \
   src/adsp/tests/ControlledTargetFixtureClient.test.ts \
   src/adsp/tests/ControlledTargetSnapshotClient.test.ts \
+  src/adsp/tests/RemoteFixtureCase.test.ts \
   src/adsp/tests/RemoteFixtureDurableObserver.test.ts \
   src/adsp/tests/RemoteFixtureHandoffClient.test.ts \
+  src/adsp/tests/RemoteFixtureLiveRuntime.test.ts \
   src/adsp/tests/RemoteFixtureOutcomeReconciler.test.ts \
   src/adsp/tests/RemoteFixtureRunner.test.ts \
   src/adsp/tests/RemoteFixtureSettlement.test.ts \
