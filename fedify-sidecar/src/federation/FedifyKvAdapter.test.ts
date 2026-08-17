@@ -37,6 +37,70 @@ describe("FedifyKvAdapter.list", () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it("includes the exact prefix key and descendants but excludes component siblings before MGET", async () => {
+    const mget = vi.fn().mockResolvedValue([
+      JSON.stringify({ kind: "root" }),
+      JSON.stringify({ kind: "child" }),
+    ]);
+    const redis = {
+      scan: vi.fn().mockResolvedValue([
+        "0",
+        [
+          "fedify:kv:actors",
+          "fedify:kv:actors:alice",
+          "fedify:kv:actors2",
+          "fedify:kv:actorship:bob",
+        ],
+      ]),
+      mget,
+    } as unknown as Redis;
+
+    const adapter = new FedifyKvAdapter(redis);
+    const entries = [];
+
+    for await (const entry of adapter.list(["actors"])) {
+      entries.push(entry);
+    }
+
+    expect(mget).toHaveBeenCalledOnce();
+    expect(mget).toHaveBeenCalledWith(
+      "fedify:kv:actors",
+      "fedify:kv:actors:alice",
+    );
+    expect(entries).toEqual([
+      { key: ["actors"], value: { kind: "root" } },
+      { key: ["actors", "alice"], value: { kind: "child" } },
+    ]);
+  });
+
+  it("escapes Redis glob metacharacters in encoded component prefixes", async () => {
+    const scan = vi.fn().mockResolvedValue([
+      "0",
+      ["fedify:kv:a*:child", "fedify:kv:ab:child"],
+    ]);
+    const mget = vi.fn().mockResolvedValue([JSON.stringify({ ok: true })]);
+    const redis = { scan, mget } as unknown as Redis;
+
+    const adapter = new FedifyKvAdapter(redis);
+    const entries = [];
+
+    for await (const entry of adapter.list(["a*"])) {
+      entries.push(entry);
+    }
+
+    expect(scan).toHaveBeenCalledWith(
+      "0",
+      "MATCH",
+      "fedify:kv:a\\**",
+      "COUNT",
+      100,
+    );
+    expect(mget).toHaveBeenCalledWith("fedify:kv:a*:child");
+    expect(entries).toEqual([
+      { key: ["a*", "child"], value: { ok: true } },
+    ]);
+  });
+
   it("skips keys that expire between SCAN and MGET without changing other entries", async () => {
     const redis = {
       scan: vi.fn().mockResolvedValue([
@@ -59,10 +123,13 @@ describe("FedifyKvAdapter.list", () => {
     ]);
   });
 
-  it("does not issue MGET for an empty SCAN page", async () => {
+  it("does not issue MGET for an empty or sibling-only SCAN page", async () => {
     const mget = vi.fn();
     const redis = {
-      scan: vi.fn().mockResolvedValue(["0", []]),
+      scan: vi
+        .fn()
+        .mockResolvedValueOnce(["9", ["fedify:kv:missingSibling"]])
+        .mockResolvedValueOnce(["0", []]),
       mget,
     } as unknown as Redis;
 
