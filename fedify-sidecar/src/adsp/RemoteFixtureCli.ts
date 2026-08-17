@@ -1,39 +1,18 @@
-import { readFile, stat } from "node:fs/promises";
+import { loadBoundedAdspJsonFile } from "./BoundedJsonFile.js";
 import { parseAdspRemoteFixtureCase } from "./RemoteFixtureCase.js";
 import {
   parseAdspRemoteLiveRuntimeConfig,
   runAdspRemoteLiveFixture,
 } from "./RemoteFixtureLiveRuntime.js";
 
-const DEFAULT_MAX_CASE_FILE_BYTES = 256 * 1024;
-
-function positiveSafeInteger(name: string, value: unknown): number {
-  if (!Number.isSafeInteger(value) || Number(value) <= 0) {
-    throw new TypeError(`${name} must be a positive safe integer`);
-  }
-  return Number(value);
-}
-
 export async function loadAdspRemoteFixtureCaseFile(
   filePath: string,
-  maxBytes: number = DEFAULT_MAX_CASE_FILE_BYTES,
+  maxBytes: number = 256 * 1024,
 ) {
-  if (!filePath || filePath !== filePath.trim()) {
-    throw new TypeError("fixture case path must be a non-empty exact string");
-  }
-  const limit = positiveSafeInteger("max fixture case bytes", maxBytes);
-  const metadata = await stat(filePath);
-  if (!metadata.isFile()) throw new Error("fixture case path must reference a regular file");
-  if (metadata.size > limit) {
-    throw new Error(`fixture case file exceeds ${limit} bytes`);
-  }
-  const raw = await readFile(filePath, "utf8");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("fixture case file contains malformed JSON");
-  }
+  const parsed = await loadBoundedAdspJsonFile(filePath, {
+    label: "fixture case",
+    maxBytes,
+  });
   return parseAdspRemoteFixtureCase(parsed);
 }
 
