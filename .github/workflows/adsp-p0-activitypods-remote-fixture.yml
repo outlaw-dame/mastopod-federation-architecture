@@ -216,7 +216,9 @@ jobs:
               tail -n 500 "${log}"
               exit 1
             fi
-            if curl -fsS --max-time 2 http://127.0.0.1:3000/ >/dev/null; then http_ready=true; break; fi
+            # Root has no stable application route: any HTTP response proves the
+            # gateway is reachable. Semantic readiness is gated separately below.
+            if curl -sS --max-time 2 -o /dev/null http://127.0.0.1:3000/; then http_ready=true; break; fi
             sleep 1
           done
           if [[ "${http_ready}" != true ]]; then
@@ -241,7 +243,7 @@ jobs:
             tail -n 500 "${log}"
             exit 1
           fi
-          curl -fsS --max-time 2 http://127.0.0.1:3000/ >/dev/null
+          curl -sS --max-time 2 -o /dev/null http://127.0.0.1:3000/
 
       - name: Start sidecar with only real outbound path enabled
         working-directory: fedify-sidecar
