@@ -39,6 +39,7 @@ jobs:
     timeout-minutes: 120
     env:
       ACTIVITYPODS_SHA: '1742c70a929307a172d2fa961b028668679695f1'
+      FEDERATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ADSP_REMOTE_REDIS_URL: redis://127.0.0.1:6379
       ADSP_REMOTE_TARGET_STATS_URL: http://127.0.0.1:18080/stats
       ADSP_REMOTE_CONSUMER_GROUP: sidecar-workers
@@ -85,7 +86,8 @@ jobs:
             version: 1,
             phase: 'ADSP-P0-B',
             fixture: 'activitypods-origin-remote',
-            federationCommitSha: process.env.GITHUB_SHA,
+            federationCandidateSha: process.env.FEDERATION_CANDIDATE_SHA,
+            federationCheckoutSha: process.env.GITHUB_SHA,
             activityPodsCommitSha: process.env.ACTIVITYPODS_SHA,
             workflowRunId: process.env.GITHUB_RUN_ID,
             runnerOs: process.env.RUNNER_OS,
@@ -125,7 +127,7 @@ jobs:
           mkdir -p data/fuseki_test data/redis_test
           docker compose -f docker-compose-test.yml up -d fuseki_test redis mailcatcher
           FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
-          redis-cli -h 127.0.0.1 ping
+          docker compose -f docker-compose-test.yml exec -T redis redis-cli PING
 
       - name: Start real RedPanda event log
         run: |
@@ -261,8 +263,8 @@ jobs:
       - name: Snapshot whole-system baseline
         run: |
           set -euo pipefail
-          redis-cli INFO commandstats > measurements/adsp-p0-remote/redis-commandstats-before.txt
-          redis-cli INFO memory > measurements/adsp-p0-remote/redis-memory-before.txt
+          docker compose -f activitypods/pod-provider/docker-compose-test.yml exec -T redis redis-cli INFO commandstats > measurements/adsp-p0-remote/redis-commandstats-before.txt
+          docker compose -f activitypods/pod-provider/docker-compose-test.yml exec -T redis redis-cli INFO memory > measurements/adsp-p0-remote/redis-memory-before.txt
           ps -o pid,ppid,rss,%cpu,etime,cmd -p "$(cat measurements/adsp-p0-remote/activitypods.pid)" > measurements/adsp-p0-remote/activitypods-process-before.txt
           ps -o pid,ppid,rss,%cpu,etime,cmd -p "$(cat measurements/adsp-p0-remote/sidecar.pid)" > measurements/adsp-p0-remote/sidecar-process-before.txt
           docker stats --no-stream --format '{{json .}}' > measurements/adsp-p0-remote/docker-stats-before.jsonl
@@ -302,13 +304,19 @@ jobs:
         if: always()
         run: |
           set +e
-          redis-cli INFO commandstats > measurements/adsp-p0-remote/redis-commandstats-after.txt
-          redis-cli INFO memory > measurements/adsp-p0-remote/redis-memory-after.txt
-          docker exec adsp-redpanda rpk topic describe ap.stream1.local-public.v1 > measurements/adsp-p0-remote/redpanda-after.txt 2>&1
-          curl -fsS http://127.0.0.1:18080/stats > measurements/adsp-p0-remote/controlled-target-final.json
-          ps -o pid,ppid,rss,%cpu,etime,cmd -p "$(cat measurements/adsp-p0-remote/activitypods.pid)" > measurements/adsp-p0-remote/activitypods-process-after.txt
-          ps -o pid,ppid,rss,%cpu,etime,cmd -p "$(cat measurements/adsp-p0-remote/sidecar.pid)" > measurements/adsp-p0-remote/sidecar-process-after.txt
-          docker stats --no-stream --format '{{json .}}' > measurements/adsp-p0-remote/docker-stats-after.jsonl
+          if docker compose -f activitypods/pod-provider/docker-compose-test.yml ps -q redis >/dev/null 2>&1; then
+            docker compose -f activitypods/pod-provider/docker-compose-test.yml exec -T redis redis-cli INFO commandstats > measurements/adsp-p0-remote/redis-commandstats-after.txt 2>&1 || true
+            docker compose -f activitypods/pod-provider/docker-compose-test.yml exec -T redis redis-cli INFO memory > measurements/adsp-p0-remote/redis-memory-after.txt 2>&1 || true
+          fi
+          docker exec adsp-redpanda rpk topic describe ap.stream1.local-public.v1 > measurements/adsp-p0-remote/redpanda-after.txt 2>&1 || true
+          curl -fsS http://127.0.0.1:18080/stats > measurements/adsp-p0-remote/controlled-target-final.json 2>/dev/null || true
+          if [[ -f measurements/adsp-p0-remote/activitypods.pid ]]; then
+            ps -o pid,ppid,rss,%cpu,etime,cmd -p "$(cat measurements/adsp-p0-remote/activitypods.pid)" > measurements/adsp-p0-remote/activitypods-process-after.txt 2>&1 || true
+          fi
+          if [[ -f measurements/adsp-p0-remote/sidecar.pid ]]; then
+            ps -o pid,ppid,rss,%cpu,etime,cmd -p "$(cat measurements/adsp-p0-remote/sidecar.pid)" > measurements/adsp-p0-remote/sidecar-process-after.txt 2>&1 || true
+          fi
+          docker stats --no-stream --format '{{json .}}' > measurements/adsp-p0-remote/docker-stats-after.jsonl 2>&1 || true
 
       - name: Validate final evidence set
         run: |
@@ -336,7 +344,8 @@ jobs:
             schema: 'adsp.p0.activitypods-origin-live-evidence.v1',
             complete: true,
             activityPodsCommitSha: process.env.ACTIVITYPODS_SHA,
-            federationCommitSha: process.env.GITHUB_SHA,
+            federationCandidateSha: process.env.FEDERATION_CANDIDATE_SHA,
+            federationCheckoutSha: process.env.GITHUB_SHA,
             cases: cases.map(c => ({
               scenario: c.scenario,
               activityId: c.origin.activityId,
@@ -376,9 +385,9 @@ jobs:
         if: always()
         run: |
           set +e
-          kill "$(cat measurements/adsp-p0-remote/sidecar.pid)" 2>/dev/null || true
-          kill "$(cat measurements/adsp-p0-remote/activitypods.pid)" 2>/dev/null || true
-          kill "$(cat measurements/adsp-p0-remote/controlled-target.pid)" 2>/dev/null || true
+          if [[ -f measurements/adsp-p0-remote/sidecar.pid ]]; then kill "$(cat measurements/adsp-p0-remote/sidecar.pid)" 2>/dev/null || true; fi
+          if [[ -f measurements/adsp-p0-remote/activitypods.pid ]]; then kill "$(cat measurements/adsp-p0-remote/activitypods.pid)" 2>/dev/null || true; fi
+          if [[ -f measurements/adsp-p0-remote/controlled-target.pid ]]; then kill "$(cat measurements/adsp-p0-remote/controlled-target.pid)" 2>/dev/null || true; fi
           docker rm -f adsp-redpanda >/dev/null 2>&1 || true
           cd activitypods/pod-provider
           docker compose -f docker-compose-test.yml down -v || true
