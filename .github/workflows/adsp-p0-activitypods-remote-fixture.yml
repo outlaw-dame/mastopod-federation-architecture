@@ -216,6 +216,7 @@ jobs:
           DOMAIN=localhost \
           SIDECAR_STARTUP_MODE=blocking \
           REDIS_URL=redis://127.0.0.1:6379 \
+          APDM_COMPLETION_MARKER_V2_CUTOVER=fresh \
           REDPANDA_BROKERS=127.0.0.1:19092 \
           REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false \
           STREAM1_TOPIC=ap.stream1.local-public.v1 \
@@ -250,9 +251,14 @@ jobs:
           REQUEST_TIMEOUT_MS=5000 \
             npm run server:dev > ../measurements/adsp-p0-remote/sidecar.log 2>&1 &
           echo "$!" > ../measurements/adsp-p0-remote/sidecar.pid
+          sidecar_pid="$(cat ../measurements/adsp-p0-remote/sidecar.pid)"
           ready=false
           for attempt in $(seq 1 120); do
             if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null; then ready=true; break; fi
+            if ! kill -0 "${sidecar_pid}" 2>/dev/null; then
+              tail -n 500 ../measurements/adsp-p0-remote/sidecar.log
+              exit 1
+            fi
             sleep 1
           done
           if [[ "${ready}" != true ]]; then
