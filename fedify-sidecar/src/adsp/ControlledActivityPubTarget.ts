@@ -12,6 +12,8 @@ export type AdspControlledRemoteScenario =
 export interface ControlledTargetObservation {
   sequence: number;
   scenario: AdspControlledRemoteScenario;
+  scenarioAttempt: number;
+  payloadAttempt: number;
   method: string;
   path: string;
   bodyBytes: number;
@@ -27,7 +29,9 @@ export interface ControlledTargetObservation {
 export interface ControlledTargetSnapshot {
   version: 1;
   transientFailuresBeforeSuccess: number;
+  maxObservations: number;
   totalRequests: number;
+  droppedObservations: number;
   counts: Record<AdspControlledRemoteScenario, number>;
   observations: ControlledTargetObservation[];
 }
@@ -63,43 +67,66 @@ function hasNonEmptyHeader(
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function assertPositiveInteger(name: string, value: number): void {
+function assertNonNegativeSafeInteger(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new TypeError(`${name} must be a non-negative safe integer`);
   }
 }
 
+function assertPositiveSafeInteger(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+}
+
 export class ControlledActivityPubTargetState {
   private readonly transientFailuresBeforeSuccess: number;
+  private readonly maxObservations: number;
   private readonly observations: ControlledTargetObservation[] = [];
+  private readonly payloadAttempts = new Map<string, number>();
   private readonly counts: Record<AdspControlledRemoteScenario, number> = {
     success: 0,
     transient: 0,
     permanent: 0,
   };
+  private totalRequests = 0;
+  private droppedObservations = 0;
 
-  constructor(options: { transientFailuresBeforeSuccess?: number } = {}) {
+  constructor(
+    options: {
+      transientFailuresBeforeSuccess?: number;
+      maxObservations?: number;
+    } = {},
+  ) {
     const transientFailuresBeforeSuccess =
       options.transientFailuresBeforeSuccess ?? 2;
-    assertPositiveInteger(
+    const maxObservations = options.maxObservations ?? 10_000;
+    assertNonNegativeSafeInteger(
       "transientFailuresBeforeSuccess",
       transientFailuresBeforeSuccess,
     );
+    assertPositiveSafeInteger("maxObservations", maxObservations);
     this.transientFailuresBeforeSuccess = transientFailuresBeforeSuccess;
+    this.maxObservations = maxObservations;
   }
 
   reset(): void {
     this.observations.length = 0;
+    this.payloadAttempts.clear();
     this.counts.success = 0;
     this.counts.transient = 0;
     this.counts.permanent = 0;
+    this.totalRequests = 0;
+    this.droppedObservations = 0;
   }
 
   snapshot(): ControlledTargetSnapshot {
     return {
       version: 1,
       transientFailuresBeforeSuccess: this.transientFailuresBeforeSuccess,
-      totalRequests: this.observations.length,
+      maxObservations: this.maxObservations,
+      totalRequests: this.totalRequests,
+      droppedObservations: this.droppedObservations,
       counts: { ...this.counts },
       observations: this.observations.map(observation => ({ ...observation })),
     };
@@ -116,13 +143,21 @@ export class ControlledActivityPubTargetState {
 
     const contentType = normalizeSingleHeader(request.headers["content-type"]);
     const body = Buffer.from(request.body);
+    const bodySha256 = createHash("sha256").update(body).digest("hex");
+    const payloadAttempt = (this.payloadAttempts.get(bodySha256) ?? 0) + 1;
+    this.payloadAttempts.set(bodySha256, payloadAttempt);
+    this.counts[request.scenario] += 1;
+    this.totalRequests += 1;
+
     const observation: ControlledTargetObservation = {
-      sequence: this.observations.length + 1,
+      sequence: this.totalRequests,
       scenario: request.scenario,
+      scenarioAttempt: this.counts[request.scenario],
+      payloadAttempt,
       method: request.method.toUpperCase(),
       path: request.path,
       bodyBytes: body.byteLength,
-      bodySha256: createHash("sha256").update(body).digest("hex"),
+      bodySha256,
       contentType,
       host: normalizeSingleHeader(request.headers.host),
       hasDate: hasNonEmptyHeader(request.headers, "date"),
@@ -131,8 +166,11 @@ export class ControlledActivityPubTargetState {
       receivedAtMs: request.nowMs ?? Date.now(),
     };
 
+    if (this.observations.length >= this.maxObservations) {
+      this.observations.shift();
+      this.droppedObservations += 1;
+    }
     this.observations.push(observation);
-    this.counts[request.scenario] += 1;
 
     if (
       !observation.hasDate ||
@@ -169,21 +207,25 @@ export class ControlledActivityPubTargetState {
 
     if (
       request.scenario === "transient" &&
-      this.counts.transient <= this.transientFailuresBeforeSuccess
+      payloadAttempt <= this.transientFailuresBeforeSuccess
     ) {
       return {
         statusCode: 503,
         headers: { "retry-after": "0" },
         body: JSON.stringify({
           error: "controlled_transient_failure",
-          attempt: this.counts.transient,
+          payloadAttempt,
         }),
       };
     }
 
     return {
       statusCode: 202,
-      body: JSON.stringify({ accepted: true, scenario: request.scenario }),
+      body: JSON.stringify({
+        accepted: true,
+        scenario: request.scenario,
+        payloadAttempt,
+      }),
     };
   }
 }
