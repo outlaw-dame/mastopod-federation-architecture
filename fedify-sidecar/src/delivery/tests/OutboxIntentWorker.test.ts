@@ -133,6 +133,98 @@ describe("OutboxIntentWorker", () => {
     expect(queue.moveToDlq).not.toHaveBeenCalled();
   });
 
+  it("deduplicates recipients only when ActivityPods supplied the same exact shared inbox", async () => {
+    const queue = makeQueue({
+      enqueueOutboundBatchForIntent: vi.fn().mockResolvedValue({ enqueued: true, jobCount: 1 }),
+    });
+    const worker = new TestOutboxIntentWorker(queue, makeRedpanda(), makeConfig());
+    const intent = makeIntent({
+      targets: [
+        {
+          inboxUrl: "https://remote.example/users/bob/inbox",
+          sharedInboxUrl: "https://remote.example/inbox",
+          deliveryUrl: "https://remote.example/inbox",
+          targetDomain: "remote.example",
+        },
+        {
+          inboxUrl: "https://remote.example/users/carol/inbox",
+          sharedInboxUrl: "https://remote.example/inbox",
+          deliveryUrl: "https://remote.example/inbox",
+          targetDomain: "remote.example",
+        },
+      ],
+    });
+
+    await worker.runIntent("msg-shared", intent);
+
+    const jobs = queue.enqueueOutboundBatchForIntent.mock.calls[0]?.[1] as Array<{ targetInbox: string }>;
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.targetInbox).toBe("https://remote.example/inbox");
+  });
+
+  it("keeps distinct advertised shared inboxes on one hostname separate", async () => {
+    const queue = makeQueue({
+      enqueueOutboundBatchForIntent: vi.fn().mockResolvedValue({ enqueued: true, jobCount: 2 }),
+    });
+    const worker = new TestOutboxIntentWorker(queue, makeRedpanda(), makeConfig());
+    const intent = makeIntent({
+      targets: [
+        {
+          inboxUrl: "https://remote.example/users/bob/inbox",
+          sharedInboxUrl: "https://remote.example/inbox/team-a",
+          deliveryUrl: "https://remote.example/inbox/team-a",
+          targetDomain: "remote.example",
+        },
+        {
+          inboxUrl: "https://remote.example/users/carol/inbox",
+          sharedInboxUrl: "https://remote.example/inbox/team-b",
+          deliveryUrl: "https://remote.example/inbox/team-b",
+          targetDomain: "remote.example",
+        },
+      ],
+    });
+
+    await worker.runIntent("msg-distinct-shared", intent);
+
+    const jobs = queue.enqueueOutboundBatchForIntent.mock.calls[0]?.[1] as Array<{ targetInbox: string }>;
+    expect(jobs.map((job) => job.targetInbox).sort()).toEqual([
+      "https://remote.example/inbox/team-a",
+      "https://remote.example/inbox/team-b",
+    ]);
+  });
+
+  it("uses the personal inbox when sharedInboxUrl is absent and never invokes rediscovery", async () => {
+    const queue = makeQueue();
+    const sharedInboxCache = {
+      enrichTargets: vi.fn().mockRejectedValue(new Error("must not run")),
+    } as any;
+    const worker = new TestOutboxIntentWorker(
+      queue,
+      makeRedpanda(),
+      makeConfig({ sharedInboxCache }),
+    );
+    const intent = makeIntent({
+      targets: [
+        {
+          inboxUrl: "https://remote.example/users/bob/inbox",
+          deliveryUrl: "https://remote.example/users/bob/inbox",
+          targetDomain: "remote.example",
+        },
+      ],
+    });
+
+    await worker.runIntent("msg-personal-fallback", intent);
+
+    expect(sharedInboxCache.enrichTargets).not.toHaveBeenCalled();
+    expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledWith(
+      intent.intentId,
+      expect.arrayContaining([
+        expect.objectContaining({ targetInbox: "https://remote.example/users/bob/inbox" }),
+      ]),
+    );
+    expect(queue.moveToDlq).not.toHaveBeenCalled();
+  });
+
   it("publishes observation-only intents and completes with an atomic zero-job fan-out", async () => {
     const queue = makeQueue({
       enqueueOutboundBatchForIntent: vi.fn().mockResolvedValue({ enqueued: true, jobCount: 0 }),
@@ -173,14 +265,7 @@ describe("OutboxIntentWorker", () => {
     const queue = makeQueue();
     const redpanda = makeRedpanda();
     const sharedInboxCache = {
-      enrichTargets: vi.fn().mockResolvedValue([
-        {
-          inboxUrl: "https://remote.example/users/bob/inbox",
-          sharedInboxUrl: "https://remote.example/inbox",
-          deliveryUrl: "https://remote.example/inbox",
-          targetDomain: "remote.example",
-        },
-      ]),
+      enrichTargets: vi.fn().mockRejectedValue(new Error("must not run")),
     } as any;
     const worker = new TestOutboxIntentWorker(
       queue,
@@ -191,7 +276,7 @@ describe("OutboxIntentWorker", () => {
 
     await worker.runIntent("msg-target-bearing-reserved-hint", intent);
 
-    expect(sharedInboxCache.enrichTargets).toHaveBeenCalledTimes(1);
+    expect(sharedInboxCache.enrichTargets).not.toHaveBeenCalled();
     expect(redpanda.publishToStream1).toHaveBeenCalledTimes(1);
     expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledTimes(1);
     expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledWith(

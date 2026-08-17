@@ -26,6 +26,13 @@ export interface OutboxIntentWorkerConfig {
   concurrency: number;
   outboundJobMaxAttempts: number;
   activityPubOutboundDeliveryPolicy: ActivityPubOutboundDeliveryPolicy;
+  /**
+   * Legacy construction seam retained temporarily for source compatibility.
+   * APDM delivery targets already carry the authoritative per-recipient
+   * sharedInboxUrl resolved by ActivityPods, so the worker deliberately does
+   * not perform sidecar actor rediscovery. Missing sharedInboxUrl falls back
+   * to the recipient's personal inbox.
+   */
   sharedInboxCache?: RemoteSharedInboxCache;
 }
 
@@ -43,7 +50,6 @@ export class OutboxIntentWorker {
   private readonly queue: RedisStreamsQueue;
   private readonly redpanda: RedPandaProducer | null;
   private readonly config: OutboxIntentWorkerConfig;
-  private readonly sharedInboxCache: RemoteSharedInboxCache | null;
   private isRunning = false;
   private activeJobs = 0;
 
@@ -55,7 +61,6 @@ export class OutboxIntentWorker {
     this.queue = queue;
     this.redpanda = redpanda;
     this.config = config;
-    this.sharedInboxCache = config.sharedInboxCache ?? null;
   }
 
   async start(): Promise<void> {
@@ -156,19 +161,15 @@ export class OutboxIntentWorker {
         return;
       }
 
-      const enrichedTargets = this.sharedInboxCache
-        ? await this.sharedInboxCache.enrichTargets(intent.targets).catch((err: Error) => {
-            logger.warn("Outbound sharedInbox enrichment failed (using original targets)", {
-              intentId: intent.intentId,
-              error: err.message,
-            });
-            return intent.targets;
-          })
-        : intent.targets;
-
+      // ActivityPods is the APDM recipient authority and has already resolved
+      // each remote actor's personal inbox plus optional endpoints.sharedInbox.
+      // Re-normalize and dedupe that durable target snapshot, but never fetch a
+      // remote actor again here merely to discover a shared inbox. This keeps
+      // shared-inbox use optional: supplied exact endpoint when known, personal
+      // inbox fallback when absent.
       const normalizedTargets = normalizeAndDedupeOutboundTargets(
-        enrichedTargets,
-        { maxTargetsPerRequest: Math.max(enrichedTargets.length, 1) },
+        intent.targets,
+        { maxTargetsPerRequest: Math.max(intent.targets.length, 1) },
       );
       if (normalizedTargets.targets.length === 0) {
         throw new OutboxIntentProcessingError(
