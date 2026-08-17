@@ -1,12 +1,12 @@
 # ADSP Phases
 
-This is the ordered cross-repository ActivityPods Distributed Scalability Program roadmap. `STATUS.md` carries the live evidence ledger and `BENCHMARK-CONTRACT.md` defines comparison rules.
+This is the ordered cross-repository ActivityPods Distributed Scalability Program roadmap. `STATUS.md` carries the live evidence ledger, `P0-SOURCE-BASELINE.md` freezes source-level baseline facts and `BENCHMARK-CONTRACT.md` defines comparison rules.
 
 ## Completion rule
 
 A checked phase means its **exit gate is closed**. Preparatory code, a successful unit test, a running distributed topology, or a faster single benchmark does not by itself complete a phase.
 
-Later phases may not be promoted by assumption. In particular, NATS Core, Redis Streams and JetStream remain conditional candidates until their preceding evidence gates close.
+Later phases may not be promoted by assumption. NATS Core remains an unselected transporter candidate, additional Redis Streams use remains workload-specific, and JetStream remains gated behind reproduced limitations in the incumbent Redis durability model.
 
 ## Program checklist
 
@@ -14,8 +14,8 @@ Later phases may not be promoted by assumption. In particular, NATS Core, Redis 
 - [ ] Phase 1 — Safe distributable Moleculer fabric — blocked by Phase 0
 - [ ] Phase 2 — Horizontal ActivityPods with Redis transporter — blocked by Phase 1
 - [ ] Phase 3 — NATS Core transporter comparison — blocked by Phase 2
-- [ ] Phase 4 — Redis Streams for qualified durable event workloads — blocked by Phase 3 and workload evidence
-- [ ] Phase 5 — Conditional JetStream evaluation — blocked unless Phase 4 exposes a material limitation
+- [ ] Phase 4 — Extend/reuse Redis Streams for qualified additional workloads — blocked by Phase 3 and workload evidence
+- [ ] Phase 5 — Conditional JetStream evaluation — blocked unless a material incumbent Redis limitation is reproduced
 - [ ] Phase 6 — Deployment profiles, stabilization and closeout — blocked by selected architecture
 
 ## Phase 0 — Freeze topology baseline, authority and benchmark contract
@@ -32,8 +32,8 @@ Goals:
 - record exact repository heads used for the baseline.
 
 Exit gate:
-- [ ] current runtime topology is source-verified in both repositories;
-- [ ] Redis responsibilities are classified as state/cache, existing durable job, or candidate event-stream workload;
+- [ ] current source/runtime topology is verified in both repositories;
+- [ ] Redis responsibilities are classified as state/cache, incumbent durable queue/stream, or candidate additional workload;
 - [ ] baseline workload matrix and whole-system telemetry are reproducible;
 - [ ] benchmark variance is measured and comparison thresholds are locked before NATS testing;
 - [ ] APDM/Tier 1/Tier 2 authority boundaries are confirmed unchanged;
@@ -77,7 +77,7 @@ Topology:
 - multiple ActivityPods backend replicas;
 - Redis Moleculer transporter;
 - Redis continues its existing state/cache/queue responsibilities;
-- Fedify sidecar durability remains unchanged;
+- Fedify sidecar keeps its incumbent Redis Streams durability unchanged;
 - tightly coupled Tier 1 services remain colocated according to Phase 1 locality groups.
 
 Exit gate:
@@ -93,7 +93,7 @@ Exit gate:
 **Status:** BLOCKED by Phase 2  
 **Primary:** `ADSP-P3-A`; `ADSP-P3-F` for whole-stack evidence.
 
-Replace **only** the distributed Moleculer transporter with NATS Core. Redis remains unchanged for state/cache/existing queues and the Fedify sidecar keeps its current durable Redis-backed path.
+Replace **only** the distributed Moleculer transporter with NATS Core. Redis remains unchanged for state/cache/existing queues and the Fedify sidecar keeps its incumbent Redis Streams durable path.
 
 Comparison rule:
 - same service grouping;
@@ -112,35 +112,40 @@ Exit gate:
 - [ ] a promotion decision is recorded: keep Redis transporter, adopt NATS Core for a distributed profile, or gather more evidence;
 - [ ] NATS is not retained merely because it is technically functional.
 
-## Phase 4 — Redis Streams for qualified durable event workloads
+## Phase 4 — Extend/reuse Redis Streams for qualified additional workloads
 
 **Status:** NOT STARTED / conditional  
 **Slices:** assigned per workload; may be ActivityPods, federation, or both.
 
-Evaluate Redis Streams only for **new or refactored workloads that require stream semantics**: ordered durable events, replay, consumer groups, acknowledgements and horizontally distributed workers.
+Redis Streams are already incumbent federation infrastructure. This phase therefore does **not** introduce Redis Streams to the architecture and does not rewrite the existing sidecar queues simply to satisfy the roadmap.
 
-This phase must not replace working Bull-style queues or Fedify durability without a workload-specific reason.
+Evaluate reuse or extension of the existing Streams model only for an **additional new or refactored workload that genuinely requires stream semantics** such as ordered durable events, replay, consumer groups, acknowledgements or horizontally distributed workers.
 
-Exit gate for each candidate workload:
-- [ ] queue/stream semantics are classified before implementation;
-- [ ] existing queue cannot satisfy the requirement as simply or efficiently, or Streams provides a measured benefit;
+The existing federation Streams implementation is part of the Phase 0/2/3 baseline and remains unchanged during the Moleculer transporter comparison. Working Bull-style queues or other established durability are not migrated merely for technology uniformity.
+
+Entry/exit gate for each additional candidate workload:
+- [ ] the workload's queue/stream semantics are classified before implementation;
+- [ ] the incumbent queue mechanism cannot satisfy the requirement as simply or efficiently, or reusing Streams provides a measured material benefit;
+- [ ] reuse of the existing Streams abstraction/topology is preferred over creating a duplicate queue implementation unless evidence requires separation;
 - [ ] idempotency, retry, poison-message/DLQ, retention and replay bounds are explicit;
 - [ ] Redis failover/data-loss semantics are tested against the workload's durability requirement;
-- [ ] consumer-group recovery and pending-entry handling are proven;
+- [ ] consumer-group recovery and pending-entry handling are proven where the workload uses them;
 - [ ] memory growth and stream trimming behavior are bounded;
-- [ ] workload-specific promotion decision is recorded.
+- [ ] workload-specific promotion or rejection decision is recorded.
+
+If no additional workload qualifies, Phase 4 closes as **NOT REQUIRED FOR ADDITIONAL WORKLOADS**; the incumbent federation Redis Streams remain part of the architecture regardless.
 
 ## Phase 5 — Conditional JetStream evaluation
 
-**Status:** BLOCKED unless Phase 4 exposes a material limitation
+**Status:** BLOCKED unless a material incumbent Redis limitation is reproduced
 
-JetStream is not part of the default plan. It may be evaluated only when a documented limitation in Redis Streams or the existing Redis queue topology materially affects HA, partitioning, flow control, recovery, throughput, or operational safety.
+JetStream is not part of the default plan. It may be evaluated only when a documented limitation in the incumbent Redis Streams/queue topology materially affects HA, partitioning, flow control, recovery, throughput, or operational safety for a required production workload.
 
 Entry gate:
-- [ ] a concrete Redis limitation is reproduced and quantified;
+- [ ] a concrete Redis limitation is reproduced and quantified under the relevant existing or Phase-4-qualified workload;
 - [ ] the limitation matters to a required production workload;
-- [ ] application-level Redis partitioning/topology options have been considered;
-- [ ] the expected JetStream benefit is large enough to justify a second durable subsystem.
+- [ ] application-level Redis partitioning/topology and simpler Redis-native options have been considered;
+- [ ] the expected JetStream benefit is large enough to justify operating a second durable subsystem.
 
 Exit gate:
 - [ ] matched correctness, throughput and failure evidence exists for Redis and JetStream arms;
@@ -160,7 +165,8 @@ Expected profiles:
 - low-resource/single-node ActivityPods profile;
 - horizontal Redis-transporter profile if retained;
 - horizontal NATS-Core profile only if Phase 3 earns it;
-- Redis Streams only for workloads promoted in Phase 4;
+- incumbent federation Redis Streams preserved;
+- additional Redis Streams use only for workloads promoted in Phase 4;
 - JetStream only for workloads/profiles promoted in Phase 5.
 
 Exit gate:
