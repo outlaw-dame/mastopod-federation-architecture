@@ -159,7 +159,7 @@ export class ControlledActivityPubTargetState {
       bodyBytes: body.byteLength,
       bodySha256,
       contentType,
-      host: normalizeSingleHeader(request.headers.host),
+      host: normalizeSingleHeader(request.headers["host"]),
       hasDate: hasNonEmptyHeader(request.headers, "date"),
       hasDigest: hasNonEmptyHeader(request.headers, "digest"),
       hasSignature: hasNonEmptyHeader(request.headers, "signature"),
