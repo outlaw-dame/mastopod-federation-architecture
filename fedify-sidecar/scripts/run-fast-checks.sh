@@ -27,6 +27,7 @@ npm exec -- vitest run \
   src/admin/mrf/routes.registry.test.ts \
   src/fep3ab2/tests/Fep3ab2ClientIpBoundary.test.ts \
   src/federation/fep8fcf/FedifyFollowersSyncSender.test.ts \
+  src/federation/fep8fcf/FollowersSyncService.test.ts \
   src/federation/tests/FedifyFastifyBridge.test.ts \
   src/federation/tests/FedifyFederationAdapterOutbound.test.ts \
   src/federation/tests/Phase5OutboundProtocolMatrix.test.ts \
