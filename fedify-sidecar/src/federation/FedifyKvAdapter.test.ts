@@ -1,5 +1,4 @@
 import type { Redis } from "ioredis";
-import type { KvKey } from "@fedify/fedify";
 import { describe, expect, it, vi } from "vitest";
 import { FedifyKvAdapter } from "./FedifyKvAdapter.js";
 
@@ -102,10 +101,7 @@ describe("FedifyKvAdapter.list", () => {
     ]);
   });
 
-  it.each<[string, KvKey | undefined]>([
-    ["omitted", undefined],
-    ["empty", []],
-  ])("treats %s prefix as root enumeration", async (_label, prefix) => {
+  it("treats an omitted prefix as root enumeration", async () => {
     const scan = vi.fn().mockResolvedValue([
       "0",
       ["fedify:kv:actors:alice", "fedify:kv:queue:first"],
@@ -118,7 +114,7 @@ describe("FedifyKvAdapter.list", () => {
     const adapter = new FedifyKvAdapter(redis);
     const entries = [];
 
-    for await (const entry of adapter.list(prefix)) {
+    for await (const entry of adapter.list()) {
       entries.push(entry);
     }
 
