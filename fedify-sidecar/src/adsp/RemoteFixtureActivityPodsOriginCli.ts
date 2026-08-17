@@ -8,6 +8,7 @@ import {
   settleActivityPodsRemoteOriginFixture,
 } from "./RemoteFixtureActivityPodsOrigin.js";
 import { assertActivityPodsOriginMatchesControlledScenario } from "./RemoteFixtureControlledOriginBinding.js";
+import { requireActivityPodsOriginRedPandaProof } from "./RemoteFixtureRedPandaProof.js";
 
 function optionalNonNegativeSafeInteger(name: string, value: string | undefined): number | undefined {
   if (value === undefined || value === "") return undefined;
@@ -74,6 +75,10 @@ export async function runActivityPodsRemoteOriginCli(
         ? { transientFailuresBeforeSuccess }
         : {}),
     });
+    const eventLogPublishedAt = await requireActivityPodsOriginRedPandaProof({
+      redisUrl: config.redisUrl,
+      intentId: result.intentId,
+    });
     return {
       ok: result.reconciliation.complete,
       schema: result.schema,
@@ -81,6 +86,7 @@ export async function runActivityPodsRemoteOriginCli(
       activityId: result.activityId,
       intentId: result.intentId,
       jobId: result.jobId,
+      eventLogPublishedAt,
       observedBodySha256: result.reconciliation.observedBodySha256,
       observedRequests: result.reconciliation.observedRequests,
       errors: result.reconciliation.errors,
