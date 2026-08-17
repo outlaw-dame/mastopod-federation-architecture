@@ -57,7 +57,7 @@ describe("FEP-8fcf Fedify outbound sender", () => {
     expect(buildSenderHeader).toHaveBeenCalledTimes(1);
   });
 
-  it("coalesces concurrent builds for the same actor and target origin", async () => {
+  it("coalesces concurrent builds for the same followers collection and target origin", async () => {
     let resolveHeader!: (value: string) => void;
     const headerPromise = new Promise<string>((resolve) => {
       resolveHeader = resolve;
@@ -92,6 +92,38 @@ describe("FEP-8fcf Fedify outbound sender", () => {
       "collectionId=\"x\", digest=\"y\", url=\"z\"",
     ]);
     expect(buildSenderHeader).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not coalesce distinct followers collection URIs that share a local identifier", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const buildSenderHeader = vi.fn(async (_actorIdentifier: string, followersUri: string) => {
+      await gate;
+      return followersUri;
+    });
+    const sender = new FedifyFollowersSyncSender("example.com", { buildSenderHeader });
+    const secureActor = "https://example.com/users/alice";
+    const alternateActor = "http://example.com/users/alice";
+
+    const first = sender.buildHeader({
+      actorUri: secureActor,
+      activity: activity({ cc: [`${secureActor}/followers`] }, secureActor),
+      targetInbox: "https://remote.example/inbox",
+    });
+    const second = sender.buildHeader({
+      actorUri: alternateActor,
+      activity: activity({ cc: [`${alternateActor}/followers`] }, alternateActor),
+      targetInbox: "https://remote.example/shared/inbox",
+    });
+
+    expect(buildSenderHeader).toHaveBeenCalledTimes(2);
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      `${secureActor}/followers`,
+      `${alternateActor}/followers`,
+    ]);
   });
 
   it("does not coalesce different target origins", async () => {
