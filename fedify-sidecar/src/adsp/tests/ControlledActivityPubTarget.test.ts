@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   ControlledActivityPubTargetState,
@@ -5,18 +6,24 @@ import {
 } from "../ControlledActivityPubTarget.js";
 import { createControlledActivityPubTargetServer } from "../ControlledActivityPubTargetServer.js";
 
-const SIGNED_HEADERS: Record<string, string> = {
-  host: "127.0.0.1:18080",
-  date: "Mon, 17 Aug 2026 21:00:00 GMT",
-  digest: "SHA-256=abc",
-  signature: 'keyId="https://pods.example/alice#main-key",signature="abc"',
-  "content-type": "application/activity+json",
-};
+function digestFor(body: string): string {
+  return `SHA-256=${createHash("sha256").update(body).digest("base64")}`;
+}
+
+function signedHeaders(body: string): Record<string, string> {
+  return {
+    host: "127.0.0.1:18080",
+    date: "Mon, 17 Aug 2026 21:00:00 GMT",
+    digest: digestFor(body),
+    signature: 'keyId="https://pods.example/alice#main-key",signature="abc"',
+    "content-type": "application/activity+json",
+  };
+}
 
 function request(
   scenario: "success" | "transient" | "permanent",
   body: string,
-  headers: Record<string, string> = SIGNED_HEADERS,
+  headers: Record<string, string> = signedHeaders(body),
 ) {
   return {
     scenario,
@@ -47,6 +54,7 @@ describe("ControlledActivityPubTargetState", () => {
           bodyBytes: 17,
           hasDate: true,
           hasDigest: true,
+          hasValidDigest: true,
           hasSignature: true,
         },
       ],
@@ -79,23 +87,41 @@ describe("ControlledActivityPubTargetState", () => {
     expect(result.body).toContain("controlled_permanent_failure");
   });
 
-  it("rejects unsigned or incorrectly typed POSTs so a broken signing path cannot look successful", () => {
+  it("rejects missing or invalid signing evidence and malformed media types", () => {
     const state = new ControlledActivityPubTargetState();
+    const body = "{}";
     const unsigned = state.handle(
-      request("success", "{}", {
+      request("success", body, {
         host: "127.0.0.1:18080",
         "content-type": "application/activity+json",
       }),
     );
     expect(unsigned.statusCode).toBe(400);
 
+    const invalidDigest = state.handle(
+      request("success", body, {
+        ...signedHeaders(body),
+        digest: digestFor("different-body"),
+      }),
+    );
+    expect(invalidDigest.statusCode).toBe(400);
+    expect(invalidDigest.body).toContain("invalid_digest");
+
     const wrongType = state.handle(
-      request("success", "{}", {
-        ...SIGNED_HEADERS,
+      request("success", body, {
+        ...signedHeaders(body),
         "content-type": "application/json",
       }),
     );
     expect(wrongType.statusCode).toBe(415);
+
+    const substringType = state.handle(
+      request("success", body, {
+        ...signedHeaders(body),
+        "content-type": "text/x-application/activity+json-invalid",
+      }),
+    );
+    expect(substringType.statusCode).toBe(415);
   });
 
   it("bounds retained observations while keeping exact aggregate request counts", () => {
@@ -137,6 +163,18 @@ describe("ControlledActivityPubTargetState", () => {
 });
 
 describe("controlled ActivityPub target HTTP server", () => {
+  it("rejects non-loopback binds so stats/reset never become a network control surface", () => {
+    expect(() => createControlledActivityPubTargetServer({ host: "0.0.0.0" })).toThrow(
+      /loopback/u,
+    );
+    expect(() => createControlledActivityPubTargetServer({ host: "::" })).toThrow(
+      /loopback/u,
+    );
+    expect(() => createControlledActivityPubTargetServer({ host: "192.0.2.10" })).toThrow(
+      /loopback/u,
+    );
+  });
+
   it("serves actor metadata, signed inbox outcomes, stats, reset, and bounded bodies", async () => {
     const fixture = createControlledActivityPubTargetServer({
       port: 0,
@@ -165,12 +203,7 @@ describe("controlled ActivityPub target HTTP server", () => {
       expect(actor.endpoints.sharedInbox).toBe(actor.inbox);
 
       const body = '{"id":"https://pods.example/activities/1","type":"Create"}';
-      const deliveryHeaders = {
-        date: "Mon, 17 Aug 2026 21:00:00 GMT",
-        digest: "SHA-256=abc",
-        signature: 'keyId="https://pods.example/alice#main-key",signature="abc"',
-        "content-type": "application/activity+json",
-      };
+      const deliveryHeaders = signedHeaders(body);
       const first = await fetch(actor.inbox, {
         method: "POST",
         headers: deliveryHeaders,
@@ -190,21 +223,23 @@ describe("controlled ActivityPub target HTTP server", () => {
       const stats = await statsResponse.json() as {
         totalRequests: number;
         counts: { transient: number };
-        observations: Array<{ payloadAttempt: number; bodyBytes: number }>;
+        observations: Array<{ payloadAttempt: number; bodyBytes: number; hasValidDigest: boolean }>;
       };
       expect(stats.totalRequests).toBe(2);
       expect(stats.counts.transient).toBe(2);
       expect(stats.observations.map(item => item.payloadAttempt)).toEqual([1, 2]);
       expect(stats.observations.every(item => item.bodyBytes === Buffer.byteLength(body))).toBe(true);
+      expect(stats.observations.every(item => item.hasValidDigest)).toBe(true);
 
       const reset = await fetch(`${info.origin}/reset`, { method: "POST" });
       expect(reset.status).toBe(200);
       expect(fixture.snapshot().totalRequests).toBe(0);
 
+      const oversizedBody = "x".repeat(65);
       const oversized = await fetch(`${info.origin}/inbox/success`, {
         method: "POST",
-        headers: deliveryHeaders,
-        body: "x".repeat(65),
+        headers: signedHeaders(oversizedBody),
+        body: oversizedBody,
       });
       expect(oversized.status).toBe(413);
       expect(fixture.snapshot().totalRequests).toBe(0);
