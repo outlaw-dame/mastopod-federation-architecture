@@ -7,14 +7,15 @@ describe("ADSP ActivityPods-origin RedPanda proof", () => {
   });
 
   it("fails closed on missing, malformed, zero, signed, or unsafe markers", () => {
-    for (const raw of [
+    const cases: Array<Record<string, string>> = [
       {},
       { eventLogPublishedAt: "" },
       { eventLogPublishedAt: "0" },
       { eventLogPublishedAt: "+1" },
       { eventLogPublishedAt: "1junk" },
       { eventLogPublishedAt: "9007199254740992" },
-    ]) {
+    ];
+    for (const raw of cases) {
       expect(() => parseRedPandaPublishedAt(raw)).toThrow(/RedPanda|eventLogPublishedAt/u);
     }
   });
