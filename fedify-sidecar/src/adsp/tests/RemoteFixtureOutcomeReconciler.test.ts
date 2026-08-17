@@ -100,6 +100,23 @@ describe("reconcileAdspRemoteFixtureOutcome", () => {
     expect(result.errors.join(" ")).toMatch(/expected exactly 2 remote request/u);
   });
 
+  it("rejects unrelated target traffic instead of assuming fixture isolation", () => {
+    const state = new ControlledActivityPubTargetState();
+    const activityId = "https://pods.example/activities/isolated";
+    expect(hit(state, "success", JSON.stringify({ id: activityId })).statusCode).toBe(202);
+    expect(hit(state, "success", JSON.stringify({ id: "https://pods.example/activities/unrelated" })).statusCode).toBe(202);
+
+    const result = reconcileAdspRemoteFixtureOutcome({
+      expectation: { scenario: "success", activityId },
+      target: state.snapshot(),
+      durable: durable(),
+    });
+
+    expect(result.complete).toBe(false);
+    expect(result.observedRequests).toBe(1);
+    expect(result.errors.join(" ")).toMatch(/only 1 belong to the expected Activity\/scenario/u);
+  });
+
   it("rejects retries whose Activity id is stable but body bytes change", () => {
     const state = new ControlledActivityPubTargetState({ transientFailuresBeforeSuccess: 1 });
     const activityId = "https://pods.example/activities/mutated-retry";
