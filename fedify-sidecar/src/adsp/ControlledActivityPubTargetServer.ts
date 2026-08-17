@@ -39,6 +39,13 @@ export interface ControlledActivityPubTargetServer {
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 18080;
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
+
+function assertLoopbackHost(value: string): void {
+  if (!LOOPBACK_HOSTS.has(value)) {
+    throw new TypeError("controlled ActivityPub target host must be an explicit loopback address");
+  }
+}
 
 function assertPort(value: number): void {
   if (!Number.isSafeInteger(value) || value < 0 || value > 65_535) {
@@ -78,6 +85,7 @@ async function readBoundedBody(
     const bytes = Buffer.from(chunk);
     total += bytes.byteLength;
     if (total > maxBytes) {
+      request.destroy();
       throw new RangeError(`request body exceeded ${maxBytes} bytes`);
     }
     chunks.push(bytes);
@@ -116,10 +124,7 @@ function listeningInfo(server: Server, configuredHost: string): ControlledActivi
     throw new Error("controlled ActivityPub target did not expose a TCP address");
   }
   const info = address as AddressInfo;
-  const publicHost = configuredHost === "0.0.0.0" || configuredHost === "::"
-    ? "127.0.0.1"
-    : configuredHost;
-  const origin = `http://${publicHost.includes(":") ? `[${publicHost}]` : publicHost}:${info.port}`;
+  const origin = `http://${configuredHost.includes(":") ? `[${configuredHost}]` : configuredHost}:${info.port}`;
   return {
     origin,
     host: configuredHost,
@@ -139,6 +144,7 @@ export function createControlledActivityPubTargetServer(
   const host = options.host ?? DEFAULT_HOST;
   const port = options.port ?? DEFAULT_PORT;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  assertLoopbackHost(host);
   assertPort(port);
   assertPositiveSafeInteger("maxBodyBytes", maxBodyBytes);
 
