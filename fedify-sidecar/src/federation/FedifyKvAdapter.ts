@@ -47,6 +47,10 @@ export class FedifyKvAdapter implements KvStore {
     return (parts.length > 0 ? parts : [""]) as unknown as KvKey;
   }
 
+  private escapeScanPattern(value: string): string {
+    return value.replace(/([*?[\]\\])/gu, "\\$1");
+  }
+
   private ttlSeconds(ttl: unknown): number | null {
     if (ttl == null) return null;
     if (
@@ -92,9 +96,17 @@ export class FedifyKvAdapter implements KvStore {
   // list() is required in Fedify 2.x (was optional in 1.x).
   // Redis SCAN keeps enumeration memory-bounded. Values are fetched once per
   // SCAN page with MGET instead of issuing one sequential GET round-trip per key.
+  // Fedify prefixes are arrays of key components, so ["foo"] must include the
+  // exact ["foo"] key and descendants like ["foo", "bar"], but never the
+  // sibling ["foobar"]. SCAN is therefore only a coarse candidate filter; the
+  // component boundary is enforced before MGET so unrelated values are not read.
   async *list(prefix?: KvKey): AsyncIterable<KvStoreListEntry> {
-    const prefixKey = this.encodeKey(prefix ?? [""]);
-    const pattern = `${prefixKey}*`;
+    const hasComponentPrefix = prefix != null && prefix.length > 0;
+    const prefixKey = hasComponentPrefix
+      ? this.encodeKey(prefix)
+      : `${this.namespace}:`;
+    const pattern = `${this.escapeScanPattern(prefixKey)}*`;
+    const descendantPrefix = `${prefixKey}:`;
     let cursor = "0";
 
     do {
@@ -109,8 +121,13 @@ export class FedifyKvAdapter implements KvStore {
 
       if (keys.length === 0) continue;
 
-      const values = await this.redis.mget(...keys);
-      for (const [index, rawKey] of keys.entries()) {
+      const eligibleKeys = hasComponentPrefix
+        ? keys.filter(rawKey => rawKey === prefixKey || rawKey.startsWith(descendantPrefix))
+        : keys.filter(rawKey => rawKey.startsWith(prefixKey));
+      if (eligibleKeys.length === 0) continue;
+
+      const values = await this.redis.mget(...eligibleKeys);
+      for (const [index, rawKey] of eligibleKeys.entries()) {
         const raw = values[index];
         if (raw == null) continue;
 
