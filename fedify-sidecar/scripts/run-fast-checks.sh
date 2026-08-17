@@ -8,6 +8,7 @@ cd "${SIDECAR_ROOT}"
 
 npm exec -- tsc -p tsconfig.json --noEmit
 npm exec -- vitest run \
+  src/adsp/tests/ControlledActivityPubTarget.test.ts \
   src/queue/tests/RedisStreamsQueue.test.ts \
   src/queue/tests/DelayedOutboundQueue.test.ts \
   src/delivery/tests/ApdmReplayHorizon.test.ts \
