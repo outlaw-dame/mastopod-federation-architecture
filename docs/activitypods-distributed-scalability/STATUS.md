@@ -21,6 +21,18 @@ This file is the live cross-repository evidence ledger for the ActivityPods Dist
 - [ ] ADSP-P5 — JetStream evaluation — conditional / entry gate closed by default
 - [ ] ADSP-P6 — deployment profiles and stabilization — blocked by selected architecture
 
+## Program setup baseline heads
+
+These are the exact `master` heads from which the ADSP setup branches were created. They are the initial source-baseline candidates for Phase 0; runtime/benchmark evidence must still record the exact heads actually executed.
+
+- ActivityPods: `3fad15838ec098d8d32c0f36cd8c75cbb66a46a8`
+- federation architecture: `e20c32fc5d4c9b9157de3063345e050ea3ec5007`
+
+Setup branches:
+
+- ActivityPods: `agent/adsp-program-baseline`
+- federation architecture: `agent/activitypods-distributed-scalability-program`
+
 ## Current architectural baseline
 
 The program begins from these already-established constraints:
@@ -37,7 +49,7 @@ The program begins from these already-established constraints:
 
 | Phase | ActivityPods slice | Federation slice | Gate |
 |---|---|---|---|
-| ADSP-P0 | source/runtime baseline pending | program/benchmark docs established on setup branch; runtime baseline pending | IN PROGRESS |
+| ADSP-P0 | companion program doc created on setup branch; source/runtime baseline pending | program/benchmark docs established on setup branch; runtime baseline pending | IN PROGRESS |
 | ADSP-P1 | not started | as needed | BLOCKED by P0 |
 | ADSP-P2 | not started | evidence coordination later | BLOCKED by P1 |
 | ADSP-P3 | not started | evidence coordination later | BLOCKED by P2 |
@@ -54,7 +66,7 @@ Earlier repository analysis identified immediate distributed-fabric concerns tha
 - RDF serializer configuration appeared coupled to whether the Redis transporter URL was present;
 - the backend normally loaded many service schemas into one `moleculer-runner` process, making current locality substantially different from a fleet of one-service-per-process microservices.
 
-These observations are hypotheses for P0 until exact current source paths, behavior and commit heads are recorded here.
+These observations are hypotheses for P0 until exact current source paths and runtime behavior are recorded here.
 
 ## Existing evidence carried into ADSP
 
@@ -69,7 +81,7 @@ ADSP does not restart scalability research from zero. Relevant already-recorded 
 
 Before P0 can pass, record:
 
-1. exact ActivityPods and federation-architecture baseline commit SHAs;
+1. exact runtime-tested ActivityPods and federation-architecture commit SHAs;
 2. exact current Moleculer broker configuration path and effective defaults;
 3. node ID generation behavior under two simultaneous backends;
 4. namespace behavior/default;
