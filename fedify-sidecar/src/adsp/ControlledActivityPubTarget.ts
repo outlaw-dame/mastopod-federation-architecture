@@ -18,6 +18,8 @@ export interface ControlledTargetObservation {
   path: string;
   bodyBytes: number;
   bodySha256: string;
+  /** ActivityStreams activity id parsed from the exact received body, when present. */
+  activityId: string | null;
   contentType: string | null;
   host: string | null;
   hasDate: boolean;
@@ -98,6 +100,17 @@ function hasValidSha256Digest(
 
   const expected = createHash("sha256").update(body).digest();
   return timingSafeEqual(supplied, expected);
+}
+
+function extractActivityId(body: Buffer): string | null {
+  try {
+    const parsed = JSON.parse(body.toString("utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const id = (parsed as Record<string, unknown>)["id"];
+    return typeof id === "string" && id.length > 0 && id === id.trim() ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 function assertNonNegativeSafeInteger(name: string, value: number): void {
@@ -192,6 +205,7 @@ export class ControlledActivityPubTargetState {
       path: request.path,
       bodyBytes: body.byteLength,
       bodySha256,
+      activityId: extractActivityId(body),
       contentType,
       host: normalizeSingleHeader(request.headers["host"]),
       hasDate: hasNonEmptyHeader(request.headers, "date"),

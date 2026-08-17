@@ -9,6 +9,13 @@ cd "${SIDECAR_ROOT}"
 npm exec -- tsc -p tsconfig.json --noEmit
 npm exec -- vitest run \
   src/adsp/tests/ControlledActivityPubTarget.test.ts \
+  src/adsp/tests/ControlledTargetFixtureClient.test.ts \
+  src/adsp/tests/ControlledTargetSnapshotClient.test.ts \
+  src/adsp/tests/RemoteFixtureDurableObserver.test.ts \
+  src/adsp/tests/RemoteFixtureHandoffClient.test.ts \
+  src/adsp/tests/RemoteFixtureOutcomeReconciler.test.ts \
+  src/adsp/tests/RemoteFixtureRunner.test.ts \
+  src/adsp/tests/RemoteFixtureSettlement.test.ts \
   src/queue/tests/RedisStreamsQueue.test.ts \
   src/queue/tests/DelayedOutboundQueue.test.ts \
   src/delivery/tests/ApdmReplayHorizon.test.ts \
