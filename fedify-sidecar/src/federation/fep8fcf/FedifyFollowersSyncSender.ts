@@ -44,10 +44,16 @@ function kvDigestCache(kv: KvStore): FollowersSyncRedisCache {
 
 export class FedifyFollowersSyncSender implements FollowersSyncHeaderBuilder {
   /**
-   * Coalesce only concurrent header builds for the same local actor and target
-   * origin. FollowersSyncService/Redis remains the TTL cache and cross-process
-   * authority; this map exists solely to prevent an in-process cache-miss
-   * stampede from issuing duplicate ActivityPods reads.
+   * Coalesce only concurrent header builds for the same exact followers
+   * collection and target origin. FollowersSyncService/Redis remains the TTL
+   * cache and cross-process authority; this map exists solely to prevent an
+   * in-process cache-miss stampede from issuing duplicate ActivityPods reads.
+   *
+   * The followers URI, rather than only the extracted actor identifier, is
+   * part of the key because the serialized FEP header embeds collectionId.
+   * Sharing a promise across distinct canonical actor URIs could otherwise
+   * return a header carrying the wrong collectionId even when both URIs map to
+   * the same local identifier.
    */
   private readonly inFlightHeaders = new Map<string, Promise<string | null>>();
 
@@ -73,7 +79,7 @@ export class FedifyFollowersSyncSender implements FollowersSyncHeaderBuilder {
       ? input.actorUri.slice(0, -1)
       : input.actorUri;
     const followersUri = `${normalizedActorUri}/followers`;
-    const coalescingKey = `${actorIdentifier}\n${targetOrigin}`;
+    const coalescingKey = `${followersUri}\n${targetOrigin}`;
 
     const existing = this.inFlightHeaders.get(coalescingKey);
     if (existing) return existing;
