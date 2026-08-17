@@ -4,7 +4,7 @@ import {
   isAdspControlledRemoteScenario,
 } from "../ControlledActivityPubTarget.js";
 
-const SIGNED_HEADERS = {
+const SIGNED_HEADERS: Record<string, string> = {
   host: "127.0.0.1:18080",
   date: "Mon, 17 Aug 2026 21:00:00 GMT",
   digest: "SHA-256=abc",
@@ -15,7 +15,7 @@ const SIGNED_HEADERS = {
 function request(
   scenario: "success" | "transient" | "permanent",
   body: string,
-  headers = SIGNED_HEADERS,
+  headers: Record<string, string> = SIGNED_HEADERS,
 ) {
   return {
     scenario,
