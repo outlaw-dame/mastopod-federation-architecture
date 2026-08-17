@@ -38,10 +38,11 @@ export class RemoteSharedInboxCache {
    *
    * This intentionally performs no discovery. In particular, two actors on the
    * same hostname are never assumed to share an inbox unless Tier 1 supplied
-   * the same exact `sharedInboxUrl` for both.
+   * the same exact `sharedInboxUrl` for both. Return a fresh array, matching the
+   * old Promise.all-based allocation behavior without cloning target objects.
    */
   async enrichTargets<T extends SharedInboxCompatibleTarget>(targets: T[]): Promise<T[]> {
-    return targets;
+    return [...targets];
   }
 
   /**
