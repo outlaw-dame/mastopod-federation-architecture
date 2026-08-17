@@ -119,6 +119,16 @@ export class FollowersSyncService {
   private readonly maxRemoteFollowerUriBytes: number;
   private readonly staleCleanupConcurrency: number;
   private readonly onStaleRemoteEntry?: (localActorUri: string, remoteActorUri: string) => Promise<void>;
+  /**
+   * Process-local single-flight registry for outbound digest acquisition.
+   *
+   * The digest itself is scoped only by local actor identifier + target origin;
+   * collectionId is deliberately excluded because it belongs to each caller's
+   * serialized header. Redis remains the TTL/cross-process cache when supplied.
+   * Entries exist only while cache lookup/fresh computation is in flight and
+   * are removed after both success and failure.
+   */
+  private readonly inFlightDigests = new Map<string, Promise<string | null>>();
 
   constructor(config: FollowersSyncServiceConfig) {
     this.domain = config.domain;
@@ -316,8 +326,33 @@ export class FollowersSyncService {
   // Private helpers
   // ==========================================================================
 
-  /** Return a cached digest or compute a fresh one via ActivityPods. */
+  /**
+   * Return a cached digest or compute a fresh one via ActivityPods.
+   * Concurrent requests for the same actor + target origin share only this
+   * digest acquisition; each buildSenderHeader caller still serializes its own
+   * collectionId after the shared digest resolves.
+   */
   private async getOrComputeDigest(
+    actorIdentifier: string,
+    targetOrigin: string,
+  ): Promise<string | null> {
+    const singleFlightKey = JSON.stringify([actorIdentifier, targetOrigin]);
+    const existing = this.inFlightDigests.get(singleFlightKey);
+    if (existing) return existing;
+
+    const pending = this.resolveDigest(actorIdentifier, targetOrigin);
+    this.inFlightDigests.set(singleFlightKey, pending);
+
+    try {
+      return await pending;
+    } finally {
+      if (this.inFlightDigests.get(singleFlightKey) === pending) {
+        this.inFlightDigests.delete(singleFlightKey);
+      }
+    }
+  }
+
+  private async resolveDigest(
     actorIdentifier: string,
     targetOrigin: string,
   ): Promise<string | null> {
