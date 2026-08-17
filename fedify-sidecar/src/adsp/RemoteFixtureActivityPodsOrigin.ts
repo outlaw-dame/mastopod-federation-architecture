@@ -46,6 +46,8 @@ export interface AdspActivityPodsOriginEvidence {
   inboxUrl: string;
   sharedInboxUrl?: string;
   targetDomain: string;
+  visibility: "public" | "unlisted";
+  isPublicActivity: true;
   suppressedNativeRemotePostCount: 1;
   durableHandoffQueued: true;
   senderUsername?: string;
@@ -158,6 +160,8 @@ export function parseActivityPodsOriginEvidence(value: unknown): AdspActivityPod
       "inboxUrl",
       "sharedInboxUrl",
       "targetDomain",
+      "visibility",
+      "isPublicActivity",
       "suppressedNativeRemotePostCount",
       "durableHandoffQueued",
       "senderUsername",
@@ -177,6 +181,9 @@ export function parseActivityPodsOriginEvidence(value: unknown): AdspActivityPod
   }
   if (root["suppressedNativeRemotePostCount"] !== 1) {
     throw new TypeError("ActivityPods origin evidence must prove exactly one suppressed native remotePost");
+  }
+  if (root["isPublicActivity"] !== true || (root["visibility"] !== "public" && root["visibility"] !== "unlisted")) {
+    throw new TypeError("ActivityPods origin evidence must prove a public/unlisted Activity for RedPanda event logging");
   }
 
   const activityId = exact("ActivityPods origin activityId", root["activityId"]);
@@ -232,6 +239,8 @@ export function parseActivityPodsOriginEvidence(value: unknown): AdspActivityPod
     inboxUrl: target.inboxUrl,
     ...(target.sharedInboxUrl ? { sharedInboxUrl: target.sharedInboxUrl } : {}),
     targetDomain,
+    visibility: root["visibility"] as "public" | "unlisted",
+    isPublicActivity: true,
     suppressedNativeRemotePostCount: 1,
     durableHandoffQueued: true,
     ...(senderUsername ? { senderUsername } : {}),
