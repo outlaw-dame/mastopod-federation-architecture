@@ -36,7 +36,8 @@ export async function runActivityPodsRemoteOriginCli(
     // Keep the persisted prepared-evidence file exactly compatible with the
     // strict parser consumed by `settle`; unlike a terminal status envelope it
     // is itself an evidence artifact and must not gain an extra `ok` field.
-    return await prepareActivityPodsRemoteOriginFixture(config);
+    const prepared = await prepareActivityPodsRemoteOriginFixture(config);
+    return { schema: prepared.schema, baseline: prepared.baseline };
   }
 
   if (command === "settle") {
