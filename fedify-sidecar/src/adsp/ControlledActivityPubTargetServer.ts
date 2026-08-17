@@ -85,7 +85,6 @@ async function readBoundedBody(
     const bytes = Buffer.from(chunk);
     total += bytes.byteLength;
     if (total > maxBytes) {
-      request.destroy();
       throw new RangeError(`request body exceeded ${maxBytes} bytes`);
     }
     chunks.push(bytes);
