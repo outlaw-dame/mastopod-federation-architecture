@@ -101,6 +101,43 @@ describe("FedifyKvAdapter.list", () => {
     ]);
   });
 
+  it.each([
+    ["omitted", undefined],
+    ["empty", []],
+  ])("treats %s prefix as root enumeration", async (_label, prefix) => {
+    const scan = vi.fn().mockResolvedValue([
+      "0",
+      ["fedify:kv:actors:alice", "fedify:kv:queue:first"],
+    ]);
+    const mget = vi.fn().mockResolvedValue([
+      JSON.stringify({ id: "alice" }),
+      "plain",
+    ]);
+    const redis = { scan, mget } as unknown as Redis;
+    const adapter = new FedifyKvAdapter(redis);
+    const entries = [];
+
+    for await (const entry of adapter.list(prefix as any)) {
+      entries.push(entry);
+    }
+
+    expect(scan).toHaveBeenCalledWith(
+      "0",
+      "MATCH",
+      "fedify:kv:*",
+      "COUNT",
+      100,
+    );
+    expect(mget).toHaveBeenCalledWith(
+      "fedify:kv:actors:alice",
+      "fedify:kv:queue:first",
+    );
+    expect(entries).toEqual([
+      { key: ["actors", "alice"], value: { id: "alice" } },
+      { key: ["queue", "first"], value: "plain" },
+    ]);
+  });
+
   it("skips keys that expire between SCAN and MGET without changing other entries", async () => {
     const redis = {
       scan: vi.fn().mockResolvedValue([
