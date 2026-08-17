@@ -187,6 +187,13 @@ jobs:
           SEMAPPS_REDIS_OIDC_PROVIDER_URL: redis://127.0.0.1:6379/13
           SEMAPPS_SMTP_HOST: 127.0.0.1
           SEMAPPS_SMTP_PORT: '1025'
+          # Fixture B is an ActivityPub delivery benchmark. Match the proven
+          # Tier-1 fixture by excluding unrelated ATProto projection while still
+          # requiring the real Pod/key/ActivityPub signup and bootstrap path.
+          APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
+          APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
           SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: external
           SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: 'true'
           SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: 'false'
@@ -194,17 +201,47 @@ jobs:
           APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED: 'false'
         run: |
           set -euo pipefail
-          yarn start > ../../../measurements/adsp-p0-remote/activitypods.log 2>&1 &
+          log=../../../measurements/adsp-p0-remote/activitypods.log
+          yarn start > "${log}" 2>&1 &
           echo "$!" > ../../../measurements/adsp-p0-remote/activitypods.pid
-          ready=false
+          activitypods_pid="$(cat ../../../measurements/adsp-p0-remote/activitypods.pid)"
+
+          # The HTTP gateway can answer before the Moleculer broker has finished
+          # starting all services. A signup during that interval is non-replayable
+          # and can miss bootstrap/event work. Require both HTTP reachability and
+          # the broker's definitive full-start marker before provisioning users.
+          http_ready=false
           for attempt in $(seq 1 120); do
-            if curl -fsS --max-time 2 http://127.0.0.1:3000/ >/dev/null; then ready=true; break; fi
+            if ! kill -0 "${activitypods_pid}" 2>/dev/null; then
+              tail -n 500 "${log}"
+              exit 1
+            fi
+            if curl -fsS --max-time 2 http://127.0.0.1:3000/ >/dev/null; then http_ready=true; break; fi
             sleep 1
           done
-          if [[ "${ready}" != true ]]; then
-            tail -n 400 ../../../measurements/adsp-p0-remote/activitypods.log
+          if [[ "${http_ready}" != true ]]; then
+            tail -n 500 "${log}"
             exit 1
           fi
+
+          broker_ready=false
+          for attempt in $(seq 1 120); do
+            if ! kill -0 "${activitypods_pid}" 2>/dev/null; then
+              tail -n 500 "${log}"
+              exit 1
+            fi
+            if grep -Eq 'ServiceBroker with [0-9]+ service\(s\) started successfully' "${log}"; then
+              broker_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${broker_ready}" != true ]]; then
+            echo 'ActivityPods HTTP gateway became reachable but Moleculer did not finish full service startup' >&2
+            tail -n 500 "${log}"
+            exit 1
+          fi
+          curl -fsS --max-time 2 http://127.0.0.1:3000/ >/dev/null
 
       - name: Start sidecar with only real outbound path enabled
         working-directory: fedify-sidecar
