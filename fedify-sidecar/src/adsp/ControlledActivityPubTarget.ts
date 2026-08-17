@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 export const ADSP_CONTROLLED_REMOTE_SCENARIOS = [
   "success",
@@ -22,6 +22,7 @@ export interface ControlledTargetObservation {
   host: string | null;
   hasDate: boolean;
   hasDigest: boolean;
+  hasValidDigest: boolean;
   hasSignature: boolean;
   receivedAtMs: number;
 }
@@ -65,6 +66,38 @@ function hasNonEmptyHeader(
 ): boolean {
   const value = normalizeSingleHeader(headers[name]);
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isActivityJsonContentType(value: string | null): boolean {
+  if (!value) return false;
+  const mediaType = value.split(";", 1)[0]?.trim().toLowerCase();
+  return mediaType === "application/activity+json";
+}
+
+function hasValidSha256Digest(
+  digestHeader: string | null,
+  body: Buffer,
+): boolean {
+  if (!digestHeader) return false;
+  const sha256Entry = digestHeader
+    .split(",")
+    .map(value => value.trim())
+    .find(value => /^sha-256=/iu.test(value));
+  if (!sha256Entry) return false;
+
+  const encoded = sha256Entry.slice(sha256Entry.indexOf("=") + 1).trim();
+  if (!/^[A-Za-z0-9+/]{43}=$/u.test(encoded)) return false;
+
+  let supplied: Buffer;
+  try {
+    supplied = Buffer.from(encoded, "base64");
+  } catch {
+    return false;
+  }
+  if (supplied.byteLength !== 32) return false;
+
+  const expected = createHash("sha256").update(body).digest();
+  return timingSafeEqual(supplied, expected);
 }
 
 function assertNonNegativeSafeInteger(name: string, value: number): void {
@@ -142,6 +175,7 @@ export class ControlledActivityPubTargetState {
     }
 
     const contentType = normalizeSingleHeader(request.headers["content-type"]);
+    const digestHeader = normalizeSingleHeader(request.headers["digest"]);
     const body = Buffer.from(request.body);
     const bodySha256 = createHash("sha256").update(body).digest("hex");
     const payloadAttempt = (this.payloadAttempts.get(bodySha256) ?? 0) + 1;
@@ -162,6 +196,7 @@ export class ControlledActivityPubTargetState {
       host: normalizeSingleHeader(request.headers["host"]),
       hasDate: hasNonEmptyHeader(request.headers, "date"),
       hasDigest: hasNonEmptyHeader(request.headers, "digest"),
+      hasValidDigest: hasValidSha256Digest(digestHeader, body),
       hasSignature: hasNonEmptyHeader(request.headers, "signature"),
       receivedAtMs: request.nowMs ?? Date.now(),
     };
@@ -188,10 +223,14 @@ export class ControlledActivityPubTargetState {
       };
     }
 
-    if (
-      !contentType ||
-      !contentType.toLowerCase().includes("application/activity+json")
-    ) {
+    if (!observation.hasValidDigest) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ error: "invalid_digest" }),
+      };
+    }
+
+    if (!isActivityJsonContentType(contentType)) {
       return {
         statusCode: 415,
         body: JSON.stringify({ error: "unsupported_media_type" }),
