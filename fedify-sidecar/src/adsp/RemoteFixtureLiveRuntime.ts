@@ -1,7 +1,10 @@
 import { createClient } from "redis";
-import { RedisStreamsQueue as CoreRedisStreamsQueue } from "../queue/sidecar-redis-queue-core.js";
 import { HttpControlledTargetFixtureClient } from "./ControlledTargetFixtureClient.js";
-import { AdspRemoteFixtureDurableObserver } from "./RemoteFixtureDurableObserver.js";
+import {
+  AdspRemoteFixtureDurableObserver,
+  type AdspRemoteQueueObservationPort,
+  type AdspRemoteRedisReadPort,
+} from "./RemoteFixtureDurableObserver.js";
 import { AdspRemoteFixtureHandoffClient } from "./RemoteFixtureHandoffClient.js";
 import type { AdspRemoteFixtureRunInput, AdspRemoteFixtureRunResult } from "./RemoteFixtureRunner.js";
 import { AdspRemoteFixtureRunner } from "./RemoteFixtureRunner.js";
@@ -16,10 +19,17 @@ export interface AdspRemoteLiveRuntimeConfig {
   outboundStreamKey: string;
   outboxIntentStreamKey: string;
   originReconcileStreamKey: string;
+  outboundDlqStreamKey: string;
 }
 
 export interface RedisGroupInspectionPort {
   xInfoGroups(streamKey: string): Promise<Array<{ name: string }>>;
+}
+
+export interface RedisReadOnlyObservationPort extends RedisGroupInspectionPort, AdspRemoteRedisReadPort {
+  xPending(streamKey: string, consumerGroup: string): Promise<{ pending?: number } | null>;
+  xLen(streamKey: string): Promise<number>;
+  hGetAll(key: string): Promise<Record<string, string>>;
 }
 
 function exact(name: string, value: unknown): string {
@@ -27,6 +37,21 @@ function exact(name: string, value: unknown): string {
     throw new TypeError(`${name} must be a non-empty exact string`);
   }
   return value;
+}
+
+function optionalNonNegativeSafeInteger(
+  name: string,
+  value: string | undefined,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    throw new Error(`${name} must be a canonical non-negative integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative safe integer`);
+  }
+  return parsed;
 }
 
 export function parseAdspRemoteLiveRuntimeConfig(
@@ -62,6 +87,10 @@ export function parseAdspRemoteLiveRuntimeConfig(
     originReconcileStreamKey: exact(
       "ADSP_REMOTE_ORIGIN_RECONCILE_STREAM_KEY",
       env["ADSP_REMOTE_ORIGIN_RECONCILE_STREAM_KEY"],
+    ),
+    outboundDlqStreamKey: exact(
+      "ADSP_REMOTE_OUTBOUND_DLQ_STREAM_KEY",
+      env["ADSP_REMOTE_OUTBOUND_DLQ_STREAM_KEY"],
     ),
   };
 }
@@ -101,6 +130,63 @@ export async function assertExistingSidecarConsumerGroups(
   }
 }
 
+/**
+ * Read-only adapter for the exact Redis state consumed by ADSP reconciliation.
+ * It intentionally exposes no XGROUP/XADD/HSET/DEL operations, so fixture
+ * observation cannot create or repair production measurement topology.
+ */
+export class AdspRemoteReadOnlyQueueObservation implements AdspRemoteQueueObservationPort {
+  constructor(
+    private readonly redis: RedisReadOnlyObservationPort,
+    private readonly config: Pick<
+      AdspRemoteLiveRuntimeConfig,
+      | "consumerGroup"
+      | "outboundStreamKey"
+      | "outboxIntentStreamKey"
+      | "outboundDlqStreamKey"
+    >,
+  ) {}
+
+  async getOutboxIntentState(intentId: string): Promise<{
+    completedAt?: number;
+    jobCount?: number;
+  }> {
+    const raw = await this.redis.hGetAll(`ap:outbox-intent:state:${intentId}`);
+    const completedAt = optionalNonNegativeSafeInteger(
+      "outbox intent completedAt",
+      raw["completedAt"],
+    );
+    const jobCount = optionalNonNegativeSafeInteger(
+      "outbox intent jobCount",
+      raw["jobCount"],
+    );
+    return {
+      ...(completedAt !== undefined ? { completedAt } : {}),
+      ...(jobCount !== undefined ? { jobCount } : {}),
+    };
+  }
+
+  async getPendingCount(type: "outbound" | "outbox_intent"): Promise<number> {
+    const streamKey = type === "outbound"
+      ? this.config.outboundStreamKey
+      : this.config.outboxIntentStreamKey;
+    const pending = await this.redis.xPending(streamKey, this.config.consumerGroup);
+    const count = pending?.pending;
+    if (!Number.isSafeInteger(count) || Number(count) < 0) {
+      throw new Error(`${type} pending count must be a non-negative safe integer`);
+    }
+    return Number(count);
+  }
+
+  async getDlqLength(type: "outbound"): Promise<number> {
+    const length = await this.redis.xLen(this.config.outboundDlqStreamKey);
+    if (!Number.isSafeInteger(length) || length < 0) {
+      throw new Error(`${type} DLQ length must be a non-negative safe integer`);
+    }
+    return length;
+  }
+}
+
 export async function runAdspRemoteLiveFixture(input: {
   config: AdspRemoteLiveRuntimeConfig;
   fixtureCase: AdspRemoteFixtureRunInput;
@@ -108,24 +194,14 @@ export async function runAdspRemoteLiveFixture(input: {
   const { config, fixtureCase } = input;
   const redis = createClient({ url: config.redisUrl });
   redis.on("error", () => undefined);
-  let queue: CoreRedisStreamsQueue | null = null;
 
   try {
     await redis.connect();
-    await assertExistingSidecarConsumerGroups(redis as unknown as RedisGroupInspectionPort, config);
+    const readOnlyRedis = redis as unknown as RedisReadOnlyObservationPort;
+    await assertExistingSidecarConsumerGroups(readOnlyRedis, config);
 
-    queue = new CoreRedisStreamsQueue({
-      redisUrl: config.redisUrl,
-      consumerGroup: config.consumerGroup,
-      consumerId: `adsp-observer-${process.pid}`,
-      inboundStreamKey: config.inboundStreamKey,
-      outboundStreamKey: config.outboundStreamKey,
-      outboxIntentStreamKey: config.outboxIntentStreamKey,
-      originReconcileStreamKey: config.originReconcileStreamKey,
-    });
-    await queue.connect();
-
-    const observer = new AdspRemoteFixtureDurableObserver(queue, redis);
+    const queue = new AdspRemoteReadOnlyQueueObservation(readOnlyRedis, config);
+    const observer = new AdspRemoteFixtureDurableObserver(queue, readOnlyRedis);
     const handoff = new AdspRemoteFixtureHandoffClient(
       config.sidecarWebhookUrl,
       config.sidecarToken,
@@ -134,7 +210,6 @@ export async function runAdspRemoteLiveFixture(input: {
     const runner = new AdspRemoteFixtureRunner(handoff, observer, target);
     return await runner.run(fixtureCase);
   } finally {
-    if (queue) await queue.disconnect().catch(() => undefined);
     if (redis.isOpen) await redis.quit().catch(() => undefined);
   }
 }
