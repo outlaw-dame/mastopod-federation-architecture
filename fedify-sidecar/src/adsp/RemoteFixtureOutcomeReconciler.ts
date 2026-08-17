@@ -127,6 +127,11 @@ export function reconcileAdspRemoteFixtureOutcome(input: {
       `controlled target dropped ${target.droppedObservations} observation(s); exact reconciliation is impossible`,
     );
   }
+  if (target.totalRequests !== observations.length) {
+    errors.push(
+      `isolated controlled target observed ${target.totalRequests} total request(s), but only ${observations.length} belong to the expected Activity/scenario`,
+    );
+  }
 
   assertCommonDurableState(durable, errors);
 
