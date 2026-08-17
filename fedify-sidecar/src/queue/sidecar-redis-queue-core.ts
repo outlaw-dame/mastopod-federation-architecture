@@ -21,6 +21,11 @@
 import { createClient, RedisClientType } from "redis";
 import { logger } from "../utils/logger.js";
 import type { OutboundDeliveryMeta } from "../core-domain/contracts/SigningContracts.js";
+import {
+  buildMalformedStreamDiagnostic,
+  formatMalformedStreamReason,
+  parseNonNegativeSafeInteger,
+} from "./stream-message-safety.js";
 
 // ============================================================================
 // Configuration
@@ -45,6 +50,8 @@ export interface QueueConfig {
   readBatchCount?: number;
   claimBatchCount?: number;
 }
+
+type QueueMessageType = "inbound" | "outbound" | "outbox_intent" | "origin_reconcile";
 
 // ============================================================================
 // Job Types
@@ -294,7 +301,6 @@ export class RedisStreamsQueue {
 
     while (true) {
       try {
-        // Read pending messages first (crash recovery)
         const pending = await (this.inboundConsumerRedis as any).xAutoClaim(
           this.inboundStreamKey,
           this.consumerGroup,
@@ -305,11 +311,16 @@ export class RedisStreamsQueue {
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
-          const envelope = this.deserializeInboundEnvelope(messageId, fields);
+          const envelope = await this.deserializeOrQuarantine(
+            "inbound",
+            messageId,
+            fields,
+            () => this.deserializeInboundEnvelope(messageId, fields),
+          );
+          if (!envelope) continue;
           yield { messageId, envelope };
         }
 
-        // Read new messages
         const messages = await (this.inboundConsumerRedis as any).xReadGroup(
           this.consumerGroup,
           this.consumerId,
@@ -317,13 +328,17 @@ export class RedisStreamsQueue {
           { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs }
         );
 
-        if (!messages || messages.length === 0) {
-          continue;
-        }
+        if (!messages || messages.length === 0) continue;
 
         for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
           for (const [messageId, fields] of streamMessages) {
-            const envelope = this.deserializeInboundEnvelope(messageId, fields);
+            const envelope = await this.deserializeOrQuarantine(
+              "inbound",
+              messageId,
+              fields,
+              () => this.deserializeInboundEnvelope(messageId, fields),
+            );
+            if (!envelope) continue;
             yield { messageId, envelope };
           }
         }
@@ -345,9 +360,9 @@ export class RedisStreamsQueue {
       headers: JSON.parse(this.requireField(fields, "headers", messageId)),
       body: this.requireField(fields, "body", messageId),
       remoteIp: this.requireField(fields, "remoteIp", messageId),
-      receivedAt: parseInt(this.requireField(fields, "receivedAt", messageId), 10),
-      attempt: parseInt(fields["attempt"] || "0", 10),
-      notBeforeMs: parseInt(fields["notBeforeMs"] || "0", 10),
+      receivedAt: parseNonNegativeSafeInteger(fields["receivedAt"], "receivedAt", messageId),
+      attempt: parseNonNegativeSafeInteger(fields["attempt"], "attempt", messageId, 0),
+      notBeforeMs: parseNonNegativeSafeInteger(fields["notBeforeMs"], "notBeforeMs", messageId, 0),
       verification: this.parseInboundVerification(fields["verification"], messageId),
     };
   }
@@ -433,7 +448,6 @@ export class RedisStreamsQueue {
 
     while (true) {
       try {
-        // Read pending messages first (crash recovery)
         const pending = await (this.outboundConsumerRedis as any).xAutoClaim(
           this.outboundStreamKey,
           this.consumerGroup,
@@ -444,11 +458,16 @@ export class RedisStreamsQueue {
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
-          const job = this.deserializeOutboundJob(messageId, fields);
+          const job = await this.deserializeOrQuarantine(
+            "outbound",
+            messageId,
+            fields,
+            () => this.deserializeOutboundJob(messageId, fields),
+          );
+          if (!job) continue;
           yield { messageId, job };
         }
 
-        // Read new messages
         const messages = await (this.outboundConsumerRedis as any).xReadGroup(
           this.consumerGroup,
           this.consumerId,
@@ -456,13 +475,17 @@ export class RedisStreamsQueue {
           { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs }
         );
 
-        if (!messages || messages.length === 0) {
-          continue;
-        }
+        if (!messages || messages.length === 0) continue;
 
         for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
           for (const [messageId, fields] of streamMessages) {
-            const job = this.deserializeOutboundJob(messageId, fields);
+            const job = await this.deserializeOrQuarantine(
+              "outbound",
+              messageId,
+              fields,
+              () => this.deserializeOutboundJob(messageId, fields),
+            );
+            if (!job) continue;
             yield { messageId, job };
           }
         }
@@ -515,7 +538,13 @@ export class RedisStreamsQueue {
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
-          const intent = this.deserializeOutboxIntent(messageId, fields);
+          const intent = await this.deserializeOrQuarantine(
+            "outbox_intent",
+            messageId,
+            fields,
+            () => this.deserializeOutboxIntent(messageId, fields),
+          );
+          if (!intent) continue;
           yield { messageId, intent };
         }
 
@@ -526,13 +555,17 @@ export class RedisStreamsQueue {
           { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs },
         );
 
-        if (!messages || messages.length === 0) {
-          continue;
-        }
+        if (!messages || messages.length === 0) continue;
 
         for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
           for (const [messageId, fields] of streamMessages) {
-            const intent = this.deserializeOutboxIntent(messageId, fields);
+            const intent = await this.deserializeOrQuarantine(
+              "outbox_intent",
+              messageId,
+              fields,
+              () => this.deserializeOutboxIntent(messageId, fields),
+            );
+            if (!intent) continue;
             yield { messageId, intent };
           }
         }
@@ -584,7 +617,13 @@ export class RedisStreamsQueue {
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
-          const job = this.deserializeOriginReconciliationJob(messageId, fields);
+          const job = await this.deserializeOrQuarantine(
+            "origin_reconcile",
+            messageId,
+            fields,
+            () => this.deserializeOriginReconciliationJob(messageId, fields),
+          );
+          if (!job) continue;
           yield { messageId, job };
         }
 
@@ -595,13 +634,17 @@ export class RedisStreamsQueue {
           { COUNT: this.readBatchCount, BLOCK: this.blockTimeoutMs },
         );
 
-        if (!messages || messages.length === 0) {
-          continue;
-        }
+        if (!messages || messages.length === 0) continue;
 
         for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
           for (const [messageId, fields] of streamMessages) {
-            const job = this.deserializeOriginReconciliationJob(messageId, fields);
+            const job = await this.deserializeOrQuarantine(
+              "origin_reconcile",
+              messageId,
+              fields,
+              () => this.deserializeOriginReconciliationJob(messageId, fields),
+            );
+            if (!job) continue;
             yield { messageId, job };
           }
         }
@@ -628,10 +671,10 @@ export class RedisStreamsQueue {
       actorUri: this.requireField(fields, "actorUri", messageId),
       activity: this.requireField(fields, "activity", messageId),
       targets: parsedTargets as OutboxIntentTarget[],
-      createdAt: parseInt(this.requireField(fields, "createdAt", messageId), 10),
-      attempt: parseInt(this.requireField(fields, "attempt", messageId), 10),
-      maxAttempts: parseInt(this.requireField(fields, "maxAttempts", messageId), 10),
-      notBeforeMs: parseInt(this.requireField(fields, "notBeforeMs", messageId), 10),
+      createdAt: parseNonNegativeSafeInteger(fields["createdAt"], "createdAt", messageId),
+      attempt: parseNonNegativeSafeInteger(fields["attempt"], "attempt", messageId),
+      maxAttempts: parseNonNegativeSafeInteger(fields["maxAttempts"], "maxAttempts", messageId),
+      notBeforeMs: parseNonNegativeSafeInteger(fields["notBeforeMs"], "notBeforeMs", messageId),
       lastError: fields["lastError"] || undefined,
       meta: fields["meta"] ? JSON.parse(fields["meta"]) : undefined,
       bridgeHints: fields["bridgeHints"] ? JSON.parse(fields["bridgeHints"]) : undefined,
@@ -646,10 +689,10 @@ export class RedisStreamsQueue {
       activity: this.requireField(fields, "activity", messageId),
       targetInbox: this.requireField(fields, "targetInbox", messageId),
       targetDomain: this.requireField(fields, "targetDomain", messageId),
-      attempt: parseInt(this.requireField(fields, "attempt", messageId), 10),
-      maxAttempts: parseInt(this.requireField(fields, "maxAttempts", messageId), 10),
-      notBeforeMs: parseInt(this.requireField(fields, "notBeforeMs", messageId), 10),
-      deferCount: parseInt(fields["deferCount"] || "0", 10),
+      attempt: parseNonNegativeSafeInteger(fields["attempt"], "attempt", messageId),
+      maxAttempts: parseNonNegativeSafeInteger(fields["maxAttempts"], "maxAttempts", messageId),
+      notBeforeMs: parseNonNegativeSafeInteger(fields["notBeforeMs"], "notBeforeMs", messageId),
+      deferCount: parseNonNegativeSafeInteger(fields["deferCount"], "deferCount", messageId, 0),
       lastError: fields["lastError"] || undefined,
       meta: fields["meta"] ? JSON.parse(fields["meta"]) : undefined,
     };
@@ -665,14 +708,14 @@ export class RedisStreamsQueue {
       canonicalObjectId: fields["canonicalObjectId"] || undefined,
       actorUriHint: fields["actorUriHint"] || undefined,
       reason: this.requireField(fields, "reason", messageId),
-      createdAt: parseInt(this.requireField(fields, "createdAt", messageId), 10),
-      attempt: parseInt(this.requireField(fields, "attempt", messageId), 10),
-      maxAttempts: parseInt(this.requireField(fields, "maxAttempts", messageId), 10),
-      notBeforeMs: parseInt(this.requireField(fields, "notBeforeMs", messageId), 10),
-      windowExpiresAt: parseInt(this.requireField(fields, "windowExpiresAt", messageId), 10),
+      createdAt: parseNonNegativeSafeInteger(fields["createdAt"], "createdAt", messageId),
+      attempt: parseNonNegativeSafeInteger(fields["attempt"], "attempt", messageId),
+      maxAttempts: parseNonNegativeSafeInteger(fields["maxAttempts"], "maxAttempts", messageId),
+      notBeforeMs: parseNonNegativeSafeInteger(fields["notBeforeMs"], "notBeforeMs", messageId),
+      windowExpiresAt: parseNonNegativeSafeInteger(fields["windowExpiresAt"], "windowExpiresAt", messageId),
       lastFingerprint: fields["lastFingerprint"] || undefined,
-      unchangedSuccesses: parseInt(fields["unchangedSuccesses"] || "0", 10),
-      notFoundCount: parseInt(fields["notFoundCount"] || "0", 10),
+      unchangedSuccesses: parseNonNegativeSafeInteger(fields["unchangedSuccesses"], "unchangedSuccesses", messageId, 0),
+      notFoundCount: parseNonNegativeSafeInteger(fields["notFoundCount"], "notFoundCount", messageId, 0),
       lastError: fields["lastError"] || undefined,
     };
   }
@@ -690,9 +733,7 @@ export class RedisStreamsQueue {
   }
 
   private normalizeClaimedMessages(messages: unknown): Array<[string, Record<string, string>]> {
-    if (!Array.isArray(messages)) {
-      return [];
-    }
+    if (!Array.isArray(messages)) return [];
 
     const normalized: Array<[string, Record<string, string>]> = [];
     for (const entry of messages) {
@@ -713,16 +754,13 @@ export class RedisStreamsQueue {
         }
       }
     }
-
     return normalized;
   }
 
   private normalizeStreamRead(
     streams: unknown
   ): Array<[string, Array<[string, Record<string, string>]>]> {
-    if (!Array.isArray(streams)) {
-      return [];
-    }
+    if (!Array.isArray(streams)) return [];
 
     const normalized: Array<[string, Array<[string, Record<string, string>]>]> = [];
     for (const stream of streams) {
@@ -738,32 +776,96 @@ export class RedisStreamsQueue {
         }
       }
     }
-
     return normalized;
   }
 
-  // ==========================================================================
-  // Message Acknowledgment
-  // ==========================================================================
+  private async deserializeOrQuarantine<T>(
+    type: QueueMessageType,
+    messageId: string,
+    fields: Record<string, string>,
+    deserialize: () => T,
+  ): Promise<T | null> {
+    try {
+      return deserialize();
+    } catch (error) {
+      await this.quarantineMalformedStreamMessage(type, messageId, fields, error);
+      return null;
+    }
+  }
 
-  async ack(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile", messageId: string): Promise<void> {
+  private async quarantineMalformedStreamMessage(
+    type: QueueMessageType,
+    messageId: string,
+    fields: Record<string, string>,
+    error: unknown,
+  ): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
-    const streamKey =
-      type === "inbound"
-        ? this.inboundStreamKey
-        : type === "outbound"
-          ? this.outboundStreamKey
-          : type === "outbox_intent"
-            ? this.outboxIntentStreamKey
-            : this.originReconcileStreamKey;
-    await this.redis.xAck(streamKey, this.consumerGroup, messageId);
+    const reason = formatMalformedStreamReason(type, error);
+    const diagnostic = buildMalformedStreamDiagnostic(messageId, fields);
+    const script = `
+      redis.call(
+        'XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], '*',
+        'type', ARGV[2],
+        'id', ARGV[3],
+        'reason', ARGV[4],
+        'timestamp', ARGV[5],
+        'data', ARGV[6]
+      )
+      redis.call('XACK', KEYS[2], ARGV[7], ARGV[3])
+      return 1
+    `;
+
+    await this.redis.eval(script, {
+      keys: [this.dlqKeyForType(type), this.streamKeyForType(type)],
+      arguments: [
+        this.maxDlqLength.toString(),
+        type,
+        messageId,
+        reason,
+        Date.now().toString(),
+        JSON.stringify(diagnostic),
+        this.consumerGroup,
+      ],
+    });
+
+    logger.warn("Malformed Redis Stream message quarantined", {
+      type,
+      messageId,
+      reason,
+      fieldCount: diagnostic.fieldCount,
+      payloadBytes: diagnostic.payloadBytes,
+    });
+  }
+
+  private streamKeyForType(type: QueueMessageType): string {
+    if (type === "inbound") return this.inboundStreamKey;
+    if (type === "outbound") return this.outboundStreamKey;
+    if (type === "outbox_intent") return this.outboxIntentStreamKey;
+    return this.originReconcileStreamKey;
+  }
+
+  private dlqKeyForType(type: QueueMessageType): string {
+    if (type === "inbound") return this.inboundDlqStreamKey;
+    if (type === "outbound") return this.outboundDlqStreamKey;
+    if (type === "outbox_intent") return this.outboxIntentDlqStreamKey;
+    return this.originReconcileDlqStreamKey;
+  }
+
+  // ============================================================================
+  // Message Acknowledgment
+  // ============================================================================
+
+  async ack(type: QueueMessageType, messageId: string): Promise<void> {
+    if (!this.isConnected) throw new Error("Queue not connected");
+
+    await this.redis.xAck(this.streamKeyForType(type), this.consumerGroup, messageId);
     logger.debug("Message acknowledged", { type, messageId });
   }
 
-  // ==========================================================================
+  // ============================================================================
   // Idempotency Control
-  // ==========================================================================
+  // ============================================================================
 
   async checkIdempotency(job: OutboundJob): Promise<boolean> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -822,48 +924,30 @@ export class RedisStreamsQueue {
     return raw ? JSON.parse(raw) : null;
   }
 
-  async getPendingCount(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile"): Promise<number> {
+  async getPendingCount(type: QueueMessageType): Promise<number> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
-    const streamKey =
-      type === "inbound"
-        ? this.inboundStreamKey
-        : type === "outbound"
-          ? this.outboundStreamKey
-          : type === "outbox_intent"
-            ? this.outboxIntentStreamKey
-            : this.originReconcileStreamKey;
+    const streamKey = this.streamKeyForType(type);
     let pending: { pending?: number } | null = null;
     try {
       pending = await (this.redis as any).xPending(streamKey, this.consumerGroup);
     } catch (error) {
-      if (!this.isMissingConsumerGroupError(error)) {
-        throw error;
-      }
+      if (!this.isMissingConsumerGroupError(error)) throw error;
       await this.ensureConsumerGroup(streamKey);
       pending = await (this.redis as any).xPending(streamKey, this.consumerGroup);
     }
     return typeof pending?.pending === "number" ? pending.pending : 0;
   }
 
-  async getStreamLength(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile"): Promise<number> {
+  async getStreamLength(type: QueueMessageType): Promise<number> {
     if (!this.isConnected) throw new Error("Queue not connected");
-
-    const streamKey =
-      type === "inbound"
-        ? this.inboundStreamKey
-        : type === "outbound"
-          ? this.outboundStreamKey
-          : type === "outbox_intent"
-            ? this.outboxIntentStreamKey
-            : this.originReconcileStreamKey;
-    const length = await this.redis.xLen(streamKey);
+    const length = await this.redis.xLen(this.streamKeyForType(type));
     return typeof length === "number" ? length : 0;
   }
 
-  // ==========================================================================
+  // ============================================================================
   // Domain Control (Blocklist, Rate Limiting, Concurrency)
-  // ==========================================================================
+  // ============================================================================
 
   async isDomainBlocked(domain: string): Promise<boolean> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -891,8 +975,6 @@ export class RedisStreamsQueue {
   async checkDomainRateLimit(domain: string, limit: number = 100, windowSeconds: number = 60): Promise<boolean> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
-    // Atomic: INCR + EXPIRE in a single Lua script to eliminate the TOCTOU
-    // race between the INCR and the conditional EXPIRE.
     const script = `
       local current = redis.call('INCR', KEYS[1])
       if current == 1 then
@@ -912,9 +994,6 @@ export class RedisStreamsQueue {
   async acquireDomainSlot(domain: string, maxConcurrent: number = 10): Promise<boolean> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
-    // Atomic: INCR + EXPIRE + conditional DECR in a single Lua script to
-    // eliminate the TOCTOU race between the INCR and the conditional EXPIRE,
-    // and to keep the counter coherent when the slot is denied.
     const script = `
       local current = redis.call('INCR', KEYS[1])
       if current == 1 then
@@ -942,12 +1021,12 @@ export class RedisStreamsQueue {
     await this.redis.decr(key);
   }
 
-  // ==========================================================================
+  // ============================================================================
   // Dead Letter Queue
-  // ==========================================================================
+  // ============================================================================
 
   async moveToDlq(
-    type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile",
+    type: QueueMessageType,
     data: InboundEnvelope | OutboundJob | OutboxIntent | OriginReconciliationJob,
     reason: string,
   ): Promise<void> {
@@ -967,17 +1046,8 @@ export class RedisStreamsQueue {
       data,
     };
 
-    const dlqKey =
-      type === "inbound"
-        ? this.inboundDlqStreamKey
-        : type === "outbound"
-          ? this.outboundDlqStreamKey
-          : type === "outbox_intent"
-            ? this.outboxIntentDlqStreamKey
-            : this.originReconcileDlqStreamKey;
-
     await this.redis.xAdd(
-      dlqKey,
+      this.dlqKeyForType(type),
       "*",
       {
         type,
@@ -992,9 +1062,9 @@ export class RedisStreamsQueue {
     logger.warn("Message moved to DLQ", { type, id: entry.id, reason });
   }
 
-  // ==========================================================================
+  // ============================================================================
   // Configuration Helpers
-  // ==========================================================================
+  // ============================================================================
 
   async getMetrics(): Promise<Record<string, number>> {
     if (!this.isConnected) throw new Error("Queue not connected");
@@ -1022,17 +1092,9 @@ export class RedisStreamsQueue {
     };
   }
 
-  async getDlqLength(type: "inbound" | "outbound" | "outbox_intent" | "origin_reconcile"): Promise<number> {
+  async getDlqLength(type: QueueMessageType): Promise<number> {
     if (!this.isConnected) throw new Error("Queue not connected");
-    const key =
-      type === "inbound"
-        ? this.inboundDlqStreamKey
-        : type === "outbound"
-          ? this.outboundDlqStreamKey
-          : type === "outbox_intent"
-            ? this.outboxIntentDlqStreamKey
-            : this.originReconcileDlqStreamKey;
-    return this.redis.xLen(key);
+    return this.redis.xLen(this.dlqKeyForType(type));
   }
 
   getClaimIdleTimeMs(): number {
@@ -1055,9 +1117,7 @@ export class RedisStreamsQueue {
       await this.redis.xGroupCreate(streamKey, this.consumerGroup, "0", { MKSTREAM: true });
       logger.info("Created consumer group", { stream: streamKey, group: this.consumerGroup });
     } catch (err: any) {
-      if (!err?.message?.includes("BUSYGROUP")) {
-        throw err;
-      }
+      if (!err?.message?.includes("BUSYGROUP")) throw err;
     }
   }
 
