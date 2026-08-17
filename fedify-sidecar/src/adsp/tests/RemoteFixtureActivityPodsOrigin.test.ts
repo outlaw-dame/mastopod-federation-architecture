@@ -5,6 +5,7 @@ import {
   parseAdspRemoteObservationConfig,
   parsePreparedRemoteOriginEvidence,
 } from "../RemoteFixtureActivityPodsOrigin.js";
+import { assertActivityPodsOriginMatchesControlledScenario } from "../RemoteFixtureControlledOriginBinding.js";
 
 const activityId = "https://pods.example/alice/as/activity/1";
 const actorUri = "https://pods.example/alice";
@@ -82,6 +83,31 @@ describe("ActivityPods-origin ADSP boundary", () => {
 
   it("rejects unexpected origin fields instead of silently accepting contract drift", () => {
     expect(() => parseActivityPodsOriginEvidence(origin({ unexpected: true }))).toThrow(/unsupported field/u);
+  });
+
+  it("binds valid authority to the exact controlled actor and delivery inbox for the requested scenario", () => {
+    const parsed = parseActivityPodsOriginEvidence(origin());
+    expect(() => assertActivityPodsOriginMatchesControlledScenario({
+      origin: parsed,
+      scenario: "success",
+      targetStatsUrl: "http://127.0.0.1:18080/stats",
+    })).not.toThrow();
+
+    expect(() => assertActivityPodsOriginMatchesControlledScenario({
+      origin: parsed,
+      scenario: "transient",
+      targetStatsUrl: "http://127.0.0.1:18080/stats",
+    })).toThrow(/controlled scenario actor/u);
+
+    const wrongInbox = parseActivityPodsOriginEvidence(origin({
+      inboxUrl: "http://127.0.0.1:18080/inbox/permanent",
+      sharedInboxUrl: "http://127.0.0.1:18080/inbox/permanent",
+    }));
+    expect(() => assertActivityPodsOriginMatchesControlledScenario({
+      origin: wrongInbox,
+      scenario: "success",
+      targetStatsUrl: "http://127.0.0.1:18080/stats",
+    })).toThrow(/controlled scenario inbox/u);
   });
 
   it("uses the sidecar-normalized shared inbox for the production worker job identity", () => {
