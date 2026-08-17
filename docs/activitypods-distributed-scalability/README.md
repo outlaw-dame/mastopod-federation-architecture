@@ -23,7 +23,9 @@ A phase is complete only when its **exit gate** closes. Adding a transporter, qu
 
 ## Core decision principle
 
-Do not add NATS, JetStream, Redis Streams, or any other distributed subsystem unless measured evidence shows that it improves the complete ActivityPods + federation stack on the dimensions that matter: throughput, tail latency, CPU, memory, Redis pressure, failure/recovery behavior, operational complexity, or cost.
+Do not add a new distributed subsystem—or expand an incumbent one into a new workload—unless measured evidence shows that it improves the complete ActivityPods + federation stack on the dimensions that matter: throughput, tail latency, CPU, memory, Redis pressure, failure/recovery behavior, operational complexity, or cost.
+
+Redis Streams are already incumbent federation infrastructure at the Phase 0 baseline. ADSP preserves those existing durable queues through transporter experiments. The evidence gate applies to **additional** Streams workloads, NATS Core, JetStream, or any other new distributed responsibility.
 
 Preserve local execution when locality is cheaper and semantically safer. Distribution is introduced only where independent scaling pays for itself.
 
@@ -31,11 +33,11 @@ Preserve local execution when locality is cheaper and semantically safer. Distri
 
 The experimental progression is deliberately ordered:
 
-1. **Current baseline** — single ActivityPods broker, local Moleculer calls, existing Redis, existing sidecar durability.
-2. **Safe horizontal ActivityPods** — make the service fabric safely distributable and measure multiple backend replicas using the Redis transporter.
-3. **NATS Core comparison** — same topology and workload, replacing only the distributed Moleculer transporter. Redis remains unchanged everywhere else.
-4. **Redis Streams evaluation** — only for new workloads that genuinely require durable ordered event-stream semantics.
-5. **JetStream evaluation** — only if a measured limitation in the Redis-based design justifies another durable subsystem.
+1. **Current baseline** — single ActivityPods broker, local Moleculer calls, existing Redis roles, and the existing sidecar Redis Streams durability path.
+2. **Safe horizontal ActivityPods** — make the service fabric safely distributable and measure multiple backend replicas using the Redis transporter while leaving sidecar durability unchanged.
+3. **NATS Core comparison** — same topology and workload, replacing only the distributed Moleculer transporter. Redis remains unchanged everywhere else, including the incumbent sidecar Streams queues.
+4. **Additional Redis Streams workload evaluation** — only when a new or refactored workload independently demonstrates a need for durable ordered stream semantics; reuse the existing Streams model rather than creating a duplicate abstraction where practical.
+5. **JetStream evaluation** — only if a reproduced material limitation in the incumbent Redis design justifies operating another durable subsystem.
 
 NATS Core is therefore not a target architecture. It is a candidate transporter that must earn its place. JetStream is even more conditional.
 
@@ -76,5 +78,6 @@ APDM local fan-out phases continue to optimize the authoritative Tier 1 executio
 
 - `PHASES.md` — ordered roadmap and exit gates.
 - `STATUS.md` — live cross-repository evidence ledger.
+- `P0-SOURCE-BASELINE.md` — frozen source-level Phase 0 topology and durability facts.
 - `INVARIANTS.md` — correctness, locality, durability, compatibility and rollback requirements.
 - `BENCHMARK-CONTRACT.md` — frozen comparison rules and promotion criteria.
