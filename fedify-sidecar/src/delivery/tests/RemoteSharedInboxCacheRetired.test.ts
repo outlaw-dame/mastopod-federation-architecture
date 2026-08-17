@@ -39,8 +39,10 @@ describe("RemoteSharedInboxCache retired compatibility shim", () => {
 
     const result = await shim.enrichTargets(targets);
 
-    expect(result).toBe(targets);
+    expect(result).not.toBe(targets);
     expect(result).toEqual(targets);
+    expect(result[0]).toBe(targets[0]);
+    expect(result[1]).toBe(targets[1]);
     expect(redis.get).not.toHaveBeenCalled();
     expect(redis.set).not.toHaveBeenCalled();
     expect(redis.del).not.toHaveBeenCalled();
