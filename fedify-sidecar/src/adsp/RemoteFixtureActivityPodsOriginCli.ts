@@ -7,6 +7,7 @@ import {
   prepareActivityPodsRemoteOriginFixture,
   settleActivityPodsRemoteOriginFixture,
 } from "./RemoteFixtureActivityPodsOrigin.js";
+import { assertActivityPodsOriginMatchesControlledScenario } from "./RemoteFixtureControlledOriginBinding.js";
 
 function optionalNonNegativeSafeInteger(name: string, value: string | undefined): number | undefined {
   if (value === undefined || value === "") return undefined;
@@ -55,6 +56,11 @@ export async function runActivityPodsRemoteOriginCli(
     ]);
     const prepared = parsePreparedRemoteOriginEvidence(preparedRaw);
     const origin = parseActivityPodsOriginEvidence(originRaw);
+    assertActivityPodsOriginMatchesControlledScenario({
+      origin,
+      scenario,
+      targetStatsUrl: config.targetStatsUrl,
+    });
     const transientFailuresBeforeSuccess = optionalNonNegativeSafeInteger(
       "ADSP_REMOTE_TRANSIENT_FAILURES",
       env["ADSP_REMOTE_TRANSIENT_FAILURES"],
