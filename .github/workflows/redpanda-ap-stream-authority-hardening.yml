@@ -1,6 +1,11 @@
 name: RedPanda AP stream authority hardening
 
 on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/redpanda-ap-stream-authority-hardening.yml'
   push:
     branches:
       - agent/redpanda-ap-stream-authority-hardening
