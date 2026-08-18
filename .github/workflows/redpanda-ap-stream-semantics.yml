@@ -5,9 +5,12 @@ on:
   push:
     branches:
       - agent/adsp-p0-activitypods-origin-runtime
+      - agent/redpanda-ap-stream-authority-hardening
     paths:
       - '.github/workflows/redpanda-ap-stream-semantics.yml'
       - 'fedify-sidecar/src/streams/**'
+      - 'fedify-sidecar/src/delivery/inbound-worker.ts'
+      - 'fedify-sidecar/src/delivery/tests/StreamOriginAuthority.test.ts'
       - 'fedify-sidecar/scripts/proof-ap-redpanda-stream-semantics.ts'
       - 'fedify-sidecar/package.json'
       - 'fedify-sidecar/package-lock.json'
@@ -17,6 +20,8 @@ on:
     paths:
       - '.github/workflows/redpanda-ap-stream-semantics.yml'
       - 'fedify-sidecar/src/streams/**'
+      - 'fedify-sidecar/src/delivery/inbound-worker.ts'
+      - 'fedify-sidecar/src/delivery/tests/StreamOriginAuthority.test.ts'
       - 'fedify-sidecar/scripts/proof-ap-redpanda-stream-semantics.ts'
       - 'fedify-sidecar/package.json'
       - 'fedify-sidecar/package-lock.json'
@@ -90,9 +95,12 @@ jobs:
           done
           docker exec ap-stream-proof-redpanda rpk topic list > measurements/redpanda-ap-streams/topics-before.txt
 
-      - name: Run semantic unit contract
+      - name: Run routing and producer semantic contracts
         working-directory: fedify-sidecar
-        run: npm exec -- vitest run src/streams/tests/RedPandaActivityPubStreams.test.ts
+        run: |
+          npm exec -- vitest run \
+            src/streams/tests/RedPandaActivityPubStreams.test.ts \
+            src/delivery/tests/StreamOriginAuthority.test.ts
 
       - name: Prove real broker stream membership
         working-directory: fedify-sidecar
