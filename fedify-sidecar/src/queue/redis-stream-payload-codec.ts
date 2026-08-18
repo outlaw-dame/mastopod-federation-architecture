@@ -6,6 +6,7 @@ export const REDIS_STREAM_PAYLOAD_UNKNOWN_PREFIX = "apq1:";
 export const DEFAULT_REDIS_STREAM_COMPRESSION_MIN_BYTES = 4 * 1024;
 export const DEFAULT_REDIS_STREAM_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_REDIS_STREAM_MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024;
+export const DEFAULT_REDIS_STREAM_DECODE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 
 export interface RedisStreamPayloadCodecConfig {
   writeEnabled?: boolean;
@@ -13,6 +14,7 @@ export interface RedisStreamPayloadCodecConfig {
   maxCompressedBytes?: number;
   maxDecompressedBytes?: number;
   brotliQuality?: number;
+  decodeCacheMaxBytes?: number;
 }
 
 export interface EncodedRedisStreamPayload {
@@ -22,13 +24,15 @@ export interface EncodedRedisStreamPayload {
   storedBytes: number;
 }
 
+type DecodeCacheEntry = { value: string; bytes: number };
+
 function finitePositiveInteger(value: number | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
 }
 
 function boundedBrotliQuality(value: number | undefined): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return 4;
+  if (typeof value !== "number" || !Number.isFinite(value)) return 1;
   return Math.max(0, Math.min(11, Math.floor(value)));
 }
 
@@ -42,6 +46,9 @@ export class RedisStreamPayloadCodec {
   private readonly maxCompressedBytes: number;
   private readonly maxDecompressedBytes: number;
   private readonly brotliQuality: number;
+  private readonly decodeCacheMaxBytes: number;
+  private readonly decodeCache = new Map<string, DecodeCacheEntry>();
+  private decodeCacheBytes = 0;
 
   constructor(config: RedisStreamPayloadCodecConfig = {}) {
     this.writeEnabled = config.writeEnabled === true;
@@ -58,6 +65,10 @@ export class RedisStreamPayloadCodec {
       DEFAULT_REDIS_STREAM_MAX_DECOMPRESSED_BYTES,
     );
     this.brotliQuality = boundedBrotliQuality(config.brotliQuality);
+    this.decodeCacheMaxBytes = finitePositiveInteger(
+      config.decodeCacheMaxBytes,
+      DEFAULT_REDIS_STREAM_DECODE_CACHE_MAX_BYTES,
+    );
   }
 
   encode(value: string): EncodedRedisStreamPayload {
@@ -86,8 +97,6 @@ export class RedisStreamPayloadCodec {
     const encoded = `${REDIS_STREAM_PAYLOAD_ENVELOPE_PREFIX}${payloadDigest(source)}:${compressed.toString("base64url")}`;
     const storedBytes = Buffer.byteLength(encoded);
 
-    // Compression is an optimization, not an obligation. Keep plaintext when
-    // the self-describing JSON-safe envelope is not actually smaller.
     if (storedBytes >= sourceBytes) {
       return { value, compressed: false, sourceBytes, storedBytes: sourceBytes };
     }
@@ -116,7 +125,14 @@ export class RedisStreamPayloadCodec {
       throw new Error("Redis Stream Brotli payload is not valid base64url");
     }
 
-    // Reject oversized encoded text before allocating its decoded Buffer.
+    const cached = this.decodeCache.get(expectedDigest);
+    if (cached !== undefined) {
+      // Refresh LRU position. Cache entries exist only after successful digest verification.
+      this.decodeCache.delete(expectedDigest);
+      this.decodeCache.set(expectedDigest, cached);
+      return cached.value;
+    }
+
     const maxEncodedLength = Math.ceil((this.maxCompressedBytes * 4) / 3) + 2;
     if (encoded.length > maxEncodedLength) {
       throw new Error(
@@ -152,7 +168,28 @@ export class RedisStreamPayloadCodec {
     if (payloadDigest(decompressed) !== expectedDigest) {
       throw new Error("Redis Stream Brotli payload failed SHA-256 integrity verification");
     }
-    return decompressed.toString("utf8");
+
+    const decoded = decompressed.toString("utf8");
+    this.cacheDecoded(expectedDigest, decoded, decompressed.byteLength);
+    return decoded;
+  }
+
+  private cacheDecoded(digest: string, value: string, bytes: number): void {
+    if (bytes > this.decodeCacheMaxBytes) return;
+    const existing = this.decodeCache.get(digest);
+    if (existing) {
+      this.decodeCacheBytes -= existing.bytes;
+      this.decodeCache.delete(digest);
+    }
+    while (this.decodeCacheBytes + bytes > this.decodeCacheMaxBytes && this.decodeCache.size > 0) {
+      const oldestKey = this.decodeCache.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      const oldest = this.decodeCache.get(oldestKey);
+      if (oldest) this.decodeCacheBytes -= oldest.bytes;
+      this.decodeCache.delete(oldestKey);
+    }
+    this.decodeCache.set(digest, { value, bytes });
+    this.decodeCacheBytes += bytes;
   }
 }
 
@@ -175,7 +212,12 @@ export function createRedisStreamPayloadCodecFromEnv(): RedisStreamPayloadCodec 
       10,
     ),
     brotliQuality: Number.parseInt(
-      process.env["REDIS_STREAM_PAYLOAD_BROTLI_QUALITY"] || "4",
+      process.env["REDIS_STREAM_PAYLOAD_BROTLI_QUALITY"] || "1",
+      10,
+    ),
+    decodeCacheMaxBytes: Number.parseInt(
+      process.env["REDIS_STREAM_PAYLOAD_DECODE_CACHE_MAX_BYTES"] ||
+        String(DEFAULT_REDIS_STREAM_DECODE_CACHE_MAX_BYTES),
       10,
     ),
   });
