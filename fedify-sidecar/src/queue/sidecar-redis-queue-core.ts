@@ -403,12 +403,12 @@ export class RedisStreamsQueue {
 
     const messageIds: string[] = [];
     const chunkSize = 250;
+    const encodedActivityCache = new Map<string, string>();
 
     for (let index = 0; index < jobs.length; index += chunkSize) {
       const chunk = jobs.slice(index, index + chunkSize);
       const multi = this.redis.multi();
 
-      const encodedActivityCache = new Map<string, string>();
       for (const job of chunk) {
         multi.xAdd(
           this.outboundStreamKey,
@@ -456,8 +456,12 @@ export class RedisStreamsQueue {
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
-          const job = this.deserializeOutboundJob(messageId, fields);
-          yield { messageId, job };
+          try {
+            const job = this.deserializeOutboundJob(messageId, fields);
+            yield { messageId, job };
+          } catch (error) {
+            this.logRejectedStreamMessage("outbound", messageId, error);
+          }
         }
 
         // Read new messages
@@ -474,8 +478,12 @@ export class RedisStreamsQueue {
 
         for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
           for (const [messageId, fields] of streamMessages) {
-            const job = this.deserializeOutboundJob(messageId, fields);
-            yield { messageId, job };
+            try {
+              const job = this.deserializeOutboundJob(messageId, fields);
+              yield { messageId, job };
+            } catch (error) {
+              this.logRejectedStreamMessage("outbound", messageId, error);
+            }
           }
         }
       } catch (err: any) {
@@ -527,8 +535,12 @@ export class RedisStreamsQueue {
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
-          const intent = this.deserializeOutboxIntent(messageId, fields);
-          yield { messageId, intent };
+          try {
+            const intent = this.deserializeOutboxIntent(messageId, fields);
+            yield { messageId, intent };
+          } catch (error) {
+            this.logRejectedStreamMessage("outbox_intent", messageId, error);
+          }
         }
 
         const messages = await (this.outboxIntentConsumerRedis as any).xReadGroup(
@@ -544,8 +556,12 @@ export class RedisStreamsQueue {
 
         for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
           for (const [messageId, fields] of streamMessages) {
-            const intent = this.deserializeOutboxIntent(messageId, fields);
-            yield { messageId, intent };
+            try {
+              const intent = this.deserializeOutboxIntent(messageId, fields);
+              yield { messageId, intent };
+            } catch (error) {
+              this.logRejectedStreamMessage("outbox_intent", messageId, error);
+            }
           }
         }
       } catch (err: any) {
@@ -625,6 +641,21 @@ export class RedisStreamsQueue {
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     }
+  }
+
+  private logRejectedStreamMessage(
+    type: "outbound" | "outbox_intent",
+    messageId: string,
+    error: unknown,
+  ): void {
+    logger.error(
+      {
+        type,
+        messageId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      "Rejected malformed Redis Stream message; source remains pending",
+    );
   }
 
   private deserializeOutboxIntent(messageId: string, fields: Record<string, string>): OutboxIntent {
