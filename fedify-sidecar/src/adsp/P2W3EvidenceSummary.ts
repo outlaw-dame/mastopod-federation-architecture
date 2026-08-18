@@ -2,6 +2,7 @@ import { parseActivityPodsOriginEvidence } from "./RemoteFixtureActivityPodsOrig
 
 export const ADSP_P2_W3_CORRELATION_SCHEMA = "adsp.p2.w3.origin-correlation.v1" as const;
 export const ADSP_P2_W3_SUMMARY_SCHEMA = "adsp.p2.w3.mixed-evidence-summary.v1" as const;
+export const ADSP_P0_ACTIVITYPODS_SETTLEMENT_SCHEMA = "adsp.p0.activitypods-origin-settlement.v1" as const;
 export const ADSP_P2_W3_REPLICA_COUNTS = [1, 2, 4] as const;
 export const ADSP_P2_W3_SCENARIOS = ["success", "transient", "permanent"] as const;
 
@@ -18,6 +19,7 @@ export interface AdspP2W3CorrelationEvidence {
 
 export interface AdspP2W3SettlementEvidence {
   ok: true;
+  schema: typeof ADSP_P0_ACTIVITYPODS_SETTLEMENT_SCHEMA;
   scenario: AdspP2W3Scenario;
   activityId: string;
   intentId: string;
@@ -60,6 +62,14 @@ function exact(name: string, value: unknown): string {
     throw new TypeError(`${name} must be a non-empty exact string`);
   }
   return value;
+}
+
+function sha256(name: string, value: unknown): string {
+  const digest = exact(name, value);
+  if (!/^[a-f0-9]{64}$/u.test(digest)) {
+    throw new TypeError(`${name} must be a lowercase 64-character SHA-256 digest`);
+  }
+  return digest;
 }
 
 function object(name: string, value: unknown): Record<string, unknown> {
@@ -138,19 +148,23 @@ export function parseAdspP2W3SettlementEvidence(value: unknown): AdspP2W3Settlem
     ]),
   );
   if (root["ok"] !== true) throw new TypeError("ADSP P2 W3 settlement must prove ok=true");
+  if (root["schema"] !== ADSP_P0_ACTIVITYPODS_SETTLEMENT_SCHEMA) {
+    throw new TypeError(`ADSP P2 W3 settlement schema must be ${ADSP_P0_ACTIVITYPODS_SETTLEMENT_SCHEMA}`);
+  }
   const errors = root["errors"];
   if (!Array.isArray(errors) || errors.length !== 0) {
     throw new TypeError("ADSP P2 W3 settlement errors must be an empty array");
   }
   return {
     ok: true,
+    schema: ADSP_P0_ACTIVITYPODS_SETTLEMENT_SCHEMA,
     scenario: scenario(root["scenario"]),
     activityId: exact("ADSP P2 W3 settlement activityId", root["activityId"]),
     intentId: exact("ADSP P2 W3 settlement intentId", root["intentId"]),
     jobId: exact("ADSP P2 W3 settlement jobId", root["jobId"]),
     eventLogPublishedAt: positiveSafeInteger("ADSP P2 W3 settlement eventLogPublishedAt", root["eventLogPublishedAt"]),
     observedRequests: nonNegativeSafeInteger("ADSP P2 W3 settlement observedRequests", root["observedRequests"]),
-    observedBodySha256: exact("ADSP P2 W3 settlement observedBodySha256", root["observedBodySha256"]),
+    observedBodySha256: sha256("ADSP P2 W3 settlement observedBodySha256", root["observedBodySha256"]),
     errors,
   };
 }
