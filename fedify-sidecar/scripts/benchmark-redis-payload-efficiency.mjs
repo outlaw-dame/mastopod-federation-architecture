@@ -11,15 +11,6 @@ const MAX_REAL_REDIS_LOGICAL_BYTES = Number.parseInt(
   10,
 );
 const CODEC_ITERATIONS = 20;
-
-const zstdCompressSync = zlib.zstdCompressSync;
-const zstdDecompressSync = zlib.zstdDecompressSync;
-if (typeof zstdCompressSync !== "function" || typeof zstdDecompressSync !== "function") {
-  throw new Error(
-    "This evidence benchmark requires Node >=22.15 with built-in Zstd support; production remains Node >=20 and is not changed by this benchmark.",
-  );
-}
-
 const ACTIVITY_SIZES = [2 * 1024, 20 * 1024, 100 * 1024];
 const THEORETICAL_FANOUTS = [1, 10, 100, 1000, 10000];
 const REAL_CASES = [
@@ -29,27 +20,30 @@ const REAL_CASES = [
   { recipients: 1_000, endpoints: 1_000 },
 ];
 
+const zstdCompressSync = zlib.zstdCompressSync;
+const zstdDecompressSync = zlib.zstdDecompressSync;
+if (typeof zstdCompressSync !== "function" || typeof zstdDecompressSync !== "function") {
+  throw new Error(
+    "This evidence benchmark requires Node >=22.15 with built-in Zstd support; production remains Node >=20 and is not changed by this benchmark.",
+  );
+}
+
 function deterministicText(targetBytes) {
   const words = [
     "activitypub", "solid", "federation", "recipient", "timeline", "conversation", "identity", "delivery",
     "semantic", "privacy", "community", "network", "article", "profile", "stream", "message", "public", "reply",
   ];
   let out = "";
-  let index = 0;
-  while (Buffer.byteLength(out) < targetBytes) {
+  for (let index = 0; Buffer.byteLength(out) < targetBytes; index += 1) {
     const digest = createHash("sha256").update(`payload-${index}`).digest("hex").slice(0, 12);
     out += `${words[index % words.length]}-${digest} `;
-    index += 1;
   }
   return out.slice(0, targetBytes);
 }
 
 function makeActivity(targetBytes) {
-  const base = {
-    "@context": [
-      "https://www.w3.org/ns/activitystreams",
-      "https://w3id.org/security/v1",
-    ],
+  const activity = {
+    "@context": ["https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"],
     id: "https://local.example/activities/payload-efficiency",
     type: "Create",
     actor: "https://local.example/users/alice",
@@ -63,33 +57,23 @@ function makeActivity(targetBytes) {
       content: "",
     },
   };
-  const skeletonBytes = Buffer.byteLength(JSON.stringify(base));
-  base.object.content = deterministicText(Math.max(0, targetBytes - skeletonBytes));
-  return JSON.stringify(base);
+  const skeletonBytes = Buffer.byteLength(JSON.stringify(activity));
+  activity.object.content = deterministicText(Math.max(0, targetBytes - skeletonBytes));
+  return JSON.stringify(activity);
 }
 
 function makeTargets(recipients, endpoints) {
-  const targets = [];
-  for (let index = 0; index < recipients; index += 1) {
+  return Array.from({ length: recipients }, (_, index) => {
     const endpoint = index % endpoints;
     const domain = `server-${endpoint}.example`;
-    targets.push({
+    const sharedInboxUrl = endpoints < recipients ? `https://${domain}/inbox` : undefined;
+    return {
       inboxUrl: `https://${domain}/users/user-${index}/inbox`,
-      sharedInboxUrl: endpoints < recipients ? `https://${domain}/inbox` : undefined,
-      deliveryUrl: endpoints < recipients
-        ? `https://${domain}/inbox`
-        : `https://${domain}/users/user-${index}/inbox`,
+      ...(sharedInboxUrl ? { sharedInboxUrl } : {}),
+      deliveryUrl: sharedInboxUrl ?? `https://${domain}/users/user-${index}/inbox`,
       targetDomain: domain,
-    });
-  }
-  return targets;
-}
-
-function makeOutboundTargets(endpoints) {
-  return Array.from({ length: endpoints }, (_, index) => ({
-    targetInbox: `https://server-${index}.example/inbox`,
-    targetDomain: `server-${index}.example`,
-  }));
+    };
+  });
 }
 
 function percentile(samples, p) {
@@ -101,28 +85,34 @@ function percentile(samples, p) {
 function measureCodec(name, compress, decompress, input) {
   const compressed = compress(input);
   const roundTrip = decompress(compressed);
-  if (!Buffer.from(roundTrip).equals(Buffer.from(input))) {
-    throw new Error(`${name} codec round-trip mismatch`);
-  }
-  const compressMs = [];
-  const decompressMs = [];
-  for (let i = 0; i < CODEC_ITERATIONS; i += 1) {
+  if (!Buffer.from(roundTrip).equals(Buffer.from(input))) throw new Error(`${name} codec round-trip mismatch`);
+
+  const compressionMs = [];
+  const decompressionMs = [];
+  for (let index = 0; index < CODEC_ITERATIONS; index += 1) {
     const c0 = performance.now();
     const encoded = compress(input);
-    compressMs.push(performance.now() - c0);
+    compressionMs.push(performance.now() - c0);
     const d0 = performance.now();
     decompress(encoded);
-    decompressMs.push(performance.now() - d0);
+    decompressionMs.push(performance.now() - d0);
   }
+
+  const sourceBytes = Buffer.byteLength(input);
+  const compressedBytes = Buffer.byteLength(compressed);
+  const base64urlBytes = Buffer.byteLength(compressed.toString("base64url"));
   return {
     codec: name,
-    sourceBytes: Buffer.byteLength(input),
-    compressedBytes: Buffer.byteLength(compressed),
-    ratio: Buffer.byteLength(input) / Math.max(1, Buffer.byteLength(compressed)),
-    compressP50Ms: percentile(compressMs, 0.5),
-    compressP95Ms: percentile(compressMs, 0.95),
-    decompressP50Ms: percentile(decompressMs, 0.5),
-    decompressP95Ms: percentile(decompressMs, 0.95),
+    sourceBytes,
+    compressedBytes,
+    base64urlBytes,
+    rawCompressionRatio: sourceBytes / Math.max(1, compressedBytes),
+    queueEnvelopeRatio: sourceBytes / Math.max(1, base64urlBytes),
+    base64urlExpansion: base64urlBytes / Math.max(1, compressedBytes),
+    compressP50Ms: percentile(compressionMs, 0.5),
+    compressP95Ms: percentile(compressionMs, 0.95),
+    decompressP50Ms: percentile(decompressionMs, 0.5),
+    decompressP95Ms: percentile(decompressionMs, 0.95),
   };
 }
 
@@ -132,21 +122,25 @@ function codecEvidence(activity) {
     measureCodec("gzip-6", value => zlib.gzipSync(value, { level: 6 }), zlib.gunzipSync, source),
     measureCodec(
       "brotli-4",
-      value => zlib.brotliCompressSync(value, {
-        params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 },
-      }),
+      value => zlib.brotliCompressSync(value, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } }),
       zlib.brotliDecompressSync,
       source,
     ),
     measureCodec(
       "zstd-3",
-      value => zstdCompressSync(value, {
-        params: { [zlib.constants.ZSTD_c_compressionLevel]: 3 },
-      }),
+      value => zstdCompressSync(value, { params: { [zlib.constants.ZSTD_c_compressionLevel]: 3 } }),
       zstdDecompressSync,
       source,
     ),
   ];
+}
+
+function zstd(value) {
+  return zstdCompressSync(value, { params: { [zlib.constants.ZSTD_c_compressionLevel]: 3 } });
+}
+
+function jsonSafeZstd(value) {
+  return zstd(value).toString("base64url");
 }
 
 function fieldBytes(fields) {
@@ -193,12 +187,9 @@ function buildLayouts({ activity, targets, endpoints }) {
   const activityBuffer = Buffer.from(activity);
   const targetsJson = JSON.stringify(targets);
   const targetsBuffer = Buffer.from(targetsJson);
-  const compressedActivity = zstdCompressSync(activityBuffer, {
-    params: { [zlib.constants.ZSTD_c_compressionLevel]: 3 },
-  });
-  const compressedTargets = zstdCompressSync(targetsBuffer, {
-    params: { [zlib.constants.ZSTD_c_compressionLevel]: 3 },
-  });
+  const compressedActivityBinary = zstd(activityBuffer);
+  const encodedActivity = compressedActivityBinary.toString("base64url");
+  const encodedTargets = jsonSafeZstd(targetsBuffer);
   const payloadRef = `sha256:${createHash("sha256").update(activityBuffer).digest("hex")}`;
 
   const layouts = {
@@ -207,23 +198,25 @@ function buildLayouts({ activity, targets, endpoints }) {
       outbox: { ...commonOutboxFields(), activity, targets: targetsJson },
       outbound: index => ({ ...commonOutboundFields(index), activity }),
       codec: "identity",
+      compressionEnvelope: "none",
       reference: false,
     },
     B_compressed: {
       payload: null,
       outbox: {
         ...commonOutboxFields(),
-        activityEncoding: "zstd-3",
-        activityPayload: compressedActivity,
-        targetsEncoding: "zstd-3",
-        targetsPayload: compressedTargets,
+        activityEncoding: "zstd-3+base64url",
+        activityPayload: encodedActivity,
+        targetsEncoding: "zstd-3+base64url",
+        targetsPayload: encodedTargets,
       },
       outbound: index => ({
         ...commonOutboundFields(index),
-        activityEncoding: "zstd-3",
-        activityPayload: compressedActivity,
+        activityEncoding: "zstd-3+base64url",
+        activityPayload: encodedActivity,
       }),
       codec: "zstd-3",
+      compressionEnvelope: "base64url",
       reference: false,
     },
     C_reference: {
@@ -231,18 +224,23 @@ function buildLayouts({ activity, targets, endpoints }) {
       outbox: { ...commonOutboxFields(), activityRef: payloadRef, targets: targetsJson },
       outbound: index => ({ ...commonOutboundFields(index), activityRef: payloadRef }),
       codec: "identity",
+      compressionEnvelope: "none",
       reference: true,
     },
     D_reference_compressed: {
-      payload: compressedActivity,
+      // The canonical payload key is not serialized through delayed/DLQ JSON,
+      // so it can remain binary. Queue-carried target bytes use base64url.
+      payload: compressedActivityBinary,
       outbox: {
         ...commonOutboxFields(),
         activityRef: payloadRef,
-        targetsEncoding: "zstd-3",
-        targetsPayload: compressedTargets,
+        activityRefEncoding: "zstd-3",
+        targetsEncoding: "zstd-3+base64url",
+        targetsPayload: encodedTargets,
       },
-      outbound: index => ({ ...commonOutboundFields(index), activityRef: payloadRef }),
+      outbound: index => ({ ...commonOutboundFields(index), activityRef: payloadRef, activityRefEncoding: "zstd-3" }),
       codec: "zstd-3",
+      compressionEnvelope: "binary-payload-key/base64url-queue-fields",
       reference: true,
     },
   };
@@ -265,9 +263,7 @@ async function writeStreamEntries(client, key, entries) {
   const chunkSize = 250;
   for (let offset = 0; offset < entries.length; offset += chunkSize) {
     const multi = client.multi();
-    for (const fields of entries.slice(offset, offset + chunkSize)) {
-      multi.xAdd(key, "*", fields);
-    }
+    for (const fields of entries.slice(offset, offset + chunkSize)) multi.xAdd(key, "*", fields);
     await multi.exec();
   }
 }
@@ -280,21 +276,25 @@ async function runLayout(client, caseId, name, layout, endpoints) {
   const keys = [outboxKey, outboundKey];
   if (layout.payload) keys.push(payloadKey);
 
-  const before = performance.now();
+  const started = performance.now();
   if (layout.payload) await client.set(payloadKey, layout.payload);
   await client.xAdd(outboxKey, "*", layout.outbox);
-  const outboundEntries = Array.from({ length: endpoints }, (_, index) => layout.outbound(index));
-  await writeStreamEntries(client, outboundKey, outboundEntries);
-  const writeMs = performance.now() - before;
+  await writeStreamEntries(
+    client,
+    outboundKey,
+    Array.from({ length: endpoints }, (_, index) => layout.outbound(index)),
+  );
+  const writeMs = performance.now() - started;
 
   const usages = {};
   for (const key of keys) usages[key.split(":").at(-1)] = await memoryUsage(client, key);
   const redisBytes = Object.values(usages).reduce((sum, value) => sum + value, 0);
-
   await client.del(keys);
+
   return {
     variant: name,
     codec: layout.codec,
+    compressionEnvelope: layout.compressionEnvelope,
     reference: layout.reference,
     logicalFieldBytes: layout.logicalBytes,
     redisBytes,
@@ -332,7 +332,7 @@ async function main() {
     }));
 
     const theoretical = [];
-    for (const { target, value } of activities) {
+    for (const { value } of activities) {
       const activityBytes = Buffer.byteLength(value);
       for (const recipients of THEORETICAL_FANOUTS) {
         for (const endpoints of [...new Set([Math.min(recipients, 10), Math.min(recipients, 100), recipients])]) {
@@ -384,15 +384,19 @@ async function main() {
     }
 
     const output = {
-      schema: "apdm-redis-payload-efficiency.v1",
+      schema: "apdm-redis-payload-efficiency.v2",
       measuredAt: new Date().toISOString(),
       node: process.version,
-      redisUrl: REDIS_URL.replace(/:\/\/.*@/, "://<redacted>@"),
+      redisEndpoint: new URL(REDIS_URL).hostname,
       scope: "evidence-only; no production queue schema changes",
+      benchmarkSemantics: {
+        writeMs: "isolated equivalent-field MULTI/XADD envelope timing; not production enqueueOutboundBatchForIntent Lua latency",
+        compressionEnvelope: "queue-carried compressed fields are base64url so they remain JSON-safe through existing delayed/DLQ serializers",
+      },
       invariants: [
         "outbound copy count is unique delivery endpoints after shared-inbox collapse, not raw recipient count",
         "reference variants require an independently durable payload-retention and cleanup contract before production use",
-        "compression results are cached/reused rather than recompressing identical Activity bytes for every endpoint",
+        "compression results cache/reuse identical encoded Activity bytes rather than recompressing once per endpoint",
         "real Redis memory uses MEMORY USAGE SAMPLES 0 and includes allocator/data-structure overhead for benchmark keys",
       ],
       codecs,
@@ -406,7 +410,7 @@ async function main() {
       const path = await import("node:path");
       const resolved = path.resolve(OUTPUT_PATH);
       fs.mkdirSync(path.dirname(resolved), { recursive: true });
-      fs.writeFileSync(resolved, rendered, { mode: 0o600 });
+      fs.writeFileSync(resolved, rendered, { encoding: "utf8", mode: 0o600 });
     }
     process.stdout.write(rendered);
   } finally {
