@@ -44,13 +44,13 @@ jobs:
       - name: Run real Redis A/B/C/D payload benchmark
         env:
           REDIS_URL: redis://127.0.0.1:6379
-          REDIS_PAYLOAD_BENCHMARK_OUTPUT: ../../measurements/redis-payload-efficiency/evidence.json
+          REDIS_PAYLOAD_BENCHMARK_OUTPUT: ../measurements/redis-payload-efficiency/evidence.json
           REDIS_PAYLOAD_BENCHMARK_MAX_LOGICAL_BYTES: '167772160'
         working-directory: fedify-sidecar
         run: |
-          mkdir -p ../../measurements/redis-payload-efficiency
+          mkdir -p ../measurements/redis-payload-efficiency
           node scripts/benchmark-redis-payload-efficiency.mjs \
-            | tee ../../measurements/redis-payload-efficiency/evidence.stdout.json
+            | tee ../measurements/redis-payload-efficiency/evidence.stdout.json
 
       - name: Validate evidence contract
         run: |
