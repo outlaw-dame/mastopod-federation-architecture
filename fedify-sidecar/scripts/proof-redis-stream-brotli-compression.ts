@@ -147,7 +147,7 @@ async function main() {
   await client.connect();
   try {
     const plaintextCodec = new RedisStreamPayloadCodec({ writeEnabled: false });
-    const brotliCodec = new RedisStreamPayloadCodec({ writeEnabled: true, minBytes: 4096, brotliQuality: 1 });
+    const brotliCodec = new RedisStreamPayloadCodec({ writeEnabled: true, minBytes: 4096, brotliQuality: 0 });
     const results = [];
 
     for (const testCase of cases) {
@@ -166,7 +166,7 @@ async function main() {
       const compressed = await writeVariant({
         client,
         caseId,
-        name: "brotli-1",
+        name: "brotli-0",
         activity,
         targets,
         endpoints: testCase.endpoints,

@@ -207,7 +207,7 @@ async function createArmQueue(caseName: string, arm: Arm) {
     payloadCompression: {
       writeEnabled: arm === "brotli",
       minBytes: 4 * 1024,
-      brotliQuality: 1,
+      brotliQuality: 0,
     },
   });
   await queue.connect();
