@@ -121,11 +121,13 @@ export class OutboxIntentWorker {
 
   protected async processIntent(messageId: string, intent: OutboxIntent): Promise<void> {
     this.activeJobs++;
+    let parkingAlreadyFutureIntent = false;
 
     try {
       this.assertIntentWithinReplayHorizon(intent, "processing start");
 
       if (intent.notBeforeMs > 0 && Date.now() < intent.notBeforeMs) {
+        parkingAlreadyFutureIntent = true;
         await this.persistDelayedReplacementAndAck(messageId, intent);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "deferred" });
         logger.debug("Outbox intent not ready, parked in durable delayed store", {
@@ -244,6 +246,14 @@ export class OutboxIntentWorker {
         jobCount: enqueueResult.jobCount,
       });
     } catch (error) {
+      // A future-dated intent has not attempted ActivityPub processing yet. If
+      // its durable parking transition fails, leave the original Stream entry
+      // pending and surface the infrastructure error without consuming a
+      // business retry attempt or manufacturing another replacement.
+      if (parkingAlreadyFutureIntent) {
+        throw error;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       const permanent = this.isPermanentFailure(error);
       const nextAttempt = intent.attempt + 1;
