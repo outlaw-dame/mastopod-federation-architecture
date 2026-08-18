@@ -32,7 +32,7 @@ function finitePositiveInteger(value: number | undefined, fallback: number): num
 }
 
 function boundedBrotliQuality(value: number | undefined): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return 1;
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(11, Math.floor(value)));
 }
 
@@ -132,6 +132,17 @@ export class RedisStreamPayloadCodec {
       );
     }
 
+    // An exact envelope that reached the cache has already passed canonical
+    // base64url, Brotli, size, and SHA-256 validation. Exact-string lookup
+    // avoids repeated decode/hash/decompression for fan-out copies while never
+    // allowing different compressed bytes to inherit a prior validation.
+    const cached = this.decodeCache.get(value);
+    if (cached !== undefined) {
+      this.decodeCache.delete(value);
+      this.decodeCache.set(value, cached);
+      return cached.value;
+    }
+
     const compressed = Buffer.from(encoded, "base64url");
     if (compressed.byteLength === 0 || compressed.toString("base64url") !== encoded) {
       throw new Error("Redis Stream Brotli payload is not canonical base64url");
@@ -140,16 +151,6 @@ export class RedisStreamPayloadCodec {
       throw new Error(
         `Redis Stream compressed payload exceeds maximum size of ${this.maxCompressedBytes} bytes`,
       );
-    }
-
-    // Bind reuse to both the advertised uncompressed digest and the exact
-    // canonical compressed bytes so cache hits cannot mask payload corruption.
-    const cacheKey = `${expectedDigest}:${payloadDigest(compressed)}`;
-    const cached = this.decodeCache.get(cacheKey);
-    if (cached !== undefined) {
-      this.decodeCache.delete(cacheKey);
-      this.decodeCache.set(cacheKey, cached);
-      return cached.value;
     }
 
     let decompressed: Buffer;
@@ -172,7 +173,7 @@ export class RedisStreamPayloadCodec {
     }
 
     const decoded = decompressed.toString("utf8");
-    this.cacheDecoded(cacheKey, decoded, decompressed.byteLength);
+    this.cacheDecoded(value, decoded, decompressed.byteLength + Buffer.byteLength(value));
     return decoded;
   }
 
@@ -214,7 +215,7 @@ export function createRedisStreamPayloadCodecFromEnv(): RedisStreamPayloadCodec 
       10,
     ),
     brotliQuality: Number.parseInt(
-      process.env["REDIS_STREAM_PAYLOAD_BROTLI_QUALITY"] || "1",
+      process.env["REDIS_STREAM_PAYLOAD_BROTLI_QUALITY"] || "0",
       10,
     ),
     decodeCacheMaxBytes: Number.parseInt(
