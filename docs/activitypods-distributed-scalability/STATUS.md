@@ -1,19 +1,12 @@
 # ADSP Status
 
-Last updated: 2026-08-17
+Last updated: 2026-08-18
 
-This file is the live cross-repository evidence ledger for the ActivityPods Distributed Scalability Program. `PHASES.md` defines the roadmap and exit gates. `BENCHMARK-CONTRACT.md` defines evidence validity and promotion rules. `P0-SOURCE-BASELINE.md` freezes the current source-level topology findings.
-
-## Gate semantics
-
-- **PASS / `[x]`** — the phase exit gate is closed.
-- **IN PROGRESS / `[ ]`** — implementation or investigation may exist, but required evidence/correctness/promotion gates remain open.
-- **BLOCKED / NOT STARTED** — dependent work must not be treated as completed or selected architecture.
-- **NOT REQUIRED** — a conditional phase's entry gate never opened because the preceding architecture satisfied the requirement without the additional subsystem.
+This is the live cross-repository evidence ledger for the ActivityPods Distributed Scalability Program. `PHASES.md` defines phase ownership and exit gates. `BENCHMARK-CONTRACT.md` defines evidence validity and promotion rules. Detailed Phase-0 evidence is in `P0-SOURCE-BASELINE.md`, `P0-TIER1-RUNTIME-EVIDENCE.md`, and `P0-REMOTE-RUNTIME-EVIDENCE.md`.
 
 ## Program checklist
 
-- [ ] ADSP-P0 — baseline, authority and benchmark contract — **IN PROGRESS**
+- [ ] ADSP-P0 — baseline, authority and benchmark contract — **IN PROGRESS: runtime fixtures complete; numerical promotion thresholds still to freeze**
 - [ ] ADSP-P1 — safe distributable Moleculer fabric — blocked by P0
 - [ ] ADSP-P2 — horizontal ActivityPods / Redis transporter — blocked by P1
 - [ ] ADSP-P3 — NATS Core transporter comparison — blocked by P2
@@ -21,105 +14,96 @@ This file is the live cross-repository evidence ledger for the ActivityPods Dist
 - [ ] ADSP-P5 — JetStream evaluation — conditional / entry gate closed by default
 - [ ] ADSP-P6 — deployment profiles and stabilization — blocked by selected architecture
 
-## Program setup baseline heads
+## Frozen source baseline
 
-These are the exact `master` heads from which the ADSP setup branches were created. They are the source baselines frozen in `P0-SOURCE-BASELINE.md`; runtime/benchmark evidence must still record the exact heads actually executed.
+Setup heads remain:
 
 - ActivityPods: `3fad15838ec098d8d32c0f36cd8c75cbb66a46a8`
 - federation architecture: `e20c32fc5d4c9b9157de3063345e050ea3ec5007`
 
-Setup branches:
+Confirmed baseline constraints:
 
-- ActivityPods: `agent/adsp-program-baseline`
-- federation architecture: `agent/activitypods-distributed-scalability-program`
+- ActivityPods runs the broad backend service tree as one colocated Moleculer service cell.
+- Moleculer uses literal `nodeID: 'pod-provider'`, no explicit namespace, Redis-transporter selection, and serializer behavior coupled to that transporter setting.
+- Redis cache, transporter, queue and OIDC-state responsibilities are distinct.
+- the sidecar already uses Redis Streams for durable inbound, outbound, outbox-intent and origin-reconcile workloads with consumer groups, pending reclaim and bounded DLQ handling.
+- ActivityPods owns authoritative ActivityPub planning/local semantics; the sidecar owns external HTTP execution in external mode.
+- existing Redis/Bull/Redis-Streams durability remains incumbent during later transporter comparison.
 
-## Current architectural baseline
+## Phase-0 runtime evidence
 
-The program now has source-verified evidence for these constraints:
+### Fixture A — Tier-1 local fanout: COMPLETE
 
-- ActivityPods/SemApps owns Tier 1 Pod/LDP/WebACL/triplestore semantics and authoritative ActivityPub planning.
-- Fedify sidecar owns Tier 2 external ActivityPub HTTP execution in APDM `external` mode.
-- Redis already exists in the architecture and must be treated as incumbent infrastructure rather than ignored when comparing new systems.
-- ActivityPods currently loads the broad backend service tree into one Moleculer runner, so the baseline is a colocated service cell rather than a one-service-per-process fleet.
-- local Moleculer calls should remain local where services are intentionally colocated.
-- existing durable Redis/Bull/Fedify mechanisms remain in place until workload-specific evidence justifies changing them.
-- the federation sidecar already uses Redis Streams for durable inbound, outbound, outbox-intent and origin-reconciliation work queues, with consumer groups, pending-entry reclaim and bounded DLQ streams.
-- NATS Core is a candidate for distributed Moleculer request/reply only; JetStream is not implied.
-- any Phase 4 Redis Streams work means extending/reusing the incumbent Streams subsystem for an additional qualified workload, not introducing Streams to a system that lacks them.
+Run `32070748744` executed ActivityPods `306e718b3d29a78f032d0545a0c66c22d533bb1f` and produced 25/25 successful measured samples across `N=1,10,100,200,1000`, five samples per point after warmup.
 
-## Phase status
+The Phase-10 dataset-existence memo remained OFF and the federation sidecar was explicitly excluded. N=1 elapsed time was very noisy (~170% CV); N=10–1000 elapsed CV was roughly 1–4%. Exact CPU/action/Fuseki/Redis/resource evidence and artifact provenance are recorded in `P0-TIER1-RUNTIME-EVIDENCE.md`.
 
-| Phase | ActivityPods slice | Federation slice | Gate |
-|---|---|---|---|
-| ADSP-P0 | source broker/startup/Redis configuration frozen; runtime evidence pending | Redis Streams/signing caller baseline frozen; runtime evidence pending | IN PROGRESS |
-| ADSP-P1 | not started | as needed | BLOCKED by P0 |
-| ADSP-P2 | not started | evidence coordination later | BLOCKED by P1 |
-| ADSP-P3 | not started | evidence coordination later | BLOCKED by P2 |
-| ADSP-P4 | not started | incumbent Streams documented; additional workloads not selected | CONDITIONAL |
-| ADSP-P5 | not started | not started | ENTRY GATE CLOSED |
-| ADSP-P6 | not started | not started | BLOCKED |
+### Fixture B — mixed/remote federation: COMPLETE for frozen correctness scope
 
-## P0 source findings — frozen
+Whole-system run `32086514942` passed all three deterministic scenarios using:
 
-Exact file-level evidence is recorded in `P0-SOURCE-BASELINE.md`. At the frozen heads, the earlier ActivityPods observations are now **confirmed**, not hypotheses:
+- ActivityPods candidate `2d18680ce399682ac4e85a2bd777aaf8f631b81a`;
+- federation candidate `337e62999ef6fa4e14e126987dec5be67c8e49c6`.
 
-- `pod-provider/backend/moleculer.config.js` uses the literal `nodeID: 'pod-provider'`;
-- no explicit Moleculer namespace is configured;
-- Moleculer transporter selection is `CONFIG.REDIS_TRANSPORTER_URL || undefined`;
-- RDF serialization is selected by the Redis-specific transporter setting, coupling serialization semantics to transporter choice;
-- `pod-provider/backend/package.json` starts a broad `moleculer-runner services/*.js services/**/*.js` service cell;
-- `pod-provider/backend/config/config.js` exposes distinct Redis cache, transporter, queue and OIDC-state responsibilities.
+Proven path:
 
-Federation source verification also confirms:
+`activitypub.outbox.post → authoritative Delivery Plan → one suppressed native remotePost → durable ActivityPods handoff → sidecar 202 → Redis Streams outbox-intent → RedPanda event log → outbound job → ActivityPods signing → controlled remote HTTP → completion/retry/DLQ`.
 
-- `fedify-sidecar/src/queue/sidecar-redis-queue-core.ts` already implements Redis Streams work queues;
-- inbound, outbound, outbox-intent and origin-reconcile streams are separate;
-- consumer groups use pending-entry `XAUTOCLAIM` recovery before `XREADGROUP` of new messages;
-- stream and DLQ lengths are bounded;
-- missing consumer groups are recreated;
-- outbound retry/DLQ transitions durably insert replacement or DLQ work before ACKing the original Stream entry;
-- successful delivery persists completed-delivery state before ACK;
-- outbound retries use exponential backoff and preserve the greater of normal backoff and `Retry-After`;
-- idempotency/delivery claims are separate from Stream pending ownership;
-- atomic Redis Lua is already used for selected fanout, rate-limit and concurrency state transitions.
+Outcomes:
 
-## Existing evidence carried into ADSP
+- success: one HTTP request → `202`;
+- transient: `503` → bounded retry → `503` → bounded retry → `202`, three requests total;
+- permanent: one HTTP request → `410` → permanent-failure DLQ;
+- every scenario had a positive RedPanda publication marker and zero reconciliation errors.
 
-ADSP does not restart scalability research from zero. Relevant already-recorded evidence includes:
+The artifact retains ActivityPods/sidecar process snapshots, Docker stats, Redis command/memory snapshots, RedPanda topic descriptions, service logs and strict controlled-target observations. With one deterministic run per scenario this is correctness/failure evidence, not a remote latency-distribution claim.
 
-- APDM Phase 8/9 real local-delivery measurements showing large nested Moleculer/Fuseki amplification and bounded-concurrency gains without claiming that Moleculer transport itself is the root cause;
-- `MOLECULER-FANOUT-SCALABILITY-RATIONALE.md`, which requires shared authoritative state to be resolved once, concurrency/memory to be bounded and whole-system cost to be measured;
-- `docs/scalability-audit-2026-08-14.md`, including existing Redis/Fedify optimization findings and deliberately phased ActivityPods bottlenecks;
-- `PORTABLE-BENCHMARKING-AND-CAPACITY.md` and `RESOURCE-EFFICIENCY.md` as supporting capacity/resource guidance;
-- APDM Phase 10 is closed at the frozen ActivityPods head; ADSP must not retain the stale setup wording that described it as still pending.
+Exact evidence is in `P0-REMOTE-RUNTIME-EVIDENCE.md`.
 
-## P0 evidence still required
+Implementation closures:
 
-Before P0 can pass, record:
+- ActivityPods PR #83 merged as `7a727f52ba783added771f87693afbcb4fd8c536`.
+- federation PR #80 merged as `2cd1c097456756c8c28d349dfc800d36cfd6fce6`.
+- no submitted reviews or review threads were outstanding at merge time.
 
-1. exact runtime-tested ActivityPods and federation-architecture commit SHAs;
-2. effective node/discovery behavior under two or more simultaneous backends;
-3. namespace/isolation behavior once a safe distributed fixture exists;
-4. RDF payload semantic parity across a genuine remote Moleculer call;
-5. default service-locality observations and local-versus-remote action telemetry;
-6. baseline single-node whole-system resource matrix;
-7. baseline measurement variance and locked Phase 2/3 promotion thresholds;
-8. node disappearance/rejoin and stale-registry failure fixtures;
-9. Redis failover/data-loss behavior for the incumbent Streams/queue workloads under the required durability model;
-10. reusable failure-test fixtures for Redis-transporter and NATS-Core comparison.
+## RedPanda AP stream semantics — VERIFIED
+
+Independent real-broker run `32086514958` used the production producer and consumed the actual RedPanda topics afterward. It proved exactly:
+
+- `ap.stream1.local-public.v1` = local public ActivityPub aggregate for this Pod provider;
+- `ap.stream2.remote-public.v1` = remote public ActivityPub aggregate from accepted remote sources, including relay/service ingress where applicable;
+- `ap.firehose.v1` = Stream1 + Stream2, with each proof event observed exactly once;
+- `ap.tombstones.v1` remains separate;
+- `canonical.v1` remains a separate protocol-neutral intent log.
+
+The proof detected no Stream1/Stream2 cross-contamination and no tombstone leakage into the AP firehose.
+
+## P0 gate reconciliation
+
+`PHASES.md` assigns multi-node node IDs, namespace isolation, transport-independent serialization, RDF semantic parity across remote calls, explicit locality groups, and node join/leave/rejoin behavior to **Phase 1**. They are not unfinished Phase-0 requirements.
+
+The remaining Phase-0 work is to freeze the numerical Phase-2/Phase-3 promotion thresholds from the measured baseline variance **before any NATS result is observed**. The locked values must cover:
+
+1. minimum material whole-system improvement required to justify added infrastructure;
+2. maximum p95/p99 latency regression;
+3. maximum CPU/memory regression;
+4. zero unexplained lost/duplicate authoritative outcomes;
+5. bounded recovery behavior;
+6. explicit operational-cost penalty for adding a required runtime.
+
+After those values are recorded in `BENCHMARK-CONTRACT.md`, the written P0 exit checklist can be evaluated for closure. Until then P0 remains **IN PROGRESS** and P1/NATS/JetStream remain blocked.
 
 ## Decision ledger
 
-No candidate technology has been selected by ADSP yet.
-
 | Decision | State | Reason |
 |---|---|---|
-| Redis transporter for horizontal ActivityPods | comparator only | existing infrastructure; must first prove safe horizontal fabric |
-| NATS Core | unselected candidate | test only after Redis horizontal baseline exists |
-| Existing sidecar Redis Streams | incumbent / preserved | already powers durable federation work queues; not an ADSP candidate introduction |
-| Additional Redis Streams workloads | unselected workload-specific candidate | reuse/extend only after a workload proves stream semantics are appropriate |
-| JetStream | not authorized for implementation/testing yet | Phase 5 entry gate requires a reproduced Redis limitation |
+| Redis transporter for horizontal ActivityPods | comparator only | existing infrastructure; valid comparator only after P1 |
+| NATS Core | unselected candidate | test only after the P2 Redis horizontal baseline exists |
+| Existing sidecar Redis Streams | incumbent / preserved | already provides durable federation work queues |
+| RedPanda AP public streams | incumbent / verified | Stream1 local + Stream2 remote; AP firehose is their union |
+| Additional Redis Streams workloads | unselected workload-specific candidate | extend/reuse only after workload evidence qualifies it |
+| JetStream | not authorized | Phase-5 entry gate requires a reproduced material Redis limitation |
 
 ## Relationship to APDM
 
-ADSP must not disturb the existing APDM sequence. At the frozen ActivityPods baseline, **APDM Phase 10 is already closed** and Phase 11 is the next APDM-scoped local-delivery phase. ADSP may consume APDM evidence and later provide distributed-topology evidence, but neither program marks the other's phase complete by implication.
+At the frozen ActivityPods baseline, APDM Phase 10 is already closed. ADSP consumes APDM evidence but does not advance APDM gates, and APDM does not advance ADSP gates by implication.
