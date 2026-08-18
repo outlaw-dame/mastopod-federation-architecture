@@ -108,6 +108,23 @@ function makeJob(index: number): OutboundJob {
   };
 }
 
+function outboundFields(jobId: string, encodedActivity: string): Record<string, string> {
+  return {
+    jobId,
+    activityId: "https://local.example/activities/1",
+    actorUri: "https://local.example/users/alice",
+    activity: encodedActivity,
+    targetInbox: "https://remote.example/inbox",
+    targetDomain: "remote.example",
+    attempt: "0",
+    maxAttempts: "10",
+    notBeforeMs: "0",
+    deferCount: "0",
+    lastError: "",
+    meta: "",
+  };
+}
+
 describe("RedisStreamsQueue compression boundary", () => {
   beforeEach(() => {
     fakeClients.length = 0;
@@ -183,20 +200,7 @@ describe("RedisStreamsQueue compression boundary", () => {
     installClients({
       outbound: {
         xAutoClaim: vi.fn().mockResolvedValue({
-          messages: [["1-0", {
-            jobId: "job-1",
-            activityId: "https://local.example/activities/1",
-            actorUri: "https://local.example/users/alice",
-            activity: compressedActivity,
-            targetInbox: "https://remote.example/inbox",
-            targetDomain: "remote.example",
-            attempt: "0",
-            maxAttempts: "10",
-            notBeforeMs: "0",
-            deferCount: "0",
-            lastError: "",
-            meta: "",
-          }]],
+          messages: [["1-0", outboundFields("job-1", compressedActivity)]],
         }),
       },
     });
@@ -207,6 +211,73 @@ describe("RedisStreamsQueue compression boundary", () => {
     const result = await iterator.next();
 
     expect(result.value?.job.activity).toBe(activity);
+    await queue.disconnect();
+  });
+
+  it("does not let one corrupt compressed outbound message block later valid work", async () => {
+    const encoder = new RedisStreamPayloadCodec({ writeEnabled: true, minBytes: 1 });
+    const compressedActivity = encoder.encode(activity).value;
+    const corruptActivity = `apq1:br:${"0".repeat(64)}:bm90LWJyb3RsaQ`;
+    installClients({
+      outbound: {
+        xAutoClaim: vi.fn().mockResolvedValueOnce({
+          messages: [
+            ["1-0", outboundFields("job-corrupt", corruptActivity)],
+            ["2-0", outboundFields("job-valid", compressedActivity)],
+          ],
+        }).mockResolvedValue({ messages: [] }),
+      },
+    });
+    const queue = new RedisStreamsQueue();
+    await queue.connect();
+
+    const iterator = queue.consumeOutbound()[Symbol.asyncIterator]();
+    const result = await iterator.next();
+
+    expect(result.value?.messageId).toBe("2-0");
+    expect(result.value?.job.jobId).toBe("job-valid");
+    expect(result.value?.job.activity).toBe(activity);
+    await queue.disconnect();
+  });
+
+  it("does not let one corrupt compressed outbox intent block later valid work", async () => {
+    const encoder = new RedisStreamPayloadCodec({ writeEnabled: true, minBytes: 1 });
+    const compressedActivity = encoder.encode(activity).value;
+    const compressedTargets = encoder.encode(JSON.stringify(targets)).value;
+    const corruptActivity = `apq1:br:${"0".repeat(64)}:bm90LWJyb3RsaQ`;
+    const fields = (intentId: string, encodedActivity: string): Record<string, string> => ({
+      intentId,
+      activityId: "https://local.example/activities/1",
+      actorUri: "https://local.example/users/alice",
+      activity: encodedActivity,
+      targets: compressedTargets,
+      createdAt: "1",
+      attempt: "0",
+      maxAttempts: "8",
+      notBeforeMs: "0",
+      lastError: "",
+      meta: "",
+      bridgeHints: "",
+    });
+    installClients({
+      outboxIntent: {
+        xAutoClaim: vi.fn().mockResolvedValueOnce({
+          messages: [
+            ["1-0", fields("intent-corrupt", corruptActivity)],
+            ["2-0", fields("intent-valid", compressedActivity)],
+          ],
+        }).mockResolvedValue({ messages: [] }),
+      },
+    });
+    const queue = new RedisStreamsQueue();
+    await queue.connect();
+
+    const iterator = queue.consumeOutboxIntents()[Symbol.asyncIterator]();
+    const result = await iterator.next();
+
+    expect(result.value?.messageId).toBe("2-0");
+    expect(result.value?.intent.intentId).toBe("intent-valid");
+    expect(result.value?.intent.activity).toBe(activity);
     await queue.disconnect();
   });
 
