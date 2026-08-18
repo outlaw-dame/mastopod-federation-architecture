@@ -95,13 +95,30 @@ jobs:
           NODE
 
       - name: Record Redis server facts
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+        working-directory: fedify-sidecar
         run: |
-          {
-            echo '# Redis INFO memory'
-            redis-cli -h 127.0.0.1 INFO memory
-            echo '# Redis CONFIG stream macro-node settings'
-            redis-cli -h 127.0.0.1 CONFIG GET stream-node-max-bytes stream-node-max-entries
-          } > measurements/redis-payload-efficiency/redis-runtime.txt
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import { createClient } from 'redis';
+          const client = createClient({ url: process.env.REDIS_URL });
+          await client.connect();
+          try {
+            const info = await client.sendCommand(['INFO', 'memory']);
+            const config = await client.sendCommand(['CONFIG', 'GET', 'stream-node-max-bytes', 'stream-node-max-entries']);
+            const rendered = [
+              '# Redis INFO memory',
+              String(info).trim(),
+              '# Redis CONFIG stream macro-node settings',
+              JSON.stringify(config, null, 2),
+              '',
+            ].join('\n');
+            fs.writeFileSync('../measurements/redis-payload-efficiency/redis-runtime.txt', rendered, 'utf8');
+          } finally {
+            await client.quit();
+          }
+          NODE
 
       - name: Upload raw evidence
         uses: actions/upload-artifact@v4
