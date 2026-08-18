@@ -13,6 +13,7 @@ on:
       - 'fedify-sidecar/src/delivery/**'
       - 'fedify-sidecar/src/queue/**'
       - 'fedify-sidecar/src/signing/**'
+      - 'fedify-sidecar/src/streams/**'
   pull_request:
     branches:
       - master
@@ -24,6 +25,7 @@ on:
       - 'fedify-sidecar/src/delivery/**'
       - 'fedify-sidecar/src/queue/**'
       - 'fedify-sidecar/src/signing/**'
+      - 'fedify-sidecar/src/streams/**'
 
 permissions:
   contents: read
@@ -38,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      ACTIVITYPODS_SHA: 'ad8f918785b8c1e24d3e0a2d338510a232b49774'
+      ACTIVITYPODS_SHA: '2d18680ce399682ac4e85a2bd777aaf8f631b81a'
       FEDERATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ADSP_REMOTE_REDIS_URL: redis://127.0.0.1:6379
       ADSP_REMOTE_TARGET_STATS_URL: http://127.0.0.1:18080/stats
@@ -101,6 +103,9 @@ jobs:
             deliveryPlanSchema: 'ap.delivery-plan.v1',
             federationDurability: 'Redis Streams',
             eventLog: 'RedPanda',
+            stream1Topic: 'ap.stream1.local-public.v1',
+            stream2Topic: 'ap.stream2.remote-public.v1',
+            firehoseTopic: 'ap.firehose.v1',
             controlledRemote: 'loopback HTTP',
             wholeSystemEvidence: true,
           }, null, 2)}\n`);
@@ -155,11 +160,11 @@ jobs:
             exit 1
           fi
 
-          # The production Stream1 publisher atomically sends every local-public
-          # event to both Stream1 and Firehose. The feed runtime also starts
-          # consumers for Stream1, Stream2, and canonical.v1. Auto topic creation
-          # is deliberately disabled by the producer, so this isolated fresh
-          # broker must provision the same required topology explicitly.
+          # Production AP event semantics:
+          # Stream1 = local public ActivityPub activities.
+          # Stream2 = remote public ActivityPub activities.
+          # ap.firehose.v1 = Stream1 + Stream2 only.
+          # Tombstones and canonical intents remain separate topics.
           redpanda_topics=(
             ap.stream1.local-public.v1
             ap.stream2.remote-public.v1
@@ -209,9 +214,6 @@ jobs:
           SEMAPPS_REDIS_OIDC_PROVIDER_URL: redis://127.0.0.1:6379/13
           SEMAPPS_SMTP_HOST: 127.0.0.1
           SEMAPPS_SMTP_PORT: '1025'
-          # Fixture B is an ActivityPub delivery benchmark. Match the proven
-          # Tier-1 fixture by excluding unrelated ATProto projection while still
-          # requiring the real Pod/key/ActivityPub signup and bootstrap path.
           APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
           APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
           APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
@@ -228,18 +230,12 @@ jobs:
           echo "$!" > ../../../measurements/adsp-p0-remote/activitypods.pid
           activitypods_pid="$(cat ../../../measurements/adsp-p0-remote/activitypods.pid)"
 
-          # The HTTP gateway can answer before the Moleculer broker has finished
-          # starting all services. A signup during that interval is non-replayable
-          # and can miss bootstrap/event work. Require both HTTP reachability and
-          # the broker's definitive full-start marker before provisioning users.
           http_ready=false
           for attempt in $(seq 1 120); do
             if ! kill -0 "${activitypods_pid}" 2>/dev/null; then
               tail -n 500 "${log}"
               exit 1
             fi
-            # Root has no stable application route: any HTTP response proves the
-            # gateway is reachable. Semantic readiness is gated separately below.
             if curl -sS --max-time 2 -o /dev/null http://127.0.0.1:3000/; then http_ready=true; break; fi
             sleep 1
           done
@@ -281,6 +277,9 @@ jobs:
           REDPANDA_BROKERS=127.0.0.1:19092 \
           REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false \
           STREAM1_TOPIC=ap.stream1.local-public.v1 \
+          STREAM2_TOPIC=ap.stream2.remote-public.v1 \
+          FIREHOSE_TOPIC=ap.firehose.v1 \
+          TOMBSTONE_TOPIC=ap.tombstones.v1 \
           ACTIVITYPODS_URL=http://127.0.0.1:3000 \
           ACTIVITYPODS_TOKEN="$ADSP_EPHEMERAL_TOKEN" \
           SIDECAR_TOKEN="$ADSP_EPHEMERAL_TOKEN" \
