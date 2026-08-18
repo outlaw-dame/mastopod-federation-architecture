@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      ACTIVITYPODS_SHA: 'b09c673cf26e9509b63657c59dcbeb95db10a4b7'
+      ACTIVITYPODS_SHA: 'd0b2fce2cfcfd5d319d708005dd960790a08f894'
       FEDERATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ADSP_REMOTE_REDIS_URL: redis://127.0.0.1:6379
       ADSP_REMOTE_TARGET_STATS_URL: http://127.0.0.1:18080/stats
@@ -315,8 +315,6 @@ jobs:
 
             start_sidecar "$arm_dir"
 
-            # Prove replica 1 can resolve the controlled actor through its W3
-            # loopback bridge before authoritative work begins.
             backend_cid="$(cd "$compose_root" && docker compose $files ps -q backend)"
             docker exec "$backend_cid" node -e "fetch('http://127.0.0.1:18080/actor/success').then(r=>{if(!r.ok)process.exit(1);return r.json()}).then(v=>{if(v.id!=='http://127.0.0.1:18080/actor/success')process.exit(1)}).catch(()=>process.exit(1))"
 
