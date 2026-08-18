@@ -106,7 +106,7 @@ describe("ADSP P2 W3 evidence summary", () => {
     expect(() => validateAdspP2W3Case(replicaDrift)).toThrow(/replica count drift/u);
   });
 
-  it("rejects failed reconciliation, missing RedPanda proof, or unsupported settlement fields", () => {
+  it("rejects failed reconciliation, missing RedPanda proof, wrong schema, malformed digest, or unsupported fields", () => {
     const reconciliationError = makeCase(1, "success");
     (reconciliationError.settlement as Record<string, unknown>)["errors"] = ["duplicate delivery"];
     expect(() => validateAdspP2W3Case(reconciliationError)).toThrow(/errors must be an empty array/u);
@@ -114,6 +114,14 @@ describe("ADSP P2 W3 evidence summary", () => {
     const noRedPanda = makeCase(1, "success");
     (noRedPanda.settlement as Record<string, unknown>)["eventLogPublishedAt"] = 0;
     expect(() => validateAdspP2W3Case(noRedPanda)).toThrow(/eventLogPublishedAt/u);
+
+    const wrongSchema = makeCase(1, "success");
+    (wrongSchema.settlement as Record<string, unknown>)["schema"] = "adsp.p0.wrong.v1";
+    expect(() => validateAdspP2W3Case(wrongSchema)).toThrow(/settlement schema/u);
+
+    const malformedDigest = makeCase(1, "success");
+    (malformedDigest.settlement as Record<string, unknown>)["observedBodySha256"] = "not-a-digest";
+    expect(() => validateAdspP2W3Case(malformedDigest)).toThrow(/SHA-256 digest/u);
 
     const unsupported = makeCase(1, "success");
     (unsupported.settlement as Record<string, unknown>)["extra"] = true;
