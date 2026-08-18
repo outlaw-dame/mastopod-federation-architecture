@@ -54,6 +54,7 @@ jobs:
         run: npm --prefix fedify-sidecar run check:fast
 
       - name: Prove APDM delayed outbox-intent scheduler on real Redis
+        working-directory: fedify-sidecar
         env:
           REDIS_URL: redis://127.0.0.1:6379
-        run: npm --prefix fedify-sidecar exec -- tsx scripts/proof-outbox-intent-delay-scheduler.ts
+        run: npm exec -- tsx scripts/proof-outbox-intent-delay-scheduler.ts
