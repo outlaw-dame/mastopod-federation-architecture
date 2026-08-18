@@ -6,6 +6,17 @@ import {
   type RedPandaConfig,
 } from "../redpanda-producer.js";
 
+type TopicMessageBatch = {
+  topicMessages: Array<{
+    topic: string;
+    messages: Array<{ value: string }>;
+  }>;
+};
+
+type TopicSend = {
+  topic: string;
+};
+
 const config: RedPandaConfig = {
   brokers: ["127.0.0.1:19092"],
   clientId: "redpanda-stream-semantics-test",
@@ -22,10 +33,28 @@ const config: RedPandaConfig = {
 
 function makeProducer() {
   const producer = new RedPandaProducer(config) as any;
-  const sendBatch = vi.fn(async () => undefined);
-  const send = vi.fn(async () => undefined);
+  const sendBatch = vi.fn(async (_input: TopicMessageBatch) => undefined);
+  const send = vi.fn(async (_input: TopicSend) => undefined);
   producer.producer = { sendBatch, send };
   return { producer: producer as RedPandaProducer, sendBatch, send };
+}
+
+function requireFirstCall<T>(calls: Array<[T]>, label: string): T {
+  const first = calls[0];
+  if (!first) throw new Error(`${label} was not called`);
+  return first[0];
+}
+
+function requireTopicEntry(call: TopicMessageBatch, index: number) {
+  const entry = call.topicMessages[index];
+  if (!entry) throw new Error(`Missing topicMessages[${index}]`);
+  return entry;
+}
+
+function requireFirstMessage(entry: TopicMessageBatch["topicMessages"][number]) {
+  const message = entry.messages[0];
+  if (!message) throw new Error(`Topic ${entry.topic} has no message`);
+  return message;
 }
 
 function localEvent(): ActivityEvent {
@@ -80,16 +109,17 @@ describe("ActivityPub RedPanda stream semantics", () => {
 
     expect(send).not.toHaveBeenCalled();
     expect(sendBatch).toHaveBeenCalledTimes(1);
-    const call = sendBatch.mock.calls[0]?.[0];
-    expect(call.topicMessages.map((entry: any) => entry.topic)).toEqual([
+    const call = requireFirstCall(sendBatch.mock.calls, "sendBatch");
+    expect(call.topicMessages.map(entry => entry.topic)).toEqual([
       config.stream1Topic,
       config.firehoseTopic,
     ]);
-    expect(call.topicMessages.some((entry: any) => entry.topic === config.stream2Topic)).toBe(false);
+    expect(call.topicMessages.some(entry => entry.topic === config.stream2Topic)).toBe(false);
 
-    const [stream1, firehose] = call.topicMessages;
+    const stream1 = requireTopicEntry(call, 0);
+    const firehose = requireTopicEntry(call, 1);
     expect(stream1.messages).toEqual(firehose.messages);
-    const payload = JSON.parse(stream1.messages[0].value);
+    const payload = JSON.parse(requireFirstMessage(stream1).value);
     expect(payload.origin).toBe("local");
     expect(payload.activity.id).toBe("https://local.example/alice/activities/1");
   });
@@ -101,16 +131,17 @@ describe("ActivityPub RedPanda stream semantics", () => {
 
     expect(send).not.toHaveBeenCalled();
     expect(sendBatch).toHaveBeenCalledTimes(1);
-    const call = sendBatch.mock.calls[0]?.[0];
-    expect(call.topicMessages.map((entry: any) => entry.topic)).toEqual([
+    const call = requireFirstCall(sendBatch.mock.calls, "sendBatch");
+    expect(call.topicMessages.map(entry => entry.topic)).toEqual([
       config.stream2Topic,
       config.firehoseTopic,
     ]);
-    expect(call.topicMessages.some((entry: any) => entry.topic === config.stream1Topic)).toBe(false);
+    expect(call.topicMessages.some(entry => entry.topic === config.stream1Topic)).toBe(false);
 
-    const [stream2, firehose] = call.topicMessages;
+    const stream2 = requireTopicEntry(call, 0);
+    const firehose = requireTopicEntry(call, 1);
     expect(stream2.messages).toEqual(firehose.messages);
-    const payload = JSON.parse(stream2.messages[0].value);
+    const payload = JSON.parse(requireFirstMessage(stream2).value);
     expect(payload.origin).toBe("remote");
     expect(payload.activity.id).toBe("https://remote.example/bob/activities/1");
   });
@@ -127,7 +158,8 @@ describe("ActivityPub RedPanda stream semantics", () => {
 
     expect(sendBatch).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls[0]?.[0].topic).toBe(config.tombstoneTopic);
+    const call = requireFirstCall(send.mock.calls, "send");
+    expect(call.topic).toBe(config.tombstoneTopic);
   });
 
   it("publishes local batches to Stream1 plus the AP firehose without Stream2 contamination", async () => {
@@ -146,12 +178,14 @@ describe("ActivityPub RedPanda stream semantics", () => {
     ]);
 
     expect(sendBatch).toHaveBeenCalledTimes(1);
-    const call = sendBatch.mock.calls[0]?.[0];
-    expect(call.topicMessages.map((entry: any) => entry.topic)).toEqual([
+    const call = requireFirstCall(sendBatch.mock.calls, "sendBatch");
+    expect(call.topicMessages.map(entry => entry.topic)).toEqual([
       config.stream1Topic,
       config.firehoseTopic,
     ]);
-    expect(call.topicMessages[0].messages).toHaveLength(2);
-    expect(call.topicMessages[1].messages).toEqual(call.topicMessages[0].messages);
+    const stream1 = requireTopicEntry(call, 0);
+    const firehose = requireTopicEntry(call, 1);
+    expect(stream1.messages).toHaveLength(2);
+    expect(firehose.messages).toEqual(stream1.messages);
   });
 });
