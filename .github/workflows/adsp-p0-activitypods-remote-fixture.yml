@@ -154,8 +154,30 @@ jobs:
             docker logs adsp-redpanda
             exit 1
           fi
-          docker exec adsp-redpanda rpk topic create ap.stream1.local-public.v1 || true
-          docker exec adsp-redpanda rpk topic describe ap.stream1.local-public.v1 > measurements/adsp-p0-remote/redpanda-before.txt
+
+          # The production Stream1 publisher atomically sends every local-public
+          # event to both Stream1 and Firehose. The feed runtime also starts
+          # consumers for Stream1, Stream2, and canonical.v1. Auto topic creation
+          # is deliberately disabled by the producer, so this isolated fresh
+          # broker must provision the same required topology explicitly.
+          redpanda_topics=(
+            ap.stream1.local-public.v1
+            ap.stream2.remote-public.v1
+            ap.firehose.v1
+            ap.tombstones.v1
+            canonical.v1
+          )
+          for topic in "${redpanda_topics[@]}"; do
+            docker exec adsp-redpanda rpk topic create "${topic}"
+          done
+          docker exec adsp-redpanda rpk topic list > measurements/adsp-p0-remote/redpanda-topics-before.txt
+          : > measurements/adsp-p0-remote/redpanda-before.txt
+          for topic in "${redpanda_topics[@]}"; do
+            {
+              echo "=== ${topic} ==="
+              docker exec adsp-redpanda rpk topic describe "${topic}"
+            } >> measurements/adsp-p0-remote/redpanda-before.txt
+          done
 
       - name: Start controlled remote ActivityPub target
         working-directory: fedify-sidecar
@@ -353,7 +375,14 @@ jobs:
             docker compose -f activitypods/pod-provider/docker-compose-test.yml exec -T redis redis-cli INFO commandstats > measurements/adsp-p0-remote/redis-commandstats-after.txt 2>&1 || true
             docker compose -f activitypods/pod-provider/docker-compose-test.yml exec -T redis redis-cli INFO memory > measurements/adsp-p0-remote/redis-memory-after.txt 2>&1 || true
           fi
-          docker exec adsp-redpanda rpk topic describe ap.stream1.local-public.v1 > measurements/adsp-p0-remote/redpanda-after.txt 2>&1 || true
+          docker exec adsp-redpanda rpk topic list > measurements/adsp-p0-remote/redpanda-topics-after.txt 2>&1 || true
+          : > measurements/adsp-p0-remote/redpanda-after.txt
+          for topic in ap.stream1.local-public.v1 ap.stream2.remote-public.v1 ap.firehose.v1 ap.tombstones.v1 canonical.v1; do
+            {
+              echo "=== ${topic} ==="
+              docker exec adsp-redpanda rpk topic describe "${topic}"
+            } >> measurements/adsp-p0-remote/redpanda-after.txt 2>&1 || true
+          done
           curl -fsS http://127.0.0.1:18080/stats > measurements/adsp-p0-remote/controlled-target-final.json 2>/dev/null || true
           if [[ -f measurements/adsp-p0-remote/activitypods.pid ]]; then
             ps -o pid,ppid,rss,%cpu,etime,cmd -p "$(cat measurements/adsp-p0-remote/activitypods.pid)" > measurements/adsp-p0-remote/activitypods-process-after.txt 2>&1 || true
