@@ -31,6 +31,7 @@ Important details:
 - `XACK` acknowledges work for the consumer group but does not delete the Stream entry. The entry remains until trimming.
 - The ActivityPods handoff queue is configured with completed-job age retention, so the handoff representation can coexist with sidecar Stream representations.
 - Delayed retry stores can temporarily retain an additional serialized representation while the acknowledged historical Stream entry remains until trimming.
+- Existing delayed outbound storage and DLQ storage serialize complete jobs/intents through JSON. Any production compression envelope therefore has to survive JSON round trips, not merely Redis binary strings.
 
 Therefore **raw recipient count is not the outbound Activity-copy count**. For a sidecar intent with `E` unique delivery endpoints:
 
@@ -60,10 +61,13 @@ The benchmark deliberately does not mutate production code. It writes isolated b
 ### B — compression only
 
 - large opaque Activity/target fields are Zstd-compressed;
+- queue-carried compressed bytes are encoded as **base64url strings** so they remain JSON-safe through the existing delayed retry and DLQ serializers;
 - routing/state fields remain directly readable;
-- the identical compressed Activity is computed once and reused for all endpoint writes.
+- the identical encoded Activity is computed once and reused for all endpoint writes.
 
-This retains self-contained outbound jobs and therefore preserves the strongest crash/replay independence of the current design.
+The base64url envelope deliberately pays its roughly 4/3 byte expansion over raw compressed bytes. This makes B a more realistic estimate for a minimally invasive production schema than writing raw Redis binary fields which would require redesigning every JSON durability boundary.
+
+This variant retains self-contained outbound jobs and therefore preserves the strongest crash/replay independence of the current design.
 
 ### C — canonical payload + references
 
@@ -75,17 +79,19 @@ This tests deduplication upside but is **not production-safe by itself**. A prod
 
 ### D — canonical compressed payload + references
 
-- Activity stored once, compressed with Zstd;
-- records carry the content-addressed reference;
-- target vector is Zstd-compressed in the intent.
+- Activity stored once as compressed binary in the dedicated payload key;
+- records carry the content-addressed reference plus encoding metadata;
+- queue-carried compressed target bytes use the same JSON-safe base64url envelope as B.
 
-This estimates the maximum combined memory/wire benefit while keeping the same referential-integrity warning as C.
+The dedicated canonical payload itself does not flow through the delayed/DLQ JSON serializers, so its benchmark representation can remain binary. This estimates the maximum combined memory/wire benefit while keeping the same referential-integrity warning as C.
 
 ## Compression codec evidence
 
-The benchmark also compares Gzip level 6, Brotli quality 4, and Zstd level 3 for each deterministic Activity payload size, recording compressed bytes and p50/p95 encode/decode time.
+The benchmark compares Gzip level 6, Brotli quality 4, and Zstd level 3 for each deterministic Activity payload size. It records both raw compressed bytes and the base64url queue-envelope size plus p50/p95 encode/decode time. Production queue decisions must use the **queue-envelope ratio**, not the more favorable raw compression ratio.
 
 Node's built-in Zstd API is available only from Node 22.15 and is still marked experimental. The sidecar package currently supports Node >=20. Therefore **this benchmark does not imply that built-in Node Zstd is an acceptable production dependency**. If Zstd wins materially, production options still require a separate compatibility decision: raise the supported Node floor, use a maintained stable Zstd implementation, or choose a stable built-in codec such as Brotli/Gzip if its whole-system tradeoff is better.
+
+The evidence script uses synchronous codec calls only to make isolated codec measurements deterministic. A production hot path must not simply copy that implementation: synchronous compression can block the event loop, while asynchronous compression can contend for the runtime worker pool. Whole-system queue latency and CPU must be measured before promotion.
 
 ## Evidence matrix
 
@@ -107,8 +113,10 @@ For bounded high-value scenarios, write the four variants to a real Redis instan
 - `MEMORY USAGE ... SAMPLES 0` for every benchmark key;
 - total Redis bytes for the layout;
 - logical field bytes before Redis allocator/data-structure overhead;
-- write elapsed time;
+- bounded write elapsed time;
 - reduction ratios versus current.
+
+The write-time figure is intentionally only an **equivalent-field MULTI/XADD envelope measurement**. The production `enqueueOutboundBatchForIntent` uses a Lua fan-out transaction, so these write times may indicate byte-amplification direction but are not production fan-out latency claims.
 
 A safety cap skips combinations whose current logical layout would exceed the benchmark's bounded memory budget.
 
@@ -117,6 +125,8 @@ A safety cap skips combinations whose current logical layout would exceed the be
 No storage-format change should be promoted from compression ratio alone.
 
 Compression-only is eligible for a production prototype only if repeated evidence shows a material reduction in Redis memory and/or wire bytes while encode/decode CPU and queue latency remain within the frozen ADSP regression limits.
+
+Any production decompressor must also fail closed on unknown encodings, enforce compressed and decompressed size ceilings, and verify round-trip/digest integrity where a content-addressed identity is used. A smaller payload is not worth adding an unbounded decompression or corruption failure mode.
 
 Reference-based storage has an additional gate: the canonical payload must be at least as durable and replay-safe as today's self-contained job bytes. A reference design that saves memory but can strand an outbound job after payload expiry, eviction, trim, worker crash, delayed retry, or DLQ replay is rejected.
 
