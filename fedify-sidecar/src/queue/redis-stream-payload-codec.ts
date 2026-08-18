@@ -125,14 +125,6 @@ export class RedisStreamPayloadCodec {
       throw new Error("Redis Stream Brotli payload is not valid base64url");
     }
 
-    const cached = this.decodeCache.get(expectedDigest);
-    if (cached !== undefined) {
-      // Refresh LRU position. Cache entries exist only after successful digest verification.
-      this.decodeCache.delete(expectedDigest);
-      this.decodeCache.set(expectedDigest, cached);
-      return cached.value;
-    }
-
     const maxEncodedLength = Math.ceil((this.maxCompressedBytes * 4) / 3) + 2;
     if (encoded.length > maxEncodedLength) {
       throw new Error(
@@ -148,6 +140,16 @@ export class RedisStreamPayloadCodec {
       throw new Error(
         `Redis Stream compressed payload exceeds maximum size of ${this.maxCompressedBytes} bytes`,
       );
+    }
+
+    // Bind reuse to both the advertised uncompressed digest and the exact
+    // canonical compressed bytes so cache hits cannot mask payload corruption.
+    const cacheKey = `${expectedDigest}:${payloadDigest(compressed)}`;
+    const cached = this.decodeCache.get(cacheKey);
+    if (cached !== undefined) {
+      this.decodeCache.delete(cacheKey);
+      this.decodeCache.set(cacheKey, cached);
+      return cached.value;
     }
 
     let decompressed: Buffer;
@@ -170,16 +172,16 @@ export class RedisStreamPayloadCodec {
     }
 
     const decoded = decompressed.toString("utf8");
-    this.cacheDecoded(expectedDigest, decoded, decompressed.byteLength);
+    this.cacheDecoded(cacheKey, decoded, decompressed.byteLength);
     return decoded;
   }
 
-  private cacheDecoded(digest: string, value: string, bytes: number): void {
+  private cacheDecoded(key: string, value: string, bytes: number): void {
     if (bytes > this.decodeCacheMaxBytes) return;
-    const existing = this.decodeCache.get(digest);
+    const existing = this.decodeCache.get(key);
     if (existing) {
       this.decodeCacheBytes -= existing.bytes;
-      this.decodeCache.delete(digest);
+      this.decodeCache.delete(key);
     }
     while (this.decodeCacheBytes + bytes > this.decodeCacheMaxBytes && this.decodeCache.size > 0) {
       const oldestKey = this.decodeCache.keys().next().value as string | undefined;
@@ -188,7 +190,7 @@ export class RedisStreamPayloadCodec {
       if (oldest) this.decodeCacheBytes -= oldest.bytes;
       this.decodeCache.delete(oldestKey);
     }
-    this.decodeCache.set(digest, { value, bytes });
+    this.decodeCache.set(key, { value, bytes });
     this.decodeCacheBytes += bytes;
   }
 }
