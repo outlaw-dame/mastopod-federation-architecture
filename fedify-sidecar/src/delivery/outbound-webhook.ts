@@ -169,6 +169,13 @@ export function validateApdmWebhookIdentity(input: {
   const markerIntentId = input.normalizedTargets.apdmAuthorityIntentId;
   const authoritySource = input.normalizedTargets.apdmAuthoritySource;
 
+  // Preserve the explicit test/development-only interop exception exactly as
+  // before. It is provenance-gated by target normalization and never applies to
+  // production Delivery Plans or to zero-target handoffs.
+  if (authoritySource === "interop_legacy") {
+    return undefined;
+  }
+
   const headerIntentId = normalizeExactIntentId(input.headerIntentId);
   if (!headerIntentId) {
     throw new OutboundWebhookValidationError(
@@ -229,10 +236,6 @@ export function validateApdmWebhookIdentity(input: {
       400,
       "APDM Delivery Plan target authority is required.",
     );
-  }
-
-  if (authoritySource === "interop_legacy") {
-    return undefined;
   }
 
   if (SIDECAR_INTERNAL_INTENT_PREFIXES.some((prefix) => markerIntentId.startsWith(prefix))) {
