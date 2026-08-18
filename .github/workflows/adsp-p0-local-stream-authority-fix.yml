@@ -1,0 +1,104 @@
+name: ADSP P0 local stream authority fix
+
+on:
+  push:
+    branches:
+      - agent/adsp-p0-activitypods-origin-runtime
+    paths:
+      - '.github/workflows/adsp-p0-local-stream-authority-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout candidate branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/adsp-p0-activitypods-origin-runtime
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Apply exact local-actor hostname authority fix and regression
+        shell: python
+        run: |
+          from pathlib import Path
+
+          worker_path = Path('fedify-sidecar/src/delivery/inbound-worker.ts')
+          worker = worker_path.read_text()
+          old = '''      const isLocalActor =
+                typeof this.config.domain === "string" &&
+                this.config.domain.length > 0 &&
+                typeof verifiedActorUri === "string" &&
+                verifiedActorUri.includes(`://${this.config.domain}/`);'''
+          new = '''      const isLocalActor =
+                typeof this.config.domain === "string" &&
+                this.config.domain.length > 0 &&
+                typeof verifiedActorUri === "string" &&
+                extractDomain(verifiedActorUri) === this.config.domain.trim().toLowerCase();'''
+          if worker.count(old) != 1:
+              raise SystemExit(f'Expected exactly one vulnerable local-actor classifier, found {worker.count(old)}')
+          worker_path.write_text(worker.replace(old, new, 1))
+
+          test_path = Path('fedify-sidecar/src/delivery/tests/RoutingManifest.test.ts')
+          test = test_path.read_text()
+          marker = '// ── D: Lifecycle activities (Update / Delete / Undo) ─────────────────────────\n'
+          if test.count(marker) != 1:
+              raise SystemExit('Could not locate unique RoutingManifest insertion marker')
+          regression = r'''
+// Exact authority: a remote URL path containing the local hostname text must
+// never be treated as a locally-authored actor. Origin is the parsed hostname,
+// not an attacker-controlled substring elsewhere in the URI.
+describe("C2: local stream authority uses exact parsed actor hostname", () => {
+  it("keeps a remote actor with local-domain text in its path in Stream2", async () => {
+    const ctx: TestContext = {
+      redpanda: makeRedpanda(),
+      bridge: makeActivityPodsBridge(),
+      atProjection: makeAtProjection(),
+      canonical: makeCanonicalPublisher(),
+    };
+    const activity = makeActivity("Create", "Note", "public", {
+      actorUri: "https://remote.example/https://local.example/users/eve",
+    });
+
+    await setupFixture(activity, ctx);
+    await dispatchEvent(activity, ctx);
+
+    expect(ctx.redpanda.publishToStream1).not.toHaveBeenCalled();
+    expect(ctx.redpanda.publishToStream2).toHaveBeenCalledTimes(1);
+    expect(ctx.bridge.forwardInboundActivity).toHaveBeenCalledTimes(1);
+    expect(ctx.canonical.publish).toHaveBeenCalledWith(
+      expect.objectContaining({ isLocal: false, isPublic: true }),
+    );
+  });
+});
+
+'''
+          if regression in test:
+              raise SystemExit('Regression block already present; refusing duplicate insertion')
+          test_path.write_text(test.replace(marker, regression + marker, 1))
+
+      - name: Install sidecar dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Run focused routing and stream tests
+        working-directory: fedify-sidecar
+        run: npm exec -- vitest run src/delivery/tests/RoutingManifest.test.ts src/streams/tests/RedPandaActivityPubStreams.test.ts
+
+      - name: Commit hardened routing
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fedify-sidecar/src/delivery/inbound-worker.ts fedify-sidecar/src/delivery/tests/RoutingManifest.test.ts
+          git diff --cached --check
+          git commit -m "Harden local ActivityPub stream authority"
+          git push origin HEAD:agent/adsp-p0-activitypods-origin-runtime
