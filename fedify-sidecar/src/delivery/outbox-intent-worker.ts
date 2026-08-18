@@ -131,19 +131,22 @@ export class OutboxIntentWorker {
 
       const activity = this.parseIntentActivity(intent);
 
-      if (this.isObservationOnlyIntent(intent)) {
-        if (intent.targets.length !== 0) {
-          throw new OutboxIntentProcessingError(
-            "Observation-only outbox intent must not contain delivery targets",
-            true,
-          );
-        }
+      // Stream1 is the provider-wide observation log for committed local public
+      // ActivityPub activity. Its publication is therefore independent of
+      // whether this intent has any remote delivery targets or whether later
+      // delivery normalization succeeds. The Redis state marker suppresses
+      // ordinary reprocessing. A crash after the broker ACK but before the
+      // marker is persisted can still replay physically, so consumers must
+      // dedupe by the stable outboxIntentId carried in the RedPanda record.
+      if (!state.eventLogPublishedAt) {
+        await this.publishEventLog(intent, activity);
+        await this.queue.markOutboxIntentEventLogPublished(intent.intentId);
+      }
 
-        if (!state.eventLogPublishedAt) {
-          await this.publishEventLog(intent, activity);
-          await this.queue.markOutboxIntentEventLogPublished(intent.intentId);
-        }
-
+      // A committed Activity with no remote recipients is a legitimate APDM
+      // outcome, not a malformed delivery request. Complete it after durable
+      // observation without manufacturing a recipient or a second routing path.
+      if (intent.targets.length === 0) {
         const enqueueResult = await this.queue.enqueueOutboundBatchForIntent(intent.intentId, []);
         await this.queue.markOutboxIntentCompleted(intent.intentId);
         await this.queue.ack("outbox_intent", messageId);
@@ -152,9 +155,10 @@ export class OutboxIntentWorker {
           { topic: "outbox_intent" },
           Math.max(0, (Date.now() - intent.createdAt) / 1000),
         );
-        logger.info("Observation-only outbox intent completed", {
+        logger.info("Zero-target outbox intent completed after local observation", {
           intentId: intent.intentId,
           activityId: intent.activityId,
+          explicitObservationOnly: this.isExplicitObservationOnlyIntent(intent),
           outboundEnqueued: enqueueResult.enqueued,
           jobCount: enqueueResult.jobCount,
         });
@@ -184,11 +188,6 @@ export class OutboxIntentWorker {
           invalidTargetCount: normalizedTargets.invalidTargetCount,
           duplicateTargetCount: normalizedTargets.duplicateTargetCount,
         });
-      }
-
-      if (!state.eventLogPublishedAt) {
-        await this.publishEventLog(intent, activity);
-        await this.queue.markOutboxIntentEventLogPublished(intent.intentId);
       }
 
       const outboundJobs = this.buildOutboundJobs(
@@ -273,9 +272,8 @@ export class OutboxIntentWorker {
     }
   }
 
-  private isObservationOnlyIntent(intent: OutboxIntent): boolean {
+  private isExplicitObservationOnlyIntent(intent: OutboxIntent): boolean {
     return Boolean(
-      intent.targets.length === 0 &&
       intent.bridgeHints &&
       typeof intent.bridgeHints === "object" &&
       !Array.isArray(intent.bridgeHints) &&
@@ -343,12 +341,17 @@ export class OutboxIntentWorker {
         activityId: intent.activityId,
         objectId,
         actorUri: intent.actorUri,
-        deletedAt: Date.now(),
+        deletedAt: intent.createdAt,
         outboxIntentId: intent.intentId,
+        streamTimestamp: intent.createdAt,
       });
       return;
     }
 
+    // ActivityPub "unlisted" activities are still addressed to Public (usually
+    // via cc) and therefore belong to the public federation event stream. Search
+    // and discovery eligibility remain separately constrained by searchConsent
+    // and isPublicIndexable metadata.
     const isPublicActivity =
       intent.meta?.isPublicActivity === true ||
       intent.meta?.visibility === "public" ||
@@ -366,10 +369,11 @@ export class OutboxIntentWorker {
     await this.redpanda.publishToStream1({
       activity,
       actorUri: intent.actorUri,
-      publishedAt: Date.now(),
+      publishedAt: intent.createdAt,
       origin: "local",
       meta: intent.meta as ActivityEventMeta | undefined,
       outboxIntentId: intent.intentId,
+      streamTimestamp: intent.createdAt,
     });
   }
 
