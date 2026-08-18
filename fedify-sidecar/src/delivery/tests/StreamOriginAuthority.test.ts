@@ -103,8 +103,9 @@ describe("ActivityPub RedPanda stream origin authority", () => {
     expect(redpanda.publishToStream2).toHaveBeenCalledWith(
       expect.objectContaining({
         actorUri,
-        origin: undefined,
         activity: expect.objectContaining({ id: activity.id }),
+        delivery: expect.objectContaining({ forwarding: "attempted" }),
+        meta: expect.objectContaining({ isPublicActivity: true, visibility: "public" }),
       }),
     );
     expect(activityPodsBridge.forwardInboundActivity).toHaveBeenCalledTimes(1);
@@ -145,6 +146,13 @@ describe("ActivityPub RedPanda stream origin authority", () => {
 
     expect(redpanda.publishToStream1).toHaveBeenCalledTimes(1);
     expect(redpanda.publishToStream2).not.toHaveBeenCalled();
+    expect(redpanda.publishToStream1).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorUri,
+        activity: expect.objectContaining({ id: activity.id }),
+        meta: expect.objectContaining({ isPublicActivity: true, visibility: "public" }),
+      }),
+    );
     expect(activityPodsBridge.forwardInboundActivity).not.toHaveBeenCalled();
     expect(canonicalPublisher.publish).toHaveBeenCalledWith(
       expect.objectContaining({ actorUri, isLocal: true, isPublic: true }),
