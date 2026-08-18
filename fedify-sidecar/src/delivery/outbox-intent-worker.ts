@@ -323,7 +323,21 @@ export class OutboxIntentWorker {
     activity: Record<string, unknown>,
   ): Promise<void> {
     const activityType = typeof activity["type"] === "string" ? activity["type"] : undefined;
-    if (activityType === "Delete" || activityType === "Tombstone") {
+    const isLifecycleRemoval =
+      activityType === "Delete" ||
+      activityType === "Tombstone" ||
+      (activityType === "Undo" && intent.meta?.isDeleteOrTombstone === true);
+
+    // ActivityPub "unlisted" activities are still addressed to Public (usually
+    // via cc) and therefore belong to the public federation event stream. Search
+    // and discovery eligibility remain separately constrained by searchConsent
+    // and isPublicIndexable metadata.
+    const isPublicActivity =
+      intent.meta?.isPublicActivity === true ||
+      intent.meta?.visibility === "public" ||
+      intent.meta?.visibility === "unlisted";
+
+    if (isLifecycleRemoval) {
       if (!this.redpanda) {
         throw new OutboxIntentProcessingError(
           "RedPanda producer is unavailable for tombstone publication",
@@ -345,17 +359,7 @@ export class OutboxIntentWorker {
         outboxIntentId: intent.intentId,
         streamTimestamp: intent.createdAt,
       });
-      return;
     }
-
-    // ActivityPub "unlisted" activities are still addressed to Public (usually
-    // via cc) and therefore belong to the public federation event stream. Search
-    // and discovery eligibility remain separately constrained by searchConsent
-    // and isPublicIndexable metadata.
-    const isPublicActivity =
-      intent.meta?.isPublicActivity === true ||
-      intent.meta?.visibility === "public" ||
-      intent.meta?.visibility === "unlisted";
 
     if (!isPublicActivity) return;
 
@@ -366,6 +370,9 @@ export class OutboxIntentWorker {
       );
     }
 
+    // Lifecycle records and ActivityPub lifecycle activities are separate
+    // outputs. A federation-public Delete/relevant Undo therefore appears in
+    // Stream1 + firehose and also gets a tombstone, symmetric with Stream2.
     await this.redpanda.publishToStream1({
       activity,
       actorUri: intent.actorUri,
