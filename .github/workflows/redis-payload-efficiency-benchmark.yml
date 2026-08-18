@@ -1,0 +1,107 @@
+name: Redis Payload Efficiency Benchmark
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/scripts/benchmark-redis-payload-efficiency.mjs'
+      - 'docs/redis-payload-efficiency-audit.md'
+      - '.github/workflows/redis-payload-efficiency-benchmark.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js with built-in Zstd evidence support
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install sidecar dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Run real Redis A/B/C/D payload benchmark
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          REDIS_PAYLOAD_BENCHMARK_OUTPUT: ../../measurements/redis-payload-efficiency/evidence.json
+          REDIS_PAYLOAD_BENCHMARK_MAX_LOGICAL_BYTES: '167772160'
+        working-directory: fedify-sidecar
+        run: |
+          mkdir -p ../../measurements/redis-payload-efficiency
+          node scripts/benchmark-redis-payload-efficiency.mjs \
+            | tee ../../measurements/redis-payload-efficiency/evidence.stdout.json
+
+      - name: Validate evidence contract
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const evidence = JSON.parse(fs.readFileSync('measurements/redis-payload-efficiency/evidence.json', 'utf8'));
+          if (evidence.schema !== 'apdm-redis-payload-efficiency.v1') throw new Error('unexpected evidence schema');
+          if (!Array.isArray(evidence.codecs) || evidence.codecs.length !== 3) throw new Error('expected three payload sizes');
+          for (const payload of evidence.codecs) {
+            const names = payload.codecs.map(codec => codec.codec).sort();
+            if (JSON.stringify(names) !== JSON.stringify(['brotli-4','gzip-6','zstd-3'])) throw new Error('codec matrix incomplete');
+            for (const codec of payload.codecs) {
+              if (!(codec.sourceBytes > 0 && codec.compressedBytes > 0 && codec.ratio > 0)) throw new Error('invalid codec evidence');
+            }
+          }
+          const measured = evidence.realRedis.filter(item => !item.skipped);
+          if (measured.length < 6) throw new Error(`insufficient real Redis cases: ${measured.length}`);
+          for (const item of measured) {
+            const names = item.variants.map(variant => variant.variant).sort();
+            if (JSON.stringify(names) !== JSON.stringify(['A_current','B_compressed','C_reference','D_reference_compressed'])) {
+              throw new Error(`variant matrix incomplete for ${item.requestedActivityBytes}/${item.uniqueDeliveryEndpoints}`);
+            }
+            const current = item.variants.find(variant => variant.variant === 'A_current');
+            if (!current || !(current.redisBytes > 0)) throw new Error('missing Redis baseline');
+            for (const variant of item.variants) {
+              if (!(variant.redisBytes > 0 && variant.logicalFieldBytes > 0 && variant.writeMs >= 0)) {
+                throw new Error(`invalid Redis evidence for ${variant.variant}`);
+              }
+            }
+          }
+          const highFanout = evidence.theoretical.find(item => item.recipients === 10000 && item.uniqueDeliveryEndpoints === 10000 && item.activityBytes > 15000);
+          if (!highFanout || highFanout.sidecarCurrentActivityCopies !== 10001 || highFanout.crossRedisActivityCopiesIncludingBullHandoff !== 10002) {
+            throw new Error('high-fanout duplication formula drifted');
+          }
+          NODE
+
+      - name: Record Redis server facts
+        env:
+          REDISCLI_AUTH: ''
+        run: |
+          {
+            echo '# Redis INFO memory'
+            redis-cli -h 127.0.0.1 INFO memory
+            echo '# Redis CONFIG stream macro-node settings'
+            redis-cli -h 127.0.0.1 CONFIG GET stream-node-max-bytes stream-node-max-entries
+          } > measurements/redis-payload-efficiency/redis-runtime.txt
+
+      - name: Upload raw evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-payload-efficiency-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redis-payload-efficiency/
+          if-no-files-found: error
+          retention-days: 30
