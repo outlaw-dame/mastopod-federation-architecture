@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants, brotliCompressSync, brotliDecompressSync } from "node:zlib";
 
 export const REDIS_STREAM_PAYLOAD_ENVELOPE_PREFIX = "apq1:br:";
@@ -31,6 +32,10 @@ function boundedBrotliQuality(value: number | undefined): number {
   return Math.max(0, Math.min(11, Math.floor(value)));
 }
 
+function payloadDigest(value: string | Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 export class RedisStreamPayloadCodec {
   private readonly writeEnabled: boolean;
   private readonly minBytes: number;
@@ -56,7 +61,8 @@ export class RedisStreamPayloadCodec {
   }
 
   encode(value: string): EncodedRedisStreamPayload {
-    const sourceBytes = Buffer.byteLength(value);
+    const source = Buffer.from(value);
+    const sourceBytes = source.byteLength;
     if (!this.writeEnabled || sourceBytes < this.minBytes) {
       return { value, compressed: false, sourceBytes, storedBytes: sourceBytes };
     }
@@ -66,7 +72,7 @@ export class RedisStreamPayloadCodec {
       );
     }
 
-    const compressed = brotliCompressSync(Buffer.from(value), {
+    const compressed = brotliCompressSync(source, {
       params: {
         [constants.BROTLI_PARAM_QUALITY]: this.brotliQuality,
       },
@@ -77,7 +83,7 @@ export class RedisStreamPayloadCodec {
       );
     }
 
-    const encoded = `${REDIS_STREAM_PAYLOAD_ENVELOPE_PREFIX}${compressed.toString("base64url")}`;
+    const encoded = `${REDIS_STREAM_PAYLOAD_ENVELOPE_PREFIX}${payloadDigest(source)}:${compressed.toString("base64url")}`;
     const storedBytes = Buffer.byteLength(encoded);
 
     // Compression is an optimization, not an obligation. Keep plaintext when
@@ -95,19 +101,32 @@ export class RedisStreamPayloadCodec {
       throw new Error("Redis Stream payload uses an unknown compression envelope");
     }
 
-    const encoded = value.slice(REDIS_STREAM_PAYLOAD_ENVELOPE_PREFIX.length);
-    if (!encoded) {
-      throw new Error("Redis Stream Brotli payload is empty");
+    const envelope = value.slice(REDIS_STREAM_PAYLOAD_ENVELOPE_PREFIX.length);
+    const separator = envelope.indexOf(":");
+    if (separator <= 0 || separator === envelope.length - 1) {
+      throw new Error("Redis Stream Brotli payload envelope is malformed");
     }
 
-    let compressed: Buffer;
-    try {
-      compressed = Buffer.from(encoded, "base64url");
-    } catch {
+    const expectedDigest = envelope.slice(0, separator);
+    const encoded = envelope.slice(separator + 1);
+    if (!/^[a-f0-9]{64}$/u.test(expectedDigest)) {
+      throw new Error("Redis Stream Brotli payload digest is malformed");
+    }
+    if (!/^[A-Za-z0-9_-]+$/u.test(encoded)) {
       throw new Error("Redis Stream Brotli payload is not valid base64url");
     }
-    if (compressed.byteLength === 0) {
-      throw new Error("Redis Stream Brotli payload decoded to zero bytes");
+
+    // Reject oversized encoded text before allocating its decoded Buffer.
+    const maxEncodedLength = Math.ceil((this.maxCompressedBytes * 4) / 3) + 2;
+    if (encoded.length > maxEncodedLength) {
+      throw new Error(
+        `Redis Stream compressed payload exceeds maximum size of ${this.maxCompressedBytes} bytes`,
+      );
+    }
+
+    const compressed = Buffer.from(encoded, "base64url");
+    if (compressed.byteLength === 0 || compressed.toString("base64url") !== encoded) {
+      throw new Error("Redis Stream Brotli payload is not canonical base64url");
     }
     if (compressed.byteLength > this.maxCompressedBytes) {
       throw new Error(
@@ -129,6 +148,9 @@ export class RedisStreamPayloadCodec {
       throw new Error(
         `Redis Stream decompressed payload exceeds maximum size of ${this.maxDecompressedBytes} bytes`,
       );
+    }
+    if (payloadDigest(decompressed) !== expectedDigest) {
+      throw new Error("Redis Stream Brotli payload failed SHA-256 integrity verification");
     }
     return decompressed.toString("utf8");
   }
