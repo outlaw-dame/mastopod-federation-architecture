@@ -1432,7 +1432,7 @@ export class InboundWorker {
         typeof this.config.domain === "string" &&
         this.config.domain.length > 0 &&
         typeof verifiedActorUri === "string" &&
-        verifiedActorUri.includes(`://${this.config.domain}/`);
+        extractDomain(verifiedActorUri) === this.config.domain.trim().toLowerCase();
 
       if (isLocalActor) {
         metrics.inboundActivityPubActivities.inc({ stage: "local_actor", activity_type: activityType });
