@@ -95,7 +95,9 @@ Minimum rules:
 - medians and tail distributions are preferred over a single arithmetic mean;
 - raw artifacts are retained when CI/runtime infrastructure permits.
 
-Where practical, use at least three valid measured samples per canonical workload point, matching the evidence discipline already used by APDM local-delivery benchmarking.
+For Phase 2/3 decision evidence the locked minimum is **five valid measured samples per arm per required point after at least one excluded warmup**. A claimed gain must reproduce at two required representative points including the highest tested load for that profile. Comparator and candidate should run on the same host/runner class within the same evidence set; materially different runner hardware invalidates the comparison.
+
+The Phase-0 `N=1` Tier-1 point is retained for correctness/smoke coverage but is excluded from precise latency promotion decisions because its measured elapsed CV was about 170%.
 
 ## Failure matrix
 
@@ -118,30 +120,75 @@ For every scenario record loss, duplication, recovery time, error surface and op
 
 ## Promotion thresholds
 
-Exact numerical promotion thresholds must be frozen in Phase 0 **after baseline variance is known and before candidate results are used for a decision**. This avoids selecting thresholds after seeing which technology won.
+Exact numerical promotion thresholds are frozen here from Phase-0 incumbent evidence **before any NATS-Core result is generated or inspected**. The derivation and full rationale are recorded in `P0-PROMOTION-THRESHOLDS.md`.
 
-The locked thresholds must cover:
+Phase-0 stable Tier-1 points `N=10–1000` measured worst per-case CV of:
 
-- minimum material improvement required to justify added infrastructure;
-- maximum allowable regression in p95/p99 latency;
-- maximum allowable CPU/memory regression;
-- correctness requirement: zero unexplained lost or duplicate authoritative outcomes;
-- recovery requirement for node/broker failure;
-- operational-cost penalty for an additional required runtime.
+- elapsed time: **3.85%**;
+- completed-work CPU: **8.50%**;
+- ending RSS: **15.55%**.
 
-A candidate may also be rejected even when faster if its gain is too small to justify ongoing memory, deployment, monitoring, security and failure-domain cost.
+These are noise floors, not candidate results.
+
+### Locked materiality rules
+
+- In-place topology change with no additional required runtime: at least **10%** improvement in one primary whole-system metric at the required reproducible points.
+- Candidate adding an always-on required runtime: at least **20%** improvement in one primary whole-system metric **and** at least **10%** improvement in a second primary metric, or **20%** higher completed-work throughput under the same total resource ceiling.
+- Primary metrics are completed-work p95 latency, completed-work CPU per successful application outcome, and successful application throughput at the same resource ceiling.
+- Broker-local microbenchmarks cannot satisfy the materiality rule by themselves.
+
+### Locked regression guardrails
+
+A candidate is rejected if a required matched workload shows a sustained regression beyond:
+
+- completed-work p95 latency: **+10%**;
+- completed-work p99/tail latency: **+15%**;
+- total whole-system CPU per successful outcome: **+15%**;
+- total whole-system median RSS: **+20%**;
+- ActivityPods median RSS: **+20%**;
+- Redis CPU/command work attributable to the workload: **+15%**, unless equivalent Redis-transporter work is intentionally removed and total whole-system CPU still passes.
+
+Correctness remains zero-tolerance: **0 unexplained lost or duplicate authoritative outcomes**, 0 privacy/addressing semantic drift, and 0 partial outcomes reported as success.
+
+### Locked Phase-2 horizontal-scale rule
+
+At matched offered load and resource limits:
+
+- `1 → 2` ActivityPods replicas must yield at least **1.50x** successful throughput, or at least **20% lower p95 latency** when the 1-node arm is demonstrably saturated;
+- `2 → 4` replicas, where the environment permits, must likewise yield at least **1.50x** successful throughput, or at least **20% lower p95 latency** under the same saturated-workload rule.
+
+A multi-node topology that merely functions without materially increasing useful capacity does not become the Phase-3 comparator.
+
+### Locked failure/recovery rule
+
+- unexplained lost/duplicate authoritative outcomes: **0**;
+- tested transient node/transporter failures recover automatically with **no operator intervention**;
+- once the failed/restarted dependency is reachable again, successful application request handling and stale-registry convergence must recover within **30 seconds**;
+- a Phase-3 candidate's p95 recovery time must be no worse than **1.25x** the matched Phase-2 Redis-transporter recovery p95 and must also satisfy the 30-second absolute ceiling.
+
+If the Redis Phase-2 comparator cannot meet the absolute recovery ceiling, Phase 2 remains unpromotable; the threshold is not relaxed after candidate behavior is seen.
+
+### Operational-cost penalty
+
+The stricter `20% + 10%` rule for a new required runtime is the explicit operational penalty for another process, deployment surface, security boundary, monitoring target and failure domain. All CPU/RSS of the added runtime counts inside the whole-system measurement boundary.
+
+A candidate may be rejected even when faster if its gain is too small to justify ongoing memory, deployment, monitoring, security and failure-domain cost.
+
+Once merged, these thresholds cannot be changed in response to Phase-2/3 candidate results. A future contract revision requires new incumbent/baseline evidence and must be frozen before inspecting the affected candidate results.
 
 ## Phase-specific decision rules
 
 ### Phase 2 — Redis horizontal baseline
 
-The goal is not to prove Redis is best. It is to establish a correct, reproducible multi-node ActivityPods baseline using existing infrastructure.
+The goal is not to prove Redis is best. It is to establish a correct, reproducible multi-node ActivityPods baseline using existing infrastructure. It becomes the Phase-3 comparator only after satisfying the locked correctness, scale-out, resource and recovery gates above.
 
 ### Phase 3 — NATS Core
 
 NATS Core is promoted only if matched evidence demonstrates a material whole-system advantage over the Redis transporter under one or more required distributed profiles and the operational cost is justified.
 
-If the difference is within normal variance or too small to matter, Redis remains the transporter and NATS is removed from the required architecture.
+Because NATS Core adds a required runtime, it must satisfy the locked **20% primary + 10% secondary** materiality rule, all regression guardrails, all correctness/recovery gates, and reproduce the advantage in a second matched evidence set.
+
+If the difference is within normal variance or below the locked materiality threshold, Redis remains the transporter and NATS is removed from the required architecture.
 
 ### Phase 4 — Redis Streams
 
