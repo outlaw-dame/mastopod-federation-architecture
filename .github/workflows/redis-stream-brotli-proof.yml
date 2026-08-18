@@ -1,0 +1,71 @@
+name: Redis Stream Brotli Proof
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/src/queue/redis-stream-payload-codec.ts'
+      - 'fedify-sidecar/src/queue/sidecar-redis-queue-core.ts'
+      - 'fedify-sidecar/src/queue/tests/RedisStreamPayloadCodec.test.ts'
+      - 'fedify-sidecar/src/queue/tests/RedisStreamsQueueCompression.test.ts'
+      - 'fedify-sidecar/scripts/proof-redis-stream-brotli-compression.ts'
+      - '.github/workflows/redis-stream-brotli-proof.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - run: npm ci --prefix fedify-sidecar
+
+      - name: Run production-codec real Redis proof
+        working-directory: fedify-sidecar
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          REDIS_BROTLI_PROOF_OUTPUT: ../measurements/redis-stream-brotli/evidence.json
+        run: npx tsx scripts/proof-redis-stream-brotli-compression.ts
+
+      - name: Validate evidence
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const evidence = JSON.parse(fs.readFileSync('measurements/redis-stream-brotli/evidence.json', 'utf8'));
+          if (evidence.schema !== 'apdm-redis-stream-brotli-proof.v1') throw new Error('unexpected schema');
+          if (!(evidence.minimumReduction >= 1.5)) throw new Error('memory reduction below prototype gate');
+          if (!Array.isArray(evidence.results) || evidence.results.length !== 5) throw new Error('unexpected result matrix');
+          for (const result of evidence.results) {
+            if (result.current.activityCompressed || result.current.targetsCompressed) throw new Error('plaintext baseline compressed unexpectedly');
+            if (!result.compressed.activityCompressed || !result.compressed.targetsCompressed) throw new Error('Brotli case did not compress both large fields');
+            if (!(result.redisReduction > 1)) throw new Error('Brotli layout did not reduce Redis memory');
+          }
+          NODE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: redis-stream-brotli-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redis-stream-brotli/
+          if-no-files-found: error
+          retention-days: 30

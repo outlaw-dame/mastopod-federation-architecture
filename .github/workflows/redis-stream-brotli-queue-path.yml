@@ -1,0 +1,70 @@
+name: Redis Stream Brotli Queue Path
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/src/queue/redis-stream-payload-codec.ts'
+      - 'fedify-sidecar/src/queue/sidecar-redis-queue-core.ts'
+      - 'fedify-sidecar/scripts/benchmark-redis-stream-brotli-queue-path.ts'
+      - '.github/workflows/redis-stream-brotli-queue-path.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - run: npm ci --prefix fedify-sidecar
+
+      - name: Run paired real queue-path benchmark
+        working-directory: fedify-sidecar
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          REDIS_BROTLI_QUEUE_BENCHMARK_OUTPUT: ../measurements/redis-stream-brotli-queue-path/evidence.json
+        run: npx tsx scripts/benchmark-redis-stream-brotli-queue-path.ts
+
+      - name: Validate evidence contract
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const evidence = JSON.parse(fs.readFileSync('measurements/redis-stream-brotli-queue-path/evidence.json', 'utf8'));
+          if (evidence.schema !== 'apdm-redis-stream-brotli-queue-path.v1') throw new Error('unexpected evidence schema');
+          if (evidence.measuredSamplesPerArm < 5 || evidence.warmupSamplesPerArm < 1) throw new Error('insufficient sample count');
+          if (!Array.isArray(evidence.results) || evidence.results.length !== 3) throw new Error('unexpected scenario matrix');
+          for (const result of evidence.results) {
+            if (result.plaintext.completedOutbound !== result.endpoints || result.brotli.completedOutbound !== result.endpoints) {
+              throw new Error(`incomplete outbound queue path for ${result.name}`);
+            }
+            if (!(result.comparisons.p50MemoryReduction > 1)) throw new Error(`no memory reduction for ${result.name}`);
+          }
+          NODE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: redis-stream-brotli-queue-path-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redis-stream-brotli-queue-path/
+          if-no-files-found: error
+          retention-days: 30

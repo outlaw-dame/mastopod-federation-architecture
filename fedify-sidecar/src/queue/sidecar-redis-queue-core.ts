@@ -21,6 +21,11 @@
 import { createClient, RedisClientType } from "redis";
 import { logger } from "../utils/logger.js";
 import type { OutboundDeliveryMeta } from "../core-domain/contracts/SigningContracts.js";
+import {
+  RedisStreamPayloadCodec,
+  createRedisStreamPayloadCodecFromEnv,
+  type RedisStreamPayloadCodecConfig,
+} from "./redis-stream-payload-codec.js";
 
 // ============================================================================
 // Configuration
@@ -44,6 +49,8 @@ export interface QueueConfig {
   maxStreamLength?: number;
   readBatchCount?: number;
   claimBatchCount?: number;
+  /** Optional override used by tests and staged rollouts. Env defaults remain write-disabled. */
+  payloadCompression?: RedisStreamPayloadCodecConfig;
 }
 
 // ============================================================================
@@ -170,11 +177,15 @@ export class RedisStreamsQueue {
   private readonly maxStreamLength: number;
   private readonly readBatchCount: number;
   private readonly claimBatchCount: number;
+  private readonly payloadCodec: RedisStreamPayloadCodec;
 
   private isConnected = false;
 
   constructor(config: QueueConfig = {}) {
     const redisUrl = config.redisUrl ?? process.env["REDIS_URL"] ?? "redis://localhost:6379";
+    this.payloadCodec = config.payloadCompression
+      ? new RedisStreamPayloadCodec(config.payloadCompression)
+      : createRedisStreamPayloadCodecFromEnv();
 
     this.redis = createClient({ url: redisUrl });
     this.inboundConsumerRedis = createClient({ url: redisUrl });
@@ -392,6 +403,7 @@ export class RedisStreamsQueue {
 
     const messageIds: string[] = [];
     const chunkSize = 250;
+    const encodedActivityCache = new Map<string, string>();
 
     for (let index = 0; index < jobs.length; index += chunkSize) {
       const chunk = jobs.slice(index, index + chunkSize);
@@ -401,7 +413,7 @@ export class RedisStreamsQueue {
         multi.xAdd(
           this.outboundStreamKey,
           "*",
-          this.serializeOutboundJob(job),
+          this.serializeOutboundJob(job, this.encodeActivityCached(job.activity, encodedActivityCache)),
           { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxStreamLength } },
         );
       }
@@ -444,8 +456,12 @@ export class RedisStreamsQueue {
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
-          const job = this.deserializeOutboundJob(messageId, fields);
-          yield { messageId, job };
+          try {
+            const job = this.deserializeOutboundJob(messageId, fields);
+            yield { messageId, job };
+          } catch (error) {
+            this.logRejectedStreamMessage("outbound", messageId, error);
+          }
         }
 
         // Read new messages
@@ -462,8 +478,12 @@ export class RedisStreamsQueue {
 
         for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
           for (const [messageId, fields] of streamMessages) {
-            const job = this.deserializeOutboundJob(messageId, fields);
-            yield { messageId, job };
+            try {
+              const job = this.deserializeOutboundJob(messageId, fields);
+              yield { messageId, job };
+            } catch (error) {
+              this.logRejectedStreamMessage("outbound", messageId, error);
+            }
           }
         }
       } catch (err: any) {
@@ -515,8 +535,12 @@ export class RedisStreamsQueue {
         );
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
-          const intent = this.deserializeOutboxIntent(messageId, fields);
-          yield { messageId, intent };
+          try {
+            const intent = this.deserializeOutboxIntent(messageId, fields);
+            yield { messageId, intent };
+          } catch (error) {
+            this.logRejectedStreamMessage("outbox_intent", messageId, error);
+          }
         }
 
         const messages = await (this.outboxIntentConsumerRedis as any).xReadGroup(
@@ -532,8 +556,12 @@ export class RedisStreamsQueue {
 
         for (const [, streamMessages] of this.normalizeStreamRead(messages)) {
           for (const [messageId, fields] of streamMessages) {
-            const intent = this.deserializeOutboxIntent(messageId, fields);
-            yield { messageId, intent };
+            try {
+              const intent = this.deserializeOutboxIntent(messageId, fields);
+              yield { messageId, intent };
+            } catch (error) {
+              this.logRejectedStreamMessage("outbox_intent", messageId, error);
+            }
           }
         }
       } catch (err: any) {
@@ -615,8 +643,23 @@ export class RedisStreamsQueue {
     }
   }
 
+  private logRejectedStreamMessage(
+    type: "outbound" | "outbox_intent",
+    messageId: string,
+    error: unknown,
+  ): void {
+    logger.error(
+      {
+        type,
+        messageId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      "Rejected malformed Redis Stream message; source remains pending",
+    );
+  }
+
   private deserializeOutboxIntent(messageId: string, fields: Record<string, string>): OutboxIntent {
-    const rawTargets = this.requireField(fields, "targets", messageId);
+    const rawTargets = this.payloadCodec.decode(this.requireField(fields, "targets", messageId));
     const parsedTargets = JSON.parse(rawTargets) as unknown;
     if (!Array.isArray(parsedTargets)) {
       throw new Error(`Stream message ${messageId} has invalid outbox intent targets`);
@@ -626,7 +669,7 @@ export class RedisStreamsQueue {
       intentId: this.requireField(fields, "intentId", messageId),
       activityId: this.requireField(fields, "activityId", messageId),
       actorUri: this.requireField(fields, "actorUri", messageId),
-      activity: this.requireField(fields, "activity", messageId),
+      activity: this.payloadCodec.decode(this.requireField(fields, "activity", messageId)),
       targets: parsedTargets as OutboxIntentTarget[],
       createdAt: parseInt(this.requireField(fields, "createdAt", messageId), 10),
       attempt: parseInt(this.requireField(fields, "attempt", messageId), 10),
@@ -643,7 +686,7 @@ export class RedisStreamsQueue {
       jobId: this.requireField(fields, "jobId", messageId),
       activityId: this.requireField(fields, "activityId", messageId),
       actorUri: this.requireField(fields, "actorUri", messageId),
-      activity: this.requireField(fields, "activity", messageId),
+      activity: this.payloadCodec.decode(this.requireField(fields, "activity", messageId)),
       targetInbox: this.requireField(fields, "targetInbox", messageId),
       targetDomain: this.requireField(fields, "targetDomain", messageId),
       attempt: parseInt(this.requireField(fields, "attempt", messageId), 10),
@@ -1065,12 +1108,12 @@ export class RedisStreamsQueue {
     return error instanceof Error && error.message.includes("NOGROUP");
   }
 
-  private serializeOutboundJob(job: OutboundJob): Record<string, string> {
+  private serializeOutboundJob(job: OutboundJob, encodedActivity?: string): Record<string, string> {
     return {
       jobId: job.jobId,
       activityId: job.activityId,
       actorUri: job.actorUri,
-      activity: job.activity,
+      activity: encodedActivity ?? this.payloadCodec.encode(job.activity).value,
       targetInbox: job.targetInbox,
       targetDomain: job.targetDomain,
       attempt: job.attempt.toString(),
@@ -1083,12 +1126,13 @@ export class RedisStreamsQueue {
   }
 
   private serializeOutboxIntent(intent: OutboxIntent): Record<string, string> {
+    const targets = JSON.stringify(intent.targets);
     return {
       intentId: intent.intentId,
       activityId: intent.activityId,
       actorUri: intent.actorUri,
-      activity: intent.activity,
-      targets: JSON.stringify(intent.targets),
+      activity: this.payloadCodec.encode(intent.activity).value,
+      targets: this.payloadCodec.encode(targets).value,
       createdAt: intent.createdAt.toString(),
       attempt: intent.attempt.toString(),
       maxAttempts: intent.maxAttempts.toString(),
@@ -1097,6 +1141,14 @@ export class RedisStreamsQueue {
       meta: intent.meta ? JSON.stringify(intent.meta) : "",
       bridgeHints: intent.bridgeHints ? JSON.stringify(intent.bridgeHints) : "",
     };
+  }
+
+  private encodeActivityCached(activity: string, cache: Map<string, string>): string {
+    const existing = cache.get(activity);
+    if (existing !== undefined) return existing;
+    const encoded = this.payloadCodec.encode(activity).value;
+    cache.set(activity, encoded);
+    return encoded;
   }
 
   private serializeOriginReconciliationJob(job: OriginReconciliationJob): Record<string, string> {
@@ -1190,12 +1242,16 @@ export class RedisStreamsQueue {
       return { '1', tostring(jobCount) }
     `;
 
+    const encodedActivityCache = new Map<string, string>();
     const args = [
       this.maxStreamLength.toString(),
       Date.now().toString(),
       jobs.length.toString(),
       ...jobs.flatMap((job) => {
-        const serialized = this.serializeOutboundJob(job);
+        const serialized = this.serializeOutboundJob(
+          job,
+          this.encodeActivityCached(job.activity, encodedActivityCache),
+        );
         return [
           serialized["jobId"] ?? "",
           serialized["activityId"] ?? "",
