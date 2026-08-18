@@ -121,8 +121,8 @@ describe("RedisStreamsQueue compression boundary", () => {
     await queue.enqueueOutboxIntent(makeIntent());
 
     const fields = admin.xAdd.mock.calls[0]?.[2] as Record<string, string>;
-    expect(fields.activity).toBe(activity);
-    expect(fields.targets).toBe(JSON.stringify(targets));
+    expect(fields["activity"]).toBe(activity);
+    expect(fields["targets"]).toBe(JSON.stringify(targets));
     await queue.disconnect();
   });
 
@@ -136,8 +136,8 @@ describe("RedisStreamsQueue compression boundary", () => {
     await queue.enqueueOutboxIntent(makeIntent());
 
     const fields = admin.xAdd.mock.calls[0]?.[2] as Record<string, string>;
-    expect(fields.activity).toMatch(/^apq1:br:/u);
-    expect(fields.targets).toMatch(/^apq1:br:/u);
+    expect(fields["activity"]).toMatch(/^apq1:br:/u);
+    expect(fields["targets"]).toMatch(/^apq1:br:/u);
     await queue.disconnect();
   });
 
