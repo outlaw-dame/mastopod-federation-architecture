@@ -10,8 +10,8 @@ Later phases may not be promoted by assumption. NATS Core remains an unselected 
 
 ## Program checklist
 
-- [ ] Phase 0 — Freeze topology baseline, authority and benchmark contract — **IN PROGRESS**
-- [ ] Phase 1 — Safe distributable Moleculer fabric — blocked by Phase 0
+- [x] Phase 0 — Freeze topology baseline, authority and benchmark contract — **COMPLETE**
+- [ ] Phase 1 — Safe distributable Moleculer fabric — **NEXT**
 - [ ] Phase 2 — Horizontal ActivityPods with Redis transporter — blocked by Phase 1
 - [ ] Phase 3 — NATS Core transporter comparison — blocked by Phase 2
 - [ ] Phase 4 — Extend/reuse Redis Streams for qualified additional workloads — blocked by Phase 3 and workload evidence
@@ -20,7 +20,7 @@ Later phases may not be promoted by assumption. NATS Core remains an unselected 
 
 ## Phase 0 — Freeze topology baseline, authority and benchmark contract
 
-**Status:** IN PROGRESS  
+**Status:** COMPLETE  
 **Slices:** `ADSP-P0-A`, `ADSP-P0-F`
 
 Goals:
@@ -32,16 +32,18 @@ Goals:
 - record exact repository heads used for the baseline.
 
 Exit gate:
-- [ ] current source/runtime topology is verified in both repositories;
-- [ ] Redis responsibilities are classified as state/cache, incumbent durable queue/stream, or candidate additional workload;
-- [ ] baseline workload matrix and whole-system telemetry are reproducible;
-- [ ] benchmark variance is measured and comparison thresholds are locked before NATS testing;
-- [ ] APDM/Tier 1/Tier 2 authority boundaries are confirmed unchanged;
-- [ ] exact baseline heads and evidence runs are recorded in `STATUS.md`.
+- [x] current source/runtime topology is verified in both repositories;
+- [x] Redis responsibilities are classified as state/cache, incumbent durable queue/stream, or candidate additional workload;
+- [x] baseline workload matrix and whole-system telemetry are reproducible;
+- [x] benchmark variance is measured and comparison thresholds are locked before NATS testing;
+- [x] APDM/Tier 1/Tier 2 authority boundaries are confirmed unchanged;
+- [x] exact baseline heads and evidence runs are recorded in `STATUS.md`.
+
+The numerical contract is frozen in `P0-PROMOTION-THRESHOLDS.md` and `BENCHMARK-CONTRACT.md`. No NATS-Core benchmark result was used to select those values.
 
 ## Phase 1 — Safe distributable Moleculer fabric
 
-**Status:** BLOCKED by Phase 0  
+**Status:** NOT STARTED / unblocked by Phase 0  
 **Primary:** `ADSP-P1-A`; federation slice only where integration/observability is needed.
 
 Make ActivityPods safely distributable without changing the selected transporter yet.
