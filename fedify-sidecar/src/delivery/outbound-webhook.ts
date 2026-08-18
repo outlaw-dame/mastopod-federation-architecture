@@ -70,14 +70,10 @@ export function normalizeAndDedupeOutboundTargets(
     );
   }
 
-  if (remoteTargets.length === 0) {
-    throw new OutboundWebhookValidationError(
-      "OUTBOUND_TARGETS_EMPTY",
-      400,
-      "remoteTargets must contain at least one delivery target.",
-    );
-  }
-
+  // An authoritative ActivityPods Delivery Plan may legitimately contain zero
+  // remote recipients. Stream1 observation is provider-wide and must not depend
+  // on whether federation fan-out happens to be necessary for this activity.
+  // The Delivery Plan identity is validated separately from the target list.
   if (remoteTargets.length > config.maxTargetsPerRequest) {
     throw new OutboundWebhookValidationError(
       "OUTBOUND_TARGETS_TOO_LARGE",
@@ -136,7 +132,7 @@ export function normalizeAndDedupeOutboundTargets(
   }
 
   const targets = [...deduped.values()];
-  if (targets.length === 0) {
+  if (remoteTargets.length > 0 && targets.length === 0) {
     throw new OutboundWebhookValidationError(
       "OUTBOUND_TARGETS_UNUSABLE",
       400,
@@ -155,7 +151,12 @@ export function normalizeAndDedupeOutboundTargets(
 }
 
 /**
- * Bind the raw target marker to the rest of the authoritative APDM handoff.
+ * Bind the authoritative APDM handoff identity to its Delivery Plan metadata.
+ * Non-empty target sets additionally bind every target marker to that same
+ * identity. Zero-target plans have no target on which to carry the marker, so
+ * their authority is established by the authenticated boundary plus matching
+ * X-APDM-Intent-Id and ap.delivery-plan.v1 metadata.
+ *
  * Returns the stable Delivery Plan intent ID for production handoffs. The only
  * undefined result is an exception whose provenance was established by the
  * explicit non-production interop allowlist during target normalization.
@@ -167,25 +168,6 @@ export function validateApdmWebhookIdentity(input: {
 }): string | undefined {
   const markerIntentId = input.normalizedTargets.apdmAuthorityIntentId;
   const authoritySource = input.normalizedTargets.apdmAuthoritySource;
-  if (!markerIntentId || !authoritySource) {
-    throw new OutboundWebhookValidationError(
-      "OUTBOUND_APDM_AUTHORITY_REQUIRED",
-      400,
-      "APDM Delivery Plan target authority is required.",
-    );
-  }
-
-  if (authoritySource === "interop_legacy") {
-    return undefined;
-  }
-
-  if (SIDECAR_INTERNAL_INTENT_PREFIXES.some((prefix) => markerIntentId.startsWith(prefix))) {
-    throw new OutboundWebhookValidationError(
-      "OUTBOUND_APDM_INTENT_RESERVED",
-      400,
-      "Delivery Plan intentId must not use a sidecar-reserved durable intent namespace.",
-    );
-  }
 
   const headerIntentId = normalizeExactIntentId(input.headerIntentId);
   if (!headerIntentId) {
@@ -219,6 +201,45 @@ export function validateApdmWebhookIdentity(input: {
       "OUTBOUND_APDM_META_INTENT_REQUIRED",
       400,
       "meta.deliveryPlanIntentId must contain the authoritative Delivery Plan intentId.",
+    );
+  }
+
+  if (SIDECAR_INTERNAL_INTENT_PREFIXES.some((prefix) => headerIntentId.startsWith(prefix))) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_INTENT_RESERVED",
+      400,
+      "Delivery Plan intentId must not use a sidecar-reserved durable intent namespace.",
+    );
+  }
+
+  if (input.normalizedTargets.inputTargetCount === 0) {
+    if (metaIntentId !== headerIntentId) {
+      throw new OutboundWebhookValidationError(
+        "OUTBOUND_APDM_INTENT_MISMATCH",
+        400,
+        "X-APDM-Intent-Id and meta.deliveryPlanIntentId must match for a zero-target Delivery Plan.",
+      );
+    }
+    return headerIntentId;
+  }
+
+  if (!markerIntentId || !authoritySource) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_AUTHORITY_REQUIRED",
+      400,
+      "APDM Delivery Plan target authority is required.",
+    );
+  }
+
+  if (authoritySource === "interop_legacy") {
+    return undefined;
+  }
+
+  if (SIDECAR_INTERNAL_INTENT_PREFIXES.some((prefix) => markerIntentId.startsWith(prefix))) {
+    throw new OutboundWebhookValidationError(
+      "OUTBOUND_APDM_INTENT_RESERVED",
+      400,
+      "Delivery Plan intentId must not use a sidecar-reserved durable intent namespace.",
     );
   }
 
