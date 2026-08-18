@@ -156,6 +156,91 @@ describe("Stream1 local observation authority", () => {
     });
   }
 
+  it("publishes a public local Delete to Stream1 and emits its tombstone separately", async () => {
+    const createdAt = Date.now() - 1000;
+    const queue = makeQueue();
+    const redpanda = makeRedpanda();
+    const intent = makeIntent("public", createdAt);
+    intent.activityId = "https://pods.example/as/activity/delete-1";
+    intent.activity = JSON.stringify({
+      id: intent.activityId,
+      type: "Delete",
+      actor: intent.actorUri,
+      to: ["https://www.w3.org/ns/activitystreams#Public"],
+      object: "https://pods.example/notes/deleted-1",
+    });
+    intent.meta = { ...intent.meta, isDeleteOrTombstone: true } as any;
+    const worker = new TestWorker(queue, redpanda, config);
+
+    await worker.run("msg-delete", intent);
+
+    expect(redpanda.publishTombstone).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        activityId: intent.activityId,
+        objectId: "https://pods.example/notes/deleted-1",
+        actorUri: intent.actorUri,
+        deletedAt: createdAt,
+        streamTimestamp: createdAt,
+        outboxIntentId: intent.intentId,
+      }),
+    );
+    expect(redpanda.publishToStream1).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        activity: expect.objectContaining({ type: "Delete" }),
+        outboxIntentId: intent.intentId,
+        publishedAt: createdAt,
+      }),
+    );
+  });
+
+  it("uses ActivityPods lifecycle authority to tombstone only relevant public Undo while keeping Undo in Stream1", async () => {
+    const createdAt = Date.now() - 1000;
+    const queue = makeQueue();
+    const redpanda = makeRedpanda();
+    const intent = makeIntent("public", createdAt);
+    intent.activityId = "https://pods.example/as/activity/undo-announce-1";
+    intent.activity = JSON.stringify({
+      id: intent.activityId,
+      type: "Undo",
+      actor: intent.actorUri,
+      to: ["https://www.w3.org/ns/activitystreams#Public"],
+      object: {
+        id: "https://pods.example/as/activity/announce-1",
+        type: "Announce",
+      },
+    });
+    intent.meta = { ...intent.meta, isDeleteOrTombstone: true } as any;
+    const worker = new TestWorker(queue, redpanda, config);
+
+    await worker.run("msg-undo-announce", intent);
+
+    expect(redpanda.publishTombstone).toHaveBeenCalledTimes(1);
+    expect(redpanda.publishToStream1).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invent tombstone semantics for an unrelated public Undo", async () => {
+    const queue = makeQueue();
+    const redpanda = makeRedpanda();
+    const intent = makeIntent("public", Date.now() - 1000);
+    intent.activity = JSON.stringify({
+      id: intent.activityId,
+      type: "Undo",
+      actor: intent.actorUri,
+      to: ["https://www.w3.org/ns/activitystreams#Public"],
+      object: {
+        id: "https://pods.example/as/activity/like-1",
+        type: "Like",
+      },
+    });
+    intent.meta = { ...intent.meta, isDeleteOrTombstone: false } as any;
+    const worker = new TestWorker(queue, redpanda, config);
+
+    await worker.run("msg-undo-like", intent);
+
+    expect(redpanda.publishTombstone).not.toHaveBeenCalled();
+    expect(redpanda.publishToStream1).toHaveBeenCalledTimes(1);
+  });
+
   it("publishes the event-log observation before delivery fan-out processing", async () => {
     const queue = makeQueue();
     queue.enqueueOutboundBatchForIntent.mockResolvedValue({ enqueued: true, jobCount: 1 });
