@@ -120,6 +120,58 @@ The write-time figure is intentionally only an **equivalent-field MULTI/XADD env
 
 A safety cap skips combinations whose current logical layout would exceed the benchmark's bounded memory budget.
 
+## Repeated real-Redis evidence
+
+Accepted exact head: `16c6f6e7a7fe3e97f25550c36106fff576db5ca0`.
+
+The same workflow/job was executed twice against Redis 7.4.10 with default Stream macro-node settings (`stream-node-max-bytes=4096`, `stream-node-max-entries=100`). Both attempts completed the benchmark, schema validation, Redis-runtime capture and artifact upload successfully.
+
+- run `32127608890`, attempt 1 artifact `redis-payload-efficiency-32127608890-1`, digest `sha256:0c5144f3604b2c834c42f64e16ca84db29a2fbc35bc3e1f638bf67aaec766df0`;
+- run `32127608890`, attempt 2 artifact `redis-payload-efficiency-32127608890-2`, digest `sha256:c63e88aee26bf4d4e88c9eb42537702b246047648c32decf1c4518bb3bfa06b4`.
+
+Across matched layout points, Redis `MEMORY USAGE` reproduced to within approximately **0.0024%**. CI write timings varied materially and remain directional only, as documented above.
+
+### Selected memory results
+
+Values are total measured Redis bytes for the isolated equivalent layout. Reduction is versus A/current.
+
+| Activity | Recipients | Unique endpoints | A current | B compressed/self-contained | C reference | D reference+compressed |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 KiB | 10,000 | 10 | 2.13 MB | 45.7 KB (**46.5×**) | 2.11 MB (1.01×) | 31.3 KB (68.0×) |
+| 2 KiB | 10,000 | 100 | 2.38 MB | 218.7 KB (**10.9×**) | 2.14 MB (1.11×) | 70.8 KB (33.7×) |
+| 2 KiB | 10,000 | 10,000 | 30.06 MB | 19.32 MB (**1.56×**) | 6.22 MB (4.84×) | 4.46 MB (6.74×) |
+| 20 KiB | 10,000 | 10 | 2.35 MB | 139.2 KB (**16.9×**) | 2.13 MB (1.10×) | 37.5 KB (62.6×) |
+| 20 KiB | 10,000 | 100 | 4.58 MB | 1.08 MB (**4.23×**) | 2.17 MB (2.11×) | 76.9 KB (59.6×) |
+| 20 KiB | 1,000 | 1,000 | 25.04 MB | 10.52 MB (**2.38×**) | 627.5 KB (39.9×) | 454.5 KB (55.1×) |
+| 100 KiB | 10,000 | 10 | 3.25 MB | 577.5 KB (**5.62×**) | 2.22 MB (1.46×) | 71.3 KB (45.6×) |
+| 100 KiB | 10,000 | 100 | 13.59 MB | 5.02 MB (**2.71×**) | 2.26 MB (6.02×) | 110.7 KB (122.8×) |
+| 100 KiB | 1,000 | 1,000 | 115.28 MB | 49.47 MB (**2.33×**) | 717.6 KB (160.6×) | 488.3 KB (236.1×) |
+
+The 20 KiB/10,000-endpoint and 100 KiB/10,000-endpoint real writes were intentionally skipped by the 160 MiB safety cap. Their theoretical current Activity bytes alone are approximately 204.8 MB and 1.024 GB respectively before Redis data-structure overhead.
+
+### What the results mean
+
+Two distinct amplification regimes exist:
+
+1. **High shared-inbox collapse / low endpoint count:** the full target vector dominates. Reference-only storage barely helps, while compressing the target vector produces very large savings. This is why B beats C strongly at 10,000 recipients / 10 endpoints.
+2. **Low collapse / high endpoint count:** repeated outbound Activity bodies dominate. References produce enormous savings because they remove one immutable Activity copy per endpoint. Compression-only remains material, but cannot match deduplication at high endpoint cardinality.
+
+The codec evidence also remained stable across runs. With the JSON-safe base64url queue envelope, the deterministic 20 KiB Activity compressed approximately 2.26× with Zstd-3 versus 2.09× with Brotli-4; at 100 KiB the figures were approximately 2.20× versus 2.03×. Zstd was faster in these isolated synchronous measurements, but its incremental compression gain over Brotli is single-digit percentage territory while its current built-in Node API would require Node >=22.15 and remains experimental.
+
+## Promotion decision from this slice
+
+**Promote compression-only to a feature-gated production prototype. Do not promote canonical references yet.**
+
+Rationale:
+
+- B produced a material Redis-memory reduction at every measured point, including after the JSON-safe base64url overhead;
+- B preserves self-contained queue jobs and therefore does not create a new payload-lifetime dependency;
+- the largest low-endpoint gains come from target-vector compression, which references alone do not address;
+- C/D prove that canonical references may be valuable later, especially at high endpoint cardinality, but their durability/cleanup contract is a separate architectural change and must not be smuggled in as a memory optimization;
+- built-in experimental Zstd is not promoted as the production codec. A first prototype should prefer a stable Node-20-compatible built-in codec (Brotli is the leading candidate from this evidence) and remain disabled by default until whole-system latency/CPU/failure evidence closes its gate.
+
+The production prototype should decode the compressed envelope unconditionally for rolling-upgrade compatibility while enabling writes only behind an explicit feature flag. Compression should be applied at Redis Stream serialization boundaries so in-memory `OutboxIntent`/`OutboundJob`, delayed retry JSON and DLQ JSON remain backward-compatible. Large payloads should be compressed once and reused across a fan-out batch rather than recompressed per endpoint.
+
 ## Promotion rules
 
 No storage-format change should be promoted from compression ratio alone.
