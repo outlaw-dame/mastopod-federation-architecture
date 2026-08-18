@@ -57,13 +57,18 @@ jobs:
           node - <<'NODE'
           const fs = require('node:fs');
           const evidence = JSON.parse(fs.readFileSync('measurements/redis-payload-efficiency/evidence.json', 'utf8'));
-          if (evidence.schema !== 'apdm-redis-payload-efficiency.v1') throw new Error('unexpected evidence schema');
+          if (evidence.schema !== 'apdm-redis-payload-efficiency.v2') throw new Error('unexpected evidence schema');
           if (!Array.isArray(evidence.codecs) || evidence.codecs.length !== 3) throw new Error('expected three payload sizes');
           for (const payload of evidence.codecs) {
             const names = payload.codecs.map(codec => codec.codec).sort();
             if (JSON.stringify(names) !== JSON.stringify(['brotli-4','gzip-6','zstd-3'])) throw new Error('codec matrix incomplete');
             for (const codec of payload.codecs) {
-              if (!(codec.sourceBytes > 0 && codec.compressedBytes > 0 && codec.ratio > 0)) throw new Error('invalid codec evidence');
+              if (!(codec.sourceBytes > 0 && codec.compressedBytes > 0 && codec.base64urlBytes >= codec.compressedBytes)) {
+                throw new Error('invalid codec byte evidence');
+              }
+              if (!(codec.rawCompressionRatio > 0 && codec.queueEnvelopeRatio > 0 && codec.base64urlExpansion >= 1)) {
+                throw new Error('invalid codec ratio evidence');
+              }
             }
           }
           const measured = evidence.realRedis.filter(item => !item.skipped);
@@ -75,6 +80,8 @@ jobs:
             }
             const current = item.variants.find(variant => variant.variant === 'A_current');
             if (!current || !(current.redisBytes > 0)) throw new Error('missing Redis baseline');
+            const compressed = item.variants.find(variant => variant.variant === 'B_compressed');
+            if (!compressed || compressed.compressionEnvelope !== 'base64url') throw new Error('compression variant is not JSON-safe');
             for (const variant of item.variants) {
               if (!(variant.redisBytes > 0 && variant.logicalFieldBytes > 0 && variant.writeMs >= 0)) {
                 throw new Error(`invalid Redis evidence for ${variant.variant}`);
@@ -88,8 +95,6 @@ jobs:
           NODE
 
       - name: Record Redis server facts
-        env:
-          REDISCLI_AUTH: ''
         run: |
           {
             echo '# Redis INFO memory'
