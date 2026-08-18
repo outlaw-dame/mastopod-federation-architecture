@@ -15,8 +15,10 @@ export interface OutboxIntentDelayScheduler {
 export interface RedisOutboxIntentDelaySchedulerConfig {
   redisUrl: string;
   readyStreamKey: string;
+  dlqStreamKey: string;
   consumerGroup: string;
   maxStreamLength: number;
+  maxDlqLength: number;
   promotionIntervalMs?: number;
   promotionBatchSize?: number;
 }
@@ -35,13 +37,17 @@ type RedisClient = ReturnType<typeof createClient>;
  * The source transition is atomic: delayed payload/schedule are persisted
  * before XACK in the same Lua script. Promotion is likewise atomic: XADD the
  * ready entry, then remove the delayed record. A crash cannot create an
- * ACK-without-replacement gap.
+ * ACK-without-replacement gap. Malformed/orphaned delayed records are moved to
+ * the existing outbox-intent DLQ in the same promotion script so one corrupt
+ * record cannot permanently head-of-line block all healthy delayed work.
  */
 export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelayScheduler {
   private readonly redis: RedisClient;
   private readonly readyStreamKey: string;
+  private readonly dlqStreamKey: string;
   private readonly consumerGroup: string;
   private readonly maxStreamLength: number;
+  private readonly maxDlqLength: number;
   private readonly scheduleKey: string;
   private readonly payloadKey: string;
   private readonly promotionIntervalMs: number;
@@ -52,8 +58,10 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
   constructor(config: RedisOutboxIntentDelaySchedulerConfig) {
     this.redis = createClient({ url: config.redisUrl });
     this.readyStreamKey = config.readyStreamKey;
+    this.dlqStreamKey = config.dlqStreamKey;
     this.consumerGroup = config.consumerGroup;
     this.maxStreamLength = config.maxStreamLength;
+    this.maxDlqLength = config.maxDlqLength;
     this.scheduleKey = `${config.readyStreamKey}:delayed:v1`;
     this.payloadKey = `${config.readyStreamKey}:delayed-payload:v1`;
     this.promotionIntervalMs = config.promotionIntervalMs ?? OUTBOX_INTENT_DELAY_PROMOTION_INTERVAL_MS;
@@ -141,11 +149,20 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
         local promoted = 0
         for _, id in ipairs(ids) do
           local payload = redis.call('HGET', KEYS[2], id)
+          local valid = false
+          local intent = nil
           if payload then
-            local ok, intent = pcall(cjson.decode, payload)
-            if not ok or not intent then
-              return redis.error_reply('invalid delayed outbox-intent payload for ' .. id)
+            local ok, decoded = pcall(cjson.decode, payload)
+            if ok and decoded and decoded.intentId == id and type(decoded.activityId) == 'string' and
+              type(decoded.actorUri) == 'string' and type(decoded.activity) == 'string' and
+              type(decoded.targets) == 'table' and tonumber(decoded.createdAt) and
+              tonumber(decoded.attempt) and tonumber(decoded.maxAttempts) and tonumber(decoded.notBeforeMs) then
+              valid = true
+              intent = decoded
             end
+          end
+
+          if valid then
             local meta = ''
             if intent.meta ~= nil then meta = cjson.encode(intent.meta) end
             local bridgeHints = ''
@@ -156,16 +173,31 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
               'activityId', intent.activityId,
               'actorUri', intent.actorUri,
               'activity', intent.activity,
-              'targets', cjson.encode(intent.targets or {}),
-              'createdAt', tostring(intent.createdAt or 0),
-              'attempt', tostring(intent.attempt or 0),
-              'maxAttempts', tostring(intent.maxAttempts or 0),
-              'notBeforeMs', tostring(intent.notBeforeMs or 0),
+              'targets', cjson.encode(intent.targets),
+              'createdAt', tostring(intent.createdAt),
+              'attempt', tostring(intent.attempt),
+              'maxAttempts', tostring(intent.maxAttempts),
+              'notBeforeMs', tostring(intent.notBeforeMs),
               'lastError', intent.lastError or '',
               'meta', meta,
               'bridgeHints', bridgeHints
             )
             promoted = promoted + 1
+          else
+            local reason = payload and 'Corrupt delayed outbox-intent payload' or 'Orphaned delayed outbox-intent schedule entry'
+            local diagnostic = cjson.encode({
+              intentId = id,
+              delayedPayload = payload or cjson.null,
+              scheduler = 'outbox-intent-delayed-v1'
+            })
+            redis.call(
+              'XADD', KEYS[4], 'MAXLEN', '~', ARGV[4], '*',
+              'type', 'outbox_intent',
+              'id', id,
+              'reason', reason,
+              'timestamp', ARGV[1],
+              'data', diagnostic
+            )
           end
           redis.call('ZREM', KEYS[1], id)
           redis.call('HDEL', KEYS[2], id)
@@ -174,8 +206,13 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
       `;
 
       const result = await this.redis.eval(script, {
-        keys: [this.scheduleKey, this.payloadKey, this.readyStreamKey],
-        arguments: [String(nowMs), String(this.promotionBatchSize), String(this.maxStreamLength)],
+        keys: [this.scheduleKey, this.payloadKey, this.readyStreamKey, this.dlqStreamKey],
+        arguments: [
+          String(nowMs),
+          String(this.promotionBatchSize),
+          String(this.maxStreamLength),
+          String(this.maxDlqLength),
+        ],
       });
       return typeof result === "number" ? result : Number(result ?? 0);
     } finally {
@@ -188,8 +225,10 @@ export function createRedisOutboxIntentDelaySchedulerFromEnv(): RedisOutboxInten
   return new RedisOutboxIntentDelayScheduler({
     redisUrl: process.env["REDIS_URL"] ?? "redis://localhost:6379",
     readyStreamKey: process.env["OUTBOX_INTENT_STREAM_KEY"] ?? "ap:queue:outbox-intent:v1",
+    dlqStreamKey: process.env["DLQ_OUTBOX_INTENT_STREAM_KEY"] ?? "ap:queue:dlq:outbox-intent:v1",
     consumerGroup: process.env["CONSUMER_GROUP"] ?? "sidecar-workers",
     maxStreamLength: parsePositiveInt(process.env["MAX_STREAM_LENGTH"], 500_000),
+    maxDlqLength: parsePositiveInt(process.env["MAX_DLQ_LENGTH"], 10_000),
   });
 }
 
