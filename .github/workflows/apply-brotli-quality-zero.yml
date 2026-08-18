@@ -1,0 +1,30 @@
+name: Apply Brotli Quality Zero
+
+on:
+  push:
+    branches:
+      - agent/redis-stream-brotli-compression-prototype
+    paths:
+      - '.github/workflows/apply-brotli-quality-zero.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/redis-stream-brotli-compression-prototype
+          fetch-depth: 0
+      - run: python3 scripts/apply-brotli-quality-zero.py
+      - run: |
+          rm scripts/apply-brotli-quality-zero.py
+          rm .github/workflows/apply-brotli-quality-zero.yml
+      - run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add fedify-sidecar/scripts/proof-redis-stream-brotli-compression.ts fedify-sidecar/scripts/benchmark-redis-stream-brotli-queue-path.ts scripts/apply-brotli-quality-zero.py .github/workflows/apply-brotli-quality-zero.yml
+          git commit -m 'Tune Brotli prototype to quality 0'
+          git push origin HEAD:agent/redis-stream-brotli-compression-prototype
