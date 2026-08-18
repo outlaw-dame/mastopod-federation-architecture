@@ -1,0 +1,545 @@
+name: ADSP P2 W3 ActivityPods remote correctness
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/adsp-p2-w3-activitypods-remote-correctness.yml'
+      - 'fedify-sidecar/src/adsp/**'
+      - 'fedify-sidecar/scripts/adsp-p0-activitypods-origin.ts'
+      - 'fedify-sidecar/scripts/adsp-p0-controlled-remote-target.ts'
+      - 'fedify-sidecar/src/delivery/**'
+      - 'fedify-sidecar/src/queue/**'
+      - 'fedify-sidecar/src/signing/**'
+      - 'fedify-sidecar/src/streams/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adsp-p2-w3-remote-correctness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mixed-authority-correctness:
+    name: horizontal ActivityPods to sidecar remote outcomes
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      # Temporary companion pin while ActivityPods PR #96 is under exact-head
+      # validation. Replace with its merged SHA before this PR can merge.
+      ACTIVITYPODS_SHA: '9e884e9cf0afdf48fc03d0825eb179c8e0b1e0a0'
+      FEDERATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      ADSP_P2_NAMESPACE: 'adsp-p2-w3-${{ github.run_id }}-${{ github.run_attempt }}'
+      ADSP_REMOTE_REDIS_URL: redis://127.0.0.1:6379
+      ADSP_REMOTE_TARGET_STATS_URL: http://127.0.0.1:18080/stats
+      ADSP_REMOTE_CONSUMER_GROUP: sidecar-workers
+      ADSP_REMOTE_INBOUND_STREAM_KEY: ap:queue:inbound:v1
+      ADSP_REMOTE_OUTBOUND_STREAM_KEY: ap:queue:outbound:v1
+      ADSP_REMOTE_OUTBOX_INTENT_STREAM_KEY: ap:queue:outbox-intent:v1
+      ADSP_REMOTE_ORIGIN_RECONCILE_STREAM_KEY: ap:queue:origin-reconcile:v1
+      ADSP_REMOTE_OUTBOUND_DLQ_STREAM_KEY: ap:queue:dlq:outbound:v1
+      ADSP_REMOTE_TRANSIENT_FAILURES: '2'
+      APDM_P9_CONCURRENCY: '4'
+      APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'
+      REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: 'false'
+      ADSP_P2_W3_SIDECAR_HANDOFF_URL: http://host.docker.internal:8080/webhook/outbox
+
+    steps:
+      - name: Checkout federation architecture
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned ActivityPods W3 companion
+        uses: actions/checkout@v4
+        with:
+          repository: outlaw-dame/activity-pods
+          ref: ${{ env.ACTIVITYPODS_SHA }}
+          path: activitypods
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Prepare evidence and ephemeral credentials
+        run: |
+          set -euo pipefail
+          mkdir -p measurements/adsp-p2-w3
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::${token}"
+          {
+            echo "ADSP_EPHEMERAL_TOKEN=${token}"
+            echo "ACTIVITYPODS_TOKEN=${token}"
+            echo "SIDECAR_TOKEN=${token}"
+          } >> "$GITHUB_ENV"
+          node - <<'NODE' > measurements/adsp-p2-w3/environment.json
+          const os = require('os');
+          process.stdout.write(`${JSON.stringify({
+            version: 1,
+            phase: 'ADSP-P2-W3',
+            fixture: 'horizontal-activitypods-origin-remote-correctness',
+            federationCandidateSha: process.env.FEDERATION_CANDIDATE_SHA,
+            activityPodsCommitSha: process.env.ACTIVITYPODS_SHA,
+            workflowRunId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            namespace: process.env.ADSP_P2_NAMESPACE,
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            hostNode: process.version,
+            hostCpuCount: os.cpus().length,
+            hostTotalMemoryBytes: os.totalmem(),
+            successTopologies: [1, 2, 4],
+            retryTopology: 4,
+            retryScenarios: ['transient', 'permanent'],
+            transientFailuresBeforeSuccess: 2,
+            activityPodsOrigin: 'activitypub.outbox.post',
+            deliveryPlanSchema: 'ap.delivery-plan.v1',
+            federationDurability: 'Redis Streams',
+            eventLog: 'RedPanda',
+            stream1Topic: 'ap.stream1.local-public.v1',
+            stream2Topic: 'ap.stream2.remote-public.v1',
+            firehoseTopic: 'ap.firehose.v1',
+            controlledRemote: 'literal loopback authority via per-cell loopback bridge',
+            sidecarHostBinding: '0.0.0.0 only inside isolated CI runner so ActivityPods containers can hand off via host gateway',
+            targetHostBinding: '0.0.0.0 only inside isolated CI runner; actor/inbox authority remains literal 127.0.0.1',
+            promotionEvidence: false
+          }, null, 2)}\n`);
+          NODE
+
+      - name: Install federation sidecar dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Install pinned ActivityPods backend dependencies
+        working-directory: activitypods/pod-provider/backend
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          sed -i 's#ssh://git@github.com/#https://github.com/#g; s#git+ssh://git@github.com/#git+https://github.com/#g; s#git@github.com:#https://github.com/#g' yarn.lock
+          yarn install --frozen-lockfile
+
+      - name: Build pinned ActivityPods production image once
+        working-directory: activitypods/pod-provider
+        run: |
+          set -euo pipefail
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            -f docker-compose-adsp-p2-w3-external.yml \
+            build backend
+
+      - name: Start shared Redis Fuseki and mailcatcher
+        working-directory: activitypods/pod-provider
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml -f docker-compose-adsp-p2-w3-external.yml'
+          docker compose $files down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test measurements/adsp-p2-w3
+          mkdir -p data/fuseki_test data/redis_test measurements/adsp-p2-w3
+          docker compose $files up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
+          docker compose $files exec -T redis redis-cli PING
+
+      - name: Start real RedPanda event log
+        run: |
+          set -euo pipefail
+          docker rm -f adsp-redpanda >/dev/null 2>&1 || true
+          docker run -d --name adsp-redpanda \
+            -p 19092:19092 -p 19644:9644 \
+            redpandadata/redpanda:v24.1.3 \
+            redpanda start \
+              --overprovisioned \
+              --smp 1 \
+              --memory 768M \
+              --reserve-memory 0M \
+              --node-id 0 \
+              --check=false \
+              --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \
+              --advertise-kafka-addr internal://127.0.0.1:9092,external://127.0.0.1:19092
+          ready=false
+          for attempt in $(seq 1 60); do
+            if docker exec adsp-redpanda rpk cluster health --exit-when-healthy >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then docker logs adsp-redpanda; exit 1; fi
+          for topic in \
+            ap.stream1.local-public.v1 \
+            ap.stream2.remote-public.v1 \
+            ap.firehose.v1 \
+            ap.tombstones.v1 \
+            canonical.v1; do
+            docker exec adsp-redpanda rpk topic create "$topic"
+          done
+          docker exec adsp-redpanda rpk topic list > measurements/adsp-p2-w3/redpanda-topics-before.txt
+
+      - name: Start controlled remote ActivityPub target on host gateway
+        working-directory: fedify-sidecar
+        run: |
+          set -euo pipefail
+          ADSP_REMOTE_HOST=0.0.0.0 \
+          ADSP_REMOTE_PORT=18080 \
+          ADSP_REMOTE_TRANSIENT_FAILURES=2 \
+            npm exec -- tsx scripts/adsp-p0-controlled-remote-target.ts \
+            > ../measurements/adsp-p2-w3/controlled-target.log 2>&1 &
+          echo "$!" > ../measurements/adsp-p2-w3/controlled-target.pid
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:18080/health >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then cat ../measurements/adsp-p2-w3/controlled-target.log; exit 1; fi
+
+      - name: Start one ActivityPods cell for sidecar signing authority
+        working-directory: activitypods/pod-provider
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml -f docker-compose-adsp-p2-w3-external.yml'
+          docker compose $files up -d --no-deps backend
+          ready=false
+          for attempt in $(seq 1 180); do
+            if curl -sS --max-time 2 -o /dev/null http://127.0.0.1:3000/; then ready=true; break; fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then docker compose $files logs backend; exit 1; fi
+
+      - name: Start sidecar with only proven outbound path enabled
+        working-directory: fedify-sidecar
+        run: |
+          set -euo pipefail
+          NODE_ENV=development \
+          PORT=8080 \
+          HOST=0.0.0.0 \
+          DOMAIN=localhost \
+          SIDECAR_STARTUP_MODE=blocking \
+          REDIS_URL=redis://127.0.0.1:6379 \
+          APDM_COMPLETION_MARKER_V2_CUTOVER=fresh \
+          REDPANDA_BROKERS=127.0.0.1:19092 \
+          REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false \
+          STREAM1_TOPIC=ap.stream1.local-public.v1 \
+          STREAM2_TOPIC=ap.stream2.remote-public.v1 \
+          FIREHOSE_TOPIC=ap.firehose.v1 \
+          TOMBSTONE_TOPIC=ap.tombstones.v1 \
+          ACTIVITYPODS_URL=http://127.0.0.1:3000 \
+          ACTIVITYPODS_TOKEN="$ADSP_EPHEMERAL_TOKEN" \
+          SIDECAR_TOKEN="$ADSP_EPHEMERAL_TOKEN" \
+          ENABLE_OUTBOUND_WORKER=true \
+          ENABLE_OUTBOX_INTENT_WORKER=true \
+          ENABLE_INBOUND_WORKER=false \
+          ENABLE_ORIGIN_RECONCILIATION=false \
+          ENABLE_FEDIFY_RUNTIME_INTEGRATION=false \
+          ENABLE_OPENSEARCH_INDEXER=false \
+          ENABLE_XRPC_SERVER=false \
+          ENABLE_MEDIA_ASSET_SYNC=false \
+          ENABLE_ACCOUNT_PROVISIONING=false \
+          ENABLE_ENTRYWAY=false \
+          ENABLE_FOLLOWERS_SYNC=false \
+          ENABLE_MRF_ADMIN_API=false \
+          ENABLE_MODERATION_BRIDGE_API=false \
+          ENABLE_CANONICAL_EVENT_LOG=false \
+          ENABLE_CANONICAL_NOTIFICATIONS=false \
+          ENABLE_AT_JETSTREAM=false \
+          ENABLE_AT_EXTERNAL_FIREHOSE=false \
+          APDM_ALLOW_LOOPBACK_HTTP=true \
+          APDM_ALLOW_PRIVATE_HTTP=false \
+          APDM_ALLOW_HTTP_HOSTS='' \
+          REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED=false \
+          CONSUMER_GROUP=sidecar-workers \
+          INBOUND_STREAM_KEY=ap:queue:inbound:v1 \
+          OUTBOUND_STREAM_KEY=ap:queue:outbound:v1 \
+          OUTBOX_INTENT_STREAM_KEY=ap:queue:outbox-intent:v1 \
+          ORIGIN_RECONCILE_STREAM_KEY=ap:queue:origin-reconcile:v1 \
+          DLQ_OUTBOUND_STREAM_KEY=ap:queue:dlq:outbound:v1 \
+          OUTBOUND_MAX_ATTEMPTS=5 \
+          REQUEST_TIMEOUT_MS=5000 \
+            npm run server:dev > ../measurements/adsp-p2-w3/sidecar.log 2>&1 &
+          echo "$!" > ../measurements/adsp-p2-w3/sidecar.pid
+          sidecar_pid="$(cat ../measurements/adsp-p2-w3/sidecar.pid)"
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null; then ready=true; break; fi
+            if ! kill -0 "$sidecar_pid" 2>/dev/null; then tail -n 500 ../measurements/adsp-p2-w3/sidecar.log; exit 1; fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then tail -n 500 ../measurements/adsp-p2-w3/sidecar.log; exit 1; fi
+
+      - name: Prove success chain under exact 1 2 and 4 cell topologies
+        run: |
+          set -euo pipefail
+          files='-f activitypods/pod-provider/docker-compose-test.yml -f activitypods/pod-provider/docker-compose-phase8.yml -f activitypods/pod-provider/docker-compose-adsp-p2-horizontal.yml -f activitypods/pod-provider/docker-compose-adsp-p2-w3-external.yml'
+
+          wait_port() {
+            local port="$1"
+            local ready=false
+            for attempt in $(seq 1 180); do
+              if curl -sS --max-time 2 -o /dev/null "http://127.0.0.1:${port}/"; then ready=true; break; fi
+              sleep 1
+            done
+            test "$ready" = true
+          }
+
+          start_bridge() {
+            local service="$1"
+            docker compose $files exec -d "$service" node scripts/adsp-p2-w3-loopback-bridge.js
+            local ready=false
+            for attempt in $(seq 1 60); do
+              if docker compose $files exec -T "$service" node -e "fetch('http://127.0.0.1:18080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"; then ready=true; break; fi
+              sleep 1
+            done
+            test "$ready" = true
+          }
+
+          stop_cells() {
+            docker compose $files stop -t 30 backend_p2_4 backend_p2_3 backend_p2_2 backend >/dev/null 2>&1 || true
+          }
+
+          start_topology() {
+            local replicas="$1"
+            stop_cells
+            rm -f activitypods/pod-provider/measurements/adsp-p2-w3/locality-r{1,2,3,4}.json
+            docker compose $files up -d --no-deps backend
+            wait_port 3000
+            start_bridge backend
+            if [[ "$replicas" -ge 2 ]]; then
+              docker compose $files up -d --no-deps backend_p2_2
+              wait_port 3102
+              start_bridge backend_p2_2
+            fi
+            if [[ "$replicas" -ge 4 ]]; then
+              docker compose $files up -d --no-deps backend_p2_3 backend_p2_4
+              wait_port 3103
+              wait_port 3104
+              start_bridge backend_p2_3
+              start_bridge backend_p2_4
+            fi
+          }
+
+          run_case() {
+            local replicas="$1"
+            local scenario="$2"
+            local label="$3"
+            local case_dir="measurements/adsp-p2-w3/${label}"
+            mkdir -p "$case_dir"
+
+            (cd fedify-sidecar && npm exec -- tsx scripts/adsp-p0-activitypods-origin.ts prepare) | tee "$case_dir/prepared.json"
+
+            (
+              cd activitypods/pod-provider/backend
+              ADSP_P2_W3_EXPECTED_REPLICAS="$replicas" \
+              ADSP_P2_W3_RUN_ID="${GITHUB_RUN_ID}-${label}" \
+              ADSP_P2_W3_CORRELATION_OUTPUT="${GITHUB_WORKSPACE}/${case_dir}/correlation.json" \
+              SEMAPPS_REDIS_TRANSPORTER_URL=redis://127.0.0.1:6379/12 \
+                node scripts/adsp-p2-w3-remote-origin-fixture.js \
+                "http://127.0.0.1:18080/actor/${scenario}"
+            ) | tee "$case_dir/origin.raw.log"
+            tail -n 1 "$case_dir/origin.raw.log" > "$case_dir/origin.json"
+            node -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(v.ok!==true)process.exit(1)' "$case_dir/origin.json"
+
+            (
+              cd fedify-sidecar
+              npm exec -- tsx scripts/adsp-p0-activitypods-origin.ts settle \
+                "$scenario" \
+                "${GITHUB_WORKSPACE}/${case_dir}/prepared.json" \
+                "${GITHUB_WORKSPACE}/${case_dir}/origin.json"
+            ) | tee "$case_dir/settlement.json"
+            node -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(v.ok!==true||!Number.isSafeInteger(v.eventLogPublishedAt)||v.eventLogPublishedAt<=0||(v.errors||[]).length)process.exit(1)' "$case_dir/settlement.json"
+          }
+
+          validate_locality() {
+            local replicas="$1"
+            local expected_roots="$2"
+            local label="$3"
+            local case_dir="measurements/adsp-p2-w3/${label}"
+            node - "$replicas" "$expected_roots" "$case_dir" "$ADSP_P2_NAMESPACE" <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const [replicasRaw, rootsRaw, caseDir, namespace] = process.argv.slice(2);
+          const replicas = Number(replicasRaw);
+          const expectedRoots = Number(rootsRaw);
+          let total = 0;
+          const executors = [];
+          for (let index = 1; index <= replicas; index += 1) {
+            const source = `activitypods/pod-provider/measurements/adsp-p2-w3/locality-r${index}.json`;
+            if (!fs.existsSync(source)) throw new Error(`missing locality evidence r${index}`);
+            const value = JSON.parse(fs.readFileSync(source, 'utf8'));
+            if (value.nodeID !== `adsp-p2-pod-cell-${index}`) throw new Error(`node identity drift r${index}`);
+            if (value.namespace !== namespace) throw new Error(`namespace drift r${index}`);
+            const count = Number(value.localByAction?.['activitypub.outbox.post'] || 0);
+            if (!Number.isSafeInteger(count) || count < 0) throw new Error(`invalid root count r${index}`);
+            total += count;
+            if (count > 0) executors.push({ replica: `r${index}`, count });
+            fs.copyFileSync(source, path.join(caseDir, `locality-r${index}.json`));
+          }
+          if (total !== expectedRoots) throw new Error(`expected ${expectedRoots} authoritative outbox roots, observed ${total}`);
+          fs.writeFileSync(path.join(caseDir, 'executor-summary.json'), `${JSON.stringify({ replicas, expectedRoots, totalRoots: total, executors }, null, 2)}\n`);
+          NODE
+          }
+
+          for replicas in 1 2 4; do
+            label="success-${replicas}r"
+            start_topology "$replicas"
+            run_case "$replicas" success "$label"
+            stop_cells
+            validate_locality "$replicas" 1 "$label"
+          done
+
+      - name: Prove transient retry and permanent DLQ under four cells
+        run: |
+          set -euo pipefail
+          files='-f activitypods/pod-provider/docker-compose-test.yml -f activitypods/pod-provider/docker-compose-phase8.yml -f activitypods/pod-provider/docker-compose-adsp-p2-horizontal.yml -f activitypods/pod-provider/docker-compose-adsp-p2-w3-external.yml'
+          rm -f activitypods/pod-provider/measurements/adsp-p2-w3/locality-r{1,2,3,4}.json
+          docker compose $files up -d --no-deps backend backend_p2_2 backend_p2_3 backend_p2_4
+
+          for pair in 'backend:3000' 'backend_p2_2:3102' 'backend_p2_3:3103' 'backend_p2_4:3104'; do
+            service="${pair%%:*}"; port="${pair##*:}"
+            ready=false
+            for attempt in $(seq 1 180); do
+              if curl -sS --max-time 2 -o /dev/null "http://127.0.0.1:${port}/"; then ready=true; break; fi
+              sleep 1
+            done
+            test "$ready" = true
+            docker compose $files exec -d "$service" node scripts/adsp-p2-w3-loopback-bridge.js
+            bridge_ready=false
+            for attempt in $(seq 1 60); do
+              if docker compose $files exec -T "$service" node -e "fetch('http://127.0.0.1:18080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"; then bridge_ready=true; break; fi
+              sleep 1
+            done
+            test "$bridge_ready" = true
+          done
+
+          for scenario in transient permanent; do
+            label="${scenario}-4r"
+            case_dir="measurements/adsp-p2-w3/${label}"
+            mkdir -p "$case_dir"
+            (cd fedify-sidecar && npm exec -- tsx scripts/adsp-p0-activitypods-origin.ts prepare) | tee "$case_dir/prepared.json"
+            (
+              cd activitypods/pod-provider/backend
+              ADSP_P2_W3_EXPECTED_REPLICAS=4 \
+              ADSP_P2_W3_RUN_ID="${GITHUB_RUN_ID}-${label}" \
+              ADSP_P2_W3_CORRELATION_OUTPUT="${GITHUB_WORKSPACE}/${case_dir}/correlation.json" \
+              SEMAPPS_REDIS_TRANSPORTER_URL=redis://127.0.0.1:6379/12 \
+                node scripts/adsp-p2-w3-remote-origin-fixture.js \
+                "http://127.0.0.1:18080/actor/${scenario}"
+            ) | tee "$case_dir/origin.raw.log"
+            tail -n 1 "$case_dir/origin.raw.log" > "$case_dir/origin.json"
+            (
+              cd fedify-sidecar
+              npm exec -- tsx scripts/adsp-p0-activitypods-origin.ts settle \
+                "$scenario" \
+                "${GITHUB_WORKSPACE}/${case_dir}/prepared.json" \
+                "${GITHUB_WORKSPACE}/${case_dir}/origin.json"
+            ) | tee "$case_dir/settlement.json"
+            node -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(v.ok!==true||!Number.isSafeInteger(v.eventLogPublishedAt)||v.eventLogPublishedAt<=0||(v.errors||[]).length)process.exit(1)' "$case_dir/settlement.json"
+          done
+
+          docker compose $files stop -t 30 backend_p2_4 backend_p2_3 backend_p2_2 backend
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          let roots = 0;
+          const executors = [];
+          for (let index = 1; index <= 4; index += 1) {
+            const source = `activitypods/pod-provider/measurements/adsp-p2-w3/locality-r${index}.json`;
+            if (!fs.existsSync(source)) throw new Error(`missing retry locality evidence r${index}`);
+            const value = JSON.parse(fs.readFileSync(source, 'utf8'));
+            const count = Number(value.localByAction?.['activitypub.outbox.post'] || 0);
+            roots += count;
+            if (count > 0) executors.push({ replica: `r${index}`, count });
+            for (const label of ['transient-4r', 'permanent-4r']) {
+              fs.copyFileSync(source, path.join(`measurements/adsp-p2-w3/${label}`, `locality-final-r${index}.json`));
+            }
+          }
+          if (roots !== 2) throw new Error(`expected exactly two authoritative retry/DLQ outbox roots, observed ${roots}`);
+          fs.writeFileSync('measurements/adsp-p2-w3/retry-executor-summary.json', `${JSON.stringify({ expectedRoots: 2, totalRoots: roots, executors }, null, 2)}\n`);
+          NODE
+
+      - name: Validate W3 correctness evidence
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('fs');
+          const cases = [
+            ['success-1r', 'success', 1],
+            ['success-2r', 'success', 2],
+            ['success-4r', 'success', 4],
+            ['transient-4r', 'transient', 4],
+            ['permanent-4r', 'permanent', 4]
+          ];
+          const summary = [];
+          for (const [label, scenario, replicas] of cases) {
+            const root = `measurements/adsp-p2-w3/${label}`;
+            const origin = JSON.parse(fs.readFileSync(`${root}/origin.json`, 'utf8'));
+            const settlement = JSON.parse(fs.readFileSync(`${root}/settlement.json`, 'utf8'));
+            const correlation = JSON.parse(fs.readFileSync(`${root}/correlation.json`, 'utf8'));
+            if (origin.ok !== true) throw new Error(`${label}: ActivityPods origin failed`);
+            if (origin.deliveryPlanSchema !== 'ap.delivery-plan.v1') throw new Error(`${label}: wrong plan schema`);
+            if (origin.durableHandoffQueued !== true) throw new Error(`${label}: durable handoff absent`);
+            if (origin.suppressedNativeRemotePostCount !== 1) throw new Error(`${label}: native remote suppression drift`);
+            if (origin.isPublicActivity !== true) throw new Error(`${label}: public eligibility absent`);
+            if (settlement.ok !== true || (settlement.errors || []).length !== 0) throw new Error(`${label}: settlement failed`);
+            if (settlement.intentId !== origin.deliveryPlanIntentId) throw new Error(`${label}: intent authority drift`);
+            if (!Number.isSafeInteger(settlement.eventLogPublishedAt) || settlement.eventLogPublishedAt <= 0) throw new Error(`${label}: RedPanda publication absent`);
+            if (correlation.schema !== 'adsp.p2.w3.origin-correlation.v1') throw new Error(`${label}: correlation schema drift`);
+            if (correlation.activityId !== origin.activityId) throw new Error(`${label}: Activity ID correlation drift`);
+            if (correlation.expectedReplicas !== replicas) throw new Error(`${label}: topology correlation drift`);
+            if (correlation.moleculerNamespace !== process.env.ADSP_P2_NAMESPACE) throw new Error(`${label}: namespace correlation drift`);
+            summary.push({ label, scenario, replicas, activityId: origin.activityId, intentId: settlement.intentId, eventLogPublishedAt: settlement.eventLogPublishedAt });
+          }
+          fs.writeFileSync('measurements/adsp-p2-w3/summary.json', `${JSON.stringify({
+            schema: 'adsp.p2.w3.remote-correctness.v1',
+            complete: true,
+            promotionEvidence: false,
+            activityPodsCommitSha: process.env.ACTIVITYPODS_SHA,
+            federationCandidateSha: process.env.FEDERATION_CANDIDATE_SHA,
+            cases: summary
+          }, null, 2)}\n`);
+          NODE
+
+      - name: Capture final diagnostics
+        if: always()
+        run: |
+          set +e
+          files='-f activitypods/pod-provider/docker-compose-test.yml -f activitypods/pod-provider/docker-compose-phase8.yml -f activitypods/pod-provider/docker-compose-adsp-p2-horizontal.yml -f activitypods/pod-provider/docker-compose-adsp-p2-w3-external.yml'
+          docker compose $files ps -a > measurements/adsp-p2-w3/compose-ps-final.txt 2>&1 || true
+          docker compose $files exec -T redis redis-cli INFO commandstats > measurements/adsp-p2-w3/redis-commandstats-final.txt 2>&1 || true
+          docker compose $files exec -T redis redis-cli INFO memory > measurements/adsp-p2-w3/redis-memory-final.txt 2>&1 || true
+          docker exec adsp-redpanda rpk topic list > measurements/adsp-p2-w3/redpanda-topics-final.txt 2>&1 || true
+          curl -fsS http://127.0.0.1:18080/stats > measurements/adsp-p2-w3/controlled-target-final.json 2>/dev/null || true
+          docker stats --no-stream --format '{{json .}}' > measurements/adsp-p2-w3/docker-stats-final.jsonl 2>&1 || true
+
+      - name: Upload W3 correctness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adsp-p2-w3-remote-correctness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/adsp-p2-w3
+          if-no-files-found: error
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          tail -n 500 measurements/adsp-p2-w3/sidecar.log 2>/dev/null || true
+          tail -n 500 measurements/adsp-p2-w3/controlled-target.log 2>/dev/null || true
+          files='-f activitypods/pod-provider/docker-compose-test.yml -f activitypods/pod-provider/docker-compose-phase8.yml -f activitypods/pod-provider/docker-compose-adsp-p2-horizontal.yml -f activitypods/pod-provider/docker-compose-adsp-p2-w3-external.yml'
+          docker compose $files logs --no-color --tail 500 2>/dev/null || true
+          docker logs --tail 500 adsp-redpanda 2>/dev/null || true
+
+      - name: Stop isolated W3 stack
+        if: always()
+        run: |
+          set +e
+          for pidfile in measurements/adsp-p2-w3/sidecar.pid measurements/adsp-p2-w3/controlled-target.pid; do
+            if [[ -f "$pidfile" ]]; then kill "$(cat "$pidfile")" 2>/dev/null || true; fi
+          done
+          docker compose \
+            -f activitypods/pod-provider/docker-compose-test.yml \
+            -f activitypods/pod-provider/docker-compose-phase8.yml \
+            -f activitypods/pod-provider/docker-compose-adsp-p2-horizontal.yml \
+            -f activitypods/pod-provider/docker-compose-adsp-p2-w3-external.yml \
+            down -v || true
+          docker rm -f adsp-redpanda >/dev/null 2>&1 || true
