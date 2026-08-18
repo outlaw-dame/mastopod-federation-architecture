@@ -11,6 +11,7 @@ npm exec -- vitest run \
   src/adsp/tests/ControlledActivityPubTarget.test.ts \
   src/adsp/tests/ControlledTargetFixtureClient.test.ts \
   src/adsp/tests/ControlledTargetSnapshotClient.test.ts \
+  src/adsp/tests/P2W3EvidenceSummary.test.ts \
   src/adsp/tests/RemoteFixtureActivityPodsOrigin.test.ts \
   src/adsp/tests/RemoteFixtureRedPandaProof.test.ts \
   src/adsp/tests/RemoteFixtureCase.test.ts \
