@@ -11,11 +11,16 @@ import {
   type AdspP2W3Scenario,
 } from "../P2W3EvidenceSummary.js";
 
+function syntheticIntentId(suffix: string): string {
+  const hex = Buffer.from(suffix, "utf8").toString("hex");
+  return `sha256:${hex.padEnd(64, "0").slice(0, 64)}`;
+}
+
 function makeCase(replicas: AdspP2W3ReplicaCount, scenario: AdspP2W3Scenario): AdspP2W3CaseEvidence {
   const suffix = `${replicas}-${scenario}`;
   const activityId = `https://pods.example/alice/as/activity/${suffix}`;
   const actorUri = "https://pods.example/alice";
-  const intentId = `sha256:${"a".repeat(58)}${replicas}${scenario.length}`;
+  const intentId = syntheticIntentId(suffix);
   return {
     replicas,
     scenario,
