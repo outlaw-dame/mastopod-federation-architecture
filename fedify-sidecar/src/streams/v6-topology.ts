@@ -7,7 +7,8 @@
  * Topics:
  * - ap.stream1.local-public.v1: Local public activities (from ActivityPods outbox)
  * - ap.stream2.remote-public.v1: Remote public activities (post-verification)
- * - ap.firehose.v1: Combined public activity stream (for indexing)
+ * - ap.firehose.v1: Combined public ActivityPub stream (Stream1 + Stream2)
+ * - ap.tombstones.v1: Delete/tombstone events kept separate from the AP firehose
  * - ap.outbound.v1: Outbound delivery readiness events (from ActivityPods)
  * - ap.inbound.v1: Inbound activity events (before MRF processing)
  * - ap.mrf.rejected.v1: MRF rejection audit trail
@@ -49,13 +50,14 @@ export const V6_TOPICS: Record<string, TopicSchema> = {
     description: 'Remote public activities (post-HTTP signature verification)',
   },
 
-  // Combined public activity stream for indexing/search
+  // Combined public ActivityPub stream. Tombstones remain on their dedicated
+  // compacted topic and are not members of the consumable AP firehose.
   'ap.firehose.v1': {
     name: 'ap.firehose.v1',
     partitions: 1,
     replicationFactor: 3,
     retentionMs: 30 * 24 * 60 * 60 * 1000, // 30 days
-    description: 'Combined public activity stream (Stream1 + Stream2 + tombstones)',
+    description: 'Combined public ActivityPub stream (Stream1 + Stream2)',
   },
 
   // Outbound delivery readiness events from ActivityPods
@@ -85,13 +87,14 @@ export const V6_TOPICS: Record<string, TopicSchema> = {
     description: 'MRF rejection audit trail (for compliance and debugging)',
   },
 
-  // Tombstone events (deletes)
+  // Tombstone events (deletes). Kept separate from ap.firehose.v1 so the AP
+  // firehose remains exactly the union of Stream1 and Stream2 public activities.
   'ap.tombstones.v1': {
     name: 'ap.tombstones.v1',
     partitions: 1,
     replicationFactor: 3,
     retentionMs: 30 * 24 * 60 * 60 * 1000, // 30 days
-    description: 'Tombstone events (delete notifications)',
+    description: 'Tombstone events (delete notifications; separate from AP firehose)',
   },
 
   // Protocol-neutral canonical intent log (from both AT and AP bridge)
@@ -138,7 +141,7 @@ export interface Stream2Event {
 }
 
 export interface FirehoseEvent {
-  // Combined public activity
+  // Combined public ActivityPub event originating from Stream1 or Stream2 only.
   origin: 'local' | 'remote';
   activityId: string;
   activityType: string;
