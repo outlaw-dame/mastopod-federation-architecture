@@ -80,6 +80,20 @@ describe("RedisStreamPayloadCodec", () => {
     expect(() => codec.decode(tampered)).toThrow(/SHA-256 integrity verification/u);
   });
 
+  it("does not let a decode-cache hit mask changed compressed bytes", () => {
+    const codec = new RedisStreamPayloadCodec({ writeEnabled: true, minBytes: 1 });
+    const source = "activitypub cache integrity ".repeat(2000);
+    const encoded = codec.encode(source);
+    expect(encoded.compressed).toBe(true);
+    expect(codec.decode(encoded.value)).toBe(source); // populate cache
+
+    const final = encoded.value.at(-1) ?? "A";
+    const replacement = final === "A" ? "B" : "A";
+    const tampered = `${encoded.value.slice(0, -1)}${replacement}`;
+
+    expect(() => codec.decode(tampered)).toThrow(/decompressed|integrity|canonical/u);
+  });
+
   it("enforces the maximum decompressed payload size", () => {
     const writer = new RedisStreamPayloadCodec({
       writeEnabled: true,
