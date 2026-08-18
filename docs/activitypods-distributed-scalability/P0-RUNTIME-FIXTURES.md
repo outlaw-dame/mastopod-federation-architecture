@@ -1,37 +1,37 @@
 # ADSP-P0 runtime fixtures
 
-Date: 2026-08-17
+Date: 2026-08-18
 
-This document freezes the executable-evidence split for ADSP Phase 0. It exists to prevent later transporter work from changing workload semantics, mixing unrelated costs, or using a local-only benchmark to make whole-system federation claims.
+This document freezes the executable-evidence split for ADSP Phase 0. It prevents later transporter work from changing workload semantics, mixing unrelated costs, or using a local-only benchmark to make whole-system federation claims.
 
 ## Evidence rule
 
 ADSP-P0 uses **two complementary runtime fixtures**:
 
-1. a Tier-1 ActivityPods local-fanout fixture that isolates the current colocated Pod/SemApps cell; and
-2. a mixed/remote federation fixture that includes the external handoff, Fedify sidecar and incumbent Redis Streams durability path.
+1. **Fixture A — Tier-1 ActivityPods local fanout**, isolating the current colocated Pod/SemApps cell; and
+2. **Fixture B — mixed/remote federation**, including the authoritative external handoff, Fedify sidecar, incumbent Redis Streams durability, RedPanda public event logging, ActivityPods signing and controlled remote HTTP.
 
-Neither fixture substitutes for the other. P0 does not pass until both required scopes are represented by executable evidence and the remaining distributed correctness/failure gates are closed.
+Both fixtures are now executable and have produced accepted P0 evidence. Exact results are recorded in `P0-TIER1-RUNTIME-EVIDENCE.md` and `P0-REMOTE-RUNTIME-EVIDENCE.md`.
+
+Neither fixture substitutes for the other.
 
 ## Fixture A — Tier-1 local fanout
 
-Implementation branch: `outlaw-dame/activity-pods:agent/adsp-p0-runtime-baseline`
+Status: **COMPLETE for frozen P0 local scope**.
 
-Draft PR: `outlaw-dame/activity-pods#82`
+Validated implementation: ActivityPods PR #82.
 
-Base: ActivityPods `3fad15838ec098d8d32c0f36cd8c75cbb66a46a8`.
+Accepted run: `32070748744`.
 
 ### Reused authority path
 
-The fixture deliberately reuses the existing APDM Phase 8/10 real-workload machinery rather than introducing a synthetic Moleculer microbenchmark:
+The fixture reuses the existing APDM real-workload machinery rather than a synthetic Moleculer microbenchmark:
 
 - normal account signup;
-- the normal Pod/bootstrap completion barrier;
+- normal Pod/bootstrap completion barrier;
 - real `activitypub.outbox.post` roots;
 - real detached local ActivityPub delivery completion;
-- the existing APDM Tier-1 middleware that records nested Moleculer actions, CPU/RSS and Fuseki HTTP work.
-
-The fixture therefore measures useful application work. It is not a broker messages-per-second test.
+- existing Tier-1 instrumentation for nested Moleculer actions, CPU/RSS and Fuseki HTTP work.
 
 ### Frozen workload matrix
 
@@ -43,138 +43,155 @@ Canonical recipient counts:
 - 200
 - 1000
 
-Default measured sample floor: **5 successful samples per recipient count**, after at least one warmup root. The sample count is configurable upward, but a run may not claim completeness if any canonical case has fewer than the configured successful-sample floor.
+The accepted run used five successful measured samples per case after warmup. Failed, partial or semantically incorrect work is never accepted as an efficiency improvement.
 
-Every measured trace must complete with zero delivery/instrumentation errors. Skipped, partial or failed work is not accepted as an efficiency improvement.
+### Frozen controls
 
-### Current-default controls
-
-The fixture preserves the current ActivityPods production-default behavior at the frozen baseline:
-
-- `APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED=false` because APDM Phase 10 closed without promoting the memo to default-on;
-- remote ActivityPub mode remains the local/native APDM benchmark setting;
-- the federation sidecar is intentionally excluded from this fixture;
-- local-delivery concurrency is explicitly recorded;
-- one backend benchmark image is built and reused within the run;
-- Fuseki and Redis start from fresh isolated bind-mounted state.
+- `APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED=false`;
+- federation sidecar excluded;
+- local-delivery concurrency recorded explicitly;
+- one benchmark image reused within the run;
+- Fuseki and Redis start from fresh isolated state.
 
 ### Evidence emitted
 
-Machine-readable evidence includes:
-
-- exact commit SHA and GitHub run identity;
-- host OS/architecture, CPU model/count and total memory;
-- exact backend/Fuseki/Redis image identities;
-- workload/sample/warmup/concurrency controls;
-- per-sample elapsed time;
-- backend user/system CPU;
-- backend RSS/heap evidence from the existing instrumentation;
+- exact commit/run provenance;
+- host/runtime/image provenance;
+- elapsed time and CPU;
+- RSS/heap evidence;
 - nested Moleculer action counts;
-- Fuseki request counts and request-shape evidence;
-- Redis `INFO commandstats` and memory snapshots around the measured matrix;
-- per-case container `docker stats` snapshots as supporting, not causal, evidence;
-- p50/p95/p99, sample standard deviation and coefficient of variation;
-- normalized-per-recipient elapsed, CPU, action and Fuseki-request metrics.
+- Fuseki request counts;
+- Redis command/memory snapshots;
+- supporting Docker stats;
+- p50/p95/p99, standard deviation and coefficient of variation;
+- normalized per-recipient elapsed/CPU/action/Fuseki metrics.
 
-The summary explicitly records `federationSidecar: false` so this evidence cannot be presented as whole-system federation cost.
+The summary explicitly records `federationSidecar: false`.
 
-### What this fixture can establish
+### Accepted interpretation
 
-If the workflow passes and artifacts are inspected, Fixture A can establish:
+Fixture A establishes a reproducible single-cell Tier-1 workload and baseline variance. It does not establish sidecar throughput or external delivery cost.
 
-- a reproducible single-cell Tier-1 workload;
-- baseline local-delivery variance at the frozen ActivityPods source/runtime configuration;
-- stable normalized work metrics suitable for later matched Redis-vs-NATS topology comparisons where the same application workload remains valid;
-- a reference for determining whether a distributed topology merely moves or increases work.
-
-It does **not** establish sidecar throughput, external HTTP behavior, Redis Streams durability, Redis failover behavior, or whole-system remote-delivery cost.
+The N=1 elapsed result is very noisy and is not used as a precise comparison threshold. N=10–1000 is substantially more stable and is the appropriate basis for later materiality rules.
 
 ## Fixture B — mixed/remote federation
 
-Status: **design frozen here; executable implementation pending**.
+Status: **COMPLETE for frozen P0 correctness/failure scope**.
 
-Fixture B must include the existing external-mode handoff and federation durability path without replacing any incumbent mechanism merely for benchmarking.
+Validated implementations:
 
-Required path:
+- ActivityPods PR #83, merged as `7a727f52ba783added771f87693afbcb4fd8c536`;
+- federation PR #80, merged as `2cd1c097456756c8c28d349dfc800d36cfd6fce6`.
+
+Accepted whole-system run: `32086514942`.
+
+### Frozen authority path
 
 ```text
-ActivityPods authoritative planning / handoff
+ActivityPods activitypub.outbox.post
         ↓
-Fedify sidecar durable acceptance
+authoritative ap.delivery-plan.v1
         ↓
-Redis Streams outbox-intent / outbound work
+exactly one suppressed native remotePost
         ↓
-sidecar worker + signing boundary
+ActivityPods durable Bull handoff
+        ↓
+Fedify sidecar durable 202 acceptance
+        ↓
+Redis Streams outbox-intent
+        ↓
+RedPanda Stream1 + AP firehose publication
+        ↓
+Redis Streams outbound
+        ↓
+ActivityPods signing boundary
         ↓
 controlled remote HTTP target
+        ↓
+completion / retry / DLQ reconciliation
 ```
 
-The remote target must be controlled and deterministic. The fixture must not depend on arbitrary public federation servers, internet latency, third-party rate limits or mutable remote behavior for promotion evidence.
+Benchmark code does not construct a second Delivery Plan and does not submit a second sidecar handoff.
 
-### Required useful outcomes
+### Controlled outcomes
 
-The mixed/remote fixture must distinguish and count at least:
+The accepted run executed all three cases:
 
-- authoritative handoffs accepted;
-- remote intents durably represented;
-- outbound jobs consumed;
-- successful controlled remote deliveries;
-- retries/deferrals where deliberately injected;
-- completed-delivery markers;
-- DLQ outcomes for explicitly permanent injected failures;
-- duplicate/replay attempts suppressed by idempotency.
+- **success** — one controlled HTTP request, final `202`;
+- **transient** — two injected `503` responses followed by `202`, with normal bounded retry intervals and three total requests;
+- **permanent** — one injected `410`, classified permanent and moved to outbound DLQ.
 
-No throughput/resource result is valid if the expected durable outcomes do not reconcile.
+Every case required:
 
-### Required supporting metrics
+- exact Activity/intent/target identity;
+- positive RedPanda publication marker;
+- immutable reconciled request body hash;
+- no controlled-target contamination;
+- zero final reconciliation errors;
+- durable queue state consistent with the expected outcome.
 
-At minimum:
+### Signing boundary
 
-- ActivityPods CPU/RSS and handoff latency/work;
-- sidecar CPU/RSS;
-- Redis command/stream/pending/memory evidence;
-- queue residence/backlog/recovery behavior;
-- signing calls and retry counts;
-- controlled remote HTTP attempts/bytes;
-- successful useful outcomes;
-- p50/p95/p99 end-to-end completion latency;
-- failure/retry/DLQ work per intended outcome.
+The live fixture uses the real ActivityPods signing service. Before the accepted run, its AP authority check was repaired so it:
 
-### Failure cases
+- proves the actor is bound to an actual local `auth.account`;
+- proves the ActivityPub actor resolves to that exact WebID;
+- resolves the actor-controlled RSA key through the real SemApps key service with the account dataset context;
+- derives key ID from signer-controlled attached key metadata;
+- fails closed for remote, nonexistent, mismatched or ambiguous actor/key authority.
 
-Fixture B must be reusable for later Redis-transporter and NATS-Core comparisons and therefore needs deterministic fault cases, including at least:
+The controlled target observed valid `Date`, `Digest`, and `Signature` headers.
 
-- sidecar worker interruption after durable enqueue;
-- pending-entry reclaim after consumer interruption;
-- transient controlled remote failure with exponential retry;
-- permanent controlled remote failure to DLQ;
-- duplicate intent/replay handling;
-- Redis interruption/failover scenario appropriate to the configured durability model.
+### Supporting metrics/evidence
 
-The Redis durability test must state what guarantee is being tested. Normal Redis asynchronous replication must not be described as stronger than it is.
+The artifact retains:
+
+- ActivityPods and sidecar process snapshots;
+- Docker stats;
+- Redis commandstats/memory snapshots;
+- RedPanda topic descriptions;
+- controlled-target observations;
+- service logs;
+- per-case prepare/origin/settlement evidence.
+
+Fixture B currently has one deterministic correctness run per scenario. It is accepted as correctness/failure-path evidence, not as a stable remote-delivery p50/p95/p99 performance distribution.
+
+## RedPanda public-stream contract
+
+A separate real-broker proof, run `32086514958`, freezes the ActivityPub public-stream semantics used by Fixture B and later phases:
+
+- **Stream1** — `ap.stream1.local-public.v1`: aggregate local public ActivityPub activities for this Pod provider;
+- **Stream2** — `ap.stream2.remote-public.v1`: aggregate remote public ActivityPub activities from accepted remote sources, including relay/service ingress where applicable;
+- **AP firehose** — `ap.firehose.v1`: exactly Stream1 + Stream2;
+- **tombstones** — `ap.tombstones.v1`: separate from the AP firehose;
+- **canonical intents** — `canonical.v1`: separate protocol-neutral log, not part of the AP firehose.
+
+The proof used the production RedPanda producer against a real isolated broker, then consumed all relevant topics. It observed one local proof event only in Stream1, one remote proof event only in Stream2, both exactly once in the firehose, and the tombstone only in its dedicated topic.
 
 ## Relationship to transporter comparison
 
-The ADSP-P2/P3 comparison must not rewrite these workloads to favor one transporter.
+ADSP-P2/P3 must not rewrite these workloads to favor one transporter.
 
-For the critical Redis-vs-NATS comparison:
+For Redis-transporter versus NATS-Core comparison:
 
-- application workload and useful outcomes stay fixed;
+- useful application outcomes stay fixed;
 - ActivityPods service grouping stays fixed;
-- sidecar Redis Streams and existing queue/state responsibilities stay fixed;
+- sidecar Redis Streams remain unchanged;
+- RedPanda public-stream semantics remain unchanged;
+- Redis state/cache/queue roles remain unchanged;
 - Fuseki configuration stays fixed;
-- only the Moleculer distributed transporter and the minimum transport-specific configuration may differ;
-- exact provenance and resource envelopes must be recorded for both arms.
+- only the Moleculer distributed transporter and minimum transport-specific configuration may differ;
+- exact provenance and resource envelopes are recorded for both arms;
+- JetStream is prohibited from the comparison.
 
-Fixture A primarily protects the Tier-1/locality side of this contract. Fixture B protects the federation/whole-system side.
+Fixture A protects the Tier-1/locality side of this contract. Fixture B protects the federation/whole-system side.
 
-## Current gate state
+## Current P0 gate state
 
-At the time this document was added:
-
-- Fixture A implementation exists in draft ActivityPods PR #82 and its workflow result is **pending**; no runtime numbers are accepted here yet.
-- Fixture B executable implementation has not started.
-- no P2/P3 promotion threshold has been locked from runtime variance yet;
-- ADSP-P0 remains **IN PROGRESS**;
-- ADSP-P1 remains blocked;
-- no NATS or JetStream implementation is authorized by this work.
+- Fixture A: **COMPLETE**.
+- Fixture B: **COMPLETE for frozen correctness/failure scope**.
+- Real RedPanda Stream1/Stream2/AP-firehose semantics: **COMPLETE**.
+- Exact numerical Phase-2/Phase-3 promotion thresholds: **NOT YET FROZEN**.
+- ADSP-P0 therefore remains **IN PROGRESS** until those thresholds are written before any NATS result is observed.
+- Multi-node namespace, transport-independent serializer, RDF remote parity, locality groups and node join/leave/rejoin are Phase-1 work per `PHASES.md`.
+- No NATS or JetStream implementation is authorized by this document.
