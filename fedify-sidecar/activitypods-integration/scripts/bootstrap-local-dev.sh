@@ -161,6 +161,22 @@ main() {
   : "${ENABLE_EVENT_PUBLISH:=true}"
   : "${ENABLE_MEDIA_ASSET_SYNC:=true}"
   : "${ENABLE_PROVIDER_CAPABILITIES_ENDPOINT:=true}"
+
+  # This bootstrap is the integrated ActivityPods + federation-sidecar profile,
+  # not standalone core ActivityPods. Make the sidecar the one remote-delivery
+  # executor here. Development uses the explicit APDM preview authority rather
+  # than the production cutover flag, preserving production fail-closed rules.
+  #
+  # Both processes run directly on the host in this script, so the durable
+  # handoff must use loopback rather than the Docker-only `fedify-sidecar`
+  # hostname from ActivityPods' standalone .env template.
+  NODE_ENV=development
+  SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external
+  SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=true
+  SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=false
+  SIDECAR_DELIVERY_HANDOFF_URL=http://127.0.0.1:8080/webhook/outbox
+  SIDECAR_WEBHOOK_URL=http://127.0.0.1:8080
+
   AT_LOCAL_FIXTURE=true
   ENABLE_XRPC_SERVER=false
   ENABLE_AT_JETSTREAM=false
@@ -186,11 +202,20 @@ main() {
   export ENABLE_EVENT_PUBLISH
   export ENABLE_MEDIA_ASSET_SYNC
   export ENABLE_PROVIDER_CAPABILITIES_ENDPOINT
+  export NODE_ENV
+  export SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE
+  export SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW
+  export SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER
+  export SIDECAR_DELIVERY_HANDOFF_URL
+  export SIDECAR_WEBHOOK_URL
   export AT_LOCAL_FIXTURE
   export ENABLE_XRPC_SERVER
   export ENABLE_AT_JETSTREAM
   export ENABLE_FEDIFY_RUNTIME_INTEGRATION
   export OPENSEARCH_URL
+
+  log "ActivityPub remote delivery profile: sidecar external preview authority"
+  log "ActivityPub durable handoff: $SIDECAR_DELIVERY_HANDOFF_URL"
 
   log "bootstrapping RedPanda topics"
   npm --prefix "$FEDIFY_ROOT" run topics:bootstrap
@@ -199,13 +224,17 @@ main() {
   PID_DIR="$AP_ROOT/.pids"
   mkdir -p "$LOG_DIR" "$PID_DIR"
 
+  # Start the sidecar before ActivityPods so the canonical external handoff is
+  # already accepting work when the backend becomes reachable. Durable APDM
+  # retries remain the safety net, but normal bootstrap should not manufacture
+  # avoidable retry/backoff load.
+  start_bg_if_needed "Fedify sidecar" 8080 "$LOG_DIR/sidecar-dev.log" "$PID_DIR/fedify-sidecar.pid" \
+    env PORT=8080 HOST=0.0.0.0 npm --prefix "$FEDIFY_ROOT" run server:dev
   start_bg_if_needed "ActivityPods backend" 3000 "$LOG_DIR/backend-dev.log" "$PID_DIR/backend.pid" \
     npm --prefix "$AP_ROOT/pod-provider/backend" start
   start_bg_if_needed "ActivityPods frontend" "$FRONTEND_PORT" "$LOG_DIR/frontend-dev.log" "$PID_DIR/frontend.pid" \
     env BROWSER=none npm --prefix "$AP_ROOT/pod-provider/frontend" run dev
-  start_bg_if_needed "Fedify sidecar" 8080 "$LOG_DIR/sidecar-dev.log" "$PID_DIR/fedify-sidecar.pid" \
-    env PORT=8080 HOST=0.0.0.0 npm --prefix "$FEDIFY_ROOT" run server:dev
-  start_bg_if_needed "Media pipeline sidecar" "$MEDIA_PIPELINE_PORT" "$LOG_DIR/media-pipeline-dev.log" "$PID_DIR/media-pipeline-sidecar.pid" \
+  start_bg_if_needed "Media pipeline sidecar" "$MEDIA_PIPELINE_PORT" "$LOG_DIR/media-pipeline-sidecar.log" "$PID_DIR/media-pipeline-sidecar.pid" \
     env PORT="$MEDIA_PIPELINE_PORT" HOST="$MEDIA_PIPELINE_HOST" INTERNAL_BEARER_TOKEN="$MEDIA_PIPELINE_TOKEN" npm --prefix "$MEDIA_ROOT" run server:dev
 
   log "done"
