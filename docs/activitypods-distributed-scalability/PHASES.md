@@ -11,8 +11,8 @@ Later phases may not be promoted by assumption. NATS Core remains an unselected 
 ## Program checklist
 
 - [x] Phase 0 — Freeze topology baseline, authority and benchmark contract — **COMPLETE**
-- [ ] Phase 1 — Safe distributable Moleculer fabric — **NEXT**
-- [ ] Phase 2 — Horizontal ActivityPods with Redis transporter — blocked by Phase 1
+- [x] Phase 1 — Safe distributable Moleculer fabric — **COMPLETE**
+- [ ] Phase 2 — Horizontal ActivityPods with Redis transporter — **NEXT / unblocked by Phase 1**
 - [ ] Phase 3 — NATS Core transporter comparison — blocked by Phase 2
 - [ ] Phase 4 — Extend/reuse Redis Streams for qualified additional workloads — blocked by Phase 3 and workload evidence
 - [ ] Phase 5 — Conditional JetStream evaluation — blocked unless a material incumbent Redis limitation is reproduced
@@ -43,7 +43,7 @@ The numerical contract is frozen in `P0-PROMOTION-THRESHOLDS.md` and `BENCHMARK-
 
 ## Phase 1 — Safe distributable Moleculer fabric
 
-**Status:** NOT STARTED / unblocked by Phase 0  
+**Status:** COMPLETE  
 **Primary:** `ADSP-P1-A`; federation slice only where integration/observability is needed.
 
 Make ActivityPods safely distributable without changing the selected transporter yet.
@@ -60,17 +60,19 @@ Required work:
 - fail-closed configuration for invalid distributed-mode settings.
 
 Exit gate:
-- [ ] two or more ActivityPods broker instances can coexist without node-ID collision;
-- [ ] namespace prevents accidental cross-environment discovery;
-- [ ] serializer behavior is transport-independent and RDF semantic parity passes across a genuine remote call;
-- [ ] service groups can be started independently without loading every schema everywhere;
-- [ ] locality tests prove Pod/SemApps-cell calls remain local by default;
-- [ ] node loss/rejoin does not corrupt requests or silently duplicate authoritative work;
-- [ ] native single-process deployment remains a supported low-resource profile.
+- [x] two or more ActivityPods broker instances can coexist without node-ID collision;
+- [x] namespace prevents accidental cross-environment discovery;
+- [x] serializer behavior is transport-independent and RDF semantic parity passes across a genuine remote call;
+- [x] service groups can be started independently without loading every schema everywhere;
+- [x] locality tests prove Pod/SemApps-cell calls remain local by default;
+- [x] node loss/rejoin does not corrupt requests or silently duplicate authoritative work;
+- [x] native single-process deployment remains a supported low-resource profile.
+
+Phase-1 closeout evidence is recorded in `STATUS.md`. The node-loss gate deliberately proves the Moleculer fabric does not silently replay an already-committed mutation after its serving node is killed before response; it does not weaken Phase 2's stronger whole-system requirement to test real ActivityPub/Pod mutations under horizontal node loss.
 
 ## Phase 2 — Horizontal ActivityPods with Redis transporter
 
-**Status:** BLOCKED by Phase 1  
+**Status:** NEXT / unblocked by Phase 1  
 **Primary:** `ADSP-P2-A`; `ADSP-P2-F` for whole-stack measurement.
 
 Establish the first valid distributed baseline using infrastructure already present in ActivityPods.
