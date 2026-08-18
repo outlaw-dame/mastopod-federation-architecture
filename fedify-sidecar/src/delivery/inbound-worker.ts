@@ -1432,7 +1432,7 @@ export class InboundWorker {
         typeof this.config.domain === "string" &&
         this.config.domain.length > 0 &&
         typeof verifiedActorUri === "string" &&
-        verifiedActorUri.includes(`://${this.config.domain}/`);
+        extractDomain(verifiedActorUri) === this.config.domain.trim().toLowerCase();
 
       if (isLocalActor) {
         metrics.inboundActivityPubActivities.inc({ stage: "local_actor", activity_type: activityType });
@@ -2152,7 +2152,7 @@ export class InboundWorker {
       if (response.statusCode >= 400 && response.statusCode < 500 && response.statusCode !== 429) {
         return { 
           success: false, 
-          permanent: true, 
+          permanent: true,
           error: `ActivityPods returned ${response.statusCode}: ${body}` 
         };
       }
@@ -2160,14 +2160,14 @@ export class InboundWorker {
       // 5xx and 429 are transient
       return { 
         success: false, 
-        permanent: false, 
+        permanent: false,
         error: `ActivityPods returned ${response.statusCode}: ${body}` 
       };
 
     } catch (err: any) {
       return { 
         success: false, 
-        permanent: false, 
+        permanent: false,
         error: `Network error: ${err.message}` 
       };
     }
