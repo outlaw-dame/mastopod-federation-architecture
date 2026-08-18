@@ -77,6 +77,16 @@ function makeRedpanda(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
+function makeDelayScheduler(overrides: Record<string, unknown> = {}) {
+  return {
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+    persistReplacementAndAck: vi.fn().mockResolvedValue(undefined),
+    promoteDue: vi.fn().mockResolvedValue(0),
+    ...overrides,
+  } as any;
+}
+
 function makeConfig(overrides: Partial<OutboxIntentWorkerConfig> = {}): OutboxIntentWorkerConfig {
   return {
     concurrency: 1,
@@ -291,42 +301,43 @@ describe("OutboxIntentWorker", () => {
     expect(queue.moveToDlq).not.toHaveBeenCalled();
   });
 
-  it("persists a transient retry before acknowledging the source intent", async () => {
+  it("persists a transient retry in the durable scheduler without re-XADDing the ready Stream", async () => {
     const queue = makeQueue();
+    const delayScheduler = makeDelayScheduler();
     const redpanda = makeRedpanda({
       publishToStream1: vi.fn().mockRejectedValue(new Error("broker unavailable")),
     });
-    const worker = new TestOutboxIntentWorker(queue, redpanda, makeConfig());
+    const worker = new TestOutboxIntentWorker(queue, redpanda, makeConfig({ delayScheduler }));
     const intent = makeIntent();
 
     const before = Date.now();
     await worker.runIntent("msg-002", intent);
 
-    expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "msg-002");
-    expect(queue.enqueueOutboxIntent).toHaveBeenCalledTimes(1);
-    expectCalledBefore(queue.enqueueOutboxIntent, queue.ack);
-    const retryIntent = queue.enqueueOutboxIntent.mock.calls[0]?.[0] as OutboxIntent | undefined;
-    expect(retryIntent).toBeDefined();
-    if (!retryIntent) throw new Error("Expected retry intent to be enqueued");
+    expect(delayScheduler.persistReplacementAndAck).toHaveBeenCalledTimes(1);
+    const [sourceMessageId, retryIntent] = delayScheduler.persistReplacementAndAck.mock.calls[0] as [string, OutboxIntent];
+    expect(sourceMessageId).toBe("msg-002");
     expect(retryIntent.intentId).toBe(intent.intentId);
     expect(retryIntent.attempt).toBe(1);
     expect(retryIntent.lastError).toContain("broker unavailable");
     expect(retryIntent.notBeforeMs).toBeGreaterThan(before);
+    expect(queue.enqueueOutboxIntent).not.toHaveBeenCalled();
+    expect(queue.ack).not.toHaveBeenCalled();
     expect(queue.moveToDlq).not.toHaveBeenCalled();
     expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
   });
 
-  it("persists a deferred replacement before acknowledging the source intent", async () => {
+  it("parks an already-future intent durably without creating a hot ready-Stream replacement", async () => {
     const queue = makeQueue();
+    const delayScheduler = makeDelayScheduler();
     const redpanda = makeRedpanda();
-    const worker = new TestOutboxIntentWorker(queue, redpanda, makeConfig());
+    const worker = new TestOutboxIntentWorker(queue, redpanda, makeConfig({ delayScheduler }));
     const intent = makeIntent({ notBeforeMs: Date.now() + 60_000 });
 
     await worker.runIntent("msg-deferred", intent);
 
-    expect(queue.enqueueOutboxIntent).toHaveBeenCalledWith(intent);
-    expect(queue.ack).toHaveBeenCalledWith("outbox_intent", "msg-deferred");
-    expectCalledBefore(queue.enqueueOutboxIntent, queue.ack);
+    expect(delayScheduler.persistReplacementAndAck).toHaveBeenCalledExactlyOnceWith("msg-deferred", intent);
+    expect(queue.enqueueOutboxIntent).not.toHaveBeenCalled();
+    expect(queue.ack).not.toHaveBeenCalled();
     expect(queue.enqueueOutboundBatchForIntent).not.toHaveBeenCalled();
   });
 

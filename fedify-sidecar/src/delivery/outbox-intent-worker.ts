@@ -21,11 +21,16 @@ import {
   APDM_OUTBOX_INTENT_MAX_AGE_MS,
   outboxIntentAgeMs,
 } from "./apdm-replay-horizon.js";
+import {
+  createRedisOutboxIntentDelaySchedulerFromEnv,
+  type OutboxIntentDelayScheduler,
+} from "./outbox-intent-delay-scheduler.js";
 
 export interface OutboxIntentWorkerConfig {
   concurrency: number;
   outboundJobMaxAttempts: number;
   activityPubOutboundDeliveryPolicy: ActivityPubOutboundDeliveryPolicy;
+  delayScheduler?: OutboxIntentDelayScheduler;
   /**
    * Legacy construction seam retained temporarily for source compatibility.
    * APDM delivery targets already carry the authoritative per-recipient
@@ -50,6 +55,7 @@ export class OutboxIntentWorker {
   private readonly queue: RedisStreamsQueue;
   private readonly redpanda: RedPandaProducer | null;
   private readonly config: OutboxIntentWorkerConfig;
+  private readonly delayScheduler: OutboxIntentDelayScheduler | null;
   private isRunning = false;
   private activeJobs = 0;
 
@@ -61,27 +67,42 @@ export class OutboxIntentWorker {
     this.queue = queue;
     this.redpanda = redpanda;
     this.config = config;
+    this.delayScheduler = config.delayScheduler ?? null;
   }
 
   async start(): Promise<void> {
+    if (!this.delayScheduler) {
+      throw new Error("Outbox intent worker requires a durable delay scheduler before queue consumption");
+    }
+    await this.delayScheduler.start();
     this.isRunning = true;
     logger.info("Outbox intent worker started", {
       concurrency: this.config.concurrency,
       outboundJobMaxAttempts: this.config.outboundJobMaxAttempts,
     });
 
-    for await (const { messageId, intent } of this.queue.consumeOutboxIntents()) {
-      if (!this.isRunning) break;
+    try {
+      for await (const { messageId, intent } of this.queue.consumeOutboxIntents()) {
+        if (!this.isRunning) break;
 
-      while (this.activeJobs >= this.config.concurrency) {
-        await this.sleep(100);
-      }
+        while (this.activeJobs >= this.config.concurrency) {
+          await this.sleep(100);
+        }
 
-      this.processIntent(messageId, intent).catch((error: Error) => {
-        logger.error("Unhandled error in outbox intent processing", {
-          intentId: intent.intentId,
-          error: error.message,
+        this.processIntent(messageId, intent).catch((error: Error) => {
+          logger.error("Unhandled error in outbox intent processing", {
+            intentId: intent.intentId,
+            error: error.message,
+          });
         });
+      }
+    } finally {
+      this.isRunning = false;
+      await this.delayScheduler.stop().catch(error => {
+        logger.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          "Failed to stop outbox-intent delay scheduler",
+        );
       });
     }
   }
@@ -94,20 +115,22 @@ export class OutboxIntentWorker {
       await this.sleep(100);
     }
 
+    if (this.delayScheduler) await this.delayScheduler.stop();
     logger.info("Outbox intent worker stopped", { remainingJobs: this.activeJobs });
   }
 
   protected async processIntent(messageId: string, intent: OutboxIntent): Promise<void> {
     this.activeJobs++;
+    let parkingAlreadyFutureIntent = false;
 
     try {
       this.assertIntentWithinReplayHorizon(intent, "processing start");
 
       if (intent.notBeforeMs > 0 && Date.now() < intent.notBeforeMs) {
-        await this.queue.enqueueOutboxIntent(intent);
-        await this.queue.ack("outbox_intent", messageId);
+        parkingAlreadyFutureIntent = true;
+        await this.persistDelayedReplacementAndAck(messageId, intent);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "deferred" });
-        logger.debug("Outbox intent not ready, requeued", {
+        logger.debug("Outbox intent not ready, parked in durable delayed store", {
           intentId: intent.intentId,
           notBefore: new Date(intent.notBeforeMs).toISOString(),
         });
@@ -223,6 +246,14 @@ export class OutboxIntentWorker {
         jobCount: enqueueResult.jobCount,
       });
     } catch (error) {
+      // A future-dated intent has not attempted ActivityPub processing yet. If
+      // its durable parking transition fails, leave the original Stream entry
+      // pending and surface the infrastructure error without consuming a
+      // business retry attempt or manufacturing another replacement.
+      if (parkingAlreadyFutureIntent) {
+        throw error;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       const permanent = this.isPermanentFailure(error);
       const nextAttempt = intent.attempt + 1;
@@ -247,18 +278,18 @@ export class OutboxIntentWorker {
         });
       } else {
         const delay = backoffMs(nextAttempt);
-        await this.queue.enqueueOutboxIntent({
+        const replacement = {
           ...intent,
           attempt: nextAttempt,
           notBeforeMs: Date.now() + delay,
           lastError: message,
-        });
-        await this.queue.ack("outbox_intent", messageId);
+        };
+        await this.persistDelayedReplacementAndAck(messageId, replacement);
         metrics.queueMessagesProcessed.inc({ topic: "outbox_intent", status: "retry" });
-        logger.warn("Outbox intent failed, scheduled retry", {
+        logger.warn("Outbox intent failed, scheduled durable delayed retry", {
           intentId: intent.intentId,
           attempt: nextAttempt,
-          retryAt: new Date(Date.now() + delay).toISOString(),
+          retryAt: new Date(replacement.notBeforeMs).toISOString(),
           error: message,
         });
       }
@@ -270,6 +301,13 @@ export class OutboxIntentWorker {
     } finally {
       this.activeJobs--;
     }
+  }
+
+  private async persistDelayedReplacementAndAck(messageId: string, intent: OutboxIntent): Promise<void> {
+    if (!this.delayScheduler) {
+      throw new Error("Outbox intent delayed work requires a durable delay scheduler");
+    }
+    await this.delayScheduler.persistReplacementAndAck(messageId, intent);
   }
 
   private isExplicitObservationOnlyIntent(intent: OutboxIntent): boolean {
@@ -462,6 +500,7 @@ export function createOutboxIntentWorker(
   const config: OutboxIntentWorkerConfig = {
     concurrency: parseInt(process.env["OUTBOX_INTENT_CONCURRENCY"] || "8", 10),
     outboundJobMaxAttempts: parseInt(process.env["OUTBOUND_MAX_ATTEMPTS"] || "10", 10),
+    delayScheduler: createRedisOutboxIntentDelaySchedulerFromEnv(),
     ...overrides,
   };
 
