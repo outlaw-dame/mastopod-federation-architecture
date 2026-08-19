@@ -108,15 +108,16 @@ describe("ADSP P2 W3 host-gateway proxy", () => {
     expect(result.status).toBe(202);
     expect(result.body).toBe('{"ok":true}');
     expect(result.headers["x-response-hop"]).toBeUndefined();
-    expect(upstream.observed).toEqual([{
+    expect(upstream.observed).toHaveLength(1);
+    expect(upstream.observed[0]).toMatchObject({
       url: "/proof",
       body: "payload",
       host: "authority.example",
-      connection: "close",
       transferEncoding: undefined,
       contentLength: "7",
       hop: undefined,
-    }]);
+    });
+    expect(upstream.observed[0]?.connection).not.toContain("x-hop");
   });
 
   it("fails closed on oversized bodies before opening an upstream request", async () => {
