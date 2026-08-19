@@ -9,6 +9,7 @@ import {
 } from "./RemoteFixtureActivityPodsOrigin.js";
 import { assertActivityPodsOriginMatchesControlledScenario } from "./RemoteFixtureControlledOriginBinding.js";
 import { requireActivityPodsOriginRedPandaProof } from "./RemoteFixtureRedPandaProof.js";
+import type { AdspRemoteSettlementOptions } from "./RemoteFixtureSettlement.js";
 
 function optionalNonNegativeSafeInteger(name: string, value: string | undefined): number | undefined {
   if (value === undefined || value === "") return undefined;
@@ -20,6 +21,28 @@ function optionalNonNegativeSafeInteger(name: string, value: string | undefined)
     throw new TypeError(`${name} must be a non-negative safe integer`);
   }
   return parsed;
+}
+
+function optionalPositiveSafeInteger(name: string, value: string | undefined): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new TypeError(`${name} must be a canonical positive integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+  return parsed;
+}
+
+export function parseActivityPodsRemoteOriginSettlementOptions(
+  env: Record<string, string | undefined>,
+): AdspRemoteSettlementOptions | undefined {
+  const timeoutMs = optionalPositiveSafeInteger(
+    "ADSP_REMOTE_SETTLEMENT_TIMEOUT_MS",
+    env["ADSP_REMOTE_SETTLEMENT_TIMEOUT_MS"],
+  );
+  return timeoutMs === undefined ? undefined : { timeoutMs };
 }
 
 export async function runActivityPodsRemoteOriginCli(
@@ -69,6 +92,7 @@ export async function runActivityPodsRemoteOriginCli(
       "ADSP_REMOTE_TRANSIENT_FAILURES",
       env["ADSP_REMOTE_TRANSIENT_FAILURES"],
     );
+    const settlement = parseActivityPodsRemoteOriginSettlementOptions(env);
     const result = await settleActivityPodsRemoteOriginFixture({
       config,
       scenario,
@@ -77,6 +101,7 @@ export async function runActivityPodsRemoteOriginCli(
       ...(scenario === "transient" && transientFailuresBeforeSuccess !== undefined
         ? { transientFailuresBeforeSuccess }
         : {}),
+      ...(settlement ? { settlement } : {}),
     });
     const eventLogPublishedAt = await requireActivityPodsOriginRedPandaProof({
       redisUrl: config.redisUrl,
