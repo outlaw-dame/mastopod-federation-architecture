@@ -40,6 +40,7 @@ jobs:
       ADSP_REMOTE_ORIGIN_RECONCILE_STREAM_KEY: ap:queue:origin-reconcile:v1
       ADSP_REMOTE_OUTBOUND_DLQ_STREAM_KEY: ap:queue:dlq:outbound:v1
       ADSP_REMOTE_TRANSIENT_FAILURES: '2'
+      ADSP_REMOTE_SETTLEMENT_TIMEOUT_MS: '30000'
       ADSP_P2_W3_TARGET_GATEWAY_PORT: '18081'
       ADSP_P2_W3_SIDECAR_GATEWAY_PORT: '18082'
       ADSP_P2_W3_TARGET_UPSTREAM_PORT: '18080'
@@ -96,6 +97,9 @@ jobs:
             activityPodsOrigin: 'activitypub.outbox.post',
             federationDurability: 'Redis Streams',
             eventLog: 'RedPanda',
+            transientFailuresBeforeSuccess: Number(process.env.ADSP_REMOTE_TRANSIENT_FAILURES),
+            outboundRetryDelayMs: 1000,
+            settlementTimeoutMs: Number(process.env.ADSP_REMOTE_SETTLEMENT_TIMEOUT_MS),
             redisStreamPayloadCompressionWriter: false,
             localDeliveryConcurrency: 4,
             datasetExistMemo: false,
@@ -257,6 +261,7 @@ jobs:
               ORIGIN_RECONCILE_STREAM_KEY=ap:queue:origin-reconcile:v1 \
               DLQ_OUTBOUND_STREAM_KEY=ap:queue:dlq:outbound:v1 \
               OUTBOUND_MAX_ATTEMPTS=5 \
+              OUTBOUND_RETRY_DELAY_MS=1000 \
               REQUEST_TIMEOUT_MS=5000 \
                 node --import tsx src/index.ts > "$arm_dir/sidecar.log" 2>&1 &
               echo "$!" > "$arm_dir/sidecar.pid"
