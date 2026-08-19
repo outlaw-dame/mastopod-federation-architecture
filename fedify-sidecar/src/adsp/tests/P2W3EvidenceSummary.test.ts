@@ -154,10 +154,12 @@ describe("ADSP P2 W3 evidence summary", () => {
     const source = duplicateActivity[0]!;
     const target = duplicateActivity[1]!;
     const activityId = (source.origin as Record<string, unknown>)["activityId"] as string;
+    const inboxUrl = (target.origin as Record<string, unknown>)["inboxUrl"] as string;
     (target.origin as Record<string, unknown>)["activityId"] = activityId;
     ((target.origin as Record<string, unknown>)["activity"] as Record<string, unknown>)["id"] = activityId;
     (target.correlation as Record<string, unknown>)["activityId"] = activityId;
     (target.settlement as Record<string, unknown>)["activityId"] = activityId;
+    (target.settlement as Record<string, unknown>)["jobId"] = `${activityId}::${inboxUrl}`;
     expect(() => summarizeAdspP2W3Evidence(duplicateActivity)).toThrow(/duplicate Activity identity/u);
   });
 
