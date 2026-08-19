@@ -1,0 +1,423 @@
+name: ADSP P2 W3 Mixed Redis
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/adsp-p2-w3-mixed-redis.yml'
+      - 'fedify-sidecar/src/adsp/**'
+      - 'fedify-sidecar/scripts/adsp-p0-activitypods-origin.ts'
+      - 'fedify-sidecar/scripts/adsp-p0-controlled-remote-target.ts'
+      - 'fedify-sidecar/scripts/adsp-p2-w3-*.ts'
+      - 'fedify-sidecar/src/delivery/**'
+      - 'fedify-sidecar/src/queue/**'
+      - 'fedify-sidecar/src/signing/**'
+      - 'fedify-sidecar/src/streams/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adsp-p2-w3-mixed-redis-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matched-smoke:
+    name: matched 1/2/4 ActivityPods to sidecar outcomes
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ACTIVITYPODS_SHA: '0cc30fc2a6e2774ac948e51c20a238e407b033c5'
+      FEDERATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      ADSP_REMOTE_REDIS_URL: redis://127.0.0.1:6379
+      ADSP_REMOTE_TARGET_STATS_URL: http://127.0.0.1:18080/stats
+      ADSP_REMOTE_CONSUMER_GROUP: sidecar-workers
+      ADSP_REMOTE_INBOUND_STREAM_KEY: ap:queue:inbound:v1
+      ADSP_REMOTE_OUTBOUND_STREAM_KEY: ap:queue:outbound:v1
+      ADSP_REMOTE_OUTBOX_INTENT_STREAM_KEY: ap:queue:outbox-intent:v1
+      ADSP_REMOTE_ORIGIN_RECONCILE_STREAM_KEY: ap:queue:origin-reconcile:v1
+      ADSP_REMOTE_OUTBOUND_DLQ_STREAM_KEY: ap:queue:dlq:outbound:v1
+      ADSP_REMOTE_TRANSIENT_FAILURES: '2'
+      ADSP_REMOTE_SETTLEMENT_TIMEOUT_MS: '180000'
+      ADSP_P2_W3_TARGET_GATEWAY_PORT: '18081'
+      ADSP_P2_W3_SIDECAR_GATEWAY_PORT: '18082'
+      ADSP_P2_W3_TARGET_UPSTREAM_PORT: '18080'
+      ADSP_P2_W3_SIDECAR_UPSTREAM_PORT: '8080'
+
+    steps:
+      - name: Checkout federation architecture
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned ActivityPods W3 companion
+        uses: actions/checkout@v4
+        with:
+          repository: outlaw-dame/activity-pods
+          ref: ${{ env.ACTIVITYPODS_SHA }}
+          path: activitypods
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Prepare evidence and ephemeral credentials
+        run: |
+          set -euo pipefail
+          mkdir -p measurements/adsp-p2-w3-mixed
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::${token}"
+          {
+            echo "ADSP_EPHEMERAL_TOKEN=${token}"
+            echo "ACTIVITYPODS_TOKEN=${token}"
+            echo "SIDECAR_TOKEN=${token}"
+          } >> "$GITHUB_ENV"
+          node - <<'NODE' > measurements/adsp-p2-w3-mixed/environment.json
+          const os = require('os');
+          process.stdout.write(`${JSON.stringify({
+            schema: 'adsp.p2.w3.environment.v1',
+            phase: 'ADSP-P2-W3',
+            evidenceMode: false,
+            purpose: 'matched correctness smoke; not promotion evidence',
+            activityPodsCommitSha: process.env.ACTIVITYPODS_SHA,
+            federationCandidateSha: process.env.FEDERATION_CANDIDATE_SHA,
+            federationCheckoutSha: process.env.GITHUB_SHA,
+            workflowRunId: process.env.GITHUB_RUN_ID,
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            hostNode: process.version,
+            hostCpuCount: os.cpus().length,
+            hostTotalMemoryBytes: os.totalmem(),
+            replicas: [1, 2, 4],
+            scenarios: ['success', 'transient', 'permanent'],
+            activityPodsOrigin: 'activitypub.outbox.post',
+            federationDurability: 'Redis Streams',
+            eventLog: 'RedPanda',
+            transientFailuresBeforeSuccess: Number(process.env.ADSP_REMOTE_TRANSIENT_FAILURES),
+            settlementTimeoutMs: Number(process.env.ADSP_REMOTE_SETTLEMENT_TIMEOUT_MS),
+            redisStreamPayloadCompressionWriter: false,
+            localDeliveryConcurrency: 4,
+            datasetExistMemo: false,
+          }, null, 2)}\n`);
+          NODE
+
+      - name: Install federation sidecar dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Install pinned ActivityPods backend dependencies
+        working-directory: activitypods/pod-provider/backend
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          sed -i 's#ssh://git@github.com/#https://github.com/#g; s#git+ssh://git@github.com/#git+https://github.com/#g; s#git@github.com:#https://github.com/#g' yarn.lock
+          yarn install --frozen-lockfile
+
+      - name: Build ActivityPods production image once
+        working-directory: activitypods/pod-provider
+        run: |
+          set -euo pipefail
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            -f docker-compose-adsp-p2-w3-external.yml \
+            build backend
+
+      - name: Start benchmark-only host gateways
+        working-directory: fedify-sidecar
+        run: |
+          set -euo pipefail
+          NODE_ENV=test node --import tsx scripts/adsp-p2-w3-host-gateway.ts \
+            > ../measurements/adsp-p2-w3-mixed/host-gateway.log 2>&1 &
+          echo "$!" > ../measurements/adsp-p2-w3-mixed/host-gateway.pid
+          gateway_pid="$(cat ../measurements/adsp-p2-w3-mixed/host-gateway.pid)"
+          ready=false
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$gateway_pid" 2>/dev/null; then
+              cat ../measurements/adsp-p2-w3-mixed/host-gateway.log
+              exit 1
+            fi
+            if node - <<'NODE'
+          const net = require('net');
+          const ports = [18081, 18082];
+          Promise.all(ports.map(port => new Promise((resolve, reject) => {
+            const s = net.connect({ host: '127.0.0.1', port });
+            s.setTimeout(1000);
+            s.once('connect', () => { s.end(); resolve(); });
+            s.once('timeout', () => { s.destroy(); reject(new Error('timeout')); });
+            s.once('error', reject);
+          }))).then(() => process.exit(0), () => process.exit(1));
+          NODE
+            then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+
+      - name: Run matched 1 2 4 whole-system correctness arms
+        run: |
+          set -euo pipefail
+          root="$GITHUB_WORKSPACE/measurements/adsp-p2-w3-mixed"
+          compose_root="$GITHUB_WORKSPACE/activitypods/pod-provider"
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml -f docker-compose-adsp-p2-w3-external.yml'
+
+          wait_http() {
+            local url="$1"
+            local tries="${2:-180}"
+            for attempt in $(seq 1 "$tries"); do
+              if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then return 0; fi
+              sleep 1
+            done
+            return 1
+          }
+
+          start_redpanda() {
+            docker rm -f adsp-redpanda >/dev/null 2>&1 || true
+            docker run -d --name adsp-redpanda \
+              -p 19092:19092 -p 19644:9644 \
+              redpandadata/redpanda:v24.1.3 \
+              redpanda start \
+                --overprovisioned \
+                --smp 1 \
+                --memory 768M \
+                --reserve-memory 0M \
+                --node-id 0 \
+                --check=false \
+                --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \
+                --advertise-kafka-addr internal://127.0.0.1:9092,external://127.0.0.1:19092
+            for attempt in $(seq 1 60); do
+              if docker exec adsp-redpanda rpk cluster health --exit-when-healthy >/dev/null 2>&1; then break; fi
+              if [[ "$attempt" -eq 60 ]]; then docker logs adsp-redpanda; return 1; fi
+              sleep 1
+            done
+            for topic in ap.stream1.local-public.v1 ap.stream2.remote-public.v1 ap.firehose.v1 ap.tombstones.v1 canonical.v1; do
+              docker exec adsp-redpanda rpk topic create "$topic" >/dev/null
+            done
+          }
+
+          start_target() {
+            local arm_dir="$1"
+            (
+              cd "$GITHUB_WORKSPACE/fedify-sidecar"
+              NODE_ENV=test \
+              ADSP_REMOTE_HOST=127.0.0.1 \
+              ADSP_REMOTE_PORT=18080 \
+              ADSP_REMOTE_TRANSIENT_FAILURES="$ADSP_REMOTE_TRANSIENT_FAILURES" \
+                node --import tsx scripts/adsp-p0-controlled-remote-target.ts \
+                > "$arm_dir/controlled-target.log" 2>&1 &
+              echo "$!" > "$arm_dir/controlled-target.pid"
+            )
+            wait_http http://127.0.0.1:18080/health 60
+          }
+
+          start_sidecar() {
+            local arm_dir="$1"
+            (
+              cd "$GITHUB_WORKSPACE/fedify-sidecar"
+              NODE_ENV=development \
+              PORT=8080 \
+              HOST=127.0.0.1 \
+              DOMAIN=localhost \
+              SIDECAR_STARTUP_MODE=blocking \
+              REDIS_URL=redis://127.0.0.1:6379 \
+              APDM_COMPLETION_MARKER_V2_CUTOVER=fresh \
+              REDPANDA_BROKERS=127.0.0.1:19092 \
+              REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false \
+              STREAM1_TOPIC=ap.stream1.local-public.v1 \
+              STREAM2_TOPIC=ap.stream2.remote-public.v1 \
+              FIREHOSE_TOPIC=ap.firehose.v1 \
+              TOMBSTONE_TOPIC=ap.tombstones.v1 \
+              ACTIVITYPODS_URL=http://127.0.0.1:3000 \
+              ACTIVITYPODS_TOKEN="$ADSP_EPHEMERAL_TOKEN" \
+              SIDECAR_TOKEN="$ADSP_EPHEMERAL_TOKEN" \
+              ENABLE_OUTBOUND_WORKER=true \
+              ENABLE_OUTBOX_INTENT_WORKER=true \
+              ENABLE_INBOUND_WORKER=false \
+              ENABLE_ORIGIN_RECONCILIATION=false \
+              ENABLE_FEDIFY_RUNTIME_INTEGRATION=false \
+              ENABLE_OPENSEARCH_INDEXER=false \
+              ENABLE_XRPC_SERVER=false \
+              ENABLE_MEDIA_ASSET_SYNC=false \
+              ENABLE_ACCOUNT_PROVISIONING=false \
+              ENABLE_ENTRYWAY=false \
+              ENABLE_FOLLOWERS_SYNC=false \
+              ENABLE_MRF_ADMIN_API=false \
+              ENABLE_MODERATION_BRIDGE_API=false \
+              ENABLE_CANONICAL_EVENT_LOG=false \
+              ENABLE_CANONICAL_NOTIFICATIONS=false \
+              ENABLE_AT_JETSTREAM=false \
+              ENABLE_AT_EXTERNAL_FIREHOSE=false \
+              APDM_ALLOW_LOOPBACK_HTTP=true \
+              REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED=false \
+              CONSUMER_GROUP=sidecar-workers \
+              INBOUND_STREAM_KEY=ap:queue:inbound:v1 \
+              OUTBOUND_STREAM_KEY=ap:queue:outbound:v1 \
+              OUTBOX_INTENT_STREAM_KEY=ap:queue:outbox-intent:v1 \
+              ORIGIN_RECONCILE_STREAM_KEY=ap:queue:origin-reconcile:v1 \
+              DLQ_OUTBOUND_STREAM_KEY=ap:queue:dlq:outbound:v1 \
+              OUTBOUND_MAX_ATTEMPTS=5 \
+              REQUEST_TIMEOUT_MS=5000 \
+                node --import tsx src/index.ts > "$arm_dir/sidecar.log" 2>&1 &
+              echo "$!" > "$arm_dir/sidecar.pid"
+            )
+            wait_http http://127.0.0.1:8080/health 120
+          }
+
+          stop_host_process() {
+            local pid_file="$1"
+            if [[ -f "$pid_file" ]]; then
+              local pid
+              pid="$(cat "$pid_file")"
+              kill "$pid" 2>/dev/null || true
+              for attempt in $(seq 1 20); do
+                if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+                sleep 0.25
+              done
+              kill -9 "$pid" 2>/dev/null || true
+            fi
+          }
+
+          for replicas in 1 2 4; do
+            arm_dir="$root/${replicas}r"
+            mkdir -p "$arm_dir"
+            namespace="adsp-p2-w3-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${replicas}r"
+            export ADSP_P2_NAMESPACE="$namespace"
+            export ADSP_P2_REPLICAS="$replicas"
+            export APDM_P9_CONCURRENCY=4
+            export APDM_P10_DATASET_EXIST_MEMO_ENABLED=false
+            export ADSP_P2_W3_BRIDGE_UPSTREAM_PORT=18081
+            export ADSP_P2_W3_SIDECAR_HANDOFF_URL=http://host.docker.internal:18082/webhook/outbox
+            export ACTIVITYPODS_TOKEN="$ADSP_EPHEMERAL_TOKEN"
+            export SIDECAR_TOKEN="$ADSP_EPHEMERAL_TOKEN"
+
+            (
+              cd "$compose_root"
+              docker compose $files down -v || true
+              sudo rm -rf data/fuseki_test data/redis_test measurements/adsp-p2-w3
+              mkdir -p data/fuseki_test data/redis_test measurements/adsp-p2-w3
+              docker compose $files up -d fuseki_test redis mailcatcher
+              FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
+              docker compose $files exec -T redis redis-cli PING
+            )
+            start_redpanda
+            start_target "$arm_dir"
+
+            services=(backend)
+            ports=(3000)
+            if [[ "$replicas" -ge 2 ]]; then services+=(backend_p2_2); ports+=(3102); fi
+            if [[ "$replicas" -ge 4 ]]; then services+=(backend_p2_3 backend_p2_4); ports+=(3103 3104); fi
+            (
+              cd "$compose_root"
+              docker compose $files up -d --no-deps "${services[@]}"
+            )
+            for port in "${ports[@]}"; do wait_http "http://127.0.0.1:${port}/" 180; done
+
+            start_sidecar "$arm_dir"
+
+            backend_cid="$(cd "$compose_root" && docker compose $files ps -q backend)"
+            docker exec "$backend_cid" node -e "fetch('http://127.0.0.1:18080/actor/success').then(r=>{if(!r.ok)process.exit(1);return r.json()}).then(v=>{if(v.id!=='http://127.0.0.1:18080/actor/success')process.exit(1)}).catch(()=>process.exit(1))"
+
+            (
+              cd "$compose_root"
+              docker compose $files exec -T redis redis-cli INFO commandstats > "$arm_dir/redis-commandstats-before.txt"
+              docker compose $files exec -T redis redis-cli INFO memory > "$arm_dir/redis-memory-before.txt"
+              docker stats --no-stream --format '{{json .}}' > "$arm_dir/docker-stats-before.jsonl"
+              docker compose $files ps > "$arm_dir/compose-ps.txt"
+            )
+            ps -o pid,ppid,rss,%cpu,etime,cmd -p "$(cat "$arm_dir/sidecar.pid")" > "$arm_dir/sidecar-process-before.txt"
+
+            for scenario in success transient permanent; do
+              case_dir="$arm_dir/$scenario"
+              mkdir -p "$case_dir"
+              (
+                cd "$GITHUB_WORKSPACE/fedify-sidecar"
+                npm exec -- tsx scripts/adsp-p0-activitypods-origin.ts prepare
+              ) | tee "$case_dir/prepared.json"
+
+              (
+                cd "$GITHUB_WORKSPACE/activitypods/pod-provider/backend"
+                SEMAPPS_REDIS_TRANSPORTER_URL=redis://127.0.0.1:6379/12 \
+                ADSP_P2_NAMESPACE="$namespace" \
+                ADSP_P2_W3_EXPECTED_REPLICAS="$replicas" \
+                ADSP_P2_W3_RUN_ID="${GITHUB_RUN_ID}-${replicas}r-${scenario}" \
+                ADSP_P2_W3_CORRELATION_OUTPUT="$case_dir/correlation.json" \
+                  node scripts/adsp-p2-w3-remote-origin-fixture.js \
+                  "http://127.0.0.1:18080/actor/${scenario}"
+              ) 2> >(tee "$case_dir/origin.stderr.log" >&2) | tee "$case_dir/origin.raw.log"
+              tail -n 1 "$case_dir/origin.raw.log" > "$case_dir/origin.json"
+
+              (
+                cd "$GITHUB_WORKSPACE/fedify-sidecar"
+                npm exec -- tsx scripts/adsp-p0-activitypods-origin.ts settle \
+                  "$scenario" \
+                  "$case_dir/prepared.json" \
+                  "$case_dir/origin.json"
+              ) | tee "$case_dir/settlement.json"
+            done
+
+            (
+              cd "$compose_root"
+              docker compose $files exec -T redis redis-cli INFO commandstats > "$arm_dir/redis-commandstats-after.txt"
+              docker compose $files exec -T redis redis-cli INFO memory > "$arm_dir/redis-memory-after.txt"
+              docker stats --no-stream --format '{{json .}}' > "$arm_dir/docker-stats-after.jsonl"
+              docker compose $files stop "${services[@]}"
+              cp -a measurements/adsp-p2-w3/. "$arm_dir/" 2>/dev/null || true
+            )
+            ps -o pid,ppid,rss,%cpu,etime,cmd -p "$(cat "$arm_dir/sidecar.pid")" > "$arm_dir/sidecar-process-after.txt" 2>&1 || true
+            curl -fsS http://127.0.0.1:18080/stats > "$arm_dir/controlled-target-final.json"
+            docker exec adsp-redpanda rpk topic list > "$arm_dir/redpanda-topics.txt"
+
+            stop_host_process "$arm_dir/sidecar.pid"
+            stop_host_process "$arm_dir/controlled-target.pid"
+            docker rm -f adsp-redpanda >/dev/null 2>&1 || true
+            (
+              cd "$compose_root"
+              docker compose $files down -v || true
+            )
+          done
+
+      - name: Validate all nine authoritative W3 cases
+        working-directory: fedify-sidecar
+        run: |
+          set -euo pipefail
+          npm exec -- tsx scripts/adsp-p2-w3-summarize.ts ../measurements/adsp-p2-w3-mixed
+
+      - name: Upload ADSP P2 W3 mixed smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adsp-p2-w3-mixed-redis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/adsp-p2-w3-mixed/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Show diagnostics on failure
+        if: failure()
+        run: |
+          find measurements/adsp-p2-w3-mixed -name '*.log' -maxdepth 4 -print -exec tail -n 300 {} \; 2>/dev/null || true
+          docker logs --tail 300 adsp-redpanda 2>/dev/null || true
+          cd activitypods/pod-provider
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml -f docker-compose-adsp-p2-w3-external.yml'
+          docker compose $files ps -a || true
+          docker compose $files logs --no-color --tail 300 || true
+
+      - name: Stop isolated live fixture
+        if: always()
+        run: |
+          set +e
+          for pid_file in measurements/adsp-p2-w3-mixed/*r/sidecar.pid measurements/adsp-p2-w3-mixed/*r/controlled-target.pid measurements/adsp-p2-w3-mixed/host-gateway.pid; do
+            [[ -f "$pid_file" ]] && kill "$(cat "$pid_file")" 2>/dev/null || true
+          done
+          docker rm -f adsp-redpanda >/dev/null 2>&1 || true
+          cd activitypods/pod-provider
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            -f docker-compose-adsp-p2-w3-external.yml \
+            down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
