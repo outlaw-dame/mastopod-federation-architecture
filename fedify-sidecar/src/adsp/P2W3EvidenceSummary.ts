@@ -1,10 +1,14 @@
-import { parseActivityPodsOriginEvidence } from "./RemoteFixtureActivityPodsOrigin.js";
+import {
+  expectedOutboundJobIdFromOrigin,
+  parseActivityPodsOriginEvidence,
+} from "./RemoteFixtureActivityPodsOrigin.js";
 
 export const ADSP_P2_W3_CORRELATION_SCHEMA = "adsp.p2.w3.origin-correlation.v1" as const;
 export const ADSP_P2_W3_SUMMARY_SCHEMA = "adsp.p2.w3.mixed-evidence-summary.v1" as const;
 export const ADSP_P0_ACTIVITYPODS_SETTLEMENT_SCHEMA = "adsp.p0.activitypods-origin-settlement.v1" as const;
 export const ADSP_P2_W3_REPLICA_COUNTS = [1, 2, 4] as const;
 export const ADSP_P2_W3_SCENARIOS = ["success", "transient", "permanent"] as const;
+export const ADSP_P2_W3_TRANSIENT_FAILURES_BEFORE_SUCCESS = 2 as const;
 
 export type AdspP2W3ReplicaCount = typeof ADSP_P2_W3_REPLICA_COUNTS[number];
 export type AdspP2W3Scenario = typeof ADSP_P2_W3_SCENARIOS[number];
@@ -110,6 +114,12 @@ function nonNegativeSafeInteger(name: string, value: unknown): number {
   return Number(value);
 }
 
+function expectedObservedRequests(expectedScenario: AdspP2W3Scenario): number {
+  return expectedScenario === "transient"
+    ? ADSP_P2_W3_TRANSIENT_FAILURES_BEFORE_SUCCESS + 1
+    : 1;
+}
+
 export function parseAdspP2W3CorrelationEvidence(value: unknown): AdspP2W3CorrelationEvidence {
   const root = object("ADSP P2 W3 correlation", value);
   assertOnlyKeys(
@@ -189,6 +199,17 @@ export function validateAdspP2W3Case(input: AdspP2W3CaseEvidence): AdspP2W3Valid
     throw new TypeError(`ADSP P2 W3 Delivery Plan intent drift for ${replicas}r/${expectedScenario}`);
   }
 
+  const expectedJobId = expectedOutboundJobIdFromOrigin(origin);
+  if (settlement.jobId !== expectedJobId) {
+    throw new TypeError(`ADSP P2 W3 outbound job identity drift for ${replicas}r/${expectedScenario}`);
+  }
+  const expectedRequests = expectedObservedRequests(expectedScenario);
+  if (settlement.observedRequests !== expectedRequests) {
+    throw new TypeError(
+      `ADSP P2 W3 observed request count drift for ${replicas}r/${expectedScenario}: expected ${expectedRequests}, observed ${settlement.observedRequests}`,
+    );
+  }
+
   return {
     replicas,
     scenario: expectedScenario,
@@ -213,6 +234,7 @@ export function summarizeAdspP2W3Evidence(inputs: readonly AdspP2W3CaseEvidence[
   const activityIds = new Set<string>();
   const requestIds = new Set<string>();
   const intentIds = new Set<string>();
+  const jobIds = new Set<string>();
 
   for (const item of validated) {
     const coordinate = `${item.replicas}/${item.scenario}`;
@@ -224,13 +246,22 @@ export function summarizeAdspP2W3Evidence(inputs: readonly AdspP2W3CaseEvidence[
     requestIds.add(item.requestId);
     if (intentIds.has(item.intentId)) throw new TypeError(`ADSP P2 W3 duplicate Delivery Plan intent ${item.intentId}`);
     intentIds.add(item.intentId);
+    if (jobIds.has(item.jobId)) throw new TypeError(`ADSP P2 W3 duplicate outbound job identity ${item.jobId}`);
+    jobIds.add(item.jobId);
   }
 
+  const armNamespaces = new Set<string>();
   for (const replicas of ADSP_P2_W3_REPLICA_COUNTS) {
     const namespaces = new Set(validated.filter(item => item.replicas === replicas).map(item => item.moleculerNamespace));
     if (namespaces.size !== 1) {
       throw new TypeError(`ADSP P2 W3 ${replicas}r scenarios must share one matched Moleculer namespace`);
     }
+    const [namespace] = namespaces;
+    if (!namespace) throw new TypeError(`ADSP P2 W3 ${replicas}r namespace is missing`);
+    if (armNamespaces.has(namespace)) {
+      throw new TypeError(`ADSP P2 W3 replica arms must use distinct Moleculer namespaces; reused ${namespace}`);
+    }
+    armNamespaces.add(namespace);
     for (const expectedScenario of ADSP_P2_W3_SCENARIOS) {
       if (!seenCoordinates.has(`${replicas}/${expectedScenario}`)) {
         throw new TypeError(`ADSP P2 W3 missing evidence coordinate ${replicas}/${expectedScenario}`);
