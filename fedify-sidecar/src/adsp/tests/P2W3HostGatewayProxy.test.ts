@@ -19,6 +19,11 @@ interface UpstreamObservation {
   hop: string | undefined;
 }
 
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value.join(", ");
+  return value;
+}
+
 async function listenUpstream(): Promise<{
   port: number;
   close(): Promise<void>;
@@ -35,11 +40,11 @@ async function listenUpstream(): Promise<{
       observed.push({
         url: req.url ?? "",
         body: Buffer.concat(chunks).toString("utf8"),
-        host: req.headers.host,
-        connection: req.headers.connection,
-        transferEncoding: req.headers["transfer-encoding"],
-        contentLength: req.headers["content-length"],
-        hop: req.headers["x-hop"],
+        host: singleHeader(req.headers.host),
+        connection: singleHeader(req.headers.connection),
+        transferEncoding: singleHeader(req.headers["transfer-encoding"]),
+        contentLength: singleHeader(req.headers["content-length"]),
+        hop: singleHeader(req.headers["x-hop"]),
       });
       res.writeHead(202, {
         "content-type": "application/json",
