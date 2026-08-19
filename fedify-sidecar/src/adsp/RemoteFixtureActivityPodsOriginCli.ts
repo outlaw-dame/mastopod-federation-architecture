@@ -11,6 +11,8 @@ import { assertActivityPodsOriginMatchesControlledScenario } from "./RemoteFixtu
 import { requireActivityPodsOriginRedPandaProof } from "./RemoteFixtureRedPandaProof.js";
 import type { AdspRemoteSettlementOptions } from "./RemoteFixtureSettlement.js";
 
+const DEFAULT_ACTIVITYPODS_REMOTE_ORIGIN_SETTLEMENT_TIMEOUT_MS = 180_000;
+
 function optionalNonNegativeSafeInteger(name: string, value: string | undefined): number | undefined {
   if (value === undefined || value === "") return undefined;
   if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) {
@@ -37,12 +39,14 @@ function optionalPositiveSafeInteger(name: string, value: string | undefined): n
 
 export function parseActivityPodsRemoteOriginSettlementOptions(
   env: Record<string, string | undefined>,
-): AdspRemoteSettlementOptions | undefined {
+): AdspRemoteSettlementOptions {
   const timeoutMs = optionalPositiveSafeInteger(
     "ADSP_REMOTE_SETTLEMENT_TIMEOUT_MS",
     env["ADSP_REMOTE_SETTLEMENT_TIMEOUT_MS"],
   );
-  return timeoutMs === undefined ? undefined : { timeoutMs };
+  return {
+    timeoutMs: timeoutMs ?? DEFAULT_ACTIVITYPODS_REMOTE_ORIGIN_SETTLEMENT_TIMEOUT_MS,
+  };
 }
 
 export async function runActivityPodsRemoteOriginCli(
@@ -101,7 +105,7 @@ export async function runActivityPodsRemoteOriginCli(
       ...(scenario === "transient" && transientFailuresBeforeSuccess !== undefined
         ? { transientFailuresBeforeSuccess }
         : {}),
-      ...(settlement ? { settlement } : {}),
+      settlement,
     });
     const eventLogPublishedAt = await requireActivityPodsOriginRedPandaProof({
       redisUrl: config.redisUrl,
