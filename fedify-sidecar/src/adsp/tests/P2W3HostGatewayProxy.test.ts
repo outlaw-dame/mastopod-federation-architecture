@@ -1,4 +1,4 @@
-import { createServer, request } from "node:http";
+import { createServer, request, type IncomingHttpHeaders } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { createP2W3HostGatewayProxy } from "../P2W3HostGatewayProxy.js";
@@ -9,13 +9,23 @@ afterEach(async () => {
   await Promise.allSettled(servers.splice(0).map(server => server.close()));
 });
 
+interface UpstreamObservation {
+  url: string;
+  body: string;
+  host: string | undefined;
+  connection: string | undefined;
+  transferEncoding: string | undefined;
+  contentLength: string | undefined;
+  hop: string | undefined;
+}
+
 async function listenUpstream(): Promise<{
   port: number;
   close(): Promise<void>;
-  observed: Array<{ url: string; body: string; host?: string; connection?: string; transferEncoding?: string; contentLength?: string; hop?: string }>;
+  observed: UpstreamObservation[];
   startedRequests(): number;
 }> {
-  const observed: Array<{ url: string; body: string; host?: string; connection?: string; transferEncoding?: string; contentLength?: string; hop?: string }> = [];
+  const observed: UpstreamObservation[] = [];
   let started = 0;
   const server = createServer((req, res) => {
     started += 1;
@@ -31,7 +41,11 @@ async function listenUpstream(): Promise<{
         contentLength: req.headers["content-length"],
         hop: req.headers["x-hop"],
       });
-      res.writeHead(202, { "content-type": "application/json" });
+      res.writeHead(202, {
+        "content-type": "application/json",
+        connection: "x-response-hop",
+        "x-response-hop": "remove-me",
+      });
       res.end('{"ok":true}');
     });
   });
@@ -51,7 +65,7 @@ function httpCall(
   port: number,
   body: string,
   extraHeaders: Record<string, string> = {},
-): Promise<{ status: number; body: string }> {
+): Promise<{ status: number; body: string; headers: IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = request({
       host: "127.0.0.1",
@@ -66,7 +80,11 @@ function httpCall(
     }, res => {
       const chunks: Buffer[] = [];
       res.on("data", chunk => chunks.push(Buffer.from(chunk)));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+      res.on("end", () => resolve({
+        status: res.statusCode ?? 0,
+        body: Buffer.concat(chunks).toString("utf8"),
+        headers: res.headers,
+      }));
     });
     req.on("error", reject);
     req.end(body);
@@ -74,7 +92,7 @@ function httpCall(
 }
 
 describe("ADSP P2 W3 host-gateway proxy", () => {
-  it("forwards only after validation, preserves authority, and strips hop-by-hop headers", async () => {
+  it("forwards only after validation, preserves authority, and isolates hop-by-hop headers in both directions", async () => {
     const upstream = await listenUpstream();
     servers.push(upstream);
     const proxy = createP2W3HostGatewayProxy({ bindHost: "127.0.0.1", bindPort: 19081, upstreamPort: upstream.port, maxBodyBytes: 1024 });
@@ -82,7 +100,9 @@ describe("ADSP P2 W3 host-gateway proxy", () => {
     await proxy.start();
 
     const result = await httpCall(19081, "payload", { connection: "x-hop", "x-hop": "remove-me" });
-    expect(result).toEqual({ status: 202, body: '{"ok":true}' });
+    expect(result.status).toBe(202);
+    expect(result.body).toBe('{"ok":true}');
+    expect(result.headers["x-response-hop"]).toBeUndefined();
     expect(upstream.observed).toEqual([{
       url: "/proof",
       body: "payload",
