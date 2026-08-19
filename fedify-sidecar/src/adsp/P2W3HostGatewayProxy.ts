@@ -47,13 +47,18 @@ function assertMaxBodyBytes(value: number): void {
   }
 }
 
-function forwardedHeaders(headers: IncomingHttpHeaders, bodyLength: number): IncomingHttpHeaders {
+function withoutHopByHopHeaders(headers: IncomingHttpHeaders): IncomingHttpHeaders {
   const result = { ...headers };
   const connectionTokens = String(headers["connection"] ?? "")
     .split(",")
     .map(token => token.trim().toLowerCase())
     .filter(Boolean);
   for (const header of [...HOP_BY_HOP_HEADERS, ...connectionTokens]) delete result[header];
+  return result;
+}
+
+function forwardedRequestHeaders(headers: IncomingHttpHeaders, bodyLength: number): IncomingHttpHeaders {
+  const result = withoutHopByHopHeaders(headers);
   delete result["content-length"];
   result["content-length"] = String(bodyLength);
   return result;
@@ -126,10 +131,10 @@ export function createP2W3HostGatewayProxy(options: P2W3HostGatewayProxyOptions)
           port: options.upstreamPort,
           method: incoming.method,
           path: incoming.url,
-          headers: forwardedHeaders(incoming.headers, body.byteLength),
+          headers: forwardedRequestHeaders(incoming.headers, body.byteLength),
         },
         upstreamResponse => {
-          outgoing.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+          outgoing.writeHead(upstreamResponse.statusCode ?? 502, withoutHopByHopHeaders(upstreamResponse.headers));
           upstreamResponse.pipe(outgoing);
         },
       );
