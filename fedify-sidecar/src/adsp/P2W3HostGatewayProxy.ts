@@ -17,6 +17,17 @@ export interface P2W3HostGatewayProxy {
 const DEFAULT_BIND_HOST = "0.0.0.0";
 const DEFAULT_UPSTREAM_HOST = "127.0.0.1";
 const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
 
 function assertPort(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
@@ -36,11 +47,15 @@ function assertMaxBodyBytes(value: number): void {
   }
 }
 
-function forwardedHeaders(headers: IncomingHttpHeaders): IncomingHttpHeaders {
+function forwardedHeaders(headers: IncomingHttpHeaders, bodyLength: number): IncomingHttpHeaders {
   const result = { ...headers };
-  delete result["connection"];
-  delete result["proxy-connection"];
-  delete result["transfer-encoding"];
+  const connectionTokens = String(headers["connection"] ?? "")
+    .split(",")
+    .map(token => token.trim().toLowerCase())
+    .filter(Boolean);
+  for (const header of [...HOP_BY_HOP_HEADERS, ...connectionTokens]) delete result[header];
+  delete result["content-length"];
+  result["content-length"] = String(bodyLength);
   return result;
 }
 
@@ -61,57 +76,79 @@ export function createP2W3HostGatewayProxy(options: P2W3HostGatewayProxyOptions)
   const server = createServer((incoming, outgoing) => {
     let received = 0;
     let rejected = false;
-    const upstream = httpRequest(
-      {
-        hostname: upstreamHost,
-        port: options.upstreamPort,
-        method: incoming.method,
-        path: incoming.url,
-        headers: forwardedHeaders(incoming.headers),
-      },
-      upstreamResponse => {
-        if (rejected) {
-          upstreamResponse.resume();
-          return;
-        }
-        outgoing.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
-        upstreamResponse.pipe(outgoing);
-      },
-    );
+    const chunks: Buffer[] = [];
 
-    upstream.on("error", error => {
+    const rejectOversized = (): void => {
       if (rejected) return;
+      rejected = true;
       if (!outgoing.headersSent) {
-        outgoing.writeHead(502, {
+        outgoing.writeHead(413, {
           "content-type": "text/plain; charset=utf-8",
           connection: "close",
         });
       }
-      if (!outgoing.writableEnded) outgoing.end(`ADSP P2 W3 gateway proxy upstream error: ${error.message}\n`);
-    });
+      if (!outgoing.writableEnded) outgoing.end("ADSP P2 W3 gateway proxy request body too large\n");
+    };
+
+    const declaredLength = incoming.headers["content-length"];
+    if (declaredLength !== undefined) {
+      if (!/^(?:0|[1-9][0-9]*)$/u.test(declaredLength)) {
+        outgoing.writeHead(400, { "content-type": "text/plain; charset=utf-8", connection: "close" });
+        outgoing.end("ADSP P2 W3 gateway proxy invalid Content-Length\n");
+        incoming.resume();
+        return;
+      }
+      const parsedLength = Number(declaredLength);
+      if (!Number.isSafeInteger(parsedLength) || parsedLength > maxBodyBytes) {
+        rejectOversized();
+        incoming.resume();
+        return;
+      }
+    }
 
     incoming.on("data", chunk => {
       if (rejected) return;
       const bytes = Buffer.from(chunk);
       received += bytes.byteLength;
       if (received > maxBodyBytes) {
-        rejected = true;
-        upstream.destroy();
+        rejectOversized();
+        return;
+      }
+      chunks.push(bytes);
+    });
+
+    incoming.on("end", () => {
+      if (rejected) return;
+      const body = Buffer.concat(chunks, received);
+      const upstream = httpRequest(
+        {
+          hostname: upstreamHost,
+          port: options.upstreamPort,
+          method: incoming.method,
+          path: incoming.url,
+          headers: forwardedHeaders(incoming.headers, body.byteLength),
+        },
+        upstreamResponse => {
+          outgoing.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+          upstreamResponse.pipe(outgoing);
+        },
+      );
+
+      upstream.on("error", error => {
         if (!outgoing.headersSent) {
-          outgoing.writeHead(413, {
+          outgoing.writeHead(502, {
             "content-type": "text/plain; charset=utf-8",
             connection: "close",
           });
         }
-        if (!outgoing.writableEnded) outgoing.end("ADSP P2 W3 gateway proxy request body too large\n");
-        return;
-      }
-      upstream.write(bytes);
+        if (!outgoing.writableEnded) outgoing.end(`ADSP P2 W3 gateway proxy upstream error: ${error.message}\n`);
+      });
+      upstream.end(body);
     });
-    incoming.on("end", () => {
-      if (!rejected) upstream.end();
+    incoming.on("error", () => {
+      rejected = true;
+      if (!outgoing.writableEnded) outgoing.destroy();
     });
-    incoming.on("error", () => upstream.destroy());
   });
 
   return {
