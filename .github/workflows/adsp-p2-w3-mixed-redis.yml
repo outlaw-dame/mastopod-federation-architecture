@@ -344,7 +344,7 @@ jobs:
                 ADSP_P2_W3_CORRELATION_OUTPUT="$case_dir/correlation.json" \
                   node scripts/adsp-p2-w3-remote-origin-fixture.js \
                   "http://127.0.0.1:18080/actor/${scenario}"
-              ) | tee "$case_dir/origin.raw.log"
+              ) 2> >(tee "$case_dir/origin.stderr.log" >&2) | tee "$case_dir/origin.raw.log"
               tail -n 1 "$case_dir/origin.raw.log" > "$case_dir/origin.json"
 
               (
