@@ -21,6 +21,7 @@ function makeCase(replicas: AdspP2W3ReplicaCount, scenario: AdspP2W3Scenario): A
   const activityId = `https://pods.example/alice/as/activity/${suffix}`;
   const actorUri = "https://pods.example/alice";
   const intentId = syntheticIntentId(suffix);
+  const inboxUrl = `http://127.0.0.1:18080/inbox/${scenario}`;
   return {
     replicas,
     scenario,
@@ -38,7 +39,7 @@ function makeCase(replicas: AdspP2W3ReplicaCount, scenario: AdspP2W3Scenario): A
       deliveryPlanSchema: "ap.delivery-plan.v1",
       deliveryPlanIntentId: intentId,
       remoteActorUri: `http://127.0.0.1:18080/actor/${scenario}`,
-      inboxUrl: `http://127.0.0.1:18080/inbox/${scenario}`,
+      inboxUrl,
       targetDomain: "127.0.0.1",
       visibility: "unlisted",
       isPublicActivity: true,
@@ -59,7 +60,7 @@ function makeCase(replicas: AdspP2W3ReplicaCount, scenario: AdspP2W3Scenario): A
       scenario,
       activityId,
       intentId,
-      jobId: `job-${suffix}`,
+      jobId: `${activityId}::${inboxUrl}`,
       eventLogPublishedAt: 1_780_000_000_000 + replicas,
       observedBodySha256: "b".repeat(64),
       observedRequests: scenario === "transient" ? 3 : 1,
@@ -93,7 +94,7 @@ describe("ADSP P2 W3 evidence summary", () => {
     ]);
   });
 
-  it("fails closed on Activity, intent, scenario, or replica-correlation drift", () => {
+  it("fails closed on Activity, intent, job, scenario, request-count, or replica-correlation drift", () => {
     const activityDrift = makeCase(2, "success");
     (activityDrift.correlation as Record<string, unknown>)["activityId"] = "https://pods.example/wrong";
     expect(() => validateAdspP2W3Case(activityDrift)).toThrow(/Activity identity drift/u);
@@ -102,9 +103,17 @@ describe("ADSP P2 W3 evidence summary", () => {
     (intentDrift.settlement as Record<string, unknown>)["intentId"] = "different-intent";
     expect(() => validateAdspP2W3Case(intentDrift)).toThrow(/intent drift/u);
 
+    const jobDrift = makeCase(2, "success");
+    (jobDrift.settlement as Record<string, unknown>)["jobId"] = "wrong-job";
+    expect(() => validateAdspP2W3Case(jobDrift)).toThrow(/job identity drift/u);
+
     const scenarioDrift = makeCase(2, "success");
     (scenarioDrift.settlement as Record<string, unknown>)["scenario"] = "transient";
     expect(() => validateAdspP2W3Case(scenarioDrift)).toThrow(/scenario drift/u);
+
+    const requestCountDrift = makeCase(2, "transient");
+    (requestCountDrift.settlement as Record<string, unknown>)["observedRequests"] = 2;
+    expect(() => validateAdspP2W3Case(requestCountDrift)).toThrow(/request count drift/u);
 
     const replicaDrift = makeCase(2, "success");
     (replicaDrift.correlation as Record<string, unknown>)["expectedReplicas"] = 4;
@@ -152,10 +161,16 @@ describe("ADSP P2 W3 evidence summary", () => {
     expect(() => summarizeAdspP2W3Evidence(duplicateActivity)).toThrow(/duplicate Activity identity/u);
   });
 
-  it("requires one matched Moleculer namespace across the three scenarios of an arm", () => {
+  it("requires one matched namespace per arm and distinct namespaces across replica arms", () => {
     const cases = allCases();
     const changed = cases.find(item => item.replicas === 4 && item.scenario === "permanent")!;
     (changed.correlation as Record<string, unknown>)["moleculerNamespace"] = "different-namespace";
     expect(() => summarizeAdspP2W3Evidence(cases)).toThrow(/must share one matched Moleculer namespace/u);
+
+    const reused = allCases();
+    for (const item of reused.filter(item => item.replicas === 4)) {
+      (item.correlation as Record<string, unknown>)["moleculerNamespace"] = "adsp-p2-w3-2r";
+    }
+    expect(() => summarizeAdspP2W3Evidence(reused)).toThrow(/replica arms must use distinct Moleculer namespaces/u);
   });
 });
