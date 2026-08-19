@@ -9,13 +9,28 @@ afterEach(async () => {
   await Promise.allSettled(servers.splice(0).map(server => server.close()));
 });
 
-async function listenUpstream(): Promise<{ port: number; close(): Promise<void>; observed: Array<{ url: string; body: string; host?: string }> }> {
-  const observed: Array<{ url: string; body: string; host?: string }> = [];
+async function listenUpstream(): Promise<{
+  port: number;
+  close(): Promise<void>;
+  observed: Array<{ url: string; body: string; host?: string; connection?: string; transferEncoding?: string; contentLength?: string; hop?: string }>;
+  startedRequests(): number;
+}> {
+  const observed: Array<{ url: string; body: string; host?: string; connection?: string; transferEncoding?: string; contentLength?: string; hop?: string }> = [];
+  let started = 0;
   const server = createServer((req, res) => {
+    started += 1;
     const chunks: Buffer[] = [];
     req.on("data", chunk => chunks.push(Buffer.from(chunk)));
     req.on("end", () => {
-      observed.push({ url: req.url ?? "", body: Buffer.concat(chunks).toString("utf8"), host: req.headers.host });
+      observed.push({
+        url: req.url ?? "",
+        body: Buffer.concat(chunks).toString("utf8"),
+        host: req.headers.host,
+        connection: req.headers.connection,
+        transferEncoding: req.headers["transfer-encoding"],
+        contentLength: req.headers["content-length"],
+        hop: req.headers["x-hop"],
+      });
       res.writeHead(202, { "content-type": "application/json" });
       res.end('{"ok":true}');
     });
@@ -27,13 +42,28 @@ async function listenUpstream(): Promise<{ port: number; close(): Promise<void>;
   return {
     port: (server.address() as AddressInfo).port,
     observed,
+    startedRequests: () => started,
     close: () => new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve()))),
   };
 }
 
-function httpCall(port: number, body: string): Promise<{ status: number; body: string }> {
+function httpCall(
+  port: number,
+  body: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = request({ host: "127.0.0.1", port, path: "/proof", method: "POST", headers: { host: "authority.example", "content-length": Buffer.byteLength(body) } }, res => {
+    const req = request({
+      host: "127.0.0.1",
+      port,
+      path: "/proof",
+      method: "POST",
+      headers: {
+        host: "authority.example",
+        "content-length": Buffer.byteLength(body),
+        ...extraHeaders,
+      },
+    }, res => {
       const chunks: Buffer[] = [];
       res.on("data", chunk => chunks.push(Buffer.from(chunk)));
       res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
@@ -44,19 +74,27 @@ function httpCall(port: number, body: string): Promise<{ status: number; body: s
 }
 
 describe("ADSP P2 W3 host-gateway proxy", () => {
-  it("forwards through a gateway listener while preserving request authority", async () => {
+  it("forwards only after validation, preserves authority, and strips hop-by-hop headers", async () => {
     const upstream = await listenUpstream();
     servers.push(upstream);
     const proxy = createP2W3HostGatewayProxy({ bindHost: "127.0.0.1", bindPort: 19081, upstreamPort: upstream.port, maxBodyBytes: 1024 });
     servers.push(proxy);
     await proxy.start();
 
-    const result = await httpCall(19081, "payload");
+    const result = await httpCall(19081, "payload", { connection: "x-hop", "x-hop": "remove-me" });
     expect(result).toEqual({ status: 202, body: '{"ok":true}' });
-    expect(upstream.observed).toEqual([{ url: "/proof", body: "payload", host: "authority.example" }]);
+    expect(upstream.observed).toEqual([{
+      url: "/proof",
+      body: "payload",
+      host: "authority.example",
+      connection: "close",
+      transferEncoding: undefined,
+      contentLength: "7",
+      hop: undefined,
+    }]);
   });
 
-  it("fails closed on oversized bodies", async () => {
+  it("fails closed on oversized bodies before opening an upstream request", async () => {
     const upstream = await listenUpstream();
     servers.push(upstream);
     const proxy = createP2W3HostGatewayProxy({ bindHost: "127.0.0.1", bindPort: 19082, upstreamPort: upstream.port, maxBodyBytes: 4 });
@@ -65,6 +103,7 @@ describe("ADSP P2 W3 host-gateway proxy", () => {
 
     const result = await httpCall(19082, "12345");
     expect(result.status).toBe(413);
+    expect(upstream.startedRequests()).toBe(0);
     expect(upstream.observed).toEqual([]);
   });
 
