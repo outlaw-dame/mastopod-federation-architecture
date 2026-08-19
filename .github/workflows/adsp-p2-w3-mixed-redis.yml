@@ -98,7 +98,6 @@ jobs:
             federationDurability: 'Redis Streams',
             eventLog: 'RedPanda',
             transientFailuresBeforeSuccess: Number(process.env.ADSP_REMOTE_TRANSIENT_FAILURES),
-            outboundRetryDelayMs: 60000,
             settlementTimeoutMs: Number(process.env.ADSP_REMOTE_SETTLEMENT_TIMEOUT_MS),
             redisStreamPayloadCompressionWriter: false,
             localDeliveryConcurrency: 4,
