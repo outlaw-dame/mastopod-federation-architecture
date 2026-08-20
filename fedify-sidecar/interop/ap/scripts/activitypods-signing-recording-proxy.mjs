@@ -51,6 +51,13 @@ const server = http.createServer((req, res) => {
       upstreamRes => {
         const responseChunks = [];
         let responseBytes = 0;
+
+        // Forward status and headers before the first response byte. Calling
+        // write() first implicitly commits a 200 response and makes a later
+        // writeHead() invalid, which would turn a successful signing request
+        // into a recording-proxy failure.
+        res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+
         upstreamRes.on('data', chunk => {
           responseBytes += chunk.length;
           if (responseBytes <= maxBodyBytes) responseChunks.push(chunk);
@@ -76,7 +83,6 @@ const server = http.createServer((req, res) => {
             });
           }
         });
-        res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
       }
     );
     upstream.on('error', error => {
