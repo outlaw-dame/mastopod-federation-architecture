@@ -8,6 +8,7 @@ import {
 } from "../delivery/apdm-replay-horizon.js";
 import {
   RedisStreamsQueue as CoreRedisStreamsQueue,
+  type InboundEnvelope,
   type QueueConfig,
   type OutboundJob,
 } from "./sidecar-redis-queue-core.js";
@@ -21,6 +22,34 @@ export const DELAYED_OUTBOUND_PARK_RETRY_MS = 1_000;
 export const DELAYED_OUTBOUND_PARK_MAX_RETRY_MS = 30_000;
 
 type DelayedRedisClient = ReturnType<typeof createClient>;
+
+/**
+ * Synthetic reconciliation/backfill activities are fetched representations,
+ * not wire-authenticated ActivityPub actors. They historically reused the
+ * `fedify-v2` queue marker, which caused InboundWorker to skip native HTTP
+ * signature verification and could upgrade a self-claimed actor into the
+ * trusted ActivityPods bridge principal.
+ *
+ * Strip that overloaded verification marker before the envelope reaches Redis.
+ * The normal inbound worker will then execute its native verification path;
+ * because these synthetic activities do not carry an inbound HTTP Signature,
+ * they fail closed instead of crossing the preverified ActivityPods bridge.
+ *
+ * Real Fedify ingress and the explicitly authenticated benchmark path do not
+ * carry either synthetic header and retain their existing verification marker.
+ */
+export function stripUnverifiedSyntheticVerification(envelope: InboundEnvelope): InboundEnvelope {
+  const isOriginReconciliation = envelope.headers["x-origin-reconciliation"] === "true";
+  const isRepliesBackfill = typeof envelope.headers["x-backfill-source"] === "string"
+    && envelope.headers["x-backfill-source"].length > 0;
+
+  if ((!isOriginReconciliation && !isRepliesBackfill) || !envelope.verification) {
+    return envelope;
+  }
+
+  const { verification: _untrustedVerification, ...withoutVerification } = envelope;
+  return withoutVerification;
+}
 
 /**
  * Durability wrapper around the core Redis Streams queue.
@@ -97,6 +126,10 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
       await this.delayedRedis.quit();
     }
     await super.disconnect();
+  }
+
+  override async enqueueInbound(envelope: InboundEnvelope): Promise<void> {
+    await super.enqueueInbound(stripUnverifiedSyntheticVerification(envelope));
   }
 
   override async enqueueOutbound(job: OutboundJob): Promise<void> {
