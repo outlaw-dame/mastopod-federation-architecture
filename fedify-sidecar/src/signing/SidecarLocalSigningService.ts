@@ -28,6 +28,10 @@ export interface HttpSignatureResult {
   signature: string;
 }
 
+export interface HttpSignatureWithDigestResult extends HttpSignatureResult {
+  digest: string;
+}
+
 export interface SignRequestParams {
   /** Full URI of the actor that owns the key, e.g. `https://example.com/users/relay` */
   actorUri: string;
@@ -37,6 +41,10 @@ export interface SignRequestParams {
   targetUrl: string;
   /** Exact UTF-8 body. Omit for bodyless requests such as authenticated GET. */
   body?: string;
+}
+
+export interface BodySignRequestParams extends SignRequestParams {
+  body: string;
 }
 
 export interface SidecarLocalSigningServiceOptions {
@@ -96,8 +104,6 @@ export class SidecarLocalSigningService {
     if (existingCreation) return existingCreation;
 
     const creation = (async (): Promise<LocalKeyPair> => {
-      // Re-check after acquiring the process-local creation slot. Another
-      // instance may have persisted the key between our first read and now.
       const rechecked = await this.redis.hgetall(redisKey);
       if (isStoredKeyPair(rechecked)) {
         return {
@@ -136,15 +142,10 @@ export class SidecarLocalSigningService {
     return publicKeyPem;
   }
 
-  /**
-   * Signs an outbound HTTP request with the sidecar-owned actor key.
-   *
-   * Body-bearing requests sign `(request-target) host date digest` and return
-   * a Digest header. Bodyless requests (notably authenticated GET) sign
-   * `(request-target) host date` and deliberately omit Digest. This matches
-   * the ActivityPods `ap_post_v1` / `ap_get_v1` authority split without moving
-   * the service actor's private key across the boundary.
-   */
+  /** Body-bearing calls statically guarantee a Digest header. */
+  async signHttpRequest(params: BodySignRequestParams): Promise<HttpSignatureWithDigestResult>;
+  /** Bodyless calls return Date + Signature and no Digest guarantee. */
+  async signHttpRequest(params: SignRequestParams): Promise<HttpSignatureResult>;
   async signHttpRequest(params: SignRequestParams): Promise<HttpSignatureResult> {
     const { privateKeyPem } = await this.getOrCreateKeyPair(params.identifier);
 
