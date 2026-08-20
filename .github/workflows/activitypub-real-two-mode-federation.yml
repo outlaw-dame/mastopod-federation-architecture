@@ -269,7 +269,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          redis-cli -n 0 FLUSHDB >/dev/null
+          docker compose -f "${GITHUB_WORKSPACE}/activitypods/pod-provider/docker-compose-test.yml" exec -T redis redis-cli -n 0 FLUSHDB >/dev/null
           NODE_ENV=development \
           PORT=8080 \
           HOST=127.0.0.1 \
@@ -403,22 +403,26 @@ jobs:
           const rows = fs.existsSync(path)
             ? fs.readFileSync(path, 'utf8').split(/\n/u).filter(Boolean).map(line => JSON.parse(line))
             : [];
-          const hit = rows.find(row =>
-            row.schema === 'ap.real-signing-api-call.v1' &&
-            row.path === '/api/internal/signatures/batch' &&
-            row.responseStatus === 200 &&
-            Array.isArray(row.request?.requests) &&
-            row.request.requests.some(item => item.actorUri === actor) &&
-            Array.isArray(row.response?.results) &&
-            row.response.results.some(item => item.ok === true)
-          );
+          const hit = rows.find(row => {
+            if (row.schema !== 'ap.real-signing-api-call.v1' || row.path !== '/api/internal/signatures/batch' || row.responseStatus !== 200) return false;
+            if (!Array.isArray(row.request?.requests) || !Array.isArray(row.response?.results)) return false;
+            const index = row.request.requests.findIndex(item => item.actorUri === actor);
+            if (index < 0) return false;
+            const requestItem = row.request.requests[index];
+            const result = row.response.results[index];
+            if (!result || result.ok !== true || result.requestId !== requestItem.requestId) return false;
+            const keyId = result.meta?.keyId;
+            const signature = result.outHeaders?.Signature;
+            return typeof keyId === 'string' && keyId.startsWith(`${actor}#`) &&
+              typeof signature === 'string' && signature.includes(`keyId="${keyId}"`);
+          });
           if (!hit) process.exit(1);
           NODE
             then signing_ok=true; break; fi
             sleep 1
           done
           if [[ "${signing_ok}" != true ]]; then
-            echo 'No successful real ActivityPods signing-api call was recorded for the delivered actor' >&2
+            echo 'No exact successful ActivityPods signing result was recorded for the delivered actor' >&2
             cat "${EVIDENCE_DIR}/signing-api.jsonl" || true
             exit 1
           fi
@@ -426,21 +430,30 @@ jobs:
           ACTOR_URI="${actor_uri}" SENDER="${sender}" node - <<'NODE' > "${EVIDENCE_DIR}/external-mastodon-acceptance.json"
           const fs = require('fs');
           const rows = fs.readFileSync(process.env.EVIDENCE_DIR + '/signing-api.jsonl', 'utf8').split(/\n/u).filter(Boolean).map(line => JSON.parse(line));
-          const hits = rows.filter(row =>
-            row.schema === 'ap.real-signing-api-call.v1' &&
-            row.responseStatus === 200 &&
-            Array.isArray(row.request?.requests) &&
-            row.request.requests.some(item => item.actorUri === process.env.ACTOR_URI) &&
-            Array.isArray(row.response?.results) &&
-            row.response.results.some(item => item.ok === true)
-          );
+          const matches = [];
+          for (const row of rows) {
+            if (row.schema !== 'ap.real-signing-api-call.v1' || row.path !== '/api/internal/signatures/batch' || row.responseStatus !== 200) continue;
+            if (!Array.isArray(row.request?.requests) || !Array.isArray(row.response?.results)) continue;
+            row.request.requests.forEach((requestItem, index) => {
+              if (requestItem.actorUri !== process.env.ACTOR_URI) return;
+              const result = row.response.results[index];
+              if (!result || result.ok !== true || result.requestId !== requestItem.requestId) return;
+              const keyId = result.meta?.keyId;
+              const signature = result.outHeaders?.Signature;
+              if (typeof keyId !== 'string' || !keyId.startsWith(`${process.env.ACTOR_URI}#`)) return;
+              if (typeof signature !== 'string' || !signature.includes(`keyId="${keyId}"`)) return;
+              matches.push({ requestId: requestItem.requestId, keyId });
+            });
+          }
+          if (matches.length === 0) throw new Error('exact signer result disappeared while building evidence');
           process.stdout.write(JSON.stringify({
             ok: true,
             mode: 'external',
             senderUsername: process.env.SENDER,
             actorUri: process.env.ACTOR_URI,
             mastodonFollowCount: 1,
-            successfulActivityPodsSigningCalls: hits.length
+            successfulActivityPodsSigningCalls: matches.length,
+            signerKeyIds: [...new Set(matches.map(match => match.keyId))]
           }, null, 2) + '\n');
           NODE
 
@@ -476,7 +489,8 @@ jobs:
               durableHandoffQueued: externalOrigin.durableHandoffQueued,
               nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed,
               mastodonFollowCount: externalAcceptance.mastodonFollowCount,
-              successfulActivityPodsSigningCalls: externalAcceptance.successfulActivityPodsSigningCalls
+              successfulActivityPodsSigningCalls: externalAcceptance.successfulActivityPodsSigningCalls,
+              signerKeyIds: externalAcceptance.signerKeyIds
             }
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
