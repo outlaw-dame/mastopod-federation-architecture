@@ -1,5 +1,6 @@
 services:
-  ap-proxy:
+  real-ap-proxy:
+    image: caddy:2.8-alpine
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -11,6 +12,8 @@ services:
       ap-interop:
         aliases:
           - activitypods
+          - mastodon
+          - sidecar
 
   fedify-sidecar:
     environment:
