@@ -30,4 +30,24 @@ while IFS= read -r line || [[ -n "${line}" ]]; do
 done < "${fixture}"
 
 export NODE_ENV=development
-exec yarn start
+
+monitor_pid=''
+backend_pid=''
+cleanup() {
+  if [[ -n "${monitor_pid}" ]]; then kill "${monitor_pid}" 2>/dev/null || true; fi
+  if [[ -n "${backend_pid}" ]]; then kill "${backend_pid}" 2>/dev/null || true; fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ -n "${GITHUB_WORKSPACE:-}" && -n "${EVIDENCE_DIR:-}" ]]; then
+  export AP_REAL_BULL_EVIDENCE_PATH="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/semapps-remote-post-${SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE:-unknown}.jsonl"
+  node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/semapps-bull-remote-post-evidence.mjs" &
+  monitor_pid=$!
+fi
+
+yarn start &
+backend_pid=$!
+wait "${backend_pid}"
+status=$?
+backend_pid=''
+exit "${status}"
