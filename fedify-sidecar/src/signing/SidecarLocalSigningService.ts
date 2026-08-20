@@ -16,10 +16,6 @@
 import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { Redis } from "ioredis";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 export interface LocalKeyPair {
   publicKeyPem: string;
   privateKeyPem: string;
@@ -52,11 +48,16 @@ export interface SidecarLocalSigningServiceOptions {
   keyAliases?: ReadonlyMap<string, string> | Record<string, string>;
 }
 
-// ---------------------------------------------------------------------------
-// Service
-// ---------------------------------------------------------------------------
-
 const REDIS_KEY_PREFIX = "sidecar:local:keypair:";
+
+/**
+ * Multiple runtime components may hold a SidecarLocalSigningService instance
+ * backed by the same Redis. Serialize same-process first-use creation per
+ * canonical key identifier so they cannot race and publish two different keys.
+ * Cross-process coordination remains Redis-persistence scoped; the deployed
+ * sidecar model is one process per service replica.
+ */
+const inFlightKeyPairCreations = new Map<string, Promise<LocalKeyPair>>();
 
 export class SidecarLocalSigningService {
   private readonly keyAliases: Map<string, string>;
@@ -76,36 +77,57 @@ export class SidecarLocalSigningService {
 
   /**
    * Returns the key pair for `identifier`, creating and persisting it if it
-   * does not yet exist.
+   * does not yet exist. Same-process concurrent first use is serialized so
+   * every local signer instance observes the same generated key pair.
    */
   async getOrCreateKeyPair(identifier: string): Promise<LocalKeyPair> {
     const keyIdentifier = this.resolveKeyIdentifier(identifier);
     const redisKey = `${REDIS_KEY_PREFIX}${keyIdentifier}`;
     const stored = await this.redis.hgetall(redisKey);
 
-    if (
-      stored &&
-      typeof stored["publicKeyPem"] === "string" &&
-      typeof stored["privateKeyPem"] === "string"
-    ) {
+    if (isStoredKeyPair(stored)) {
       return {
         publicKeyPem: stored["publicKeyPem"],
         privateKeyPem: stored["privateKeyPem"],
       };
     }
 
-    const { publicKey, privateKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      publicKeyEncoding: { type: "spki", format: "pem" },
-      privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    });
+    const existingCreation = inFlightKeyPairCreations.get(keyIdentifier);
+    if (existingCreation) return existingCreation;
 
-    await this.redis.hset(redisKey, {
-      publicKeyPem: publicKey,
-      privateKeyPem: privateKey,
-    });
+    const creation = (async (): Promise<LocalKeyPair> => {
+      // Re-check after acquiring the process-local creation slot. Another
+      // instance may have persisted the key between our first read and now.
+      const rechecked = await this.redis.hgetall(redisKey);
+      if (isStoredKeyPair(rechecked)) {
+        return {
+          publicKeyPem: rechecked["publicKeyPem"],
+          privateKeyPem: rechecked["privateKeyPem"],
+        };
+      }
 
-    return { publicKeyPem: publicKey, privateKeyPem: privateKey };
+      const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: "spki", format: "pem" },
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      });
+
+      await this.redis.hset(redisKey, {
+        publicKeyPem: publicKey,
+        privateKeyPem: privateKey,
+      });
+
+      return { publicKeyPem: publicKey, privateKeyPem: privateKey };
+    })();
+
+    inFlightKeyPairCreations.set(keyIdentifier, creation);
+    try {
+      return await creation;
+    } finally {
+      if (inFlightKeyPairCreations.get(keyIdentifier) === creation) {
+        inFlightKeyPairCreations.delete(keyIdentifier);
+      }
+    }
   }
 
   /** Returns only the public key PEM for embedding in an actor document. */
@@ -165,4 +187,17 @@ export class SidecarLocalSigningService {
       signature: signatureHeader,
     };
   }
+}
+
+function isStoredKeyPair(stored: Record<string, string> | null | undefined): stored is Record<string, string> & {
+  publicKeyPem: string;
+  privateKeyPem: string;
+} {
+  return Boolean(
+    stored &&
+    typeof stored["publicKeyPem"] === "string" &&
+    stored["publicKeyPem"].length > 0 &&
+    typeof stored["privateKeyPem"] === "string" &&
+    stored["privateKeyPem"].length > 0,
+  );
 }
