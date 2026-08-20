@@ -104,40 +104,29 @@ export interface SignErrorResult {
 export type SignResult = SignSuccessResult | SignErrorResult;
 
 export type SigningErrorCode =
-  | "ACTOR_NOT_LOCAL"   // Actor not owned by this ActivityPods instance
-  | "ACTOR_NOT_FOUND"   // Actor deleted or never existed
-  | "KEY_NOT_FOUND"     // No signing key material available for actor
-  | "AUTH_FAILED"       // Sidecar token rejected by ActivityPods
-  | "INVALID_REQUEST"   // Malformed signing request
-  | "BODY_TOO_LARGE"    // Activity body exceeds configured limit
-  | "RATE_LIMITED"      // ActivityPods asked us to back off
-  | "INTERNAL_ERROR";   // Transient server-side failure
+  | "ACTOR_NOT_LOCAL"
+  | "ACTOR_NOT_FOUND"
+  | "KEY_NOT_FOUND"
+  | "AUTH_FAILED"
+  | "INVALID_REQUEST"
+  | "BODY_TOO_LARGE"
+  | "RATE_LIMITED"
+  | "INTERNAL_ERROR";
 
-// ============================================================================
-// Internal wire-format types  (ActivityPods signing.service.js contract)
-// ============================================================================
-
-/** One item in the POST /api/internal/signatures/batch request body */
 interface ApSigningItem {
   requestId: string;
   actorUri: string;
   method: string;
-  /** "ap_get_v1" | "ap_post_v1" | "ap_post_v1_ct" */
   profile: string;
   target: {
-    /** hostname[:port] — no scheme, no path */
     host: string;
-    /** URL path, must start with "/" */
     path: string;
-    /** URL query string including "?", or "" */
     query?: string;
   };
-  /** Present only for POST */
   body?: {
     bytes: string;
     encoding: "utf8";
   };
-  /** Present only for POST */
   digest?: {
     mode: "server_compute";
   };
@@ -147,11 +136,8 @@ interface ApSignSuccessResult {
   requestId: string;
   ok: true;
   outHeaders: {
-    /** IMF-fixdate */
     Date: string;
-    /** Full Cavage Signature header value */
     Signature: string;
-    /** `SHA-256=<base64>` — present only when digest was computed */
     Digest?: string;
   };
   meta?: {
@@ -178,30 +164,15 @@ interface ApSignBatchResponse {
   results: ApSignResult[];
 }
 
-// ============================================================================
-// Config
-// ============================================================================
-
 export interface SigningClientConfig {
-  /** Base URL of the ActivityPods instance, e.g. http://activitypods:3000 */
   baseUrl: string;
-  /** Bearer token for /api/internal/signatures/batch (ACTIVITYPODS_TOKEN) */
   token: string;
-  /** Maximum items per HTTP call to the signing API */
   maxBatchSize: number;
-  /** Pre-screen body size (bytes) before sending to ActivityPods */
   maxBodyBytes: number;
-  /** Per-attempt HTTP timeout in milliseconds */
   timeoutMs: number;
-  /** Number of total attempts (1 = no retry) */
   maxRetries: number;
-  /** Base back-off delay in milliseconds — doubles each attempt */
   retryDelayMs: number;
 }
-
-// ============================================================================
-// SigningClient
-// ============================================================================
 
 export class SigningClient {
   private readonly config: SigningClientConfig;
@@ -217,14 +188,6 @@ export class SigningClient {
     }
   }
 
-  // --------------------------------------------------------------------------
-  // Public API
-  // --------------------------------------------------------------------------
-
-  /**
-   * Sign a batch of outbound HTTP requests.
-   * Splits into chunks of `maxBatchSize` and fans out.
-   */
   async signBatch(requests: SignRequest[]): Promise<SignResult[]> {
     if (requests.length === 0) return [];
 
@@ -237,9 +200,6 @@ export class SigningClient {
     return all;
   }
 
-  /**
-   * Convenience wrapper for a single request.
-   */
   async signOne(req: Omit<SignRequest, "requestId">): Promise<SignResult> {
     const requestId = `sig-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const results = await this.signBatch([{ ...req, requestId }]);
@@ -250,24 +210,10 @@ export class SigningClient {
     return first;
   }
 
-  /**
-   * Returns true when the error represents a permanent failure that should
-   * NOT be retried (move to DLQ immediately). Uses the server-authoritative
-   * `retryable` flag propagated from ActivityPods' signing service.
-   */
   static isPermanentError(result: SignErrorResult): boolean {
     return !result.error.retryable;
   }
 
-  // --------------------------------------------------------------------------
-  // ATProto signing methods (V6.5 extensions)
-  // --------------------------------------------------------------------------
-
-  /**
-   * Sign an ATProto repository commit.
-   * Calls POST /api/internal/atproto/commit-sign on the signing service.
-   * The private secp256k1 signing key never leaves ActivityPods.
-   */
   async signAtprotoCommit(
     req: SignAtprotoCommitRequest
   ): Promise<SignAtprotoCommitResponse> {
@@ -278,10 +224,6 @@ export class SigningClient {
     );
   }
 
-  /**
-   * Sign a did:plc operation using the account's rotation key.
-   * Calls POST /api/internal/atproto/plc-sign on the signing service.
-   */
   async signAtprotoPlcOp(
     req: SignPlcOperationRequest
   ): Promise<SignPlcOperationResponse> {
@@ -292,11 +234,6 @@ export class SigningClient {
     );
   }
 
-  /**
-   * Retrieve the ATProto public key for an account (commit or rotation key).
-   * Calls GET /api/internal/atproto/public-key on the signing service.
-   * Returns multibase-encoded secp256k1 compressed public key.
-   */
   async getAtprotoPublicKey(
     req: GetAtprotoPublicKeyRequest
   ): Promise<GetAtprotoPublicKeyResponse> {
@@ -308,11 +245,6 @@ export class SigningClient {
     );
   }
 
-  /**
-   * Shared HTTP helper for the ATProto signing endpoints.
-   * These are synchronous per-request (not batched), with the same auth,
-   * timeout, and retry policy as the AP batch endpoint.
-   */
   private async _callAtprotoEndpoint<T>(
     method: "GET" | "POST",
     path: string,
@@ -366,7 +298,6 @@ export class SigningClient {
         }
 
         return (await res.body.json()) as T;
-
       } catch (err: any) {
         lastErr = err;
         const isTransient =
@@ -387,10 +318,6 @@ export class SigningClient {
       `ATProto signing API unavailable after ${this.config.maxRetries} attempts — ${path}: ${this._getErrorMessage(lastErr, "Unknown error")}`
     );
   }
-
-  // --------------------------------------------------------------------------
-  // Internal implementation
-  // --------------------------------------------------------------------------
 
   private async _signChunk(requests: SignRequest[]): Promise<SignResult[]> {
     const apItems: ApSigningItem[] = [];
@@ -510,7 +437,6 @@ export class SigningClient {
         });
 
         return [...earlyErrors, ...remapped];
-
       } catch (err: any) {
         lastErr = err;
 
@@ -699,9 +625,12 @@ export class SigningClient {
   }
 }
 
-// ============================================================================
-// Factory
-// ============================================================================
+export function resolveSidecarRelayActorUri(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const domain = env["DOMAIN"]?.trim() || "localhost";
+  return env["AP_RELAY_LOCAL_ACTOR_URI"]?.trim() || `https://${domain}/users/relay`;
+}
 
 export function createSigningClient(
   overrides?: Partial<SigningClientConfig>
@@ -719,13 +648,8 @@ export function createSigningClient(
 
   const client = new SigningClient(config);
 
-  // Remote-fetch helpers (replies backfill/origin reconciliation) use signOne.
-  // When Fedify runtime integration is enabled, the relay identity is a
-  // sidecar-owned service actor. Route that exact IRI to the sidecar-local key
-  // while leaving batch signing and every non-service actor under ActivityPods.
   if (process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true") {
-    const domain = process.env["DOMAIN"] ?? "localhost";
-    const relayActorUri = process.env["AP_RELAY_LOCAL_ACTOR_URI"] ?? `https://${domain}/users/relay`;
+    const relayActorUri = resolveSidecarRelayActorUri();
     const localSigningRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
     localSigningRedis.on("error", (err: Error) =>
       logger.error("Authority-aware signing Redis error", { error: err.message }),
