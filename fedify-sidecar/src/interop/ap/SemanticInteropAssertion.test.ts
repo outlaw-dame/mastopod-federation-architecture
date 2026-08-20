@@ -96,6 +96,20 @@ describe("SemanticInteropAssertion", () => {
     }
   });
 
+  it("requires wire_authentication whenever a wire signature is claimed", () => {
+    const candidate = validAssertion();
+    candidate.evidence.actorProvenance = "self_claimed";
+    candidate.evidence.boundariesExecuted = candidate.evidence.boundariesExecuted.filter(
+      (boundary) => boundary !== "wire_authentication",
+    );
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("wire_authentication"))).toBe(true);
+    }
+  });
+
   it("forbids parser-only evidence from claiming authenticated actor provenance", () => {
     const candidate = validAssertion();
     candidate.direction = "semantic_only";
@@ -148,6 +162,31 @@ describe("SemanticInteropAssertion", () => {
     expect(parsed.success).toBe(false);
     if (!parsed.success) {
       expect(parsed.error.issues.some((issue) => issue.message.includes("sidecar service actors"))).toBe(true);
+    }
+  });
+
+  it("forbids remote signer evidence for local actor authority", () => {
+    const candidate = validAssertion();
+    candidate.evidence.actorAuthorityClass = "activitypods_pod_actor";
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("remote actor authority"))).toBe(true);
+    }
+  });
+
+  it("requires activitystreams_structure before reporting a structural decision", () => {
+    const candidate = validAssertion();
+    candidate.evidence.actorProvenance = "self_claimed";
+    candidate.evidence.transportAuthentication = "none";
+    candidate.evidence.entryPoint = "parser_semantic_only";
+    candidate.evidence.boundariesExecuted = ["http_body", "authority_policy", "target_persistence"];
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("activitystreams_structure"))).toBe(true);
     }
   });
 
@@ -204,6 +243,31 @@ describe("SemanticInteropAssertion", () => {
     expect(parsed.success).toBe(false);
     if (!parsed.success) {
       expect(parsed.error.issues.some((issue) => issue.message.includes("persistence-dependent"))).toBe(true);
+    }
+  });
+
+  it("requires target_persistence for target representations", () => {
+    const candidate = validAssertion();
+    candidate.evidence.boundariesExecuted = candidate.evidence.boundariesExecuted
+      .filter((boundary) => boundary !== "target_persistence")
+      .concat("native_local_persistence");
+    candidate.persistence.targetRepresentation = "mastodon-row";
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("target_persistence"))).toBe(true);
+    }
+  });
+
+  it("requires application_consumption for application-visible results", () => {
+    const candidate = validAssertion();
+    candidate.persistence.applicationVisible = true;
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("application_consumption"))).toBe(true);
     }
   });
 });
