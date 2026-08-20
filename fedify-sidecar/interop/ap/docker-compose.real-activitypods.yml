@@ -1,6 +1,7 @@
 services:
-  real-ap-proxy:
+  ap-proof-router:
     image: caddy:2.8-alpine
+    profiles: ["real-activitypods"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -13,8 +14,10 @@ services:
         aliases:
           - activitypods
           - mastodon
-          - sidecar
 
+  # Optional containerized sidecar override for manual real-ActivityPods runs.
+  # The authoritative two-mode CI proof starts the sidecar on the host instead,
+  # so the native control lane never depends on this service.
   fedify-sidecar:
     environment:
       ACTIVITYPODS_URL: http://host.docker.internal:3001
