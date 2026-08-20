@@ -21,7 +21,7 @@ x-media-pipeline-sidecar-base: &media_pipeline_sidecar_base
     - S3_ACCESS_KEY_ID=${MEDIA_PIPELINE_S3_ACCESS_KEY_ID:-}
     - S3_SECRET_ACCESS_KEY=${MEDIA_PIPELINE_S3_SECRET_ACCESS_KEY:-}
     - S3_PUBLIC_BASE_URL=${MEDIA_PIPELINE_S3_PUBLIC_BASE_URL:-}
-    - CLOUDFLARE_MEDIA_DOMAIN=${MEDIA_PIPELINE_CLOUDFLARE_MEDIA_DOMAIN:-}
+    - CLOUDFLARE_MEDIA_DOMAIN=${CLOUDFLARE_MEDIA_DOMAIN:-}
     - SAFE_BROWSING_API_KEY=${SAFE_BROWSING_API_KEY:-}
     - GOOGLE_VISION_API_KEY=${GOOGLE_VISION_API_KEY:-}
     - GOOGLE_VIDEO_ACCESS_TOKEN=${GOOGLE_VIDEO_ACCESS_TOKEN:-}
@@ -95,9 +95,10 @@ services:
       - FIREHOSE_TOPIC=ap.firehose.v1
       - CONSUMER_GROUP_INDEXER=sidecar-indexer
       
-      # ActivityPods - signing API (keys never leave)
+      # ActivityPods - sidecar -> ActivityPods authority (keys never leave)
       - ACTIVITYPODS_URL=${ACTIVITYPODS_URL:-http://activitypods:3000}
       - ACTIVITYPODS_TOKEN=${ACTIVITYPODS_TOKEN:-}
+      - ATPROTO_PASSWORD_VERIFY_TOKEN=${ATPROTO_PASSWORD_VERIFY_TOKEN:-}
       - SIGNING_API_URL=http://activitypods:3000/api/internal/signatures/batch
       
       # OpenSearch - activity storage
@@ -123,9 +124,9 @@ services:
       # AP_RELAY_ACTOR_URLS: override the default relay list (comma-separated actor URLs).
       # Omit to use the built-in fedi.buzz list.
       - AP_RELAY_ACTOR_URLS=${AP_RELAY_ACTOR_URLS:-}
-      # The local AP actor that sends Follow activities to relay servers.
-      # Must be an actor whose private key is held by ActivityPods.
-      - AP_RELAY_LOCAL_ACTOR_URI=https://${DOMAIN:-localhost}/users/relay
+      # Sidecar-owned service actor for relay Follow/authenticated GET traffic.
+      # Leave empty to let the runtime derive https://${DOMAIN}/users/relay.
+      - AP_RELAY_LOCAL_ACTOR_URI=${AP_RELAY_LOCAL_ACTOR_URI:-}
       - AP_RELAY_RESUBSCRIBE_INTERVAL_MS=${AP_RELAY_RESUBSCRIBE_INTERVAL_MS:-86400000}
 
       # Memory API AP ingress webhook (relay content forwarding).
@@ -307,8 +308,7 @@ services:
       - OPENSEARCH_HOSTS=["http://opensearch:9200"]
       - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
     depends_on:
-      opensearch:
-        condition: service_healthy
+      - opensearch
     networks:
       - activitypods-network
 
@@ -348,7 +348,6 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
     networks:
