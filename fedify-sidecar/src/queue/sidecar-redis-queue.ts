@@ -24,26 +24,29 @@ export const DELAYED_OUTBOUND_PARK_MAX_RETRY_MS = 30_000;
 type DelayedRedisClient = ReturnType<typeof createClient>;
 
 /**
+ * Only genuine wire-verified Fedify ingress may retain the `fedify-v2`
+ * verification marker when entering the durable inbound queue.
+ *
  * Synthetic reconciliation/backfill activities are fetched representations,
- * not wire-authenticated ActivityPub actors. They historically reused the
- * `fedify-v2` queue marker, which caused InboundWorker to skip native HTTP
- * signature verification and could upgrade a self-claimed actor into the
- * trusted ActivityPods bridge principal.
+ * not wire-authenticated ActivityPub actors. Benchmark injection is separately
+ * authenticated test traffic and is explicitly non-promotion evidence; it also
+ * does not prove a remote ActivityPub actor. All three historically reused the
+ * `fedify-v2` queue marker, which could cause InboundWorker to skip native HTTP
+ * signature verification and upgrade a self-claimed actor into the trusted
+ * ActivityPods bridge principal.
  *
- * Strip that overloaded verification marker before the envelope reaches Redis.
- * The normal inbound worker will then execute its native verification path;
- * because these synthetic activities do not carry an inbound HTTP Signature,
- * they fail closed instead of crossing the preverified ActivityPods bridge.
- *
- * Real Fedify ingress and the explicitly authenticated benchmark path do not
- * carry either synthetic header and retain their existing verification marker.
+ * Strip that overloaded marker before Redis. The normal inbound worker then
+ * executes its native verification path. Because these non-wire producers do
+ * not carry a valid remote HTTP Signature, they fail closed instead of crossing
+ * the preverified ActivityPods bridge.
  */
 export function stripUnverifiedSyntheticVerification(envelope: InboundEnvelope): InboundEnvelope {
   const isOriginReconciliation = envelope.headers["x-origin-reconciliation"] === "true";
   const isRepliesBackfill = typeof envelope.headers["x-backfill-source"] === "string"
     && envelope.headers["x-backfill-source"].length > 0;
+  const isBenchmark = envelope.headers["x-sidecar-benchmark"] === "1";
 
-  if ((!isOriginReconciliation && !isRepliesBackfill) || !envelope.verification) {
+  if ((!isOriginReconciliation && !isRepliesBackfill && !isBenchmark) || !envelope.verification) {
     return envelope;
   }
 
