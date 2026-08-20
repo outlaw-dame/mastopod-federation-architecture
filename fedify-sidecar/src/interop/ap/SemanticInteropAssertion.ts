@@ -194,6 +194,18 @@ export const SemanticInteropAssertionSchema = z.object({
   }
 
   if (
+    (value.evidence.transportAuthentication === "fedify_http_signature" ||
+      value.evidence.transportAuthentication === "native_http_signature") &&
+    !boundarySet.has("wire_authentication")
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidence", "boundariesExecuted"],
+      message: "HTTP-signature authentication evidence requires the wire_authentication boundary to execute",
+    });
+  }
+
+  if (
     value.evidence.entryPoint === "trusted_activitypods_bridge" &&
     value.evidence.transportAuthentication !== "trusted_internal"
   ) {
@@ -260,6 +272,25 @@ export const SemanticInteropAssertionSchema = z.object({
     });
   }
 
+  if (
+    value.evidence.signerPath === "remote_implementation" &&
+    value.evidence.actorAuthorityClass !== "remote_actor"
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidence", "actorAuthorityClass"],
+      message: "remote implementation signer evidence is valid only for remote actor authority",
+    });
+  }
+
+  if (value.structuralOutcome !== "not_executed" && !boundarySet.has("activitystreams_structure")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["structuralOutcome"],
+      message: "structural outcomes require the activitystreams_structure boundary to execute",
+    });
+  }
+
   if (value.authorizationOutcome !== "not_executed" && !boundarySet.has("authority_policy")) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -290,7 +321,10 @@ export const SemanticInteropAssertionSchema = z.object({
     });
   }
 
-  if (value.persistence.attempted && !boundarySet.has("target_persistence") && !boundarySet.has("native_local_persistence")) {
+  const hasAnyPersistenceBoundary =
+    boundarySet.has("target_persistence") || boundarySet.has("native_local_persistence");
+
+  if (value.persistence.attempted && !hasAnyPersistenceBoundary) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["persistence", "attempted"],
@@ -312,6 +346,28 @@ export const SemanticInteropAssertionSchema = z.object({
         message: "persistence-dependent results cannot be asserted when persistence was not attempted",
       });
     }
+  }
+
+  if (
+    value.persistence.targetRepresentation !== undefined &&
+    !boundarySet.has("target_persistence")
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["persistence", "targetRepresentation"],
+      message: "targetRepresentation requires the target_persistence boundary to execute",
+    });
+  }
+
+  if (
+    value.persistence.applicationVisible !== undefined &&
+    !boundarySet.has("application_consumption")
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["persistence", "applicationVisible"],
+      message: "applicationVisible requires the application_consumption boundary to execute",
+    });
   }
 });
 
