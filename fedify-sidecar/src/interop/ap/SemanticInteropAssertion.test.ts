@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   AP_INTEROP_ASSERTION_VERSION,
   SemanticInteropAssertionSchema,
+  type SemanticInteropAssertion,
 } from "./SemanticInteropAssertion.js";
 
-function validAssertion() {
+function validAssertion(): SemanticInteropAssertion {
   return {
     schemaVersion: AP_INTEROP_ASSERTION_VERSION,
     caseId: "mastodon.follow-accept.roundtrip",
@@ -13,21 +14,21 @@ function validAssertion() {
       family: "Mastodon",
       version: "v4.5.8",
     },
-    direction: "round_trip" as const,
+    direction: "round_trip",
     evidence: {
-      entryPoint: "wire_fedify" as const,
-      transportAuthentication: "fedify_http_signature" as const,
-      actorProvenance: "authenticated" as const,
-      actorAuthorityClass: "remote_actor" as const,
-      signerPath: "remote_implementation" as const,
+      entryPoint: "wire_fedify",
+      transportAuthentication: "fedify_http_signature",
+      actorProvenance: "authenticated",
+      actorAuthorityClass: "remote_actor",
+      signerPath: "remote_implementation",
       boundariesExecuted: [
-        "http_body" as const,
-        "wire_authentication" as const,
-        "activitystreams_structure" as const,
-        "jsonld_semantics" as const,
-        "authority_policy" as const,
-        "visibility_privacy" as const,
-        "target_persistence" as const,
+        "http_body",
+        "wire_authentication",
+        "activitystreams_structure",
+        "jsonld_semantics",
+        "authority_policy",
+        "visibility_privacy",
+        "target_persistence",
       ],
       implementationEvidence: ["mastodon-postgres-proof"],
     },
@@ -39,14 +40,14 @@ function validAssertion() {
       object: "https://local.example/activities/follow-1",
     },
     visibility: {
-      class: "direct" as const,
+      class: "direct",
       recipients: ["https://local.example/users/bob"],
       blindRecipientFieldsObserved: [],
     },
     attachments: [],
     extensions: [],
-    structuralOutcome: "accepted" as const,
-    authorizationOutcome: "accepted" as const,
+    structuralOutcome: "accepted",
+    authorizationOutcome: "accepted",
     persistence: {
       attempted: true,
       persisted: true,
@@ -86,7 +87,7 @@ describe("SemanticInteropAssertion", () => {
 
   it("does not accept the overloaded fedify-v2 concept as Fedify wire proof", () => {
     const candidate = validAssertion();
-    candidate.evidence.transportAuthentication = "trusted_internal" as any;
+    candidate.evidence.transportAuthentication = "trusted_internal";
 
     const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
     expect(parsed.success).toBe(false);
@@ -98,9 +99,9 @@ describe("SemanticInteropAssertion", () => {
   it("forbids parser-only evidence from claiming authenticated actor provenance", () => {
     const candidate = validAssertion();
     candidate.direction = "semantic_only";
-    candidate.evidence.entryPoint = "parser_semantic_only" as any;
-    candidate.evidence.transportAuthentication = "benchmark_token" as any;
-    candidate.evidence.boundariesExecuted = ["activitystreams_structure", "jsonld_semantics"] as any;
+    candidate.evidence.entryPoint = "parser_semantic_only";
+    candidate.evidence.transportAuthentication = "benchmark_token";
+    candidate.evidence.boundariesExecuted = ["activitystreams_structure", "jsonld_semantics"];
     candidate.authorizationOutcome = "not_executed";
     candidate.persistence = { attempted: false };
 
@@ -113,8 +114,8 @@ describe("SemanticInteropAssertion", () => {
 
   it("forbids synthetic reconciliation from claiming authenticated remote actor provenance", () => {
     const candidate = validAssertion();
-    candidate.evidence.entryPoint = "trusted_synthetic_reconciliation" as any;
-    candidate.evidence.transportAuthentication = "trusted_internal" as any;
+    candidate.evidence.entryPoint = "trusted_synthetic_reconciliation";
+    candidate.evidence.transportAuthentication = "trusted_internal";
     candidate.evidence.actorProvenance = "authenticated";
 
     const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
@@ -127,8 +128,8 @@ describe("SemanticInteropAssertion", () => {
   it("forbids ActivityPods signing evidence for sidecar service actors", () => {
     const candidate = validAssertion();
     candidate.direction = "outbound";
-    candidate.evidence.actorAuthorityClass = "sidecar_service_actor" as any;
-    candidate.evidence.signerPath = "activitypods_internal_api" as any;
+    candidate.evidence.actorAuthorityClass = "sidecar_service_actor";
+    candidate.evidence.signerPath = "activitypods_internal_api";
 
     const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
     expect(parsed.success).toBe(false);
@@ -140,8 +141,8 @@ describe("SemanticInteropAssertion", () => {
   it("forbids sidecar-local signer evidence for ActivityPods pod actors", () => {
     const candidate = validAssertion();
     candidate.direction = "outbound";
-    candidate.evidence.actorAuthorityClass = "activitypods_pod_actor" as any;
-    candidate.evidence.signerPath = "sidecar_local_signer" as any;
+    candidate.evidence.actorAuthorityClass = "activitypods_pod_actor";
+    candidate.evidence.signerPath = "sidecar_local_signer";
 
     const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
     expect(parsed.success).toBe(false);
@@ -154,7 +155,7 @@ describe("SemanticInteropAssertion", () => {
     const candidate = validAssertion();
     candidate.evidence.boundariesExecuted = candidate.evidence.boundariesExecuted.filter(
       (boundary) => boundary !== "authority_policy",
-    ) as any;
+    );
 
     const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
     expect(parsed.success).toBe(false);
@@ -177,10 +178,10 @@ describe("SemanticInteropAssertion", () => {
   it("does not allow persistence claims from parser-only evidence", () => {
     const candidate = validAssertion();
     candidate.direction = "semantic_only";
-    candidate.evidence.entryPoint = "parser_semantic_only" as any;
-    candidate.evidence.transportAuthentication = "none" as any;
-    candidate.evidence.actorProvenance = "self_claimed" as any;
-    candidate.evidence.boundariesExecuted = ["activitystreams_structure", "jsonld_semantics"] as any;
+    candidate.evidence.entryPoint = "parser_semantic_only";
+    candidate.evidence.transportAuthentication = "none";
+    candidate.evidence.actorProvenance = "self_claimed";
+    candidate.evidence.boundariesExecuted = ["activitystreams_structure", "jsonld_semantics"];
     candidate.authorizationOutcome = "not_executed";
 
     const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
@@ -197,7 +198,7 @@ describe("SemanticInteropAssertion", () => {
       applicationVisible: true,
       idempotentReplayObserved: true,
       targetRepresentation: "row",
-    } as any;
+    };
 
     const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
     expect(parsed.success).toBe(false);
