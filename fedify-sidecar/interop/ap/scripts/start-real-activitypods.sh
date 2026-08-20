@@ -45,7 +45,13 @@ if [[ -n "${GITHUB_WORKSPACE:-}" && -n "${EVIDENCE_DIR:-}" ]]; then
   monitor_pid=$!
 fi
 
-yarn start &
+# Invoke the backend entrypoint directly instead of `yarn start`.  The workflow
+# owns this wrapper PID and terminates it between native and external authority
+# lanes.  If Yarn sits between the wrapper and Node, terminating the wrapper
+# only kills Yarn and leaves its Node child listening on port 3000, preventing
+# the external lane from starting.  Tracking the real backend process here
+# makes the TERM trap authoritative and keeps the two federation modes isolated.
+node scripts/run-moleculer-fabric.js &
 backend_pid=$!
 wait "${backend_pid}"
 status=$?
