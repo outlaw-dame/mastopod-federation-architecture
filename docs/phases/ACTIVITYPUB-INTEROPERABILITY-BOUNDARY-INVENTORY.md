@@ -1,29 +1,99 @@
 # ActivityPub Interoperability Boundary Inventory
 
-Status: **ACTIVE inventory / fixture work not yet authorized**  
+Status: **ACTIVE inventory / semantic assertion-model work next**  
 Inventory baseline: **2026-08-20**  
 Architecture base: `4a1b15390d834b4e8e6078733c076376c12b312c`  
 ActivityPods evidence baseline: `0ae54f0a898df3fb4e6516504c4e649669834d69`
 
 ## Purpose
 
-This document closes the first ordered deliverable of ActivityPub Interoperability Hardening: identify the existing ActivityPods/SemApps processing and test boundaries before defining a cross-implementation fixture schema or corpus.
+This document closes the first ordered deliverable of ActivityPub Interoperability Hardening: identify the existing ActivityPods/SemApps/Fedify processing, authority, normalization, and test boundaries before defining a new cross-implementation semantic fixture contract.
 
-It does **not** authorize the fixture corpus, live third-party interoperability testing, NATS Core, JetStream, or any change to the frozen ADSP promotion gates.
+It does **not** start interoperability from zero. The architecture repository already contains a local Dockerized real-implementation ActivityPub harness covering GoToSocial, Mastodon, and Akkoma. That harness remains valid evidence. What is still missing is one explicit, versioned semantic assertion model that can be shared across those implementation proofs, lower-level fixtures, and the ActivityPods/SemApps application-consumption boundary.
 
-The critical architectural distinction is that ActivityPods does not own the entire ActivityPub protocol stack. It composes and configures SemApps services, then adds ActivityPods-specific authority, privacy, product semantics, and federation-delivery policy. A useful interoperability suite therefore cannot treat every observable behavior as one undifferentiated ActivityPods parser contract.
+This document does not authorize a new public-internet test dependency, NATS Core, JetStream, or any weakening of the frozen ADSP promotion gates.
 
-## Runtime-source caveat
+## Corrections established by the repository-wide re-audit
 
-`pod-provider/backend/package.json` pins the relevant published SemApps packages (`@semapps/activitypub`, `@semapps/jsonld`, `@semapps/ldp`, `@semapps/ontologies`, `@semapps/webacl`, and related packages) to `1.1.4`. ActivityPods also runs postinstall patch scripts against installed SemApps code for distributed/locality/cache and delivery behavior.
+The initial inventory pass was too conservative in two places. Both are corrected here.
 
-The SemApps GitHub repository currently does not expose an obvious `1.1.4` or `v1.1.4` Git ref. Therefore:
+### C1 — SemApps `1.1.4` source provenance is identifiable
 
-1. current upstream SemApps source is useful for locating architectural seams;
-2. it must **not** be silently equated with the exact npm `1.1.4` runtime implementation;
-3. fixture implementation must assert against the installed ActivityPods dependency tree and its patches, with upstream source used as explanatory/reference evidence until the npm release can be tied to an exact source commit.
+`pod-provider/backend/package.json` pins the relevant published SemApps middleware packages (`@semapps/activitypub`, `@semapps/jsonld`, `@semapps/ldp`, `@semapps/ontologies`, `@semapps/webacl`, and related packages) exactly to `1.1.4`.
 
-This prevents a false-positive inventory that tests SemApps `master` instead of the code ActivityPods actually executes.
+The upstream SemApps repository contains release commit:
+
+`b8e1061c9d94cbaa42ef5c5bca87f38f0da9fb1` — `middleware-v1.1.4`
+
+At that commit:
+
+- `src/middleware/lerna.json` declares version `1.1.4`;
+- `src/middleware/packages/activitypub/package.json` declares `@semapps/activitypub` version `1.1.4`;
+- its SemApps middleware dependencies are changed to the same `1.1.4` release line.
+
+Therefore the earlier statement that release provenance still needed to be tied to an exact upstream commit is no longer a gap.
+
+One caution remains: the `gitHead` field embedded in that package metadata is not reliable release provenance by itself; resolving that historical SHA yields an older package state. The release commit above plus the installed package/lockfile are the useful provenance anchors.
+
+ActivityPods also applies postinstall patches to the installed SemApps runtime, including ActivityPub local-delivery behavior and distributed LDP/JSON-LD/ontology locality/cache behavior. Consequently executable interoperability tests must still run against the ActivityPods-installed SemApps `1.1.4` tree **after ActivityPods patches**, not current SemApps `master`.
+
+### C2 — ActivityPods/Fedify signing and inbound verification authority are established, not missing
+
+The current architecture already has multiple complementary controls.
+
+#### Outbound authority
+
+ActivityPods remains the only private-key/signing authority. Its internal `POST /api/internal/signatures/batch` contract:
+
+- authenticates the internal caller;
+- requires the requested actor to bind to an exact local ActivityPods account via `auth.account.findByWebId`;
+- resolves that exact ActivityPub actor via `activitypub.actor.get`;
+- obtains RSA material from SemApps `keys.getOrCreateWebIdKeys` in the account dataset;
+- requires owner and controller to equal the actor;
+- requires the signing key to be attached through the actor's public-key linkage;
+- requires one unambiguous signer-controlled candidate;
+- derives `keyId` from that signer-controlled linkage rather than caller input;
+- never exports the private key to Fedify/the sidecar.
+
+Fedify/sidecar requests signatures; ActivityPods owns signing authority.
+
+#### Inbound authority
+
+There are two intentional verified-ingress modes in the sidecar runtime:
+
+1. **Fedify-verified ingress.** `InboundEnvelope.verification` is an explicit typed trust marker with `source: "fedify-v2"`, `actorUri`, and `verifiedAt`. The inbound worker trusts only envelopes carrying that explicit runtime provenance and does not redundantly run its native signature verifier for them.
+2. **Sidecar-native fallback verification.** Raw inbound envelopes without that trusted marker go through the sidecar's HTTP-signature verification path.
+
+The architecture's local interop documentation additionally records that shared-inbox requests are exercised through Fedify while per-actor inboxes intentionally remain on the sidecar-native verifier. This is an architectural choice, not an accidental split.
+
+Whichever verifier establishes the principal, the worker requires the verified actor to match `activity.actor`. The ActivityPods internal bridge then independently requires the supplied `verifiedActorUri` to match the activity actor and requires the target inbox to be a trusted local inbox before calling the normal SemApps inbox with duplicate signature validation skipped.
+
+That final `skipSignatureValidation` is therefore a bounded trusted-infrastructure handoff, not a generic bypass.
+
+The remaining interoperability work must **preserve and label** these provenance classes; it does not need to invent this authority boundary again.
+
+## Existing real-implementation interoperability harness
+
+The architecture repository already has `fedify-sidecar/interop/ap/` with a local-only Dockerized matrix.
+
+It currently exercises:
+
+- the real sidecar;
+- Redis and Redpanda;
+- an ActivityPods authority mock limited to actor metadata and the internal signing contract;
+- GoToSocial;
+- Mastodon;
+- Akkoma from pinned official source;
+- local TLS without weakening production HTTPS requirements;
+- outbound signed `Follow`;
+- remote actor/key dereference;
+- remote `Accept` returning through the sidecar inbound path;
+- target-side persistence/media verification for the supported proof cases;
+- a fast non-Docker lane for queue/runtime/signing compatibility.
+
+`smoke:interop:ap` runs the default local GoToSocial + Mastodon proof lane and `smoke:interop:ap:extended` adds Akkoma. These tests do not rely on public federation endpoints.
+
+This means the next phase is **not** “start third-party interoperability testing.” It is to make the semantic expectations across the existing proof surfaces explicit and reusable.
 
 ## End-to-end boundary map
 
@@ -34,19 +104,25 @@ remote HTTP request
 [0] HTTP/body decoding + content negotiation
   |
   v
-[1] transport integrity + cryptographic authentication
-    - Digest
-    - HTTP Signature
-    - authenticated remote principal / verified actor provenance
+[1] transport integrity + authenticated principal
+    - Fedify-verified ingress OR sidecar-native HTTP-signature verification
+    - explicit verification provenance
+    - activity.actor equality
   |
   v
-[2] ActivityPub envelope / ActivityStreams structural handling
+[2] trusted sidecar -> ActivityPods handoff
+    - trusted local inbox
+    - verifiedActorUri equality re-check
+    - duplicate SemApps signature verification skipped only here
+  |
+  v
+[3] ActivityPub envelope / ActivityStreams structural handling
     - actor/object/type/recipient shapes
     - string vs object identifiers
     - supported extension surface
   |
   v
-[3] JSON-LD + ontology semantic normalization
+[4] JSON-LD + ontology semantic normalization
     - context loading
     - term/type expansion
     - RDF/JSON-LD equivalence where relevant
@@ -55,7 +131,7 @@ remote HTTP request
   +----------------------------+
   |                            |
   v                            v
-[4a] authority/policy       [4b] visibility/ACL
+[5a] authority/policy       [5b] visibility/ACL
     - actor authority           - public addressing
     - local actor authority     - recipients
     - remote-fetch trust        - WebACL rights
@@ -64,282 +140,200 @@ remote HTTP request
   +-------------+--------------+
                 |
                 v
-[5] persistence + ActivityPub side effects
+[6] persistence + ActivityPub side effects
     - remote activity/object storage
     - collections/inbox/outbox effects
     - follow/reply/share/etc. handlers
                 |
                 v
-[6] stable application-consumption boundary
+[7] stable application-consumption boundary
     - SemApps LDP/JSON-LD resource representation
     - ActivityPods feature/API semantics layered on those resources
     - NOT the internal federation-sidecar bridge itself
 ```
 
-The fixture program must preserve these boundaries. In particular, a parser-level case may deliberately enter at [2] or [3], but it must be labelled as such and cannot be counted as evidence for [1], [4], or [5].
+A lower-level parser/semantic case may deliberately enter below the wire boundary, but it must be labelled and cannot claim transport, authority, ACL, or persistence evidence that it bypassed.
 
 ## 0. HTTP/body decoding and route boundary
 
-### Existing implementation
+SemApps ActivityPub and LDP routes disable Moleculer-Web's default body parser and use the SemApps middleware chain for URL/header parsing, content negotiation, JSON/Turtle/file parsing, and dataset metadata. ActivityPods' API gateway supplies authentication dispatch for HTTP Signature, Solid/OIDC, ActivityPods JWT, and anonymous access where applicable.
 
-SemApps ActivityPub and LDP routes disable Moleculer-Web's default body parser and use the SemApps middleware chain (`parseUrl`, `parseHeader`, content negotiation, `parseJson`, `parseTurtle`, file parsing, and dataset metadata). ActivityPods' API gateway supplies the authentication dispatch and distinguishes HTTP Signature, OIDC, ActivityPods JWT, and anonymous requests.
+### Remaining interoperability work
 
-### Existing evidence
+The existing implementation/proof suites do not form one versioned cross-dialect media-type/body/context matrix. Full HTTP fixtures are therefore still useful when the assertion concerns content type, headers, digest/signature bytes, malformed bodies, or equivalent wire representations.
 
-The repository has extensive API and integration tests, but this workstream does not yet have a dedicated cross-dialect matrix for media type, JSON body, context/header, malformed-body, or equivalent ActivityStreams wire representations.
+## 1. Transport authentication and actor provenance
 
-### Correct fixture seam
+This boundary is already architecturally established by the Fedify/native verifier split described in C2.
 
-Use full HTTP fixtures when the assertion concerns content type, headers, digest/signature bytes, body decoding, or route behavior. Do not replace those with direct Moleculer action calls.
+### Required assertion classes
 
-## 1. Transport integrity, signature, and authenticated authority provenance
+The semantic fixture model should distinguish at least:
 
-### SemApps-owned machinery
+- `wire_fedify_verified` — verified by the trusted Fedify runtime and represented by explicit `fedify-v2` envelope provenance;
+- `wire_native_verified` — verified by the sidecar-native HTTP-signature path;
+- `preverified_activitypods_bridge` — the authenticated internal handoff after one of the two trusted sidecar verification paths;
+- `parser_semantic_only` — deliberately bypasses transport and therefore cannot claim transport/authentication conformance.
 
-The SemApps inbox path:
-
-- requires raw request/body metadata for normal signed federation requests;
-- verifies the digest;
-- verifies the HTTP Signature;
-- obtains the authenticated remote actor principal through signature verification;
-- requires `activity.actor` to match that authenticated principal before normal inbox processing;
-- only then changes execution metadata to system authority for internal processing.
-
-SemApps signature verification resolves the signer key and validates the HTTP signature against remote RSA public keys.
-
-### ActivityPods-owned additions
-
-ActivityPods selects the remote-delivery authority profile around the SemApps ActivityPub service. Separately, the internal Fedify/ActivityPods bridge has a narrowly scoped inbound path in which the sidecar supplies `verifiedActorUri`. ActivityPods revalidates that the activity actor matches this value and that the destination is a trusted local inbox, then calls the normal SemApps inbox with `skipSignatureValidation: true`.
-
-That bridge shortcut is legitimate only because signature verification has already occurred in the trusted sidecar. It is **not** a general rule for fixture ingestion or normal ActivityPub HTTP traffic.
-
-ActivityPods also has explicit authority/signing regression tests, including Phase-5/local-signing and integrated authority-profile tests.
-
-### Correct fixture seam
-
-Create two evidence classes:
-
-- `wire_authenticated`: complete HTTP request; signature/digest/actor provenance must be exercised;
-- `preverified_internal`: only for the authenticated internal bridge contract; fixture metadata must identify the external verifier and actor binding.
-
-A direct `activitypub.inbox.post` call with signature checks disabled must never be promoted to wire-conformance evidence.
+A direct `activitypub.inbox.post` call with signature checks skipped is never wire-conformance evidence.
 
 ## 2. ActivityPub envelope and ActivityStreams structural handling
 
-### Existing implementation
+After HTTP parsing, SemApps operates on ActivityStreams-shaped objects and ActivityPods layers feature-specific middleware/utilities for actor metadata, app control, attribution, content warnings, collection views, hashtags, link previews, long-form text, media, polls, quote posts, reply policies, search consent, trust evaluation, and other supported extensions.
 
-After HTTP parsing, SemApps ActivityPub actions operate on JavaScript ActivityStreams-shaped objects. The inbox currently performs important actor/signature checks but does not provide a single comprehensive schema validator for every valid or invalid ActivityStreams dialect; upstream source still contains a TODO to check general activity validity at the inbox boundary.
+The existing ActivityPods semantic/distributed probes cover broad ActivityStreams type behavior, while the local GoToSocial/Mastodon/Akkoma harness proves selected real cross-implementation flows. Neither is yet one deliberately versioned semantic dialect corpus.
 
-ActivityPods then layers extension-specific middleware and utilities for features such as:
+### Remaining interoperability work
 
-- actor metadata;
-- app control;
-- author attribution;
-- content warnings;
-- collection views;
-- hashtag normalization;
-- link previews;
-- long-form text;
-- media attachments;
-- polls;
-- quote posts;
-- reply policies;
-- search consent;
-- trust evaluation.
+Structural fixtures should preserve meaningful source differences such as:
 
-The existing PR #106 semantic proof establishes broad type-processing coverage, but it is a semantic/distributed proof, not a replacement for a deliberately versioned interoperability dialect corpus.
-
-### Existing evidence
-
-ActivityPods already contains feature proofs for multiple ActivityPub/FEP surfaces and the PR #106 ActivityStreams semantic probe. These are valuable seed evidence, but their current test inputs were written to prove individual features rather than to define one normalized cross-implementation fixture contract.
-
-### Correct fixture seam
-
-Parser/shape fixtures may enter after HTTP decoding only when the fixture explicitly says `assertionBoundary: activitystreams-structure` and does not claim transport/authentication coverage.
-
-Structural fixtures should preserve source form sufficiently to test meaningful dialect differences, including:
-
-- scalar vs array values where ActivityStreams permits both;
-- IRI string vs embedded object identifier forms;
-- compact terms vs expanded/aliased forms;
+- scalar versus array values where permitted;
+- IRI strings versus embedded object identifiers;
+- compact versus aliased/expanded terms;
 - absent optional fields;
 - unknown extensions;
+- polymorphic attachment/link forms already observed in real implementations;
 - invalid authority-bearing shapes.
 
-Unknown or malformed extensions must not acquire authority, visibility, or capabilities merely because the generic structure remains parseable.
+Unknown or malformed extensions must never acquire authority, visibility, or capabilities simply because the containing JSON remains parseable.
 
 ## 3. JSON-LD and ontology semantic normalization
 
-### SemApps-owned machinery
+ActivityPods mixes in SemApps `JsonLdService`, caches local ActivityStreams/blocked contexts, and patches SemApps JSON-LD/LDP/ontology behavior for distributed locality/cache correctness. Existing postinstall patch/test pairs and the broad ActivityStreams semantic proof demonstrate that distributed topology must not silently lose ontology semantics.
 
-ActivityPods mixes in SemApps `JsonLdService`. The SemApps JSON-LD parser exposes compact/expand/flatten/frame/normalize/RDF conversions and term/type expansion using a document loader and ontology/context information.
+### Remaining interoperability work
 
-ActivityPods configures local cached contexts for at least ActivityStreams and the blocked vocabulary. It also registers/patches SemApps JSON-LD, LDP, and ontology behavior for distributed locality/cache correctness.
-
-### Existing ActivityPods hardening
-
-Postinstall patch/test pairs cover important runtime-distribution hazards, including:
-
-- JSON-LD distributed context caching;
-- JSON-LD distributed locality;
-- LDP distributed semantic locality;
-- LDP local registry bootstrap;
-- LDP special-endpoint races;
-- ontology distributed caching;
-- ActivityPub local-delivery/local-context reuse behavior.
-
-PR #106's 58-type semantic proof belongs primarily at this semantic-normalization layer and demonstrates that the distributed topology does not silently lose local ActivityStreams ontology semantics.
-
-### Correct fixture seam
-
-Semantic fixtures should assert equivalence at the JSON-LD/ontology boundary, not incidental lexical equality of incoming JSON.
-
-Expected assertions include:
+Assertions should compare semantic meaning rather than incidental lexical JSON. Useful expectations include:
 
 - canonical/expanded type identity;
-- expanded predicates where application behavior depends on them;
-- context alias equivalence;
-- safe behavior for unknown terms;
-- deterministic output across the supported distributed topology;
-- no remote-context behavior that bypasses the existing remote-fetch/cache security policy.
+- expanded predicates where behavior depends on them;
+- alias/context equivalence;
+- deterministic supported behavior across topology;
+- bounded handling of unknown terms;
+- no remote-context behavior that bypasses remote-fetch/security policy.
 
-Do not freeze the entire compacted JSON document byte-for-byte unless a downstream public API explicitly promises that lexical form.
+Do not freeze an entire compacted JSON document byte-for-byte unless an actual public API promises that exact lexical form.
 
-## 4a. Authority and policy boundary
+## 4. Authority and policy boundary
 
-### Existing implementation
+Cryptographic verification is necessary but not sufficient for ActivityPods authority. Existing controls cover local account/actor ownership, signer/key authority, delivery authority, remote fetching, feature policy, provider identity, and sidecar handoff.
 
-Cryptographic authentication alone is not the complete ActivityPods authority model. ActivityPods has additional local/remote authority checks around signing, actor ownership, delivery authority, remote fetching, feature policy, and sidecar handoff.
+### Remaining interoperability work
 
-Existing tests include authority-profile, signing-authority, provider-URI, and observability coverage. This is where a syntactically valid extension must fail closed if it attempts to change signer, controller, local actor ownership, remote-delivery authority, or another security-sensitive interpretation.
+Cross-implementation cases should state both authenticated principal and claimed authority. Expected outcomes should be semantic policy results such as `accept`, `reject`, or a deliberately bounded `ignore_extension`; unknown JSON-LD extensions cannot grant authority.
 
-### Correct fixture seam
+## 5. Visibility, addressing, WebACL, and blind-recipient privacy
 
-Authority fixtures must state which principal is authenticated and which resource/actor claims authority. The expected result should be a policy decision (`accept`, `reject`, or explicitly bounded `ignore-extension`) rather than merely a parsed object.
+SemApps derives recipients/public visibility and applies WebACL read rights as ActivityPub side effects. ActivityPods adds privacy-sensitive behavior around blind addressing and delivery planning.
 
-No fixture expectation may infer authority from an unknown JSON-LD extension.
+Existing tests already cover:
 
-## 4b. Visibility, addressing, and ACL boundary
+- recursive removal of `bto`/`bcc` from outward-visible representations;
+- private blind-recipient routing state;
+- expanded/aliased blind-address properties;
+- unsupported unique `audience` semantics failing before persistence;
+- duplicate visible/blind recipients converging safely;
+- required private routing state failing closed when it cannot be persisted.
 
-### SemApps-owned machinery
+### Remaining interoperability work
 
-SemApps derives recipients/public visibility through ActivityPub activity helpers and applies WebACL read rights as ActivityPub side effects. ActivityPods mixes in SemApps WebACL in pod-provider mode.
-
-### ActivityPods-owned hardening
-
-ActivityPods adds privacy-sensitive delivery behavior beyond the generic WebACL mapping. Existing tests verify, among other things:
-
-- `bto`/`bcc` are stripped recursively from outward-visible activity representations while remaining routable through the dedicated blind-recipient snapshot;
-- expanded and aliased ActivityStreams blind-recipient properties are recognized;
-- unsupported unique `audience` semantics fail before persistence;
-- duplicate visible/blind recipients converge safely;
-- failure to persist required private routing state fails closed.
-
-### Correct fixture seam
-
-Visibility fixtures need two distinct expected products:
+Each relevant case needs two separate observable products:
 
 1. semantic visibility/recipient decision; and
-2. externally observable normalized representation.
+2. externally observable representation.
 
-This prevents a test from passing because delivery routing was correct while accidentally leaking blind-recipient fields, or vice versa.
+Correct routing must not hide a serialization leak, and correct serialization must not hide incorrect ACL/delivery semantics.
 
-## 5. Persistence and ActivityPub side-effect boundary
+## 6. Persistence and ActivityPub side effects
 
-### Existing implementation
+Once accepted, SemApps/ActivityPods can store remote activity/object material, attach activities to collections/inboxes, emit inbox events, and apply feature-specific durable effects such as follow/reply/share/like/ACL changes.
 
-Once SemApps accepts an inbound activity, its inbox processing invokes ActivityPub side effects, stores remote activity/object material through LDP remote storage, attaches the activity to the ActivityPub activity container and recipient inbox, and emits inbox-received events.
+The existing local target proofs already inspect persistence for selected flows, including media representation differences across GoToSocial, Mastodon, and Akkoma.
 
-This boundary is where feature behavior (follow state, reply/share/like semantics, ACL changes, collection membership, etc.) can become durable application state.
+### Remaining interoperability work
 
-### Correct fixture seam
+Only cases executing through this boundary may claim persistence/behavioral interoperability. Normalization-only tests cannot. Retryable flows should additionally assert idempotency/replay behavior where applicable.
 
-Only fixtures that execute through this boundary may claim persistence/behavioral interoperability. Pure normalization fixtures must not be counted as evidence that ActivityPods applies the normalized result correctly.
+## 7. Representation exposed to applications
 
-Where persistence is asserted, tests should additionally check idempotency/replay behavior if the activity can be retried, and should avoid real private-user data.
+There is no single dedicated production `NormalizedActivity` DTO that ActivityPods applications consume after federation.
 
-## 6. Normalized representation exposed to applications
+The stable application-facing substrate is the SemApps/ActivityPods LDP + JSON-LD resource model, with ActivityPods APIs and feature middleware exposing higher-level supported semantics. The internal ActivityPub bridge is infrastructure and must not be promoted into the public application contract.
 
-### Finding
+This finding remains valid after the re-audit.
 
-There is **not** one dedicated `NormalizedActivity` DTO in ActivityPods that applications consume after federation. The stable application-facing substrate is instead the SemApps/ActivityPods LDP + JSON-LD resource model, with ActivityPods APIs and feature middleware exposing higher-level semantics over those resources.
+### Consequence
 
-The generic LDP catch-all route runs the SemApps parsing/content-negotiation machinery and ActivityPods configures `LdpService` in pod-provider mode. ActivityPods' normal API gateway authenticates callers using HTTP Signatures, Solid/OIDC, ActivityPods JWTs, or anonymous access as applicable.
-
-The `internal-activitypub-bridge-api` is **not** this public normalized application contract. It is a federation infrastructure trust adapter between the sidecar and ActivityPods.
-
-### Consequence for the next deliverable
-
-The stable assertion model should not invent a replacement wire DTO for applications. It should describe the semantic facts applications are entitled to rely on after ActivityPods/SemApps processing, for example:
+The next deliverable should be a **test-facing semantic assertion contract**, not a new production serialization layer. It should describe facts applications are entitled to rely on, such as:
 
 - canonical resource/activity identity;
 - semantic type(s);
 - actor/attribution identity;
 - object/target identity;
 - visible addressing class without blind-recipient leakage;
-- normalized content/attachment/extension facts where ActivityPods explicitly supports them;
+- supported content/attachment/extension semantics;
 - accepted/ignored/rejected extension disposition;
-- public/private authorization outcome as an assertion, not leaked ACL internals;
-- provenance indicating whether the assertion was reached from authenticated wire input, preverified bridge input, or a parser-only test.
+- authorization/visibility outcome without leaking ACL internals;
+- provenance showing which verification/entry boundary produced the assertion.
 
-This assertion model should be a **test contract**, not a new production serialization layer unless later implementation evidence shows a real application API needs one.
+## Existing evidence and remaining gaps
 
-## Existing test/evidence inventory by layer
-
-| Layer | Existing evidence | Current gap for interoperability hardening |
+| Layer | Existing evidence | Remaining work |
 | --- | --- | --- |
-| HTTP/body | SemApps ActivityPub/LDP route middleware; ActivityPods API auth dispatch | No versioned dialect/media-type corpus |
-| Signature/auth principal | SemApps digest + HTTP Signature verification; inbox actor equality; ActivityPods signing/authority tests | Need fixture provenance classes and negative cross-implementation wire cases |
-| ActivityStreams structure | SemApps ActivityPub actions; ActivityPods extension middlewares/proofs | No unified structural/dialect fixture schema |
-| JSON-LD/ontology | SemApps JsonLdService/parser; ActivityPods cached contexts; locality/cache patches; 58-type semantic proof | Need semantic equivalence assertions across dialect inputs |
-| Authority/policy | ActivityPods Phase-5 authority/signing/provider-boundary tests | Need extension-specific cross-implementation negative cases |
-| Visibility/ACL | SemApps WebACL side effects; ActivityPods blind-address/delivery-plan hardening | Need combined semantic-visibility + outward-representation assertions |
-| Persistence/side effects | SemApps inbox store/attach/events and ActivityPub handlers | Need replay/idempotency-aware empirical cases |
-| App consumption | LDP/JSON-LD resource substrate + ActivityPods feature APIs | No explicit stable interoperability assertion model yet; this is the **next** deliverable |
+| HTTP/body | SemApps route middleware; ActivityPods API auth; real local harness | Versioned media/body/context dialect cases |
+| Outbound signing | ActivityPods internal signing API; exact local account/actor/key authority chain | Preserve in interop assertions; add implementation-specific negative cases where useful |
+| Inbound verification | Fedify `fedify-v2` provenance; native verifier fallback; worker actor check; ActivityPods bridge re-check | Encode provenance classes in shared assertion model, not redesign authority |
+| ActivityStreams structure | SemApps actions; ActivityPods feature proofs; real GoToSocial/Mastodon/Akkoma flows | Unified semantic/dialect fixture schema |
+| JSON-LD/ontology | SemApps JsonLdService; cached contexts; distributed locality/cache patches; broad semantic proof | Shared semantic-equivalence assertions |
+| Authority/policy | Signing/provider/delivery/remote-fetch hardening | Cross-implementation negative extension/authority cases |
+| Visibility/ACL | SemApps WebACL; ActivityPods blind-address privacy tests | Combined visibility + outward-representation fixture expectations |
+| Persistence | SemApps side effects plus target-specific real-implementation persistence proofs | Shared replay/idempotency-aware semantic cases |
+| App consumption | LDP/JSON-LD substrate + ActivityPods feature APIs | **One explicit versioned semantic assertion model** |
 
-## Fixture-boundary rules established by this inventory
+## Remaining gaps
 
-The next fixture schema/corpus work must obey all of the following:
+### G1 — No single shared semantic assertion model
 
-1. Every case declares an `assertionBoundary`; no test may implicitly claim a lower-layer guarantee it bypassed.
-2. Every case declares provenance: authenticated wire, trusted/preverified internal bridge, or parser/semantic unit input.
-3. Signature validation may only be bypassed for explicitly labelled lower-level or preverified-internal cases.
-4. Parser success alone never means authority, visibility, ACL, persistence, or application compatibility succeeded.
-5. Unknown extensions may be retained or ignored but cannot grant authority/capabilities/visibility.
-6. Blind-recipient data must have separate private-routing and outward-representation assertions.
-7. JSON-LD semantic equivalence should be asserted semantically; lexical JSON equality is not the default contract.
-8. App-facing assertions target the LDP/JSON-LD semantic substrate and supported ActivityPods feature facts; the internal sidecar bridge is excluded.
-9. Runtime tests must execute against ActivityPods' installed SemApps `1.1.4` dependency plus ActivityPods patches. Current SemApps `master` is not a substitute runtime target.
-10. Live third-party endpoints remain optional smoke/evidence only and are not required CI dependencies.
-11. No real private user data is admitted to the fixture corpus.
-12. Existing SSRF/remote-fetch, signature, authority, and ACL protections stay active; the interoperability program cannot weaken them for convenience.
+This is the real next ordered deliverable.
 
-## Gaps discovered during inventory
+The repository already has many assertions and a real implementation harness. The missing piece is one small, versioned contract that tells every harness/fixture which semantic facts are comparable across implementations and which evidence boundary produced them.
 
-### G1 — No single explicit stable assertion model
+It should not become a second ActivityPub object model or freeze irrelevant storage/lexical differences.
 
-This is the intended next ordered deliverable. It should be test-facing and semantic, with enough structure to compare Mastodon/Akkoma/GoToSocial/etc. dialects without freezing irrelevant lexical differences.
+### G2 — General ActivityStreams structural validation is intentionally not one strict schema gate
 
-### G2 — Runtime SemApps release provenance is not tied to an obvious Git tag
+SemApps has targeted validation and downstream handlers rather than one universal ActivityStreams schema validator. Interoperability work should characterize and harden real compatibility behavior without prematurely imposing a strict schema that rejects legitimate ecosystem dialects.
 
-Before using upstream source lines as executable-version evidence, tie npm `1.1.4` to its package provenance/commit if available from the lockfile/package metadata or published artifact. Until then, tests must treat the installed ActivityPods dependency as authoritative.
+### G3 — Visibility has two observable contracts
 
-### G3 — General inbox structural validation is not a complete schema gate
+Delivery/ACL correctness and privacy-safe outward representation remain distinct and must both be represented in the shared assertion model.
 
-The current SemApps inbox has targeted authentication/actor checks and downstream handlers, but no single comprehensive ActivityStreams schema validation step. The fixture work should expose actual compatibility behavior without prematurely adding a strict schema that rejects valid ecosystem dialects.
+### G4 — Existing implementation-specific proofs need semantic convergence, not replacement
 
-### G4 — Internal bridge provenance must remain explicit
+GoToSocial, Mastodon, and Akkoma already have useful target-specific proof logic, including differing persistence/storage representations. The new model should let those proofs project into common semantic outcomes while retaining target-specific diagnostics where needed.
 
-The inbound sidecar path deliberately skips duplicate signature validation after verifying actor provenance at the infrastructure boundary. Tests must prevent this mechanism from becoming an accidental general bypass.
+## Invariants, not gaps
 
-### G5 — Visibility has two observable contracts
+The following were initially easy to misread as unfinished work but are established boundaries that future work must preserve:
 
-Delivery/ACL correctness and privacy-safe serialization are distinct. The fixture model needs to represent both or it can miss blind-address leakage/regressions.
+- SemApps middleware `1.1.4` has an identifiable upstream release commit; ActivityPods' installed/patched runtime remains the executable authority.
+- ActivityPods is the sole private-key/outbound signing authority.
+- Fedify-verified and sidecar-native inbound verification are explicit trusted ingress modes.
+- verified actor equality is checked before forwarding and rechecked at the ActivityPods bridge.
+- duplicate signature validation is skipped only at the authenticated preverified ActivityPods bridge boundary.
+- existing local real-implementation interop testing is already present; no public-internet dependency is required.
 
 ## Ordered next step
 
-With this boundary inventory established, the next authorized design task is the **stable interoperability assertion model** described by `ACTIVITYPUB-INTEROPERABILITY-HARDENING.md`.
+Define the **stable semantic interoperability assertion model** before expanding a new fixture metadata/schema and seed corpus.
 
-That model should be specified before the fixture metadata/schema and before the seed corpus. It should remain intentionally smaller than the full ActivityStreams object model and should encode semantic outcomes rather than implementation-specific SemApps internals.
+That model should be intentionally smaller than the full ActivityStreams object model and should be reusable by:
 
-No fixture implementation or live third-party testing is started by this document.
+- the existing GoToSocial/Mastodon/Akkoma local harness;
+- authenticated wire tests;
+- Fedify-verified and native-verifier ingress tests;
+- parser/JSON-LD semantic tests;
+- persistence/visibility/privacy tests;
+- application-boundary assertions.
+
+No new production DTO, public-internet federation dependency, NATS authorization, JetStream authorization, or promotion-gate weakening is implied by this inventory.
