@@ -285,8 +285,11 @@ export function assertInteropTargetRegistry(): void {
   const aliases = new Set<string>();
 
   for (const target of AP_INTEROP_TARGETS) {
-    if (ids.has(target.id)) throw new Error(`duplicate ActivityPub interop target id: ${target.id}`);
-    ids.add(target.id);
+    const normalizedId = target.id.toLowerCase();
+    if (ids.has(normalizedId) || aliases.has(normalizedId)) {
+      throw new Error(`duplicate ActivityPub interop target id: ${target.id}`);
+    }
+    ids.add(normalizedId);
 
     for (const alias of target.aliases) {
       const normalizedAlias = alias.toLowerCase();
