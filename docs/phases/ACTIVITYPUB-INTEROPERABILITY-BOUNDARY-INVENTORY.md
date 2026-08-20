@@ -13,6 +13,8 @@ It does **not** start interoperability from zero. `fedify-sidecar/interop/ap/` a
 
 No public-internet CI dependency, NATS Core authorization, JetStream authorization, or ADSP gate weakening is implied.
 
+The target additions in this inventory are **additive**. They do not replace the implementation families already required by `ACTIVITYPUB-INTEROPERABILITY-HARDENING.md`; that active phase remains the authoritative coverage taxonomy.
+
 ## Re-audit corrections
 
 ### C1 — SemApps `1.1.4` provenance is identifiable
@@ -41,7 +43,7 @@ However, this is **not yet a runtime-wide exclusive service-actor signer invaria
 
 Therefore the current evidence supports these narrower statements:
 
-- ActivityPods exclusively signs ActivityPods pod/user actors;
+- ActivityPods exclusively owns signing for ActivityPods pod/user actors;
 - `FedifyFederationAdapter` locally signs configured sidecar service actors;
 - replies-backfill/origin-reconciliation signed GETs are a **known signer-routing inconsistency** that must be resolved before claiming runtime-wide service-actor authority separation;
 - no test may infer a universal signer from actor URI alone until that gap is closed.
@@ -66,7 +68,7 @@ Accordingly:
 - benchmark injection may claim an authenticated benchmark caller/path where applicable, but not remote-actor authentication unless separately proven;
 - the ActivityPods bridge equality re-check protects against mutation between trusted stages but cannot upgrade an unauthenticated synthetic actor claim into authenticated actor evidence.
 
-The existing `fedify-v2` marker is therefore an overloaded preverified/trusted-envelope signal and must not be used as the semantic assertion model's verifier identity.
+The existing `fedify-v2` marker is therefore an overloaded trusted-envelope signal and must not be used as the semantic assertion model's verifier identity.
 
 ## Existing real-implementation interoperability harness
 
@@ -281,7 +283,11 @@ External blind-address sanitization does not establish native/local persistence 
 
 ### G7 — Existing implementation-specific proofs need semantic convergence and expansion
 
-GoToSocial, Mastodon, and Akkoma should project into the shared model while retaining target-specific diagnostics. The same harness then expands to Bonfire, Castopod, Emissary/Bandwagon, Friendica, Funkwhale, Ghost ActivityPub, Loops, Owncast, PeerTube, Pixelfed, Misskey, Vernissage, and an open-source WriteFreely target for the Write.as family. Hosted Micro.blog and the exact hosted Write.as service remain fixture/explicit opt-in external-conformance targets rather than required local CI dependencies.
+GoToSocial, Mastodon, and Akkoma should project into the shared model while retaining target-specific diagnostics.
+
+The expansion set is **non-exhaustive and additive**. It includes the active phase's already-required implementation families—**WordPress ActivityPub, Lemmy/PieFed, and Mobilizon**—plus the newly requested **Bonfire, Castopod, Emissary/Bandwagon, Friendica, Funkwhale, Ghost ActivityPub, Loops, Owncast, PeerTube, Pixelfed, Misskey, Vernissage**, and the **Write.as family**. Where the exact service is hosted-only, a local open-source relative such as WriteFreely may provide local dialect coverage but must not be mislabeled as exact Write.as conformance. **Micro.blog** and exact hosted **Write.as** remain fixture/explicit opt-in external-conformance targets rather than required public-internet CI dependencies.
+
+The target taxonomy in `ACTIVITYPUB-INTEROPERABILITY-HARDENING.md` continues to govern any additional required families not repeated here.
 
 ## Established invariants, not gaps
 
@@ -298,7 +304,8 @@ GoToSocial, Mastodon, and Akkoma should project into the shared model while reta
 1. Close the two newly identified authority inconsistencies: service-actor signed-fetch routing and synthetic-origin actor provenance.
 2. Define the stable **semantic interoperability assertion model**.
 3. Project the existing GoToSocial/Mastodon/Akkoma proofs into it.
-4. Expand the local real-implementation matrix in validated batches, pinning official versions/commits and retaining local-only CI.
-5. Add hosted-only dialect evidence as fixtures or explicit opt-in external conformance, never required public-internet CI.
+4. Expand the local real-implementation matrix in validated batches, preserving every family required by the active phase and adding the new targets above.
+5. Pin official versions/commits and retain local-only CI for required lanes.
+6. Add hosted-only dialect evidence as fixtures or explicit opt-in external conformance, never required public-internet CI.
 
 No new production DTO is implied.
