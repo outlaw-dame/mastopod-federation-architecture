@@ -3,17 +3,16 @@
 Status: **ACTIVE inventory / semantic assertion-model work next**  
 Inventory baseline: **2026-08-20**  
 Architecture base: `4a1b15390d834b4e8e6078733c076376c12b312c`  
-ActivityPods evidence baseline: `0ae54f0a898df3fb4e6516504c4e649669834d69`
+ActivityPods evidence baseline: `0ae54f0a898df3fb4e6516504c4e649669834d69`  
+Companion signing/provenance repair evidence: PR #97 head `fde88cb499fb1aa23883af95100613dca150fd64`
 
 ## Purpose
 
-This document inventories the existing ActivityPods/SemApps/Fedify processing, authority, normalization, privacy, persistence, and interoperability-test boundaries before a shared cross-implementation semantic assertion contract is introduced.
+This document inventories the existing ActivityPods/SemApps/Fedify processing, authority, normalization, privacy, persistence, and interoperability-test boundaries before the shared cross-implementation semantic assertion contract is expanded.
 
-It does **not** start interoperability from zero. `fedify-sidecar/interop/ap/` already contains a local Dockerized real-implementation harness for GoToSocial, Mastodon, and Akkoma. The next work is to converge those proofs on one versioned semantic contract and then expand the same harness to additional ActivityPub implementations.
+It does **not** start interoperability from zero. `fedify-sidecar/interop/ap/` already contains a local Dockerized real-implementation harness for GoToSocial, Mastodon, and Akkoma. The next work is to converge those proofs on one versioned semantic contract and expand the same harness to additional ActivityPub implementations.
 
-No public-internet CI dependency, NATS Core authorization, JetStream authorization, or ADSP gate weakening is implied.
-
-The target additions in this inventory are **additive**. They do not replace the implementation families already required by `ACTIVITYPUB-INTEROPERABILITY-HARDENING.md`; that active phase remains the authoritative coverage taxonomy.
+No public-internet CI dependency, NATS Core authorization, JetStream authorization, or ADSP gate weakening is implied. The target additions in this inventory are additive; `ACTIVITYPUB-INTEROPERABILITY-HARDENING.md` remains the authoritative coverage taxonomy.
 
 ## Re-audit corrections
 
@@ -23,52 +22,58 @@ ActivityPods pins the relevant published SemApps middleware packages exactly to 
 
 `b8e1061c9d94cbaa42ef5c5bca87f38f0da9fb1` — `middleware-v1.1.4`
 
-At that commit, `src/middleware/lerna.json` and `@semapps/activitypub` declare `1.1.4`, and the SemApps middleware dependencies move to the same release line. The package metadata's historical `gitHead` is not a reliable release-source locator by itself.
-
 ActivityPods patches the installed SemApps runtime at postinstall for ActivityPub local-delivery behavior and distributed LDP/JSON-LD/ontology locality/cache behavior. Executable interoperability tests therefore target **installed SemApps `1.1.4` after ActivityPods patches**, not current SemApps `master`.
 
-### C2 — Pod/user signing authority is established; service-actor signing is not yet uniform across every runtime path
+### C2 — Signing authority is split by actor class, with no cross-authority fallback
 
 #### ActivityPods pod/user actors
 
-For ActivityPods-owned pod/user actors, ActivityPods is the private-key/signing authority. `POST /api/internal/signatures/batch` resolves an exact local account, exact ActivityPub actor, and SemApps RSA key material; requires owner/controller/actor-key linkage; requires an unambiguous signer-controlled key; derives `keyId` from signer-controlled linkage; and keeps the private key inside ActivityPods.
-
-This is an established invariant for pod/user federation signing.
+For ActivityPods-owned pod/user actors, ActivityPods is the private-key/signing authority. `POST /api/internal/signatures/batch` resolves the exact local account, exact ActivityPub actor, and SemApps RSA key material; requires owner/controller/actor-key linkage; requires an unambiguous signer-controlled key; derives `keyId` from signer-controlled linkage; and keeps the private key inside ActivityPods.
 
 #### Sidecar-owned service actors
 
-`SidecarLocalSigningService` intentionally owns RSA keys for configured sidecar service identities such as relay/provider actors. `FedifyFederationAdapter` uses that local signer for its configured sidecar service actors rather than asking ActivityPods to sign.
+`SidecarLocalSigningService` owns RSA keys for configured sidecar service identities such as relay/provider actors. The runtime authority router on companion PR #97 routes those exact sidecar service actors only to the sidecar-local signer. All other actors remain delegated to ActivityPods, where the exact local account/actor/key authority chain decides whether signing is allowed.
 
-However, this is **not yet a runtime-wide exclusive service-actor signer invariant**. Replies backfill and origin reconciliation are currently constructed with the shared ActivityPods `SigningClient` while defaulting their authenticated-GET signer identity to the relay actor. Their remote GETs therefore ask `/api/internal/signatures/batch` to sign as an identity that the Fedify adapter otherwise treats as sidecar-owned. Under ActivityPods' exact local-account/actor enforcement, that request either requires an ActivityPods-owned relay identity or fails.
+The same router is applied to the concrete `SigningClient.signOne` path used by authenticated GETs. Replies backfill and origin reconciliation therefore no longer need ActivityPods to sign as the sidecar-owned relay actor. A sidecar-service signing failure does **not** fall back to ActivityPods.
 
-Therefore the current evidence supports these narrower statements:
+Established signer invariants:
 
-- ActivityPods exclusively owns signing for ActivityPods pod/user actors;
-- `FedifyFederationAdapter` locally signs configured sidecar service actors;
-- replies-backfill/origin-reconciliation signed GETs are a **known signer-routing inconsistency** that must be resolved before claiming runtime-wide service-actor authority separation;
-- no test may infer a universal signer from actor URI alone until that gap is closed.
+- `activitypods_pod_actor` -> `activitypods_internal_api`;
+- `sidecar_service_actor` -> `sidecar_local_signer`;
+- no cross-authority fallback;
+- actor URI shape alone never grants signing authority.
 
-The semantic assertion model must carry both `actorAuthorityClass` and `signerPath`, rather than pretending the two are currently identical across all code paths.
+The semantic assertion model still records both `actorAuthorityClass` and `signerPath` so the evidence remains explicit rather than inferred.
 
-### C3 — Fedify wire verification, trusted enqueue provenance, and actor authentication are distinct facts
+### C3 — Wire verification, synthetic enqueue, and authenticated actor provenance are distinct facts
 
-Two real wire-verification modes exist:
+Two real inbound wire-verification modes exist:
 
 1. **Fedify wire verification** for requests actually verified by Fedify before enqueue;
-2. **sidecar-native HTTP-signature verification** for raw inbound requests that have not crossed a trusted verification boundary.
+2. **sidecar-native HTTP-signature verification** for raw inbound requests that have not crossed a trusted Fedify verification boundary.
 
-`InboundEnvelope.verification.source: "fedify-v2"` is **not unique proof of Fedify wire verification**. Origin reconciliation, replies backfill, and an authenticated benchmark path also construct envelopes carrying that marker.
+Historically, `InboundEnvelope.verification.source: "fedify-v2"` was overloaded: origin reconciliation, replies backfill, and a benchmark path could also construct that marker. Reconciliation/backfill copied a fetched object's actor/attribution claim into both the activity and verification metadata, so equality downstream was tautological rather than actor authentication.
 
-More importantly, reconciliation/backfill do **not** cryptographically authenticate the ActivityPub actor merely by copying a fetched object's `actor`/`attributedTo` into both `activity.actor` and `verification.actorUri`. The worker equality check is tautological for those synthesized envelopes. HTTPS and an authenticated/signed outbound GET establish properties of the fetch transaction and origin endpoint; they do not by themselves prove that a returned actor claim was signed by that actor.
+Companion PR #97 closes the authority-upgrade path at the queue boundary:
+
+- envelopes carrying `x-origin-reconciliation: true` have synthetic preverification stripped before Redis enqueue;
+- envelopes carrying `x-backfill-source` have synthetic preverification stripped before Redis enqueue;
+- genuine Fedify wire traffic retains its trusted verification marker;
+- the benchmark path remains explicitly test-only and retains its benchmark marker;
+- stripped synthetic envelopes enter the native verifier with no incoming HTTP Signature and therefore fail closed before the ActivityPods trusted bridge.
+
+This means synthetic origin/backfill material is **not forwarded to ActivityPods as an authenticated remote actor** merely because a fetched payload names that actor. The bridge does not receive those failed synthetic cases and therefore cannot upgrade them by assigning `meta.webId` with skipped duplicate validation.
 
 Accordingly:
 
-- actual Fedify/native wire verification may claim an authenticated remote actor when their verifier establishes it;
-- reconciliation/backfill may claim a **trusted internal enqueue source** and remote-origin fetch evidence, but **not authenticated actor provenance** merely from the synthetic envelope marker;
-- benchmark injection may claim an authenticated benchmark caller/path where applicable, but not remote-actor authentication unless separately proven;
-- the ActivityPods bridge equality re-check protects against mutation between trusted stages but cannot upgrade an unauthenticated synthetic actor claim into authenticated actor evidence.
+- `wire_fedify_verified` requires independently established Fedify wire verification;
+- `wire_native_verified` requires sidecar-native HTTP-signature verification;
+- reconciliation/backfill may carry origin/fetch evidence for parser/reconciliation purposes, but not authenticated remote-actor provenance unless a future independent verifier establishes it;
+- benchmark injection is test-only and never promotion evidence;
+- `preverified_activitypods_bridge` means a trusted handoff that preserves an already-authenticated principal; it is not a verifier class of its own;
+- `parser_semantic_only` makes no transport/authentication claim.
 
-The existing `fedify-v2` marker is therefore an overloaded trusted-envelope signal and must not be used as the semantic assertion model's verifier identity.
+The overloaded `fedify-v2` string must never be treated by tests as sufficient verifier identity by itself.
 
 ## Existing real-implementation interoperability harness
 
@@ -89,8 +94,6 @@ The existing `fedify-v2` marker is therefore an overloaded trusted-envelope sign
 
 `smoke:interop:ap` runs GoToSocial + Mastodon. `smoke:interop:ap:extended` adds Akkoma. These are real local implementations, not public-internet dependencies.
 
-The next harness expansion will use this same framework for additional implementations rather than create isolated one-off test systems.
-
 ## Boundary map
 
 ```text
@@ -101,19 +104,20 @@ remote HTTP request
   |
   v
 [1] wire authentication, when present
-    - actual Fedify verification
+    - Fedify verification
     - sidecar-native HTTP-signature verification
   |
-  +--> trusted internal producers
+  +--> synthetic/internal producers
   |      - reconciliation / replies backfill
-  |      - authenticated benchmark injection
-  |      - trusted enqueue != authenticated remote actor
+  |      - synthetic preverification stripped before queue storage
+  |      - no authenticated remote actor merely from fetched actor equality
   |
   v
 [2] trusted sidecar -> ActivityPods handoff
+    - only after an accepted authenticated inbound path
     - trusted local inbox
     - actor-value equality re-check
-    - does not upgrade provenance established above
+    - preserves, never upgrades, upstream authenticated principal
   |
   v
 [3] ActivityStreams structural handling
@@ -147,24 +151,21 @@ SemApps ActivityPub/LDP routes use the SemApps middleware chain for URL/header p
 
 ## 1. Authentication, provenance, and signer evidence
 
-The assertion contract must model facts separately rather than encode a single overloaded `source` label.
+The assertion contract models facts separately rather than encoding a single overloaded source label.
 
-Recommended inbound evidence classes:
+Inbound evidence classes:
 
 - `wire_fedify_verified` — independently proven Fedify wire-verification path;
 - `wire_native_verified` — sidecar-native HTTP-signature verification;
-- `trusted_synthetic_reconciliation` — internal reconciliation enqueue; no authenticated actor claim by default;
-- `trusted_synthetic_backfill` — internal replies-backfill enqueue; no authenticated actor claim by default;
-- `authenticated_benchmark_injection` — benchmark-only path, never production interoperability evidence;
-- `trusted_activitypods_bridge` — authenticated sidecar-to-ActivityPods handoff preserving, not upgrading, upstream provenance;
+- `preverified_activitypods_bridge` — trusted handoff preserving an already authenticated principal;
 - `parser_semantic_only` — no transport/authentication claim.
 
-Recommended outbound signer evidence separates:
+Synthetic reconciliation/backfill is deliberately **not** an authenticated inbound evidence class after the queue-boundary repair. Those producers may be exercised for origin/parser/reconciliation behavior, but they cannot claim an authenticated remote actor unless a separate verifier is introduced.
 
-- `actorAuthorityClass`: `activitypods_pod_actor | sidecar_service_actor | unknown`;
-- `signerPath`: `activitypods_internal_api | sidecar_local_signer | other_test_only`.
+Outbound signer evidence records:
 
-Until the signed-fetch inconsistency is fixed, `sidecar_service_actor` must not mechanically imply `sidecar_local_signer`.
+- `actorAuthorityClass`: `activitypods_pod_actor | sidecar_service_actor | remote_actor | unknown`;
+- `signerPath`: `activitypods_internal_api | sidecar_local_signer | remote_implementation | other_test_only`.
 
 A direct SemApps inbox call with signature validation skipped is never wire-conformance evidence. A `source: "fedify-v2"` value without independent entry-point/runtime evidence is not enough to establish `wire_fedify_verified`.
 
@@ -184,17 +185,17 @@ ActivityPods uses SemApps `JsonLdService`, cached ActivityStreams/blocked contex
 
 Authentication is not the complete ActivityPods authority model. Existing controls cover local account/actor ownership, signer/key authority, remote-delivery authority, remote fetches, provider identity, sidecar handoff, and feature policy.
 
-Synthetic origin/backfill data needs its own authority treatment: trusted scheduling/fetch origin does not automatically make every actor claim authoritative.
+Synthetic origin/backfill data remains non-authoritative for remote actor identity unless independently verified. Trusted scheduling/fetch origin does not automatically make every actor claim authoritative.
 
-**Remaining work:** negative cases must declare the authenticated principal (if any), claimed actor, origin evidence, signer path where relevant, and expected `accept | reject | ignore_extension` outcome.
+Negative cases must declare the authenticated principal, if any; claimed actor; origin evidence; signer path where relevant; and expected `accept | reject | ignore_extension` outcome.
 
 ## 5. Visibility, addressing, WebACL, and blind-address privacy
 
-This layer must remain split.
+This layer remains split.
 
 ### SemApps/native/local behavior
 
-Exact SemApps `1.1.4` recipient discovery reads `to`, `bto`, `cc`, and `bcc`, while the native outbox can continue carrying the source Activity representation. The APDM Delivery Plan contract explicitly states that its blind-address repair **does not by itself repair SemApps native/local persistence or delivery behavior**.
+Exact SemApps `1.1.4` recipient discovery reads `to`, `bto`, `cc`, and `bcc`, while the native outbox can continue carrying the source Activity representation. The APDM Delivery Plan contract explicitly states that its blind-address repair does **not** by itself repair SemApps native/local persistence or delivery behavior.
 
 Native/local persisted and application-visible representations therefore require direct privacy evidence.
 
@@ -221,9 +222,7 @@ Only cases that execute this layer may claim behavioral interoperability. Retrya
 
 There is no single production `NormalizedActivity` DTO consumed by ActivityPods applications. The application-facing substrate is SemApps/ActivityPods LDP + JSON-LD resources plus ActivityPods-supported feature/API semantics. The federation bridge is infrastructure, not a public normalized application contract.
 
-Therefore the next deliverable is a **test-facing semantic assertion contract**, not a new production serialization layer.
-
-It should describe at least:
+The test-facing semantic assertion contract therefore describes at least:
 
 - canonical activity/resource identity;
 - semantic type(s);
@@ -235,7 +234,7 @@ It should describe at least:
 - authorization outcome without exposing ACL internals;
 - evidence boundary and test entry point;
 - transport/authentication provenance;
-- whether actor provenance is authenticated, origin-bound, self-claimed, or absent;
+- actor provenance quality;
 - actor authority class and actual signer path;
 - persistence/application-visible outcome.
 
@@ -245,33 +244,38 @@ It should describe at least:
 | --- | --- | --- |
 | HTTP/body | SemApps middleware; ActivityPods gateway; local implementation harness | Versioned media/body/context dialect cases |
 | Pod/user outbound signing | exact ActivityPods account/actor/key authority chain | Preserve + negative interop cases |
-| Service-actor signing | sidecar local signer in Fedify adapter | **Resolve replies-backfill/origin-reconciliation signed-fetch inconsistency** |
-| Wire verification | actual Fedify path + native verifier | Encode independently from overloaded envelope marker |
-| Synthetic ingress | trusted internal enqueue/origin fetch | **Do not claim authenticated actor without separate proof; harden authority semantics** |
+| Service-actor signing | authority-aware router + sidecar local signer, including signed GETs | Federation-level proof with real ActivityPods signer API |
+| Wire verification | actual Fedify path + native verifier | Keep semantic evidence independent from overloaded marker |
+| Synthetic ingress | synthetic preverification stripped; unauthenticated cases fail before bridge | Optional future non-authoritative hydration/reconciliation path |
 | ActivityStreams | SemApps actions, ActivityPods feature probes, GoToSocial/Mastodon/Akkoma | Shared semantic/dialect schema |
 | JSON-LD/ontology | JsonLdService, cached contexts, distributed hardening | Shared semantic-equivalence assertions |
 | External delivery privacy | APDM sanitized Delivery Plan + sidecar rejection | Integrate into shared model |
-| Native/local privacy | SemApps/WebACL path exists | **Direct persistence/application-visible privacy evidence** |
+| Native/local privacy | SemApps/WebACL path exists | Direct persistence/application-visible privacy evidence |
 | Persistence | SemApps side effects + target-specific proofs | Shared replay/idempotency-aware assertions |
-| App consumption | LDP/JSON-LD + ActivityPods feature APIs | **One explicit versioned semantic assertion model** |
+| App consumption | LDP/JSON-LD + ActivityPods feature APIs | Continue semantic contract coverage |
 
 ## Remaining gaps
 
-### G1 — No single shared semantic assertion model
+### G1 — Semantic assertion coverage still needs expansion
 
-Existing assertions need one small versioned contract defining which semantic facts are comparable and which boundary produced them.
+The versioned assertion contract exists on companion work, but existing and future implementation lanes still need to project all relevant evidence into it consistently.
 
-### G2 — Service-actor signed-fetch routing is inconsistent
+### G2 — Real ActivityPods internal-signing federation proof is still required
 
-Fedify delivery can sign sidecar service actors locally, while replies backfill and origin reconciliation currently use ActivityPods `SigningClient` for relay-authenticated GETs. Resolve this before claiming runtime-wide service-actor signer separation.
+Unit and smoke evidence establish routing and signature behavior. Before this signing work is considered complete, run federation with a real ActivityPods internal signing API and prove both modes:
 
-### G3 — `fedify-v2` is an overloaded trusted-envelope marker
+- sidecar enabled: ActivityPods pod/user signing crosses the internal signing API while sidecar service actors remain locally signed;
+- sidecar disabled: native ActivityPods/SemApps federation still works independently.
 
-It cannot serve as verifier provenance. Split or supplement it with explicit producer/verifier metadata, and keep test evidence independent from that overloaded field.
+This is an explicit completion gate, not an inferred result from unit tests.
 
-### G4 — Synthetic origin/backfill actor claims are not authenticated by equality alone
+### G3 — `fedify-v2` remains an overloaded storage marker
 
-The producer currently copies a fetched actor/attribution claim into both the synthetic activity and its verification metadata. Equality downstream therefore cannot prove the actor. Define and enforce the correct origin/authority policy before allowing these paths to claim authenticated actor evidence.
+The queue-boundary repair prevents synthetic reconciliation/backfill from exploiting it as authenticated actor provenance, but the stored field is still unsuitable as the semantic model's verifier identity. Tests must continue to rely on explicit entry-point/runtime evidence.
+
+### G4 — Synthetic origin/backfill needs a deliberately non-authoritative product path if retained
+
+The security repair correctly fails these synthetic envelopes before the trusted ActivityPods bridge. If product behavior still needs fetched reconciliation/backfill material, introduce a separate non-authoritative hydration/parser path rather than weakening wire authentication.
 
 ### G5 — No universal strict ActivityStreams schema gate
 
@@ -285,27 +289,15 @@ External blind-address sanitization does not establish native/local persistence 
 
 GoToSocial, Mastodon, and Akkoma should project into the shared model while retaining target-specific diagnostics.
 
-The expansion set is **non-exhaustive and additive**. It includes the active phase's already-required implementation families—**WordPress ActivityPub, Lemmy/PieFed, and Mobilizon**—plus the newly requested **Bonfire, Castopod, Emissary/Bandwagon, Friendica, Funkwhale, Ghost ActivityPub, Loops, Owncast, PeerTube, Pixelfed, Misskey, Vernissage**, and the **Write.as family**. Where the exact service is hosted-only, a local open-source relative such as WriteFreely may provide local dialect coverage but must not be mislabeled as exact Write.as conformance. **Micro.blog** and exact hosted **Write.as** remain fixture/explicit opt-in external-conformance targets rather than required public-internet CI dependencies.
+The expansion set is non-exhaustive and additive. It includes the active phase's already-required implementation families—**WordPress ActivityPub, Lemmy/PieFed, and Mobilizon**—plus **Bonfire, Castopod, Emissary/Bandwagon, Friendica, Funkwhale, Ghost ActivityPub, Loops, Owncast, PeerTube, Pixelfed, Misskey, Vernissage**, and the **Write.as family**. Where the exact service is hosted-only, a local open-source relative such as WriteFreely may provide local dialect coverage but must not be mislabeled as exact Write.as conformance. **Micro.blog** and exact hosted **Write.as** remain fixture/explicit opt-in external-conformance targets rather than required public-internet CI dependencies.
 
-The target taxonomy in `ACTIVITYPUB-INTEROPERABILITY-HARDENING.md` continues to govern any additional required families not repeated here.
-
-## Established invariants, not gaps
-
-- SemApps middleware `1.1.4` has an identifiable upstream release commit; the installed/patched runtime is executable authority.
-- ActivityPods owns private keys/signing authority for ActivityPods pod/user actors.
-- Fedify adapter delivery has an explicit sidecar-local signer for configured sidecar service actors; this is not yet generalized to every signed-fetch path.
-- actual Fedify wire verification and sidecar-native verification are real ingress modes; `source: "fedify-v2"` alone is not verifier proof.
-- actor equality checks preserve an already-established principal but do not create one for self-claimed synthetic data.
-- local GoToSocial/Mastodon/Akkoma interoperability testing already exists.
-- APDM external Delivery Plan privacy guarantees must not be generalized to native/local persistence.
+`ACTIVITYPUB-INTEROPERABILITY-HARDENING.md` continues to govern any additional required families not repeated here.
 
 ## Ordered next work
 
-1. Close the two newly identified authority inconsistencies: service-actor signed-fetch routing and synthetic-origin actor provenance.
-2. Define the stable **semantic interoperability assertion model**.
-3. Project the existing GoToSocial/Mastodon/Akkoma proofs into it.
-4. Expand the local real-implementation matrix in validated batches, preserving every family required by the active phase and adding the new targets above.
-5. Pin official versions/commits and retain local-only CI for required lanes.
-6. Add hosted-only dialect evidence as fixtures or explicit opt-in external conformance, never required public-internet CI.
+1. run the real ActivityPods federation proof with sidecar enabled and disabled;
+2. project that evidence into the versioned semantic assertion contract;
+3. keep native/local privacy evidence separate from external-delivery evidence;
+4. expand the existing local implementation harness without introducing public-internet CI dependencies.
 
 No new production DTO is implied.
