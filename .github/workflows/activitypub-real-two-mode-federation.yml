@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      ACTIVITYPODS_SHA: 'fc015ab1e9d9e455c1eeb6c57eced7587d9d5e2c'
+      ACTIVITYPODS_SHA: '37c96839eae87647ac2a157737ec6e75cfc22bf9'
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       MASTODON_USERNAME: interop
@@ -57,6 +57,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${EVIDENCE_DIR}"
+          printf '{"schema":"activitypods.activitypub.real-two-mode-run.v1","started":true,"activityPodsSha":"%s","federationSha":"%s"}\n' \
+            "${ACTIVITYPODS_SHA}" "${GITHUB_SHA}" > "${EVIDENCE_DIR}/run-started.json"
           activitypods_token="$(openssl rand -hex 32)"
           sidecar_token="$(openssl rand -hex 32)"
           password_verify_token="$(openssl rand -hex 32)"
@@ -67,7 +69,6 @@ jobs:
             echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
             echo "SIDECAR_TOKEN=${sidecar_token}"
             echo "ATPROTO_PASSWORD_VERIFY_TOKEN=${password_verify_token}"
-            echo "NODE_EXTRA_CA_CERTS=${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/runtime/certs/rootCA.crt"
           } >> "$GITHUB_ENV"
 
       - name: Install federation sidecar dependencies
@@ -89,6 +90,7 @@ jobs:
           fedify-sidecar/interop/ap/scripts/generate-certs.sh
           fedify-sidecar/interop/ap/scripts/prepare-mastodon-env.sh
           echo '127.0.0.1 mastodon' | sudo tee -a /etc/hosts >/dev/null
+          echo "NODE_EXTRA_CA_CERTS=${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/runtime/certs/rootCA.crt" >> "$GITHUB_ENV"
 
       - name: Start real ActivityPods data services
         working-directory: activitypods/pod-provider
