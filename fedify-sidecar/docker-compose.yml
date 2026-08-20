@@ -21,7 +21,7 @@ x-media-pipeline-sidecar-base: &media_pipeline_sidecar_base
     - S3_ACCESS_KEY_ID=${MEDIA_PIPELINE_S3_ACCESS_KEY_ID:-}
     - S3_SECRET_ACCESS_KEY=${MEDIA_PIPELINE_S3_SECRET_ACCESS_KEY:-}
     - S3_PUBLIC_BASE_URL=${MEDIA_PIPELINE_S3_PUBLIC_BASE_URL:-}
-    - CLOUDFLARE_MEDIA_DOMAIN=${CLOUDFLARE_MEDIA_DOMAIN:-}
+    - CLOUDFLARE_MEDIA_DOMAIN=${MEDIA_PIPELINE_CLOUDFLARE_MEDIA_DOMAIN:-}
     - SAFE_BROWSING_API_KEY=${SAFE_BROWSING_API_KEY:-}
     - GOOGLE_VISION_API_KEY=${GOOGLE_VISION_API_KEY:-}
     - GOOGLE_VIDEO_ACCESS_TOKEN=${GOOGLE_VIDEO_ACCESS_TOKEN:-}
@@ -308,7 +308,8 @@ services:
       - OPENSEARCH_HOSTS=["http://opensearch:9200"]
       - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
     depends_on:
-      - opensearch
+      opensearch:
+        condition: service_healthy
     networks:
       - activitypods-network
 
@@ -348,6 +349,7 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
     networks:
