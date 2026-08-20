@@ -188,7 +188,7 @@ jobs:
             exit 1
           fi
           log="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-native.log"
-          yarn start > "${log}" 2>&1 &
+          "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
           echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-native.pid"
           pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-native.pid")"
           ready=false
@@ -346,7 +346,7 @@ jobs:
         run: |
           set -euo pipefail
           log="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.log"
-          yarn start > "${log}" 2>&1 &
+          "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
           echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.pid"
           pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.pid")"
           ready=false
