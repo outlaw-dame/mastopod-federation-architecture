@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getInteropTarget } from "./InteropTargetRegistry.js";
 
 export const AP_INTEROP_ASSERTION_VERSION = "ap-interop-semantic-v1" as const;
 
@@ -83,11 +84,6 @@ export const SemanticOutcomeSchema = z.enum([
   "not_executed",
 ]);
 
-const HttpUrlSchema = z.string().url().refine((value) => {
-  const protocol = new URL(value).protocol;
-  return protocol === "http:" || protocol === "https:";
-}, "expected an HTTP(S) URL");
-
 const SemanticIdentitySchema = z.object({
   id: z.string().min(1).optional(),
   types: z.array(z.string().min(1)).min(1),
@@ -141,6 +137,7 @@ export const SemanticInteropAssertionSchema = z.object({
   schemaVersion: z.literal(AP_INTEROP_ASSERTION_VERSION),
   caseId: z.string().min(1).regex(/^[a-z0-9][a-z0-9._-]*$/),
   software: z.object({
+    targetId: z.string().min(1),
     family: z.string().min(1),
     version: z.string().min(1),
     implementation: z.string().min(1).optional(),
@@ -158,6 +155,21 @@ export const SemanticInteropAssertionSchema = z.object({
   notes: z.array(z.string().min(1)).default([]),
 }).strict().superRefine((value, ctx) => {
   const boundarySet = new Set(value.evidence.boundariesExecuted);
+  const governedTarget = getInteropTarget(value.software.targetId);
+
+  if (!governedTarget || governedTarget.id !== value.software.targetId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["software", "targetId"],
+      message: "software.targetId must be a canonical governed ActivityPub interoperability target id",
+    });
+  } else if (governedTarget.family !== value.software.family) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["software", "family"],
+      message: `software family must match governed target ${governedTarget.id}: ${governedTarget.family}`,
+    });
+  }
 
   if (
     value.evidence.entryPoint === "wire_fedify" &&
@@ -182,6 +194,17 @@ export const SemanticInteropAssertionSchema = z.object({
   }
 
   if (
+    value.evidence.entryPoint === "trusted_activitypods_bridge" &&
+    value.evidence.transportAuthentication !== "trusted_internal"
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidence", "transportAuthentication"],
+      message: "trusted ActivityPods bridge evidence requires trusted-internal authentication provenance",
+    });
+  }
+
+  if (
     (value.evidence.entryPoint === "trusted_synthetic_reconciliation" ||
       value.evidence.entryPoint === "trusted_synthetic_backfill") &&
     value.evidence.actorProvenance === "authenticated"
@@ -191,6 +214,28 @@ export const SemanticInteropAssertionSchema = z.object({
       path: ["evidence", "actorProvenance"],
       message: "synthetic reconciliation/backfill cannot claim authenticated actor provenance without a separate verifier boundary",
     });
+  }
+
+  if (value.evidence.actorProvenance === "authenticated") {
+    const authenticatedWire =
+      (value.evidence.entryPoint === "wire_fedify" &&
+        value.evidence.transportAuthentication === "fedify_http_signature" &&
+        boundarySet.has("wire_authentication")) ||
+      (value.evidence.entryPoint === "wire_native" &&
+        value.evidence.transportAuthentication === "native_http_signature" &&
+        boundarySet.has("wire_authentication"));
+    const preservingBridge =
+      value.evidence.entryPoint === "trusted_activitypods_bridge" &&
+      value.evidence.transportAuthentication === "trusted_internal" &&
+      boundarySet.has("trusted_handoff");
+
+    if (!authenticatedWire && !preservingBridge) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["evidence", "actorProvenance"],
+        message: "authenticated actor provenance requires an executed compatible wire-authentication boundary or preserving trusted ActivityPods handoff",
+      });
+    }
   }
 
   if (
@@ -212,6 +257,14 @@ export const SemanticInteropAssertionSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["evidence", "actorAuthorityClass"],
       message: "sidecar-local signing is valid only for explicit sidecar service actors",
+    });
+  }
+
+  if (value.authorizationOutcome !== "not_executed" && !boundarySet.has("authority_policy")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["authorizationOutcome"],
+      message: "authorization outcomes require the authority_policy boundary to execute",
     });
   }
 
@@ -245,24 +298,20 @@ export const SemanticInteropAssertionSchema = z.object({
     });
   }
 
-  if (!value.persistence.attempted && value.persistence.persisted !== undefined) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["persistence", "persisted"],
-      message: "persisted cannot be asserted when persistence was not attempted",
-    });
-  }
-
-  if (
-    value.evidence.actorProvenance === "authenticated" &&
-    value.evidence.transportAuthentication === "none" &&
-    value.evidence.entryPoint !== "trusted_activitypods_bridge"
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["evidence", "actorProvenance"],
-      message: "authenticated actor provenance needs an authentication boundary or a preserving trusted bridge",
-    });
+  if (!value.persistence.attempted) {
+    const claimedFields = [
+      value.persistence.persisted,
+      value.persistence.idempotentReplayObserved,
+      value.persistence.applicationVisible,
+      value.persistence.targetRepresentation,
+    ];
+    if (claimedFields.some((field) => field !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["persistence"],
+        message: "persistence-dependent results cannot be asserted when persistence was not attempted",
+      });
+    }
   }
 });
 
