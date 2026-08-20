@@ -2,9 +2,12 @@
  * Signing Client for ActivityPods Signing API
  *
  * Calls ActivityPods' `signing.signHttpRequestsBatch` REST endpoint to obtain
- * HTTP Signatures for outbound federation requests.  Private keys NEVER leave
- * ActivityPods — the sidecar supplies the request metadata and receives back
- * the ready-to-use signed headers.
+ * HTTP Signatures for outbound federation requests. Private keys for
+ * ActivityPods-owned pod/user actors NEVER leave ActivityPods. When Fedify
+ * runtime integration is enabled, `createSigningClient()` additionally routes
+ * the exact configured sidecar relay/service actor through the sidecar-local
+ * signer for `signOne` remote-fetch requests. No cross-authority fallback is
+ * permitted.
  *
  * Wire contract (ActivityPods signing.service.js):
  *   POST /api/internal/signatures/batch
@@ -34,6 +37,7 @@
  *   - Token-empty startup warning
  */
 
+import { Redis } from "ioredis";
 import { request } from "undici";
 import { logger } from "../utils/logger.js";
 import type {
@@ -44,6 +48,8 @@ import type {
   GetAtprotoPublicKeyRequest,
   GetAtprotoPublicKeyResponse,
 } from "../core-domain/contracts/SigningContracts.js";
+import { ActorAuthoritySigningRouter } from "./ActorAuthoritySigningRouter.js";
+import { SidecarLocalSigningService } from "./SidecarLocalSigningService.js";
 
 // ============================================================================
 // Public types  (used by outbound-worker.ts and tests)
@@ -246,7 +252,7 @@ export class SigningClient {
 
   /**
    * Returns true when the error represents a permanent failure that should
-   * NOT be retried (move to DLQ immediately).  Uses the server-authoritative
+   * NOT be retried (move to DLQ immediately). Uses the server-authoritative
    * `retryable` flag propagated from ActivityPods' signing service.
    */
   static isPermanentError(result: SignErrorResult): boolean {
@@ -294,7 +300,6 @@ export class SigningClient {
   async getAtprotoPublicKey(
     req: GetAtprotoPublicKeyRequest
   ): Promise<GetAtprotoPublicKeyResponse> {
-    // GET with query params
     const qs = `?canonicalAccountId=${encodeURIComponent(req.canonicalAccountId)}&purpose=${encodeURIComponent(req.purpose)}`;
     return this._callAtprotoEndpoint<GetAtprotoPublicKeyResponse>(
       "GET",
@@ -388,7 +393,6 @@ export class SigningClient {
   // --------------------------------------------------------------------------
 
   private async _signChunk(requests: SignRequest[]): Promise<SignResult[]> {
-    // --- Phase 1: transform + pre-screen each request ---
     const apItems: ApSigningItem[] = [];
     const earlyErrors: SignResult[] = [];
 
@@ -415,15 +419,13 @@ export class SigningClient {
 
     if (apItems.length === 0) return earlyErrors;
 
-    // --- Phase 2: call ActivityPods with exponential back-off + jitter ---
     const url = `${this.config.baseUrl}/api/internal/signatures/batch`;
     let lastErr: Error | null = null;
 
     for (let attempt = 0; attempt < this.config.maxRetries; attempt++) {
       if (attempt > 0) {
-        // Exponential back-off: base * 2^(attempt-1), capped at 30 s, ±10 % jitter
         const base = this.config.retryDelayMs * Math.pow(2, attempt - 1);
-        const jitter = base * (Math.random() * 0.2 - 0.1); // -10 % … +10 %
+        const jitter = base * (Math.random() * 0.2 - 0.1);
         await this._sleep(Math.min(base + jitter, 30_000));
       }
 
@@ -439,7 +441,6 @@ export class SigningClient {
           headersTimeout: this.config.timeoutMs,
         });
 
-        // --- Auth failures — permanent, do not retry ---
         if (res.statusCode === 401 || res.statusCode === 403) {
           const body = await res.body.text();
           logger.error("Signing API: authentication failure", {
@@ -452,19 +453,17 @@ export class SigningClient {
           ];
         }
 
-        // --- Rate-limited — wait Retry-After then retry ---
         if (res.statusCode === 429) {
           const retryAfter = parseInt(
             (res.headers["retry-after"] as string) || "5",
             10
           );
           logger.warn("Signing API: rate limited", { retryAfter, attempt });
-          await res.body.text(); // consume to free connection
+          await res.body.text();
           await this._sleep(retryAfter * 1_000);
           continue;
         }
 
-        // --- Server errors (5xx) — transient, back-off and retry ---
         if (res.statusCode >= 500) {
           const body = await res.body.text();
           logger.warn("Signing API: server error", {
@@ -475,7 +474,6 @@ export class SigningClient {
           continue;
         }
 
-        // --- Other non-2xx client errors — permanent ---
         if (res.statusCode < 200 || res.statusCode >= 300) {
           const body = await res.body.text();
           logger.error("Signing API: unexpected client error", {
@@ -496,13 +494,11 @@ export class SigningClient {
           ];
         }
 
-        // --- Success: parse + remap ---
         const parsed = (await res.body.json()) as ApSignBatchResponse;
         if (!Array.isArray(parsed?.results)) {
           logger.error("Signing API: malformed response (missing results array)", {
             parsed,
           });
-          // Treat as transient — the service may be mid-deploy
           continue;
         }
 
@@ -536,12 +532,10 @@ export class SigningClient {
           continue;
         }
 
-        // Unexpected error — escalate immediately
         throw err;
       }
     }
 
-    // All retries exhausted
     const lastErrMessage = this._getErrorMessage(lastErr, "Signing API unavailable");
     logger.error("Signing API: unavailable after retries", {
       attempts: this.config.maxRetries,
@@ -561,15 +555,6 @@ export class SigningClient {
     ];
   }
 
-  // --------------------------------------------------------------------------
-  // Request transformation  (public SignRequest → ActivityPods wire format)
-  // --------------------------------------------------------------------------
-
-  /**
-   * Transforms one `SignRequest` into an `ApSigningItem`.
-   * Returns `{ _earlyError: SignErrorResult }` on validation failure so the
-   * caller can collect it without throwing.
-   */
   private _toApItem(
     req: SignRequest
   ): ApSigningItem | { _earlyError: SignErrorResult } {
@@ -581,12 +566,10 @@ export class SigningClient {
       },
     });
 
-    // actorUri — must be a non-empty string (validated as URL by ActivityPods)
     if (!req.actorUri || typeof req.actorUri !== "string") {
       return fail("actorUri is required");
     }
 
-    // targetUrl — must parse as http(s) URL
     let parsed: URL;
     try {
       parsed = new URL(req.targetUrl);
@@ -599,8 +582,6 @@ export class SigningClient {
 
     const method = req.method.toUpperCase() as "GET" | "POST";
     const isPost = method === "POST";
-
-    // Select signing profile based on HTTP method
     const profile: SignProfile = isPost ? "ap_post_v1" : "ap_get_v1";
 
     const item: ApSigningItem = {
@@ -609,7 +590,6 @@ export class SigningClient {
       method,
       profile,
       target: {
-        // parsed.host includes port when non-standard (e.g. "mastodon.social:8443")
         host: parsed.host,
         path: parsed.pathname,
         query: parsed.search || "",
@@ -624,10 +604,6 @@ export class SigningClient {
     return item;
   }
 
-  // --------------------------------------------------------------------------
-  // Response remapping  (ActivityPods wire format → public SignResult)
-  // --------------------------------------------------------------------------
-
   private _fromApResult(ap: ApSignResult): SignResult {
     if (!ap.ok) {
       const e = (ap as ApSignErrorResult).error;
@@ -637,7 +613,6 @@ export class SigningClient {
         error: {
           code: this._mapErrorCode(e?.code),
           message: e?.message ?? "Signing failed",
-          // Authoritative retryability from the signing service
           retryable: e?.retryable ?? false,
         },
       };
@@ -646,7 +621,6 @@ export class SigningClient {
     const success = ap as ApSignSuccessResult;
     const out = success.outHeaders;
 
-    // Guard: ActivityPods should never return ok=true without Signature+Date
     if (!out?.Signature || !out?.Date) {
       logger.error(
         "Signing API returned ok=true but missing Signature or Date",
@@ -666,7 +640,6 @@ export class SigningClient {
     const result: SignSuccessResult = {
       requestId: ap.requestId,
       ok: true,
-      // Normalise to lowercase field names expected by outbound-worker.ts
       signedHeaders: {
         date: out.Date,
         signature: out.Signature,
@@ -685,10 +658,6 @@ export class SigningClient {
     return result;
   }
 
-  /**
-   * Map ActivityPods error codes to our public `SigningErrorCode` enum.
-   * Unknown codes fall back to INTERNAL_ERROR (safest default).
-   */
   private _mapErrorCode(apCode: string | undefined): SigningErrorCode {
     const map: Record<string, SigningErrorCode> = {
       ACTOR_NOT_LOCAL:     "ACTOR_NOT_LOCAL",
@@ -705,10 +674,6 @@ export class SigningClient {
     };
     return map[apCode ?? ""] ?? "INTERNAL_ERROR";
   }
-
-  // --------------------------------------------------------------------------
-  // Helpers
-  // --------------------------------------------------------------------------
 
   private _authFailedResult(requestId: string): SignErrorResult {
     return {
@@ -745,12 +710,41 @@ export function createSigningClient(
     baseUrl:      process.env["ACTIVITYPODS_URL"]   ?? "http://localhost:3000",
     token:        process.env["ACTIVITYPODS_TOKEN"]  ?? "",
     maxBatchSize: 200,
-    maxBodyBytes: 512 * 1024,   // 512 KB — matches ActivityPods default
+    maxBodyBytes: 512 * 1024,
     timeoutMs:    30_000,
-    maxRetries:   4,            // 1 initial + 3 retries → back-off: 1 s, 2 s, 4 s
+    maxRetries:   4,
     retryDelayMs: 1_000,
     ...overrides,
   };
 
-  return new SigningClient(config);
+  const client = new SigningClient(config);
+
+  // Remote-fetch helpers (replies backfill/origin reconciliation) use signOne.
+  // When Fedify runtime integration is enabled, the relay identity is a
+  // sidecar-owned service actor. Route that exact IRI to the sidecar-local key
+  // while leaving batch signing and every non-service actor under ActivityPods.
+  if (process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true") {
+    const domain = process.env["DOMAIN"] ?? "localhost";
+    const relayActorUri = process.env["AP_RELAY_LOCAL_ACTOR_URI"] ?? `https://${domain}/users/relay`;
+    const localSigningRedis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379");
+    localSigningRedis.on("error", (err: Error) =>
+      logger.error("Authority-aware signing Redis error", { error: err.message }),
+    );
+    const localSigningService = new SidecarLocalSigningService(localSigningRedis);
+    const activityPodsSignOne = client.signOne.bind(client);
+    const router = new ActorAuthoritySigningRouter(
+      { signOne: activityPodsSignOne },
+      localSigningService,
+      {
+        sidecarServiceActors: [{ actorUri: relayActorUri, identifier: "relay" }],
+      },
+    );
+
+    client.signOne = router.signOne.bind(router);
+    logger.info("SigningClient: authority-aware signOne routing enabled", {
+      sidecarServiceActor: relayActorUri,
+    });
+  }
+
+  return client;
 }
