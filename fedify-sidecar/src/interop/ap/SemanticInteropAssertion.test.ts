@@ -9,8 +9,9 @@ function validAssertion() {
     schemaVersion: AP_INTEROP_ASSERTION_VERSION,
     caseId: "mastodon.follow-accept.roundtrip",
     software: {
+      targetId: "mastodon",
       family: "Mastodon",
-      version: "fixture-pin",
+      version: "v4.5.8",
     },
     direction: "round_trip" as const,
     evidence: {
@@ -59,6 +60,30 @@ describe("SemanticInteropAssertion", () => {
     expect(SemanticInteropAssertionSchema.safeParse(validAssertion()).success).toBe(true);
   });
 
+  it("requires a canonical governed target identity", () => {
+    const candidate = validAssertion();
+    candidate.software.targetId = "write.as";
+    candidate.software.family = "Write.as";
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("canonical governed"))).toBe(true);
+    }
+  });
+
+  it("prevents WriteFreely evidence from being relabeled as Write.as", () => {
+    const candidate = validAssertion();
+    candidate.software.targetId = "writefreely";
+    candidate.software.family = "Write.as";
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("family must match governed target"))).toBe(true);
+    }
+  });
+
   it("does not accept the overloaded fedify-v2 concept as Fedify wire proof", () => {
     const candidate = validAssertion();
     candidate.evidence.transportAuthentication = "trusted_internal" as any;
@@ -67,6 +92,22 @@ describe("SemanticInteropAssertion", () => {
     expect(parsed.success).toBe(false);
     if (!parsed.success) {
       expect(parsed.error.issues.some((issue) => issue.message.includes("Fedify HTTP-signature"))).toBe(true);
+    }
+  });
+
+  it("forbids parser-only evidence from claiming authenticated actor provenance", () => {
+    const candidate = validAssertion();
+    candidate.direction = "semantic_only";
+    candidate.evidence.entryPoint = "parser_semantic_only" as any;
+    candidate.evidence.transportAuthentication = "benchmark_token" as any;
+    candidate.evidence.boundariesExecuted = ["activitystreams_structure", "jsonld_semantics"] as any;
+    candidate.authorizationOutcome = "not_executed";
+    candidate.persistence = { attempted: false };
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("executed compatible wire-authentication"))).toBe(true);
     }
   });
 
@@ -109,6 +150,19 @@ describe("SemanticInteropAssertion", () => {
     }
   });
 
+  it("requires authority_policy before reporting an authorization decision", () => {
+    const candidate = validAssertion();
+    candidate.evidence.boundariesExecuted = candidate.evidence.boundariesExecuted.filter(
+      (boundary) => boundary !== "authority_policy",
+    ) as any;
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("authority_policy"))).toBe(true);
+    }
+  });
+
   it("keeps external delivery privacy separate from native/local persistence privacy", () => {
     const candidate = validAssertion();
     candidate.visibility.nativeLocalBlindFieldsPresent = false;
@@ -122,15 +176,33 @@ describe("SemanticInteropAssertion", () => {
 
   it("does not allow persistence claims from parser-only evidence", () => {
     const candidate = validAssertion();
+    candidate.direction = "semantic_only";
     candidate.evidence.entryPoint = "parser_semantic_only" as any;
     candidate.evidence.transportAuthentication = "none" as any;
     candidate.evidence.actorProvenance = "self_claimed" as any;
     candidate.evidence.boundariesExecuted = ["activitystreams_structure", "jsonld_semantics"] as any;
+    candidate.authorizationOutcome = "not_executed";
 
     const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
     expect(parsed.success).toBe(false);
     if (!parsed.success) {
       expect(parsed.error.issues.some((issue) => issue.message.includes("persistence evidence"))).toBe(true);
+    }
+  });
+
+  it("rejects every persistence-dependent result when no persistence attempt occurred", () => {
+    const candidate = validAssertion();
+    candidate.persistence = {
+      attempted: false,
+      applicationVisible: true,
+      idempotentReplayObserved: true,
+      targetRepresentation: "row",
+    } as any;
+
+    const parsed = SemanticInteropAssertionSchema.safeParse(candidate);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.message.includes("persistence-dependent"))).toBe(true);
     }
   });
 });
