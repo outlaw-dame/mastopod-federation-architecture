@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      ACTIVITYPODS_SHA: '37c96839eae87647ac2a157737ec6e75cfc22bf9'
+      ACTIVITYPODS_SHA: '56f0ac2e8c7eb8f908fdc7bf2331f7d5545d2140'
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       MASTODON_USERNAME: interop
@@ -165,7 +165,6 @@ jobs:
         working-directory: activitypods/pod-provider/backend
         shell: bash
         env:
-          NODE_ENV: test
           SEMAPPS_HOME_URL: https://activitypods/
           SEMAPPS_PORT: '3000'
           SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
@@ -326,7 +325,6 @@ jobs:
         working-directory: activitypods/pod-provider/backend
         shell: bash
         env:
-          NODE_ENV: test
           SEMAPPS_HOME_URL: https://activitypods/
           SEMAPPS_PORT: '3000'
           SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
