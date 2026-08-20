@@ -27,7 +27,7 @@ describe("ActorAuthoritySigningRouter", () => {
   it("routes the configured relay service actor only to the sidecar-local signer", async () => {
     const pods = activityPodsSigner();
     const local = sidecarSigner();
-    const router = new ActorAuthoritySigningRouter(pods as any, local as any, {
+    const router = new ActorAuthoritySigningRouter(pods, local as any, {
       sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
     });
 
@@ -52,7 +52,7 @@ describe("ActorAuthoritySigningRouter", () => {
   it("routes non-service actors only to ActivityPods", async () => {
     const pods = activityPodsSigner();
     const local = sidecarSigner();
-    const router = new ActorAuthoritySigningRouter(pods as any, local as any, {
+    const router = new ActorAuthoritySigningRouter(pods, local as any, {
       sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
     });
 
@@ -76,7 +76,7 @@ describe("ActorAuthoritySigningRouter", () => {
         throw new Error("redis key store unavailable");
       }),
     };
-    const router = new ActorAuthoritySigningRouter(pods as any, local as any, {
+    const router = new ActorAuthoritySigningRouter(pods, local as any, {
       sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
     });
 
@@ -95,14 +95,39 @@ describe("ActorAuthoritySigningRouter", () => {
     expect(pods.signOne).not.toHaveBeenCalled();
   });
 
-  it("normalizes only harmless trailing slashes and rejects ambiguous actor URIs", () => {
+  it("keeps trailing-slash-distinct actor IRIs in different authority domains", async () => {
     const pods = activityPodsSigner();
     const local = sidecarSigner();
-    const router = new ActorAuthoritySigningRouter(pods as any, local as any, {
+    const router = new ActorAuthoritySigningRouter(pods, local as any, {
       sidecarServiceActors: [{ actorUri: "https://example.com/users/relay/", identifier: "relay" }],
     });
 
-    expect(router.classifyActor("https://example.com/users/relay")).toBe("sidecar_service_actor");
+    expect(router.classifyActor("https://example.com/users/relay/")).toBe("sidecar_service_actor");
+    expect(router.classifyActor("https://example.com/users/relay")).toBe("activitypods_pod_actor");
+
+    await router.signOne({
+      actorUri: "https://example.com/users/relay",
+      method: "GET",
+      targetUrl: "https://remote.example/objects/1",
+    });
+    expect(pods.signOne).toHaveBeenCalledOnce();
+    expect(local.signHttpRequest).not.toHaveBeenCalled();
+  });
+
+  it("does not collapse dot-segment spellings into configured actor identity", () => {
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
+    });
+
+    expect(router.classifyActor("https://example.com/users/a/../relay")).toBe("activitypods_pod_actor");
+  });
+
+  it("rejects authority-ambiguous actor URI shapes", () => {
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
+    });
+
+    expect(() => router.classifyActor(" https://example.com/users/relay")).toThrow(/exact URI/u);
     expect(() => router.classifyActor("https://example.com/users/relay?as=alice")).toThrow(/query/u);
     expect(() => router.classifyActor("did:example:relay")).toThrow(/protocol/u);
   });
