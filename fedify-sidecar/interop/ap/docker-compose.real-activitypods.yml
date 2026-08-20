@@ -13,7 +13,9 @@ services:
       ap-interop:
         aliases:
           - activitypods
+          - gotosocial
           - mastodon
+          - akkoma
 
   # Optional containerized sidecar override for manual real-ActivityPods runs.
   # The authoritative two-mode CI proof starts the sidecar on the host instead,
