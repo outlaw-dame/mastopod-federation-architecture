@@ -89,7 +89,7 @@ jobs:
           set -euo pipefail
           fedify-sidecar/interop/ap/scripts/generate-certs.sh
           fedify-sidecar/interop/ap/scripts/prepare-mastodon-env.sh
-          echo '127.0.0.1 mastodon' | sudo tee -a /etc/hosts >/dev/null
+          echo '127.0.0.1 mastodon activitypods' | sudo tee -a /etc/hosts >/dev/null
           echo "NODE_EXTRA_CA_CERTS=${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/runtime/certs/rootCA.crt" >> "$GITHUB_ENV"
 
       - name: Start real ActivityPods data services
