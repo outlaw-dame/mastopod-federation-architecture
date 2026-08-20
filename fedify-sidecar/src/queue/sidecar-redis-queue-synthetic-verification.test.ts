@@ -40,16 +40,17 @@ describe("stripUnverifiedSyntheticVerification", () => {
     expect(result.verification).toBeUndefined();
   });
 
-  it("preserves genuine Fedify verification metadata", () => {
+  it("removes wire-verification trust from authenticated benchmark injection", () => {
+    const result = stripUnverifiedSyntheticVerification(
+      envelope({ "x-sidecar-benchmark": "1" }),
+    );
+    expect(result.verification).toBeUndefined();
+  });
+
+  it("preserves genuine Fedify wire verification metadata", () => {
     const original = envelope({ "content-type": "application/activity+json" });
     const result = stripUnverifiedSyntheticVerification(original);
     expect(result).toBe(original);
-    expect(result.verification?.source).toBe("fedify-v2");
-  });
-
-  it("preserves the explicitly authenticated benchmark marker", () => {
-    const original = envelope({ "x-sidecar-benchmark": "1" });
-    const result = stripUnverifiedSyntheticVerification(original);
     expect(result.verification?.source).toBe("fedify-v2");
   });
 });
