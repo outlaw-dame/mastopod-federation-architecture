@@ -1,0 +1,25 @@
+services:
+  ap-proxy:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./caddy/Caddyfile.real-activitypods:/etc/caddy/Caddyfile:ro
+      - ./runtime/certs:/certs:ro
+    ports:
+      - "127.0.0.1:443:443"
+    networks:
+      ap-interop:
+        aliases:
+          - activitypods
+
+  fedify-sidecar:
+    environment:
+      ACTIVITYPODS_URL: http://host.docker.internal:3001
+      ACTIVITYPODS_TOKEN: ${ACTIVITYPODS_TOKEN:?ACTIVITYPODS_TOKEN is required}
+      ATPROTO_PASSWORD_VERIFY_TOKEN: ${ATPROTO_PASSWORD_VERIFY_TOKEN:-}
+      DOMAIN: activitypods
+      AP_RELAY_LOCAL_ACTOR_URI: https://activitypods/users/relay
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8080:8080"
