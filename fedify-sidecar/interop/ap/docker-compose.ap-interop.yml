@@ -126,7 +126,7 @@ services:
       - ap-interop
 
   gotosocial-app:
-    image: superseriousbusiness/gotosocial:v0.22.0
+    image: superseriousbusiness/gotosocial:0.21.3
     command: ["/gotosocial/gotosocial", "--config-path", "/gotosocial/config.yaml", "server", "start"]
     environment:
       SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
