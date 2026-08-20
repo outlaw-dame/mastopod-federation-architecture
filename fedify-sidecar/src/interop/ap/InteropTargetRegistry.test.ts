@@ -42,15 +42,17 @@ describe("ActivityPub interop target registry", () => {
     expect(() => assertInteropTargetRegistry()).not.toThrow();
   });
 
-  it("retains every family already required by the active hardening phase", () => {
+  it("retains every canonical family already required by the active hardening phase", () => {
+    const canonicalIds = new Set(AP_INTEROP_TARGETS.map((target) => target.id));
     for (const id of REQUIRED_ACTIVE_PHASE_FAMILIES) {
-      expect(getInteropTarget(id), `missing active-phase target ${id}`).toBeDefined();
+      expect(canonicalIds.has(id), `missing canonical active-phase target ${id}`).toBe(true);
     }
   });
 
   it("adds every newly requested platform without replacing the active-phase set", () => {
+    const canonicalIds = new Set(AP_INTEROP_TARGETS.map((target) => target.id));
     for (const id of REQUESTED_ADDITIONS) {
-      expect(getInteropTarget(id), `missing requested target ${id}`).toBeDefined();
+      expect(canonicalIds.has(id), `missing canonical requested target ${id}`).toBe(true);
     }
   });
 
