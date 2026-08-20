@@ -35,6 +35,21 @@ describe("SidecarLocalSigningService", () => {
     expect(redis.hashes.has("sidecar:local:keypair:moderation")).toBe(false);
   });
 
+  it("serializes concurrent first-use creation across service instances", async () => {
+    const redis = makeRedisStub();
+    const first = new SidecarLocalSigningService(redis as any);
+    const second = new SidecarLocalSigningService(redis as any);
+
+    const [firstKey, secondKey] = await Promise.all([
+      first.getOrCreateKeyPair("relay-concurrent"),
+      second.getOrCreateKeyPair("relay-concurrent"),
+    ]);
+
+    expect(secondKey).toEqual(firstKey);
+    expect(redis.hset).toHaveBeenCalledTimes(1);
+    expect(redis.hashes.get("sidecar:local:keypair:relay-concurrent")).toEqual(firstKey);
+  });
+
   it("keeps the alias actor URI in the HTTP Signature keyId", async () => {
     const redis = makeRedisStub();
     const service = new SidecarLocalSigningService(redis as any, {
