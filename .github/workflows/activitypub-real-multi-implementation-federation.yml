@@ -60,6 +60,7 @@ jobs:
             actor_uri: https://bonfire.test/@interop
             remote_version: Bonfire Social v1.0.6@53f5c428d94a84c0d442f6c842edd47d87321d88 image sha256:55084069242e4e09619081ca4f05102a8805325371003f79a5bc50d2e91dae05
     env:
+      FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ACTIVITYPODS_SHA: '2652eb2ecc81237938b7cb777b81fcb25833d8e9'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
@@ -78,6 +79,9 @@ jobs:
     steps:
       - name: Checkout federation architecture
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FEDERATION_SHA }}
+          persist-credentials: false
 
       - name: Checkout exact ActivityPods signing candidate
         uses: actions/checkout@v4
@@ -134,7 +138,7 @@ jobs:
             echo "BONFIRE_RELEASE_COOKIE=${bonfire_release_cookie}"
           } >> "$GITHUB_ENV"
           printf '{"schema":"activitypods.activitypub.real-multi-run.v1","target":"%s","activityPodsSha":"%s","federationSha":"%s"}\n' \
-            "${TARGET}" "${ACTIVITYPODS_SHA}" "${GITHUB_SHA}" > "${EVIDENCE_DIR}/run-started.json"
+            "${TARGET}" "${ACTIVITYPODS_SHA}" "${FEDERATION_SHA}" > "${EVIDENCE_DIR}/run-started.json"
 
       - name: Install dependencies
         shell: bash
@@ -415,7 +419,7 @@ jobs:
             target: process.env.TARGET,
             remoteVersion: process.env.REMOTE_VERSION,
             activityPodsSha: process.env.ACTIVITYPODS_SHA,
-            federationSha: process.env.GITHUB_SHA,
+            federationSha: process.env.FEDERATION_SHA,
             native: { actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, sidecarRunning: false },
             external: { actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds }
           };
