@@ -55,7 +55,7 @@ jobs:
             remote_version: Pixelfed v0.12.7@e33026a9e5334d2c124a7321f8b15d4329b8961f
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '252bd18c9cddfb9af2141f94ad9d2b2d9607882d'
+      ACTIVITYPODS_SHA: '4f337f8ba2d7cc1f0b2069dddace885b8255d80d'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -384,12 +384,17 @@ jobs:
             node scripts/activitypub-federation-follow-proof.js external "${TARGET_ACTOR_URI}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.log"
           tail -n 1 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.log" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json"
+          node - <<'NODE'
+          const fs = require('fs');
+          const v = JSON.parse(fs.readFileSync(process.env.GITHUB_WORKSPACE + '/' + process.env.EVIDENCE_DIR + '/external-origin.json', 'utf8'));
+          if (v.ok !== true || v.mode !== 'external' || v.durableHandoffQueued !== true || v.nativeRemotePostSuppressed !== true) process.exit(1);
+          NODE
           actor_uri="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json','utf8')).actorUri")"
           AP_INTEROP_COMPOSE_OVERLAY="${TARGET_COMPOSE_OVERLAY}" \
             sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-acceptance.json"
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs" \
-            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" "${actor_uri}" "${TARGET_HOST}" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${TARGET_HOST}" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-signing.json"
 
       - name: Build exact implementation evidence summary
@@ -406,7 +411,12 @@ jobs:
           const externalOrigin = JSON.parse(fs.readFileSync(`${root}/external-origin.json`, 'utf8'));
           const externalAcceptance = JSON.parse(fs.readFileSync(`${root}/external-acceptance.json`, 'utf8'));
           const signing = JSON.parse(fs.readFileSync(`${root}/external-signing.json`, 'utf8'));
-          if (!nativeOrigin.ok || !nativeAcceptance.ok || !externalOrigin.ok || !externalAcceptance.ok || !signing.ok) throw new Error('incomplete evidence');
+          if (!nativeOrigin.ok || !nativeAcceptance.ok || !externalAcceptance.ok || !signing.ok ||
+              externalOrigin.ok !== true || externalOrigin.mode !== 'external' ||
+              externalOrigin.durableHandoffQueued !== true || externalOrigin.nativeRemotePostSuppressed !== true ||
+              signing.activityId !== externalOrigin.activityId || signing.actorUri !== externalOrigin.actorUri) {
+            throw new Error('incomplete or invalid external-delivery evidence');
+          }
           const summary = {
             schema: 'activitypods.activitypub.real-multi-implementation.v1',
             complete: true,
@@ -415,7 +425,7 @@ jobs:
             activityPodsSha: process.env.ACTIVITYPODS_SHA,
             federationSha: process.env.FEDERATION_SHA,
             native: { actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, sidecarRunning: false },
-            external: { actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds }
+            external: { actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64 }
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
           console.log(JSON.stringify(summary, null, 2));

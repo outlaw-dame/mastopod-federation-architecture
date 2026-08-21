@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 120
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '252bd18c9cddfb9af2141f94ad9d2b2d9607882d'
+      ACTIVITYPODS_SHA: '4f337f8ba2d7cc1f0b2069dddace885b8255d80d'
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       MASTODON_USERNAME: interop
@@ -347,28 +347,9 @@ jobs:
 
           signing_ok=false
           for attempt in $(seq 1 30); do
-            if ACTOR_URI="${actor_uri}" node - <<'NODE'
-          const fs = require('fs');
-          const path = process.env.EVIDENCE_DIR + '/signing-api.jsonl';
-          const actor = process.env.ACTOR_URI;
-          const rows = fs.existsSync(path)
-            ? fs.readFileSync(path, 'utf8').split(/\n/u).filter(Boolean).map(line => JSON.parse(line))
-            : [];
-          const hit = rows.find(row => {
-            if (row.schema !== 'ap.real-signing-api-call.v1' || row.path !== '/api/internal/signatures/batch' || row.responseStatus !== 200) return false;
-            if (!Array.isArray(row.request?.requests) || !Array.isArray(row.response?.results)) return false;
-            const index = row.request.requests.findIndex(item => item.actorUri === actor);
-            if (index < 0) return false;
-            const requestItem = row.request.requests[index];
-            const result = row.response.results[index];
-            if (!result || result.ok !== true || result.requestId !== requestItem.requestId) return false;
-            const keyId = result.meta?.keyId;
-            const signature = result.outHeaders?.Signature;
-            return typeof keyId === 'string' && keyId.startsWith(`${actor}#`) &&
-              typeof signature === 'string' && signature.includes(`keyId="${keyId}"`);
-          });
-          if (!hit) process.exit(1);
-          NODE
+            if node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs" \
+              "${EVIDENCE_DIR}/signing-api.jsonl" "${EVIDENCE_DIR}/external-origin.json" mastodon \
+              "${EVIDENCE_DIR}/external-signing.json"
             then signing_ok=true; break; fi
             sleep 1
           done
@@ -380,31 +361,21 @@ jobs:
 
           ACTOR_URI="${actor_uri}" SENDER="${sender}" node - <<'NODE' > "${EVIDENCE_DIR}/external-mastodon-acceptance.json"
           const fs = require('fs');
-          const rows = fs.readFileSync(process.env.EVIDENCE_DIR + '/signing-api.jsonl', 'utf8').split(/\n/u).filter(Boolean).map(line => JSON.parse(line));
-          const matches = [];
-          for (const row of rows) {
-            if (row.schema !== 'ap.real-signing-api-call.v1' || row.path !== '/api/internal/signatures/batch' || row.responseStatus !== 200) continue;
-            if (!Array.isArray(row.request?.requests) || !Array.isArray(row.response?.results)) continue;
-            row.request.requests.forEach((requestItem, index) => {
-              if (requestItem.actorUri !== process.env.ACTOR_URI) return;
-              const result = row.response.results[index];
-              if (!result || result.ok !== true || result.requestId !== requestItem.requestId) return;
-              const keyId = result.meta?.keyId;
-              const signature = result.outHeaders?.Signature;
-              if (typeof keyId !== 'string' || !keyId.startsWith(`${process.env.ACTOR_URI}#`)) return;
-              if (typeof signature !== 'string' || !signature.includes(`keyId="${keyId}"`)) return;
-              matches.push({ requestId: requestItem.requestId, keyId });
-            });
+          const signing = JSON.parse(fs.readFileSync(process.env.EVIDENCE_DIR + '/external-signing.json', 'utf8'));
+          if (signing.ok !== true || signing.actorUri !== process.env.ACTOR_URI || signing.targetHost !== 'mastodon') {
+            throw new Error('exact POST signer result disappeared while building evidence');
           }
-          if (matches.length === 0) throw new Error('exact signer result disappeared while building evidence');
           process.stdout.write(JSON.stringify({
             ok: true,
             mode: 'external',
             senderUsername: process.env.SENDER,
             actorUri: process.env.ACTOR_URI,
+            activityId: signing.activityId,
             mastodonFollowCount: 1,
-            successfulActivityPodsSigningCalls: matches.length,
-            signerKeyIds: [...new Set(matches.map(match => match.keyId))]
+            successfulActivityPodsSigningCalls: signing.successfulSigningCalls,
+            signerKeyIds: signing.signerKeyIds,
+            deliveredInboxPaths: signing.deliveredInboxPaths,
+            bodySha256Base64: signing.bodySha256Base64
           }, null, 2) + '\n');
           NODE
 
@@ -420,8 +391,11 @@ jobs:
           const externalOrigin = JSON.parse(fs.readFileSync(`${root}/external-origin.json`, 'utf8'));
           const externalAcceptance = JSON.parse(fs.readFileSync(`${root}/external-mastodon-acceptance.json`, 'utf8'));
           const externalCompression = JSON.parse(fs.readFileSync(`${root}/external-redis-compression.json`, 'utf8'));
-          if (!nativeOrigin.ok || !nativeAcceptance.ok || !externalOrigin.ok || !externalAcceptance.ok || !externalCompression.ok) {
-            throw new Error('two-mode evidence is incomplete');
+          if (!nativeOrigin.ok || !nativeAcceptance.ok || !externalAcceptance.ok || !externalCompression.ok ||
+              externalOrigin.ok !== true || externalOrigin.mode !== 'external' ||
+              externalOrigin.durableHandoffQueued !== true || externalOrigin.nativeRemotePostSuppressed !== true ||
+              externalAcceptance.activityId !== externalOrigin.activityId) {
+            throw new Error('two-mode evidence is incomplete or violates external-delivery invariants');
           }
           const summary = {
             schema: 'activitypods.activitypub.real-two-mode-federation.v1',
@@ -444,6 +418,8 @@ jobs:
               mastodonFollowCount: externalAcceptance.mastodonFollowCount,
               successfulActivityPodsSigningCalls: externalAcceptance.successfulActivityPodsSigningCalls,
               signerKeyIds: externalAcceptance.signerKeyIds,
+              deliveredInboxPaths: externalAcceptance.deliveredInboxPaths,
+              bodySha256Base64: externalAcceptance.bodySha256Base64,
               redisStreamCompression: {
                 codecEnvelope: externalCompression.codecEnvelope,
                 matches: externalCompression.matches
