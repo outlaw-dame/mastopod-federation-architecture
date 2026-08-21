@@ -23,11 +23,26 @@ https://akkoma {
   reverse_proxy akkoma-app:4000
 }
 
+https://pixelfed.test {
+  tls /certs/pixelfed.test.crt /certs/pixelfed.test.key
+  reverse_proxy pixelfed-app:8080
+}
+
+https://bonfire.test {
+  tls /certs/bonfire.test.crt /certs/bonfire.test.key
+  reverse_proxy bonfire-app:4000
+}
+
 # Canonical public ActivityPods actor/key surface for the live federation proof.
 # The backend remains a host process so the exact PR checkout is exercised;
 # Caddy supplies the local trusted TLS name that remote implementations can
 # dereference from inside the interop Docker network.
 https://activitypods {
   tls /certs/activitypods.crt /certs/activitypods.key
+  reverse_proxy host.docker.internal:3000
+}
+
+https://activitypods.test {
+  tls /certs/activitypods.test.crt /certs/activitypods.test.key
   reverse_proxy host.docker.internal:3000
 }

@@ -30,19 +30,47 @@ jobs:
       matrix:
         include:
           - target: mastodon
+            target_host: mastodon
+            activitypods_host: activitypods
+            compose_overlay: ''
             actor_uri: https://mastodon/users/interop
             remote_version: Mastodon v4.5.8
           - target: gotosocial
+            target_host: gotosocial
+            activitypods_host: activitypods
+            compose_overlay: ''
             actor_uri: https://gotosocial/users/interop
             remote_version: GoToSocial 0.21.3
           - target: akkoma
+            target_host: akkoma
+            activitypods_host: activitypods
+            compose_overlay: ''
             actor_uri: https://akkoma/users/interop
             remote_version: Akkoma v3.18.1@792385f4ac1e258c21a3a900342c4ded14db1727
+          - target: pixelfed
+            target_host: pixelfed.test
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.pixelfed.yml
+            actor_uri: https://pixelfed.test/users/interop
+            remote_version: Pixelfed v0.12.7@e33026a9e5334d2c124a7321f8b15d4329b8961f
+          - target: bonfire
+            target_host: bonfire.test
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.bonfire.yml
+            actor_uri: https://bonfire.test/@interop
+            remote_version: Bonfire Social v1.0.6@53f5c428d94a84c0d442f6c842edd47d87321d88 image sha256:55084069242e4e09619081ca4f05102a8805325371003f79a5bc50d2e91dae05
     env:
-      ACTIVITYPODS_SHA: '56f0ac2e8c7eb8f908fdc7bf2331f7d5545d2140'
+      ACTIVITYPODS_SHA: 'dd3c4a9fe8084057d3ca51dd9b53d38e6ebc7c5f'
+      PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
+      PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
+      PIXELFED_OVERLAY: fedify-sidecar/interop/ap/docker-compose.pixelfed.yml
+      BONFIRE_OVERLAY: fedify-sidecar/interop/ap/docker-compose.bonfire.yml
       TARGET: ${{ matrix.target }}
+      TARGET_HOST: ${{ matrix.target_host }}
+      ACTIVITYPODS_HOST: ${{ matrix.activitypods_host }}
+      TARGET_COMPOSE_OVERLAY: ${{ matrix.compose_overlay }}
       TARGET_ACTOR_URI: ${{ matrix.actor_uri }}
       TARGET_USERNAME: interop
       EVIDENCE_DIR: measurements/ap-real-multi/${{ matrix.target }}
@@ -57,6 +85,15 @@ jobs:
           repository: outlaw-dame/activity-pods
           ref: ${{ env.ACTIVITYPODS_SHA }}
           path: activitypods
+          persist-credentials: false
+
+      - name: Checkout exact Pixelfed fixture source
+        if: matrix.target == 'pixelfed'
+        uses: actions/checkout@v4
+        with:
+          repository: pixelfed/pixelfed
+          ref: ${{ env.PIXELFED_SHA }}
+          path: pixelfed
           persist-credentials: false
 
       - name: Setup Node.js
@@ -74,11 +111,27 @@ jobs:
           activitypods_token="$(openssl rand -hex 32)"
           sidecar_token="$(openssl rand -hex 32)"
           password_verify_token="$(openssl rand -hex 32)"
-          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}"; do echo "::add-mask::${value}"; done
+          pixelfed_db_password="$(openssl rand -hex 32)"
+          pixelfed_db_root_password="$(openssl rand -hex 32)"
+          pixelfed_app_key="base64:$(openssl rand -base64 32)"
+          bonfire_db_password="$(openssl rand -hex 32)"
+          bonfire_secret_key_base="$(openssl rand -hex 64)"
+          bonfire_signing_salt="$(openssl rand -hex 32)"
+          bonfire_encryption_salt="$(openssl rand -hex 32)"
+          bonfire_release_cookie="$(openssl rand -hex 32)"
+          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
           {
             echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
             echo "SIDECAR_TOKEN=${sidecar_token}"
             echo "ATPROTO_PASSWORD_VERIFY_TOKEN=${password_verify_token}"
+            echo "PIXELFED_DB_PASSWORD=${pixelfed_db_password}"
+            echo "PIXELFED_DB_ROOT_PASSWORD=${pixelfed_db_root_password}"
+            echo "PIXELFED_APP_KEY=${pixelfed_app_key}"
+            echo "BONFIRE_DB_PASSWORD=${bonfire_db_password}"
+            echo "BONFIRE_SECRET_KEY_BASE=${bonfire_secret_key_base}"
+            echo "BONFIRE_SIGNING_SALT=${bonfire_signing_salt}"
+            echo "BONFIRE_ENCRYPTION_SALT=${bonfire_encryption_salt}"
+            echo "BONFIRE_RELEASE_COOKIE=${bonfire_release_cookie}"
           } >> "$GITHUB_ENV"
           printf '{"schema":"activitypods.activitypub.real-multi-run.v1","target":"%s","activityPodsSha":"%s","federationSha":"%s"}\n' \
             "${TARGET}" "${ACTIVITYPODS_SHA}" "${GITHUB_SHA}" > "${EVIDENCE_DIR}/run-started.json"
@@ -98,7 +151,6 @@ jobs:
         run: |
           set -euo pipefail
           fedify-sidecar/interop/ap/scripts/generate-certs.sh
-          echo '127.0.0.1 activitypods mastodon gotosocial akkoma' | sudo tee -a /etc/hosts >/dev/null
           echo "NODE_EXTRA_CA_CERTS=${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/runtime/certs/rootCA.crt" >> "$GITHUB_ENV"
 
       - name: Start ActivityPods data services
@@ -159,9 +211,24 @@ jobs:
               AP_INTEROP_AKKOMA_USERNAME="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-akkoma-account.sh
               ;;
+            pixelfed)
+              docker build --tag "${PIXELFED_IMAGE}" pixelfed
+              fedify-sidecar/interop/ap/scripts/prepare-pixelfed-env.sh
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_PIXELFED_OVERLAY="${PIXELFED_OVERLAY}" \
+              AP_INTEROP_PIXELFED_USERNAME="${TARGET_USERNAME}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-pixelfed-account.sh
+              ;;
+            bonfire)
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_BONFIRE_OVERLAY="${BONFIRE_OVERLAY}" \
+              AP_INTEROP_BONFIRE_USERNAME="${TARGET_USERNAME}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
+              ;;
             *) exit 2 ;;
           esac
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods up -d ap-proof-router
+          AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
+            fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh "${TARGET_HOST}" "${ACTIVITYPODS_HOST}" \
+            | tee "${EVIDENCE_DIR}/proof-router-hosts.json"
           ready=false
           for attempt in $(seq 1 90); do
             if curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS -H 'Accept: application/activity+json' "${TARGET_ACTOR_URI}" >/dev/null; then ready=true; break; fi
@@ -173,7 +240,7 @@ jobs:
         working-directory: activitypods/pod-provider/backend
         shell: bash
         env:
-          SEMAPPS_HOME_URL: https://activitypods/
+          SEMAPPS_HOME_URL: https://${{ matrix.activitypods_host }}/
           SEMAPPS_PORT: '3000'
           SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
           SEMAPPS_QUEUE_SERVICE_URL: redis://127.0.0.1:6379/1
@@ -215,7 +282,8 @@ jobs:
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.log"
           tail -n 1 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.log" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json"
           actor_uri="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json','utf8')).actorUri")"
-          sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
+          AP_INTEROP_COMPOSE_OVERLAY="${TARGET_COMPOSE_OVERLAY}" \
+            sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-acceptance.json"
 
       - name: Stop native ActivityPods
@@ -240,7 +308,8 @@ jobs:
             node interop/ap/scripts/activitypods-signing-recording-proxy.mjs > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-proxy.log" 2>&1 &
           echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-proxy.pid"
           docker compose -f "${GITHUB_WORKSPACE}/activitypods/pod-provider/docker-compose-test.yml" exec -T redis redis-cli -n 0 FLUSHDB >/dev/null
-          NODE_ENV=development PORT=8080 HOST=127.0.0.1 DOMAIN=activitypods SIDECAR_STARTUP_MODE=blocking \
+          NODE_ENV=development PORT=8080 HOST=127.0.0.1 DOMAIN="${ACTIVITYPODS_HOST}" SIDECAR_STARTUP_MODE=blocking \
+          AP_INTEROP_ENABLE_MEDIA_FIXTURES=true APDM_INTEROP_PRIVATE_HOSTS="${TARGET_HOST}" \
           REDIS_URL=redis://127.0.0.1:6379 APDM_COMPLETION_MARKER_V2_CUTOVER=fresh REDPANDA_BROKERS=127.0.0.1:19092 \
           REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 \
           FIREHOSE_TOPIC=ap.firehose.v1 TOMBSTONE_TOPIC=ap.tombstones.v1 ACTIVITYPODS_URL=http://127.0.0.1:3001 \
@@ -266,7 +335,7 @@ jobs:
         working-directory: activitypods/pod-provider/backend
         shell: bash
         env:
-          SEMAPPS_HOME_URL: https://activitypods/
+          SEMAPPS_HOME_URL: https://${{ matrix.activitypods_host }}/
           SEMAPPS_PORT: '3000'
           SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
           SEMAPPS_QUEUE_SERVICE_URL: redis://127.0.0.1:6379/1
@@ -308,10 +377,11 @@ jobs:
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.log"
           tail -n 1 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.log" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json"
           actor_uri="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json','utf8')).actorUri")"
-          sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
+          AP_INTEROP_COMPOSE_OVERLAY="${TARGET_COMPOSE_OVERLAY}" \
+            sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-acceptance.json"
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs" \
-            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" "${actor_uri}" "${TARGET}" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" "${actor_uri}" "${TARGET_HOST}" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-signing.json"
 
       - name: Build exact implementation evidence summary
@@ -366,6 +436,8 @@ jobs:
             mastodon) docker compose -f "${COMPOSE_FILE}" --profile mastodon logs --no-color mastodon-web-app mastodon-sidekiq 2>/dev/null || true ;;
             gotosocial) docker compose -f "${COMPOSE_FILE}" logs --no-color gotosocial-app 2>/dev/null || true ;;
             akkoma) docker compose -f "${COMPOSE_FILE}" --profile akkoma logs --no-color akkoma-app 2>/dev/null || true ;;
+            pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
+            bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
           esac
 
       - name: Stop isolated fixture
@@ -378,6 +450,12 @@ jobs:
           done
           docker rm -f "ap-real-redpanda-${TARGET}" >/dev/null 2>&1 || true
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods down -v || true
+          if [[ "${TARGET}" == pixelfed ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" down -v || true
+          fi
+          if [[ "${TARGET}" == bonfire ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" down -v || true
+          fi
           docker compose -f "${COMPOSE_FILE}" --profile mastodon --profile akkoma down -v || true
           cd activitypods/pod-provider
           docker compose -f docker-compose-test.yml down -v || true

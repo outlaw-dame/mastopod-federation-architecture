@@ -16,6 +16,9 @@ services:
           - gotosocial
           - mastodon
           - akkoma
+          - pixelfed.test
+          - bonfire.test
+          - activitypods.test
 
   # Containerized real-ActivityPods sidecar proof. Keeping this service on the
   # interop network lets the existing development-only private-host allowlist
