@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      ACTIVITYPODS_SHA: 'dd3c4a9fe8084057d3ca51dd9b53d38e6ebc7c5f'
+      ACTIVITYPODS_SHA: '020dbf8d670fc46f4641813cfa1c352a7d1def1f'
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       MASTODON_USERNAME: interop

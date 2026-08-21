@@ -14,8 +14,12 @@ compose up -d bonfire-db bonfire-app
 
 ready=false
 for attempt in $(seq 1 150); do
-  if compose exec -T bonfire-app bin/bonfire rpc 'IO.puts("AP_INTEROP_READY")' 2>/dev/null \
-    | grep -q '^AP_INTEROP_READY$'; then
+  # The release VM accepts RPCs before its background auto-migrator has
+  # created the identity tables. Probe the actual account read used below so
+  # a live BEAM alone cannot be mistaken for a ready Bonfire database.
+  if compose exec -T bonfire-app bin/bonfire rpc \
+    "case Bonfire.Me.Users.by_username(\"${USERNAME}\") do _ -> IO.puts(\"AP_INTEROP_SCHEMA_READY\") end" \
+    2>/dev/null | grep -q '^AP_INTEROP_SCHEMA_READY$'; then
     ready=true
     break
   fi

@@ -60,7 +60,7 @@ jobs:
             actor_uri: https://bonfire.test/@interop
             remote_version: Bonfire Social v1.0.6@53f5c428d94a84c0d442f6c842edd47d87321d88 image sha256:55084069242e4e09619081ca4f05102a8805325371003f79a5bc50d2e91dae05
     env:
-      ACTIVITYPODS_SHA: 'dd3c4a9fe8084057d3ca51dd9b53d38e6ebc7c5f'
+      ACTIVITYPODS_SHA: '020dbf8d670fc46f4641813cfa1c352a7d1def1f'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -229,9 +229,19 @@ jobs:
           AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
             fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh "${TARGET_HOST}" "${ACTIVITYPODS_HOST}" \
             | tee "${EVIDENCE_DIR}/proof-router-hosts.json"
+          readiness_uri="${TARGET_ACTOR_URI}"
+          readiness_accept='application/activity+json'
+          if [[ "${TARGET}" == gotosocial ]]; then
+            # GoToSocial deliberately requires an HTTP signature on actor GETs.
+            # Its WebFinger document is the unsigned discovery endpoint and
+            # confirms that the bootstrapped account is reachable through TLS.
+            readiness_uri="https://${TARGET_HOST}/.well-known/webfinger?resource=acct:${TARGET_USERNAME}@${TARGET_HOST}"
+            readiness_accept='application/jrd+json'
+          fi
           ready=false
           for attempt in $(seq 1 90); do
-            if curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS -H 'Accept: application/activity+json' "${TARGET_ACTOR_URI}" >/dev/null; then ready=true; break; fi
+            if curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS \
+              -H "Accept: ${readiness_accept}" "${readiness_uri}" >/dev/null; then ready=true; break; fi
             sleep 2
           done
           [[ "${ready}" == true ]]

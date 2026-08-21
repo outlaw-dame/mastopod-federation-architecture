@@ -1,6 +1,9 @@
 services:
   pixelfed-db:
-    image: mysql:9@sha256:313c76f59c62376fd26b78fc85169902ef10134996bbfc31200eb9c2ed7e802e
+    # Pixelfed v0.12.7's Pulse migration uses MD5 in a generated column,
+    # which current MySQL 9 rejects. Pin the compatible 8.4 LTS line instead
+    # of inheriting the upstream compose file's mutable mysql:9 tag.
+    image: mysql:8.4@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
     environment:
       MYSQL_DATABASE: pixelfed
       MYSQL_USER: pixelfed
