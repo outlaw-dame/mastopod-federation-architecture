@@ -73,12 +73,12 @@ const activity = JSON.stringify({
   object: { type: "Note", content: "activitypub ".repeat(3000) },
 });
 
-const targets = [{
-  inboxUrl: "https://remote.example/users/bob/inbox",
+const targets = Array.from({ length: 32 }, (_, index) => ({
+  inboxUrl: `https://remote.example/users/recipient-${index}/inbox`,
   deliveryUrl: "https://remote.example/inbox",
   sharedInboxUrl: "https://remote.example/inbox",
   targetDomain: "remote.example",
-}];
+}));
 
 function makeIntent(): OutboxIntent {
   return {
