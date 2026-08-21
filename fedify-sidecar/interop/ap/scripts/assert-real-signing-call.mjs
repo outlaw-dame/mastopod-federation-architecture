@@ -18,6 +18,59 @@ if (![actorUri, activityId, remoteActorUri].every(value => typeof value === 'str
   console.error('external origin evidence is missing actorUri, activityId, or remoteActorUri');
   process.exit(1);
 }
+const remoteDeliveryTarget = origin.remoteDeliveryTarget;
+if (!remoteDeliveryTarget || typeof remoteDeliveryTarget !== 'object' || Array.isArray(remoteDeliveryTarget)) {
+  console.error('external origin evidence is missing the authoritative remote delivery target');
+  process.exit(1);
+}
+const targetKeys = Object.keys(remoteDeliveryTarget).sort();
+const allowedTargetKeys = ['actorUri', 'deliveryUrl', 'inboxUrl', 'sharedInboxUrl', 'targetDomain'];
+if (targetKeys.some(key => !allowedTargetKeys.includes(key))) {
+  console.error('external origin remote delivery target contains unsupported fields');
+  process.exit(1);
+}
+if (remoteDeliveryTarget.actorUri !== remoteActorUri) {
+  console.error('external origin remote delivery target does not match remoteActorUri');
+  process.exit(1);
+}
+
+function parseCredentialFreeUrl(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) return null;
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+const inboxUrl = parseCredentialFreeUrl(remoteDeliveryTarget.inboxUrl);
+const sharedInboxUrl = remoteDeliveryTarget.sharedInboxUrl === undefined
+  ? null
+  : parseCredentialFreeUrl(remoteDeliveryTarget.sharedInboxUrl);
+const deliveryUrl = parseCredentialFreeUrl(remoteDeliveryTarget.deliveryUrl);
+const expectedDeliveryUrl = sharedInboxUrl || inboxUrl;
+if (
+  !inboxUrl ||
+  (remoteDeliveryTarget.sharedInboxUrl !== undefined && !sharedInboxUrl) ||
+  !deliveryUrl ||
+  !expectedDeliveryUrl ||
+  deliveryUrl.href !== expectedDeliveryUrl.href ||
+  deliveryUrl.host !== targetHost ||
+  remoteDeliveryTarget.targetDomain !== deliveryUrl.hostname.toLowerCase()
+) {
+  console.error('external origin remote delivery target is invalid or does not match the requested host');
+  process.exit(1);
+}
+
+const actorUrl = parseCredentialFreeUrl(actorUri);
+if (!actorUrl || actorUrl.search) {
+  console.error('external origin actorUri cannot own a signing key');
+  process.exit(1);
+}
+actorUrl.pathname = `${actorUrl.pathname.replace(/\/$/u, '')}/keys/main`;
+const expectedKeyId = actorUrl.toString();
 
 const rows = fs.existsSync(evidencePath)
   ? fs.readFileSync(evidencePath, 'utf8').split(/\n/u).filter(Boolean).map(line => JSON.parse(line))
@@ -32,8 +85,9 @@ for (const row of rows) {
   row.request.requests.forEach((requestItem, index) => {
     if (requestItem.actorUri !== actorUri) return;
     if (requestItem.method !== 'POST' || requestItem.profile !== 'ap_post_v1') return;
-    if (requestItem.target?.host !== targetHost) return;
-    if (typeof requestItem.target?.path !== 'string' || !requestItem.target.path.startsWith('/')) return;
+    if (requestItem.target?.host !== deliveryUrl.host) return;
+    if (requestItem.target?.path !== deliveryUrl.pathname) return;
+    if ((requestItem.target?.query || '') !== deliveryUrl.search.replace(/^\?/u, '')) return;
     if (requestItem.body?.encoding !== 'utf8' || typeof requestItem.body?.bytes !== 'string') return;
     let activity;
     try { activity = JSON.parse(requestItem.body.bytes); } catch { return; }
@@ -44,7 +98,7 @@ for (const row of rows) {
     const signature = result.outHeaders?.Signature;
     const digest = result.outHeaders?.Digest;
     const bodySha256Base64 = createHash('sha256').update(requestItem.body.bytes, 'utf8').digest('base64');
-    if (typeof keyId !== 'string' || !keyId.startsWith(`${actorUri}#`)) return;
+    if (keyId !== expectedKeyId) return;
     if (typeof signature !== 'string' || !signature.includes(`keyId="${keyId}"`)) return;
     if (digest !== `SHA-256=${bodySha256Base64}` || result.meta?.bodySha256Base64 !== bodySha256Base64) return;
     matches.push({
@@ -72,6 +126,7 @@ const evidence = {
   targetHost,
   activityId,
   remoteActorUri,
+  remoteDeliveryTarget,
   deliveredInboxPaths: [...new Set(matches.map(match => match.targetPath))],
   bodySha256Base64: [...new Set(matches.map(match => match.bodySha256Base64))],
   successfulSigningCalls: matches.length,
