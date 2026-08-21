@@ -60,7 +60,7 @@ jobs:
             actor_uri: https://bonfire.test/@interop
             remote_version: Bonfire Social v1.0.6@53f5c428d94a84c0d442f6c842edd47d87321d88 image sha256:55084069242e4e09619081ca4f05102a8805325371003f79a5bc50d2e91dae05
     env:
-      ACTIVITYPODS_SHA: '020dbf8d670fc46f4641813cfa1c352a7d1def1f'
+      ACTIVITYPODS_SHA: '652e64039278f563cc459b97b282b86f60a6cca0'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
