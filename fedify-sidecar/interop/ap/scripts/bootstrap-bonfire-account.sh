@@ -10,7 +10,13 @@ compose() {
   docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" "$@"
 }
 
-compose up -d bonfire-db bonfire-app
+# The pinned Bonfire deployment guide requires setup/migration before the app
+# starts and documents this exact release task. Running the app first invokes
+# its background one-by-one auto-migrator, whose concurrent-index migrations
+# can race inside transactions on an empty database.
+compose up -d bonfire-db
+compose run --rm bonfire-app bin/bonfire eval 'Bonfire.Common.Repo.migrate()'
+compose up -d bonfire-app
 
 ready=false
 for attempt in $(seq 1 150); do
