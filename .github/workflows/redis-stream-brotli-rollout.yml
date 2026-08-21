@@ -7,6 +7,9 @@ on:
       - 'fedify-sidecar/src/queue/sidecar-redis-queue-core.ts'
       - 'fedify-sidecar/src/queue/tests/RedisStreamsQueueCompression.test.ts'
       - 'fedify-sidecar/scripts/proof-redis-stream-brotli-rollout.ts'
+      - 'fedify-sidecar/interop/ap/docker-compose.redis-compression.yml'
+      - 'fedify-sidecar/interop/ap/scripts/run-gotosocial-proof.sh'
+      - 'fedify-sidecar/interop/ap/scripts/run-mastodon-proof.sh'
       - '.github/workflows/redis-stream-brotli-rollout.yml'
   workflow_dispatch:
 
@@ -76,3 +79,118 @@ jobs:
           path: measurements/redis-stream-brotli-rollout/
           if-no-files-found: error
           retention-days: 30
+
+  compression-enabled-interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      COMPOSE_DOCKER_CLI_BUILD: '1'
+      DOCKER_BUILDKIT: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - run: npm ci --prefix fedify-sidecar
+
+      - name: Run GoToSocial federation with compressed Redis Stream writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p measurements/redis-stream-brotli-interop
+          override="$GITHUB_WORKSPACE/fedify-sidecar/interop/ap/docker-compose.redis-compression.yml"
+          AP_INTEROP_COMPOSE_OVERRIDE="$override" \
+          AP_INTEROP_GOTOSOCIAL_RESET_STATE=1 \
+            fedify-sidecar/interop/ap/scripts/run-gotosocial-proof.sh \
+            2>&1 | tee measurements/redis-stream-brotli-interop/gotosocial.log
+
+          docker compose \
+            -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
+            -f "$override" \
+            exec -T redis redis-cli --raw XRANGE ap:queue:outbound:v1 - + \
+            > measurements/redis-stream-brotli-interop/gotosocial-outbound-stream.txt
+
+          grep -q '^apq1:br:' measurements/redis-stream-brotli-interop/gotosocial-outbound-stream.txt
+
+      - name: Run Mastodon federation with compressed Redis Stream writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          override="$GITHUB_WORKSPACE/fedify-sidecar/interop/ap/docker-compose.redis-compression.yml"
+          AP_INTEROP_COMPOSE_OVERRIDE="$override" \
+            fedify-sidecar/interop/ap/scripts/run-mastodon-proof.sh \
+            2>&1 | tee measurements/redis-stream-brotli-interop/mastodon.log
+
+          docker compose \
+            -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
+            -f "$override" \
+            exec -T redis redis-cli --raw XRANGE ap:queue:outbound:v1 - + \
+            > measurements/redis-stream-brotli-interop/mastodon-outbound-stream.txt
+
+          grep -q '^apq1:br:' measurements/redis-stream-brotli-interop/mastodon-outbound-stream.txt
+
+      - name: Record compression-enabled interop evidence
+        if: success()
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const dir = 'measurements/redis-stream-brotli-interop';
+          const summarize = target => {
+            const raw = fs.readFileSync(path.join(dir, `${target}-outbound-stream.txt`), 'utf8');
+            const envelopes = raw.split(/\r?\n/u).filter(line => line.startsWith('apq1:br:'));
+            if (envelopes.length === 0) throw new Error(`${target} did not persist a compressed outbound Activity`);
+            return { target, compressedEnvelopeCount: envelopes.length };
+          };
+          const evidence = {
+            schema: 'apdm-redis-stream-brotli-interop.v1',
+            measuredAt: new Date().toISOString(),
+            writerEnabled: true,
+            minimumBytes: 1,
+            targets: [summarize('gotosocial'), summarize('mastodon')],
+            interpretation: 'Each target completed the existing ActivityPub interoperability proof while the live sidecar persisted at least one versioned Brotli outbound Stream payload.',
+          };
+          fs.writeFileSync(path.join(dir, 'evidence.json'), `${JSON.stringify(evidence, null, 2)}\n`);
+          NODE
+
+      - name: Collect compose logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p measurements/redis-stream-brotli-interop
+          override="$GITHUB_WORKSPACE/fedify-sidecar/interop/ap/docker-compose.redis-compression.yml"
+          docker compose \
+            -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
+            -f "$override" \
+            ps > measurements/redis-stream-brotli-interop/compose-ps.txt || true
+          docker compose \
+            -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
+            -f "$override" \
+            logs --no-color > measurements/redis-stream-brotli-interop/compose.log || true
+
+      - name: Upload compression interop evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-stream-brotli-interop-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redis-stream-brotli-interop/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Tear down AP interop stack
+        if: always()
+        shell: bash
+        run: |
+          override="$GITHUB_WORKSPACE/fedify-sidecar/interop/ap/docker-compose.redis-compression.yml"
+          docker compose \
+            -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
+            -f "$override" \
+            --profile mastodon --profile akkoma --profile proof down -v --remove-orphans || true
