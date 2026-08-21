@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      ACTIVITYPODS_SHA: '56f0ac2e8c7eb8f908fdc7bf2331f7d5545d2140'
+      ACTIVITYPODS_SHA: '6a03b365e27c2e247c85781f524888b7fe5f6d50'
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       MASTODON_USERNAME: interop
@@ -217,7 +217,7 @@ jobs:
           node - <<'NODE'
           const fs = require('fs');
           const v = JSON.parse(fs.readFileSync(process.env.GITHUB_WORKSPACE + '/' + process.env.EVIDENCE_DIR + '/native-origin.json', 'utf8'));
-          if (v.ok !== true || v.mode !== 'native' || v.durableHandoffQueued !== false) process.exit(1);
+          if (v.ok !== true || v.mode !== 'native' || v.durableHandoffQueued !== false || v.proofSummaryBytes !== 0) process.exit(1);
           NODE
 
       - name: Assert Mastodon accepted native signed Follow
@@ -368,6 +368,7 @@ jobs:
         shell: bash
         env:
           SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
+          AP_FEDERATION_PROOF_SUMMARY_BYTES: '8192'
         run: |
           set -euo pipefail
           AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-external" \
@@ -377,7 +378,7 @@ jobs:
           node - <<'NODE'
           const fs = require('fs');
           const v = JSON.parse(fs.readFileSync(process.env.GITHUB_WORKSPACE + '/' + process.env.EVIDENCE_DIR + '/external-origin.json', 'utf8'));
-          if (v.ok !== true || v.mode !== 'external' || v.durableHandoffQueued !== true || v.nativeRemotePostSuppressed !== true) process.exit(1);
+          if (v.ok !== true || v.mode !== 'external' || v.durableHandoffQueued !== true || v.nativeRemotePostSuppressed !== true || v.proofSummaryBytes !== 8192) process.exit(1);
           NODE
 
       - name: Assert real external Activity used compressed Redis Stream storage
@@ -505,6 +506,7 @@ jobs:
             external: {
               actorUri: externalOrigin.actorUri,
               activityId: externalOrigin.activityId,
+              proofSummaryBytes: externalOrigin.proofSummaryBytes,
               durableHandoffQueued: externalOrigin.durableHandoffQueued,
               nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed,
               mastodonFollowCount: externalAcceptance.mastodonFollowCount,
