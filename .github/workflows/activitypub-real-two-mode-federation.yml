@@ -12,6 +12,7 @@ on:
       - 'fedify-sidecar/src/queue/**'
       - 'fedify-sidecar/src/signing/**'
       - 'fedify-sidecar/src/federation/**'
+      - 'fedify-sidecar/scripts/assert-real-redis-stream-compression.ts'
 
 permissions:
   contents: read
@@ -264,7 +265,7 @@ jobs:
             > "${EVIDENCE_DIR}/signing-proxy.log" 2>&1 &
           echo "$!" > "${EVIDENCE_DIR}/signing-proxy.pid"
 
-      - name: Start sidecar using the real ActivityPods signer
+      - name: Start sidecar using the real ActivityPods signer with Brotli Redis storage
         working-directory: fedify-sidecar
         shell: bash
         run: |
@@ -276,6 +277,9 @@ jobs:
           DOMAIN=activitypods \
           SIDECAR_STARTUP_MODE=blocking \
           REDIS_URL=redis://127.0.0.1:6379 \
+          REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED=true \
+          REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES=1 \
+          REDIS_STREAM_PAYLOAD_BROTLI_QUALITY=0 \
           APDM_COMPLETION_MARKER_V2_CUTOVER=fresh \
           REDPANDA_BROKERS=127.0.0.1:19092 \
           REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false \
@@ -376,6 +380,20 @@ jobs:
           if (v.ok !== true || v.mode !== 'external' || v.durableHandoffQueued !== true || v.nativeRemotePostSuppressed !== true) process.exit(1);
           NODE
 
+      - name: Assert real external Activity used compressed Redis Stream storage
+        working-directory: fedify-sidecar
+        shell: bash
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          OUTBOX_INTENT_STREAM_KEY: ap:queue:outbox-intent:v1
+          OUTBOUND_STREAM_KEY: ap:queue:outbound:v1
+        run: |
+          set -euo pipefail
+          activity_id="$(node -p "JSON.parse(require('fs').readFileSync('../${EVIDENCE_DIR}/external-origin.json','utf8')).activityId")"
+          npx tsx scripts/assert-real-redis-stream-compression.ts \
+            "${activity_id}" \
+            "../${EVIDENCE_DIR}/external-redis-compression.json"
+
       - name: Assert Mastodon accepted sidecar delivery and real signer was used
         shell: bash
         run: |
@@ -468,7 +486,8 @@ jobs:
           const nativeAcceptance = JSON.parse(fs.readFileSync(`${root}/native-mastodon-acceptance.json`, 'utf8'));
           const externalOrigin = JSON.parse(fs.readFileSync(`${root}/external-origin.json`, 'utf8'));
           const externalAcceptance = JSON.parse(fs.readFileSync(`${root}/external-mastodon-acceptance.json`, 'utf8'));
-          if (!nativeOrigin.ok || !nativeAcceptance.ok || !externalOrigin.ok || !externalAcceptance.ok) {
+          const externalCompression = JSON.parse(fs.readFileSync(`${root}/external-redis-compression.json`, 'utf8'));
+          if (!nativeOrigin.ok || !nativeAcceptance.ok || !externalOrigin.ok || !externalAcceptance.ok || !externalCompression.ok) {
             throw new Error('two-mode evidence is incomplete');
           }
           const summary = {
@@ -490,7 +509,11 @@ jobs:
               nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed,
               mastodonFollowCount: externalAcceptance.mastodonFollowCount,
               successfulActivityPodsSigningCalls: externalAcceptance.successfulActivityPodsSigningCalls,
-              signerKeyIds: externalAcceptance.signerKeyIds
+              signerKeyIds: externalAcceptance.signerKeyIds,
+              redisStreamCompression: {
+                codecEnvelope: externalCompression.codecEnvelope,
+                matches: externalCompression.matches
+              }
             }
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
