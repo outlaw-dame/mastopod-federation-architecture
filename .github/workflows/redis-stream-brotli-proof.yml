@@ -8,6 +8,7 @@ on:
       - 'fedify-sidecar/src/queue/tests/RedisStreamPayloadCodec.test.ts'
       - 'fedify-sidecar/src/queue/tests/RedisStreamsQueueCompression.test.ts'
       - 'fedify-sidecar/scripts/proof-redis-stream-brotli-compression.ts'
+      - 'fedify-sidecar/scripts/run-fast-checks.sh'
       - '.github/workflows/redis-stream-brotli-proof.yml'
   workflow_dispatch:
 
@@ -40,6 +41,13 @@ jobs:
           cache-dependency-path: fedify-sidecar/package-lock.json
 
       - run: npm ci --prefix fedify-sidecar
+
+      - name: Run codec and queue compatibility tests
+        working-directory: fedify-sidecar
+        run: >-
+          npx vitest run
+          src/queue/tests/RedisStreamPayloadCodec.test.ts
+          src/queue/tests/RedisStreamsQueueCompression.test.ts
 
       - name: Run production-codec real Redis proof
         working-directory: fedify-sidecar
