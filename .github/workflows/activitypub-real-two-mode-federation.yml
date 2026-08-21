@@ -105,36 +105,6 @@ jobs:
           FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
           docker compose -f docker-compose-test.yml exec -T redis redis-cli PING
 
-      - name: Start local Redpanda event log
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker rm -f ap-real-redpanda >/dev/null 2>&1 || true
-          docker run -d --name ap-real-redpanda \
-            -p 19092:19092 \
-            redpandadata/redpanda:v24.1.3 \
-            redpanda start \
-              --overprovisioned \
-              --smp 1 \
-              --memory 768M \
-              --reserve-memory 0M \
-              --node-id 0 \
-              --check=false \
-              --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \
-              --advertise-kafka-addr internal://127.0.0.1:9092,external://127.0.0.1:19092
-          ready=false
-          for attempt in $(seq 1 60); do
-            if docker exec ap-real-redpanda rpk cluster health --exit-when-healthy >/dev/null 2>&1; then ready=true; break; fi
-            sleep 1
-          done
-          if [[ "${ready}" != true ]]; then
-            docker logs ap-real-redpanda
-            exit 1
-          fi
-          for topic in ap.stream1.local-public.v1 ap.stream2.remote-public.v1 ap.firehose.v1 ap.tombstones.v1 canonical.v1; do
-            docker exec ap-real-redpanda rpk topic create "${topic}" >/dev/null
-          done
-
       - name: Start pinned Mastodon and independent TLS router
         shell: bash
         run: |
@@ -265,65 +235,25 @@ jobs:
             > "${EVIDENCE_DIR}/signing-proxy.log" 2>&1 &
           echo "$!" > "${EVIDENCE_DIR}/signing-proxy.pid"
 
-      - name: Start sidecar using the real ActivityPods signer with Brotli Redis storage
-        working-directory: fedify-sidecar
+      - name: Start isolated sidecar with Brotli Redis storage
         shell: bash
         run: |
           set -euo pipefail
-          docker compose -f "${GITHUB_WORKSPACE}/activitypods/pod-provider/docker-compose-test.yml" exec -T redis redis-cli -n 0 FLUSHDB >/dev/null
-          NODE_ENV=development \
-          PORT=8080 \
-          HOST=127.0.0.1 \
-          DOMAIN=activitypods \
-          SIDECAR_STARTUP_MODE=blocking \
-          REDIS_URL=redis://127.0.0.1:6379 \
-          REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED=true \
-          REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES=1 \
-          REDIS_STREAM_PAYLOAD_BROTLI_QUALITY=0 \
-          APDM_COMPLETION_MARKER_V2_CUTOVER=fresh \
-          REDPANDA_BROKERS=127.0.0.1:19092 \
-          REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false \
-          STREAM1_TOPIC=ap.stream1.local-public.v1 \
-          STREAM2_TOPIC=ap.stream2.remote-public.v1 \
-          FIREHOSE_TOPIC=ap.firehose.v1 \
-          TOMBSTONE_TOPIC=ap.tombstones.v1 \
-          ACTIVITYPODS_URL=http://127.0.0.1:3001 \
-          ACTIVITYPODS_TOKEN="${ACTIVITYPODS_TOKEN}" \
-          SIDECAR_TOKEN="${SIDECAR_TOKEN}" \
-          ENABLE_OUTBOUND_WORKER=true \
-          ENABLE_OUTBOX_INTENT_WORKER=true \
-          ENABLE_INBOUND_WORKER=false \
-          ENABLE_ORIGIN_RECONCILIATION=false \
-          ENABLE_FEDIFY_RUNTIME_INTEGRATION=false \
-          ENABLE_OPENSEARCH_INDEXER=false \
-          ENABLE_XRPC_SERVER=false \
-          ENABLE_MEDIA_ASSET_SYNC=false \
-          ENABLE_ACCOUNT_PROVISIONING=false \
-          ENABLE_ENTRYWAY=false \
-          ENABLE_FOLLOWERS_SYNC=false \
-          ENABLE_MRF_ADMIN_API=false \
-          ENABLE_MODERATION_BRIDGE_API=false \
-          ENABLE_CANONICAL_EVENT_LOG=false \
-          ENABLE_CANONICAL_NOTIFICATIONS=false \
-          ENABLE_AT_JETSTREAM=false \
-          ENABLE_AT_EXTERNAL_FIREHOSE=false \
-          CONSUMER_GROUP=sidecar-workers \
-          INBOUND_STREAM_KEY=ap:queue:inbound:v1 \
-          OUTBOUND_STREAM_KEY=ap:queue:outbound:v1 \
-          OUTBOX_INTENT_STREAM_KEY=ap:queue:outbox-intent:v1 \
-          ORIGIN_RECONCILE_STREAM_KEY=ap:queue:origin-reconcile:v1 \
-          DLQ_OUTBOUND_STREAM_KEY=ap:queue:dlq:outbound:v1 \
-          REQUEST_TIMEOUT_MS=10000 \
-            npm run server:dev > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/sidecar.log" 2>&1 &
-          echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/sidecar.pid"
-          pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/sidecar.pid")"
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            up -d redis redpanda mock-activitypods fedify-sidecar
           ready=false
           for attempt in $(seq 1 120); do
-            if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null; then ready=true; break; fi
-            if ! kill -0 "${pid}" 2>/dev/null; then tail -n 500 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/sidecar.log"; exit 1; fi
+            if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null; then
+              ready=true
+              break
+            fi
             sleep 1
           done
-          if [[ "${ready}" != true ]]; then tail -n 500 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/sidecar.log"; exit 1; fi
+          if [[ "${ready}" != true ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+              logs --no-color redis redpanda mock-activitypods fedify-sidecar
+            exit 1
+          fi
 
       - name: Start ActivityPods in external sidecar mode
         working-directory: activitypods/pod-provider/backend
@@ -381,19 +311,15 @@ jobs:
           if (v.ok !== true || v.mode !== 'external' || v.durableHandoffQueued !== true || v.nativeRemotePostSuppressed !== true || v.proofSummaryBytes !== 8192) process.exit(1);
           NODE
 
-      - name: Assert real external Activity used compressed Redis Stream storage
-        working-directory: fedify-sidecar
+      - name: Assert real external Activity used compressed sidecar Redis Stream storage
         shell: bash
-        env:
-          REDIS_URL: redis://127.0.0.1:6379
-          OUTBOX_INTENT_STREAM_KEY: ap:queue:outbox-intent:v1
-          OUTBOUND_STREAM_KEY: ap:queue:outbound:v1
         run: |
           set -euo pipefail
-          activity_id="$(node -p "JSON.parse(require('fs').readFileSync('../${EVIDENCE_DIR}/external-origin.json','utf8')).activityId")"
-          npx tsx scripts/assert-real-redis-stream-compression.ts \
-            "${activity_id}" \
-            "../${EVIDENCE_DIR}/external-redis-compression.json"
+          activity_id="$(node -p "JSON.parse(require('fs').readFileSync('${EVIDENCE_DIR}/external-origin.json','utf8')).activityId")"
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            exec -T fedify-sidecar npx tsx scripts/assert-real-redis-stream-compression.ts "${activity_id}" \
+            > "${EVIDENCE_DIR}/external-redis-compression.json"
+          cat "${EVIDENCE_DIR}/external-redis-compression.json"
 
       - name: Assert Mastodon accepted sidecar delivery and real signer was used
         shell: bash
@@ -540,8 +466,9 @@ jobs:
           tail -n 500 "${EVIDENCE_DIR}/activitypods-native.log" 2>/dev/null || true
           echo '--- ActivityPods external ---'
           tail -n 500 "${EVIDENCE_DIR}/activitypods-external.log" 2>/dev/null || true
-          echo '--- Sidecar ---'
-          tail -n 700 "${EVIDENCE_DIR}/sidecar.log" 2>/dev/null || true
+          echo '--- Sidecar / interop infrastructure ---'
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            logs --no-color fedify-sidecar redis redpanda mock-activitypods 2>/dev/null || true
           echo '--- Signing proxy ---'
           cat "${EVIDENCE_DIR}/signing-proxy.log" 2>/dev/null || true
           echo '--- Mastodon ---'
@@ -554,10 +481,9 @@ jobs:
         shell: bash
         run: |
           set +e
-          for file in activitypods-external.pid activitypods-native.pid sidecar.pid signing-proxy.pid; do
+          for file in activitypods-external.pid activitypods-native.pid signing-proxy.pid; do
             if [[ -f "${EVIDENCE_DIR}/${file}" ]]; then kill "$(cat "${EVIDENCE_DIR}/${file}")" 2>/dev/null || true; fi
           done
-          docker rm -f ap-real-redpanda >/dev/null 2>&1 || true
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods down -v || true
           docker compose -f "${COMPOSE_FILE}" --profile mastodon down -v || true
           cd activitypods/pod-provider
