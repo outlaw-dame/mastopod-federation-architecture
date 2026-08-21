@@ -1,0 +1,78 @@
+name: Redis Stream Brotli Rollout Proof
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/src/queue/redis-stream-payload-codec.ts'
+      - 'fedify-sidecar/src/queue/sidecar-redis-queue-core.ts'
+      - 'fedify-sidecar/src/queue/tests/RedisStreamsQueueCompression.test.ts'
+      - 'fedify-sidecar/scripts/proof-redis-stream-brotli-rollout.ts'
+      - '.github/workflows/redis-stream-brotli-rollout.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rollout-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - run: npm ci --prefix fedify-sidecar
+
+      - name: Run focused compression regression tests
+        working-directory: fedify-sidecar
+        run: npx vitest run src/queue/tests/RedisStreamsQueueCompression.test.ts src/queue/tests/RedisStreamPayloadCodec.test.ts
+
+      - name: Prove staged enablement, crash recovery, and writer rollback
+        working-directory: fedify-sidecar
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          REDIS_BROTLI_ROLLOUT_PROOF_OUTPUT: ../measurements/redis-stream-brotli-rollout/evidence.json
+        run: npx tsx scripts/proof-redis-stream-brotli-rollout.ts
+
+      - name: Validate rollout evidence contract
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const evidence = JSON.parse(fs.readFileSync('measurements/redis-stream-brotli-rollout/evidence.json', 'utf8'));
+          if (evidence.schema !== 'apdm-redis-stream-brotli-rollout.v1') throw new Error('unexpected evidence schema');
+          if (evidence.stages.decodeCapableWriteDisabled.persistedEncoding !== 'plaintext') throw new Error('stage 1 did not remain plaintext');
+          if (!evidence.stages.decodeCapableWriteDisabled.consumedByEnabledReader) throw new Error('enabled reader did not consume retained plaintext');
+          if (evidence.stages.compressionEnabled.persistedEncoding !== 'apq1:br') throw new Error('stage 2 did not persist Brotli envelope');
+          if (!evidence.stages.compressionEnabled.inMemoryActivityUnchanged) throw new Error('stage 2 changed the in-memory Activity');
+          if (!evidence.stages.writerRollback.reclaimedCompressedPendingEntry) throw new Error('rollback did not reclaim compressed pending work');
+          if (!evidence.stages.writerRollback.compressedPayloadDecodedUnchanged) throw new Error('rollback did not decode compressed work');
+          if (!evidence.stages.writerRollback.newWritesReturnedToPlaintext) throw new Error('rollback writer did not return to plaintext');
+          if (evidence.stages.writerRollback.finalPendingCount !== 0) throw new Error('rollout proof left pending work');
+          for (const [name, value] of Object.entries(evidence.invariants)) {
+            if (value !== true) throw new Error(`rollout invariant failed: ${name}`);
+          }
+          NODE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: redis-stream-brotli-rollout-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redis-stream-brotli-rollout/
+          if-no-files-found: error
+          retention-days: 30
