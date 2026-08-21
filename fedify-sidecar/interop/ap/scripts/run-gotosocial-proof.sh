@@ -36,6 +36,15 @@ reset_gotosocial_state() {
   chmod 0666 "${DB_FILE}"
 }
 
+gotosocial_db_is_healthy() {
+  if [ ! -f "${DB_FILE}" ]; then
+    return 0
+  fi
+
+  output=$(sqlite3 "file:${DB_FILE}?mode=ro" "pragma integrity_check;" 2>/dev/null || true)
+  [ "${output}" = "ok" ]
+}
+
 if [ ! -f "${CERTS_DIR}/rootCA.crt" ] || [ ! -f "${CERTS_DIR}/sidecar.crt" ] || [ ! -f "${CERTS_DIR}/gotosocial.crt" ]; then
   "${SCRIPT_DIR}/generate-certs.sh"
 fi
