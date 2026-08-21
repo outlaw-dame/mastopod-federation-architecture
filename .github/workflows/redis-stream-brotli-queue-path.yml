@@ -46,7 +46,7 @@ jobs:
           REDIS_BROTLI_QUEUE_BENCHMARK_OUTPUT: ../measurements/redis-stream-brotli-queue-path/evidence.json
         run: npx tsx scripts/benchmark-redis-stream-brotli-queue-path.ts
 
-      - name: Validate evidence contract
+      - name: Validate evidence contract and promotion guardrails
         run: |
           node - <<'NODE'
           const fs = require('node:fs');
@@ -59,6 +59,19 @@ jobs:
               throw new Error(`incomplete outbound queue path for ${result.name}`);
             }
             if (!(result.comparisons.p50MemoryReduction > 1)) throw new Error(`no memory reduction for ${result.name}`);
+          }
+          const guards = evidence.frozenAdspComparison;
+          if (!guards || guards.p95Pass !== true) {
+            throw new Error(`Brotli p95 queue-path latency exceeded ${guards?.p95LatencyAllowedRatio ?? 'missing'}x guardrail`);
+          }
+          if (guards.p99Pass !== true) {
+            throw new Error(`Brotli p99 queue-path latency exceeded ${guards.p99LatencyAllowedRatio}x guardrail`);
+          }
+          if (guards.cpuPass !== true) {
+            throw new Error(`Brotli queue-path CPU exceeded ${guards.cpuAllowedRatio}x guardrail`);
+          }
+          if (guards.memoryPass !== true) {
+            throw new Error(`Brotli memory improvement missed ${guards.minimumMaterialMemoryImprovementRatio}x guardrail`);
           }
           NODE
 
