@@ -5,6 +5,16 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("real federation fixture bootstrap contracts", () => {
+  it("bounds slow post-setup actor readiness beyond Misskey's measured migration restart", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toContain("for attempt in $(seq 1 210)");
+    expect(workflow).toContain("Misskey 2026.7.0's post-setup migration restart");
+  });
+
   it("bounds retries for transient Pixelfed image-build downloads", () => {
     const script = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/build-pixelfed-fixture.sh"),
@@ -32,21 +42,27 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).not.toContain('dump(["type" => gettype($response), "bytes" => is_string($response) ? strlen($response) : 0, "body" => $response])');
   });
 
-  it("keeps TLS verification enabled for Pixelfed application fetches", () => {
-    const compose = readFileSync(
+  it("keeps TLS verification enabled for PHP implementation actor fetches", () => {
+    const pixelfedCompose = readFileSync(
       resolve(process.cwd(), "interop/ap/docker-compose.pixelfed.yml"),
       "utf8",
     );
+    const friendicaCompose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.friendica.yml"),
+      "utf8",
+    );
     const phpConfig = readFileSync(
-      resolve(process.cwd(), "interop/ap/fixtures/pixelfed/interop-ca.ini"),
+      resolve(process.cwd(), "interop/ap/fixtures/php/interop-ca.ini"),
       "utf8",
     );
 
-    expect(compose.match(/zz-interop-ca\.ini:ro/g)).toHaveLength(2);
+    expect(pixelfedCompose.match(/fixtures\/php\/interop-ca\.ini:.*:ro/g)).toHaveLength(2);
+    expect(friendicaCompose.match(/fixtures\/php\/interop-ca\.ini:.*:ro/g)).toHaveLength(2);
     expect(phpConfig).toContain("curl.cainfo=/interop/runtime/certs/rootCA.crt");
     expect(phpConfig).toContain("openssl.cafile=/interop/runtime/certs/rootCA.crt");
-    expect(compose).not.toContain("GuzzleHttp\\RequestOptions::VERIFY: false");
-    expect(compose).not.toContain("CURLOPT_SSL_VERIFYPEER");
+    expect(pixelfedCompose).not.toContain("GuzzleHttp\\RequestOptions::VERIFY: false");
+    expect(friendicaCompose).not.toContain("GuzzleHttp\\RequestOptions::VERIFY: false");
+    expect(`${pixelfedCompose}\n${friendicaCompose}`).not.toContain("CURLOPT_SSL_VERIFYPEER");
   });
 
   it("bootstraps Misskey without exposing directional credentials", () => {
@@ -142,6 +158,8 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(bootstrap).toContain("spark interop:create-podcast");
     expect(bootstrap).not.toContain("define('CI_DEBUG'");
     expect(command).toContain("new PodcastModel()");
+    expect(command).toContain("where('username', 'interopadmin')");
+    expect(command).not.toContain("interop-admin");
     expect(command).toContain("imagecreatetruecolor(1400, 1400)");
     expect(command).not.toContain("private_key' =>");
     expect(command).not.toContain("public_key' =>");

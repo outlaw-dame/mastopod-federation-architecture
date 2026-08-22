@@ -34,7 +34,7 @@ final class InteropCreatePodcast extends BaseCommand
             return;
         }
 
-        $user = model('UserModel')->where('username', 'interop-admin')->first();
+        $user = model('UserModel')->where('username', 'interopadmin')->first();
         if ($user === null || ! is_numeric($user->id)) {
             throw new RuntimeException('Interop superadmin is missing.');
         }

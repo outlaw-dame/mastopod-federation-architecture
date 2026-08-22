@@ -295,8 +295,10 @@ jobs:
           ready=false
           # First-boot migrations for larger fixtures (notably Misskey) can
           # legitimately outlive the common three-minute window. Keep this
-          # bounded while allowing six minutes for the real actor endpoint.
-          for attempt in $(seq 1 180); do
+          # bounded while allowing seven minutes for the real actor endpoint.
+          # Misskey 2026.7.0's post-setup migration restart measured just over
+          # six minutes on the hosted runner, after its setup API had returned.
+          for attempt in $(seq 1 210); do
             if curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS \
               -H "Accept: ${readiness_accept}" "${readiness_uri}" >/dev/null; then ready=true; break; fi
             sleep 2

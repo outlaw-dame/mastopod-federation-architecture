@@ -44,6 +44,7 @@ services:
     volumes:
       - ap_interop_friendica_html:/var/www/html
       - ./runtime/certs:/interop/runtime/certs:ro
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
     networks:
       - ap-interop
 
@@ -57,6 +58,7 @@ services:
     volumes:
       - ap_interop_friendica_html:/var/www/html
       - ./runtime/certs:/interop/runtime/certs:ro
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
     networks:
       - ap-interop
 
