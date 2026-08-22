@@ -8,6 +8,9 @@ import {
   DefaultOpenSearchAuthorClient,
   DefaultOpenSearchClient,
 } from '../src/search/writer/OpenSearchClient.js';
+import { PublicContentIndexWriter } from '../src/search/writer/PublicContentIndexWriter.js';
+import { InMemorySearchDocAliasCache } from '../src/search/writer/SearchDocAliasCache.js';
+import { DefaultSearchDedupService } from '../src/search/aliases/SearchDedupService.js';
 
 const url = process.env['OPENSEARCH_URL'] ?? 'http://127.0.0.1:19200';
 const native = new OpenSearchNativeClient({ node: url });
@@ -24,6 +27,12 @@ const bootstrapConfig: OpenSearchBootstrapConfig = {
 const bootstrap = new OpenSearchBootstrapService(bootstrapConfig);
 const contentStore = new DefaultOpenSearchClient(native);
 const authorStore = new DefaultOpenSearchAuthorClient(native);
+const aliasCache = new InMemorySearchDocAliasCache();
+const contentWriter = new PublicContentIndexWriter(
+  contentStore,
+  aliasCache,
+  new DefaultSearchDedupService(aliasCache),
+);
 
 try {
   const info = await native.info();
@@ -32,11 +41,12 @@ try {
 
   await bootstrap.bootstrap();
   await assertFreshLexicalMapping();
-  await exerciseRepositoryClients();
+  await exerciseRepositoryWriterAndClients();
   await assertLegacyPipelineMigration();
 
   console.log(JSON.stringify({
     openSearchVersion: version,
+    realContentWriter: 'passed',
     lexicalQuery: 'passed',
     contentCrud: 'passed',
     authorCrud: 'passed',
@@ -65,27 +75,31 @@ async function assertFreshLexicalMapping(): Promise<void> {
   assert(indexSettings['default_pipeline'] === undefined, 'fresh active index must not require an ingest pipeline');
 }
 
-async function exerciseRepositoryClients(): Promise<void> {
+async function exerciseRepositoryWriterAndClients(): Promise<void> {
   const now = new Date().toISOString();
-  await contentStore.upsert('os3-doc-1', {
+
+  // Use the real writer rather than a hand-built store upsert. This is the
+  // contract that caught the OS3 review regression where embeddingStatus was
+  // still projected into the new strict lexical-only mapping.
+  await contentWriter.onUpsert({
+    upsertKind: 'full',
     stableDocId: 'os3-doc-1',
     canonicalContentId: 'https://example.test/posts/os3-doc-1',
-    protocolPresence: ['activitypub'],
+    protocolSource: 'ap',
     sourceKind: 'remote',
+    ap: { objectUri: 'https://example.test/posts/os3-doc-1' },
     author: {
       canonicalId: 'os3-author-1',
       apUri: 'https://example.test/users/os3-author-1',
-      displayName: 'OS3 Search Author',
     },
-    text: 'OS3 lexical compatibility sentinel kiwi-orbit',
-    createdAt: now,
+    content: {
+      text: 'OS3 lexical compatibility sentinel kiwi-orbit',
+      createdAt: now,
+      langs: ['en'],
+      tags: ['os3'],
+    },
+    media: { hasMedia: false, mediaCount: 0 },
     indexedAt: now,
-    langs: ['en'],
-    tags: ['os3'],
-    hasMedia: false,
-    mediaCount: 0,
-    engagement: { likeCount: 0, repostCount: 0, replyCount: 0 },
-    isDeleted: false,
   });
 
   await authorStore.upsert('os3-author-1', {
@@ -108,7 +122,9 @@ async function exerciseRepositoryClients(): Promise<void> {
   await native.indices.refresh({ index: 'public-content-v1,public-author-v1' });
 
   const stored = await contentStore.get('os3-doc-1');
-  assert(stored?.text?.includes('kiwi-orbit'), 'content wrapper failed round-trip');
+  assert(stored?.text?.includes('kiwi-orbit'), 'content writer failed round-trip');
+  assert((stored as any).embeddingStatus === undefined, 'real writer reintroduced embeddingStatus');
+  assert((stored as any).embedding === undefined, 'real writer reintroduced embedding');
 
   const author = await authorStore.get('os3-author-1');
   assert(author?.displayName === 'OS3 Search Author', 'author wrapper failed round-trip');
@@ -128,19 +144,25 @@ async function exerciseRepositoryClients(): Promise<void> {
   const lexicalIds = (lexical.body?.hits?.hits ?? []).map((hit: any) => String(hit._id));
   assert(lexicalIds.includes('os3-doc-1'), 'lexical query did not return smoke document');
 
-  await contentStore.updateScripted(
-    'os3-doc-1',
-    'ctx._source.engagement.likeCount += params.likeDelta',
-    { likeDelta: 2 },
-  );
+  await contentWriter.onPartialUpdate({
+    stableDocId: 'os3-doc-1',
+    updateKind: 'engagement_delta',
+    deltas: { likeCount: 2 },
+    indexedAt: new Date().toISOString(),
+  });
   await native.indices.refresh({ index: 'public-content-v1' });
   const updated = await contentStore.get('os3-doc-1');
-  assert(updated?.engagement?.likeCount === 2, 'scripted update failed');
+  assert(updated?.engagement?.likeCount === 2, 'writer scripted update failed');
 
-  await contentStore.delete('os3-doc-1');
+  await contentWriter.onDelete({
+    stableDocId: 'os3-doc-1',
+    reason: 'moderation',
+    deleteMode: 'hard',
+    deletedAt: new Date().toISOString(),
+  });
   await authorStore.delete('os3-author-1');
   await native.indices.refresh({ index: 'public-content-v1,public-author-v1' });
-  assert((await contentStore.get('os3-doc-1')) === null, 'content delete failed');
+  assert((await contentStore.get('os3-doc-1')) === null, 'writer content delete failed');
   assert((await authorStore.get('os3-author-1')) === null, 'author delete failed');
 }
 
@@ -178,22 +200,21 @@ async function assertLegacyPipelineMigration(): Promise<void> {
   const afterPipeline = after.body?.['public-content-v1']?.settings?.index?.['default_pipeline'];
   assert(afterPipeline === '_none', `legacy default pipeline was not disabled; got ${String(afterPipeline)}`);
 
-  const now = new Date().toISOString();
-  await contentStore.upsert('os3-migrated-doc', {
+  await contentWriter.onUpsert({
+    upsertKind: 'full',
     stableDocId: 'os3-migrated-doc',
-    protocolPresence: ['activitypub'],
+    protocolSource: 'ap',
     sourceKind: 'remote',
     author: { canonicalId: 'os3-migrated-author' },
-    text: 'migration sentinel',
-    createdAt: now,
-    indexedAt: now,
-    hasMedia: false,
-    mediaCount: 0,
-    isDeleted: false,
+    content: {
+      text: 'migration sentinel',
+      createdAt: new Date().toISOString(),
+    },
+    indexedAt: new Date().toISOString(),
   });
   await native.indices.refresh({ index: 'public-content-v1' });
   const migrated = await contentStore.get('os3-migrated-doc');
-  assert(migrated, 'migrated content write failed');
+  assert(migrated, 'migrated content writer failed');
   assert((migrated as any).embeddingStatus === undefined, 'legacy ingest pipeline still mutated new content');
 
   await native.ingest.deletePipeline({ id: 'os3-legacy-embedding-pipeline' });
