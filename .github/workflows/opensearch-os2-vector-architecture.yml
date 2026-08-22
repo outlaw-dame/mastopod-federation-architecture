@@ -1,0 +1,101 @@
+name: OpenSearch OS2 Vector Architecture
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/scripts/benchmark-search-vector-architecture.mjs'
+      - '.github/workflows/opensearch-os2-vector-architecture.yml'
+      - 'docs/opensearch-os2-vector-architecture.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opensearch-os2-vector-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  whole-deployment-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.0'
+
+      - name: Prepare OpenSearch host requirements
+        run: |
+          sudo sysctl -w vm.max_map_count=262144
+          docker version
+          node --version
+
+      - name: Syntax-check OS2 benchmark
+        working-directory: fedify-sidecar
+        run: node --check scripts/benchmark-search-vector-architecture.mjs
+
+      - name: Run matched whole-deployment benchmark
+        working-directory: fedify-sidecar
+        env:
+          OPENSEARCH_BENCH_IMAGE: opensearchproject/opensearch:3.8.0
+          QDRANT_BENCH_IMAGE: qdrant/qdrant:v1.19.0
+          SEARCH_VECTOR_BENCH_DOCS: '6000'
+          SEARCH_VECTOR_BENCH_VECTOR_DIM: '1024'
+          SEARCH_VECTOR_BENCH_QUERY_SAMPLES: '40'
+          SEARCH_VECTOR_BENCH_BULK_DOCS: '200'
+          SEARCH_VECTOR_BENCH_OUTPUT: ../measurements/opensearch-os2/summary.json
+        run: node scripts/benchmark-search-vector-architecture.mjs
+
+      - name: Validate evidence contract
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const path = 'measurements/opensearch-os2/summary.json';
+          const summary = JSON.parse(readFileSync(path, 'utf8'));
+          if (summary.version !== 2) throw new Error('unexpected OS2 evidence version');
+          if (summary.images?.openSearch !== 'opensearchproject/opensearch:3.8.0') throw new Error('wrong OpenSearch image');
+          if (summary.images?.qdrant !== 'qdrant/qdrant:v1.19.0') throw new Error('wrong Qdrant image');
+          if (summary.results?.length !== 3) throw new Error('expected three architecture arms');
+          const ids = new Set(summary.results.map((r) => r.arm));
+          for (const id of ['opensearch-lexical', 'opensearch-vector-32x', 'opensearch-plus-qdrant']) {
+            if (!ids.has(id)) throw new Error(`missing arm ${id}`);
+          }
+          if (summary.decisions?.currentRuntime?.selected !== 'opensearch-lexical') {
+            throw new Error(`current runtime must select lexical-only from live requirements, got ${summary.decisions?.currentRuntime?.selected}`);
+          }
+          if (summary.decisions?.currentRuntime?.pass !== true) throw new Error('current-runtime evidence incomplete');
+          if (summary.decisions?.futureVector?.pass !== true) throw new Error('future-vector evidence incomplete');
+          const vectorArms = summary.results.filter((r) => r.query?.vector);
+          for (const arm of vectorArms) {
+            if (arm.query.vector.recallAt10 < 0.95) throw new Error(`${arm.arm} recall@10 below guard`);
+            if (!(arm.resources?.diskBytes > 0 && arm.resources?.settledMemoryBytes > 0 && arm.ingest?.serviceCpuMs > 0)) {
+              throw new Error(`${arm.arm} missing resource evidence`);
+            }
+          }
+          console.log(JSON.stringify({ comparisons: summary.comparisons, decisions: summary.decisions }, null, 2));
+          NODE
+
+      - name: Show container diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker logs --tail=200 os2-opensearch || true
+          docker logs --tail=200 os2-qdrant || true
+
+      - name: Cleanup benchmark containers
+        if: always()
+        run: |
+          docker rm -f os2-opensearch os2-qdrant 2>/dev/null || true
+
+      - name: Upload OS2 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensearch-os2-vector-architecture-${{ github.sha }}
+          path: measurements/opensearch-os2/
+          if-no-files-found: error
+          retention-days: 14
