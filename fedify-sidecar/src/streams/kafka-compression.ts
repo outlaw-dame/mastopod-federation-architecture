@@ -38,6 +38,10 @@ export function hasNativeZstdSupport(version = process.versions.node): boolean {
   return minor >= ZSTD_MIN_NODE.minor;
 }
 
+export function defaultRedpandaCompressionName(): RedpandaCompressionName {
+  return hasNativeZstdSupport() ? "zstd" : "gzip";
+}
+
 export function parseZstdLevel(raw = process.env["REDPANDA_ZSTD_LEVEL"]): number {
   if (raw === undefined || raw === "") return DEFAULT_ZSTD_LEVEL;
   if (!/^-?\d+$/.test(raw)) {
@@ -100,9 +104,18 @@ function registerNativeZstdCodec(level: number): void {
 }
 
 export function resolveRedpandaCompression(
-  raw = process.env["REDPANDA_COMPRESSION"] ?? "zstd",
+  raw = process.env["REDPANDA_COMPRESSION"] ?? defaultRedpandaCompressionName(),
 ): { name: RedpandaCompressionName; type: CompressionType; zstdLevel?: number } {
   const name = raw.trim().toLowerCase();
+
+  // Kafka logs can contain batches written before a producer codec rollback.
+  // On capable runtimes, keep the Zstd decoder registered even when new
+  // batches are configured as gzip/none so historical Zstd batches remain
+  // consumable during and after a rollback.
+  if (name !== "zstd" && hasNativeZstdSupport()) {
+    registerNativeZstdCodec(DEFAULT_ZSTD_LEVEL);
+  }
+
   switch (name) {
     case "none":
       return { name, type: CompressionTypes.None };
@@ -126,7 +139,7 @@ export function resolveRedpandaCompression(
 }
 
 export function ensureRedpandaCompressionCodec(
-  raw = process.env["REDPANDA_COMPRESSION"] ?? "zstd",
+  raw = process.env["REDPANDA_COMPRESSION"] ?? defaultRedpandaCompressionName(),
 ): CompressionType {
   return resolveRedpandaCompression(raw).type;
 }
