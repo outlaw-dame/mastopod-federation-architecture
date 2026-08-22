@@ -5,6 +5,11 @@ import type { CompressionTypes as CompressionType } from "kafkajs";
 const { CompressionCodecs, CompressionTypes } = kafkaJs;
 
 export type RedpandaCompressionName = "none" | "gzip" | "zstd";
+export interface ResolvedRedpandaCompression {
+  name: RedpandaCompressionName;
+  type: CompressionType;
+  zstdLevel?: number;
+}
 
 const DEFAULT_ZSTD_LEVEL = 1;
 const MIN_ZSTD_LEVEL = -131072;
@@ -113,7 +118,7 @@ function registerNativeZstdCodec(level: number): void {
 
 export function resolveRedpandaCompression(
   raw = process.env["REDPANDA_COMPRESSION"] ?? defaultRedpandaCompressionName(),
-): { name: RedpandaCompressionName; type: CompressionType; zstdLevel?: number } {
+): ResolvedRedpandaCompression {
   const name = raw.trim().toLowerCase();
 
   // Kafka logs can contain batches written before a producer codec rollback.
@@ -146,11 +151,14 @@ export function resolveRedpandaCompression(
   }
 }
 
-export function ensureRedpandaCompressionCodec(raw?: string): CompressionType {
-  // Legacy call sites pass `process.env.REDPANDA_COMPRESSION ?? "zstd"`.
-  // Treat that literal only as their historical implicit default when the env
-  // variable itself is absent, so package-level Node 20 compatibility is not
-  // accidentally converted into an automatic mixed-fleet Zstd rollout.
+/**
+ * Resolve process-level Redpanda compression while tolerating the repository's
+ * historical `process.env.REDPANDA_COMPRESSION || "zstd"` call shape. When the
+ * environment is actually unset, a caller-supplied literal `zstd` is treated as
+ * the old implicit default and mapped to the rolling-upgrade-safe package
+ * default. Explicit deployment configuration remains authoritative.
+ */
+export function resolveConfiguredRedpandaCompression(raw?: string): ResolvedRedpandaCompression {
   const configured = process.env["REDPANDA_COMPRESSION"];
   const selected =
     configured !== undefined
@@ -158,5 +166,9 @@ export function ensureRedpandaCompressionCodec(raw?: string): CompressionType {
       : raw === undefined || raw.trim().toLowerCase() === "zstd"
         ? defaultRedpandaCompressionName()
         : raw;
-  return resolveRedpandaCompression(selected).type;
+  return resolveRedpandaCompression(selected);
+}
+
+export function ensureRedpandaCompressionCodec(raw?: string): CompressionType {
+  return resolveConfiguredRedpandaCompression(raw).type;
 }
