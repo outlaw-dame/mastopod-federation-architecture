@@ -31,6 +31,7 @@ const PROFILE_SETTINGS: Record<DurabilityProfile, ProfileSettings> = {
 };
 
 const TOPIC_RESOURCE_TYPE = 2;
+const TOPIC_COMPRESSION_POLICY = "producer";
 
 export function resolveTopicGovernanceOptionsFromEnv(): TopicGovernanceOptions {
   const brokers = (process.env["REDPANDA_BROKERS"] || "localhost:9092")
@@ -208,8 +209,10 @@ export async function verifyRedpandaTopics(options: TopicGovernanceOptions): Pro
 
       const configEntries = configByTopic.get(topic.topic) ?? new Map<string, string>();
       const compressionType = configEntries.get("compression.type");
-      if (compressionType !== "zstd") {
-        failures.push(`${topic.topic}: compression.type must be zstd (found ${compressionType ?? "unset"})`);
+      if (compressionType !== TOPIC_COMPRESSION_POLICY) {
+        failures.push(
+          `${topic.topic}: compression.type must be ${TOPIC_COMPRESSION_POLICY} (found ${compressionType ?? "unset"})`,
+        );
       }
 
       const expectedCleanup = normalizeCleanupPolicy(topic.cleanupPolicy);
@@ -302,7 +305,7 @@ function buildConfigEntries(
   const entries: Array<{ name: string; value: string }> = [
     { name: "cleanup.policy", value: topic.cleanupPolicy },
     { name: "retention.ms", value: String(topic.retentionMs) },
-    { name: "compression.type", value: "zstd" },
+    { name: "compression.type", value: TOPIC_COMPRESSION_POLICY },
     { name: "min.insync.replicas", value: String(profileSettings.minInSyncReplicas) },
   ];
 
@@ -398,8 +401,6 @@ function buildTopicDefinitions(profile: DurabilityProfile): TopicDefinition[] {
     },
   ];
 
-  // DLQ topics — produced to by Redpanda Connect on sink failure.
-  // Must be pre-created because auto-topic creation is disabled.
   const dlqTopics: TopicDefinition[] = [
     {
       topic: sanitizeTopicName("ap.firehose.dlq.v1"),
