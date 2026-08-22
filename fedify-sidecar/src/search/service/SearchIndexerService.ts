@@ -55,7 +55,6 @@ export interface SearchIndexerServiceConfig {
   redis: {
     get(key: string): Promise<string | null>;
     set(key: string, value: string, ...args: Array<string | number>): Promise<unknown>;
-    del(key: string): Promise<unknown>;
   } | null;
   backpressureRetryDelayMs: number;
   maxProcessingAttempts: number;
@@ -152,7 +151,10 @@ export class SearchIndexerService {
     await this.producer.connect();
     await this.consumer.connect();
     await this.consumer.subscribe({ topics: [this.config.firehoseTopic, this.config.tombstoneTopic], fromBeginning: false });
-    await this.consumer.run({ eachBatch: async (payload: EachBatchPayload) => { await this.processBatch(payload); } });
+    await this.consumer.run({
+      eachBatchAutoResolve: false,
+      eachBatch: async (payload: EachBatchPayload) => { await this.processBatch(payload); },
+    });
     logger.info('[SearchIndexerService] Started', {
       firehoseTopic: this.config.firehoseTopic,
       tombstoneTopic: this.config.tombstoneTopic,
@@ -171,6 +173,11 @@ export class SearchIndexerService {
     logger.info('[SearchIndexerService] Stopped');
   }
 
+  private async markCompleted(outboxIntentId: string | undefined): Promise<void> {
+    if (!outboxIntentId) return;
+    await this.outboxIntentDeduper.claim(outboxIntentId);
+  }
+
   private async processBatch(payload: EachBatchPayload): Promise<void> {
     const { batch, resolveOffset, heartbeat, isRunning, isStale, pause } = payload;
     for (const message of batch.messages) {
@@ -180,7 +187,6 @@ export class SearchIndexerService {
       const retryKey = `${batch.topic}:${batch.partition}:${message.offset}`;
       let raw: string | undefined;
       let outboxIntentId: string | undefined;
-      let dedupeClaimed = false;
 
       try {
         raw = message.value?.toString();
@@ -195,17 +201,15 @@ export class SearchIndexerService {
           event,
           message.headers as Record<string, Buffer | string | undefined> | undefined,
         );
-        if (outboxIntentId) {
-          dedupeClaimed = await this.outboxIntentDeduper.claim(outboxIntentId);
-          if (!dedupeClaimed) {
-            logger.debug('[SearchIndexerService] Skipping duplicate local outbox intent replay', {
-              outboxIntentId, topic: batch.topic, partition: batch.partition, offset: message.offset,
-            });
-            resolveOffset(message.offset);
-            this.processingAttempts.delete(retryKey);
-            await heartbeat();
-            continue;
-          }
+
+        if (outboxIntentId && await this.outboxIntentDeduper.has(outboxIntentId)) {
+          logger.debug('[SearchIndexerService] Skipping completed local outbox intent replay', {
+            outboxIntentId, topic: batch.topic, partition: batch.partition, offset: message.offset,
+          });
+          resolveOffset(message.offset);
+          this.processingAttempts.delete(retryKey);
+          await heartbeat();
+          continue;
         }
 
         if (batch.topic === this.config.tombstoneTopic) {
@@ -216,6 +220,7 @@ export class SearchIndexerService {
             logger.debug('[SearchIndexerService] Skipping non-searchable activity (FEP-268d)', {
               activityId: (event['activity'] as any)?.id, source: consent.source,
             });
+            await this.markCompleted(outboxIntentId);
             resolveOffset(message.offset);
             this.processingAttempts.delete(retryKey);
             await heartbeat();
@@ -224,22 +229,11 @@ export class SearchIndexerService {
           await this.projector.onApFirehoseEvent(event);
         }
 
+        await this.markCompleted(outboxIntentId);
         resolveOffset(message.offset);
         this.processingAttempts.delete(retryKey);
         await heartbeat();
       } catch (error: unknown) {
-        if (dedupeClaimed && outboxIntentId) {
-          try {
-            await this.outboxIntentDeduper.release(outboxIntentId);
-          } catch (releaseError: unknown) {
-            logger.error('[SearchIndexerService] Cannot release dedupe claim after failed projection', {
-              outboxIntentId, topic: batch.topic, partition: batch.partition, offset: message.offset,
-              error: releaseError instanceof Error ? releaseError.message : String(releaseError),
-            });
-            throw releaseError;
-          }
-        }
-
         const attempts = (this.processingAttempts.get(retryKey) ?? 0) + 1;
         this.processingAttempts.set(retryKey, attempts);
         const errorMessage = error instanceof Error ? error.message : String(error);
