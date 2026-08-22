@@ -38,6 +38,7 @@ jobs:
       - name: Start Redis, Redpanda, and OpenSearch 3.8
         run: |
           set -euo pipefail
+          mkdir -p artifacts/os4b-live
           docker run -d --name os4b-live-redis -p 16379:6379 redis:7-alpine
           docker run -d --name os4b-live-redpanda \
             -p 19092:19092 \
@@ -52,18 +53,28 @@ jobs:
             --memory=1536m --cpus=2 \
             opensearchproject/opensearch:3.8.0
 
+          ready=false
           for i in $(seq 1 90); do
             redis_ok=false; redpanda_ok=false; opensearch_ok=false
             redis-cli -p 16379 ping 2>/dev/null | grep -q PONG && redis_ok=true || true
-            docker exec os4b-live-redpanda rpk cluster health --exit-when-healthy >/dev/null 2>&1 && redpanda_ok=true || true
+            docker exec os4b-live-redpanda rpk cluster info --brokers=127.0.0.1:19092 >/dev/null 2>&1 && redpanda_ok=true || true
             curl -fsS http://127.0.0.1:19200/_cluster/health 2>/dev/null | grep -qv '"status":"red"' && opensearch_ok=true || true
-            if $redis_ok && $redpanda_ok && $opensearch_ok; then break; fi
+            if $redis_ok && $redpanda_ok && $opensearch_ok; then
+              ready=true
+              break
+            fi
             sleep 2
-            if [[ $i -eq 90 ]]; then exit 1; fi
           done
+          if [[ "$ready" != true ]]; then
+            echo "Dependency readiness failed: redis=${redis_ok} redpanda=${redpanda_ok} opensearch=${opensearch_ok}" | tee artifacts/os4b-live/dependency-readiness.txt
+            docker exec os4b-live-redpanda rpk cluster info --brokers=127.0.0.1:19092 >> artifacts/os4b-live/dependency-readiness.txt 2>&1 || true
+            curl -sS http://127.0.0.1:19200/_cluster/health >> artifacts/os4b-live/dependency-readiness.txt 2>&1 || true
+            exit 1
+          fi
+          echo "redis=true redpanda=true opensearch=true" > artifacts/os4b-live/dependency-readiness.txt
 
           for topic in ap.stream1.local-public.v1 ap.stream2.remote-public.v1 ap.firehose.v1 ap.tombstones.v1 ap.firehose.dlq.v1; do
-            docker exec os4b-live-redpanda rpk topic create "$topic" >/dev/null
+            docker exec os4b-live-redpanda rpk topic create "$topic" --brokers=127.0.0.1:19092 >/dev/null
           done
 
       - name: Start mock ActivityPods authority and canonical Fedify sidecar runtime
@@ -149,6 +160,7 @@ jobs:
       - name: Diagnostics
         if: failure()
         run: |
+          cat artifacts/os4b-live/dependency-readiness.txt 2>/dev/null || true
           cat artifacts/os4b-live/sidecar.log 2>/dev/null || true
           cat artifacts/os4b-live/activitypods.log 2>/dev/null || true
           docker logs --tail 200 os4b-live-redpanda 2>/dev/null || true
