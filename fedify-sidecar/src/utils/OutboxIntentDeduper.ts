@@ -1,8 +1,8 @@
 import { logger } from "./logger.js";
 
 export interface OutboxIntentDeduperStore {
+  get?(key: string): Promise<string | null>;
   set(key: string, value: string, ...args: Array<string | number>): Promise<unknown>;
-  del?(key: string): Promise<unknown>;
 }
 
 export interface OutboxIntentDeduperConfig {
@@ -13,15 +13,14 @@ export interface OutboxIntentDeduperConfig {
 }
 
 /**
- * Best-effort dedupe for at-least-once consumers of local outbox-derived events.
+ * Best-effort completion dedupe for at-least-once consumers of local
+ * outbox-derived events.
  *
- * Redis-backed mode uses SET NX EX for cross-process dedupe.
- * In-memory mode is the fallback for isolated tests or single-process consumers.
- *
- * OS4 adds release() so a consumer that claims before a downstream side effect
- * can relinquish the claim when that side effect fails. Without this, a Kafka
- * retry can be incorrectly suppressed as a duplicate and silently lose the
- * rebuildable projection update.
+ * `has()` is a non-mutating completion check. `claim()` records completion with
+ * SET NX EX. Consumers whose downstream side effect is idempotent should check
+ * `has()`, perform the side effect, then `claim()` before resolving their source
+ * offset. This avoids acquiring a durable claim that later has to be rolled back
+ * if the side effect fails.
  */
 export class OutboxIntentDeduper {
   private readonly prefix: string;
@@ -35,6 +34,26 @@ export class OutboxIntentDeduper {
     this.ttlMs = Math.max(1, config.ttlSeconds) * 1000;
     this.store = config.store ?? null;
     this.now = config.now ?? (() => Date.now());
+  }
+
+  async has(intentId: string): Promise<boolean> {
+    const normalized = intentId.trim();
+    if (!normalized) return false;
+
+    if (this.store?.get) {
+      try {
+        return (await this.store.get(`${this.prefix}:${normalized}`)) !== null;
+      } catch (error) {
+        logger.warn("Outbox intent dedupe read unavailable, falling back to memory", {
+          prefix: this.prefix,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    this.prune();
+    const expiresAt = this.memory.get(normalized);
+    return expiresAt !== undefined && expiresAt > this.now();
   }
 
   async claim(intentId: string): Promise<boolean> {
@@ -66,20 +85,6 @@ export class OutboxIntentDeduper {
 
     this.memory.set(normalized, now + this.ttlMs);
     return true;
-  }
-
-  async release(intentId: string): Promise<void> {
-    const normalized = intentId.trim();
-    if (!normalized) return;
-
-    this.memory.delete(normalized);
-
-    if (!this.store) return;
-    if (!this.store.del) {
-      throw new Error("Outbox intent dedupe store does not support release/del");
-    }
-
-    await this.store.del(`${this.prefix}:${normalized}`);
   }
 
   private prune(): void {
