@@ -20,6 +20,7 @@ services:
           - bonfire.test
           - misskey.test
           - friendica.test
+          - castopod.test
           - activitypods.test
 
   # Containerized real-ActivityPods sidecar proof. Keeping this service on the

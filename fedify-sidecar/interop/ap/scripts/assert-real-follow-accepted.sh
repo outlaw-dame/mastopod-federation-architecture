@@ -44,12 +44,12 @@ if [ -n "${COMPOSE_OVERLAY}" ]; then
 fi
 
 if [ -z "${TARGET}" ] || [ -z "${ACTOR_URI}" ]; then
-  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica> <actor-uri> [local-username]" >&2
+  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod> <actor-uri> [local-username]" >&2
   exit 2
 fi
 
 case "${TARGET}" in
-  mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica) ;;
+  mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod) ;;
   *) fail "unsupported target '${TARGET}'" ;;
 esac
 case "${EXPECTED_COUNT}:${ATTEMPTS}:${DELAY_SECONDS}" in
@@ -119,6 +119,10 @@ query_count() {
     friendica)
       compose exec -T friendica-db /bin/sh -lc \
         "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"select count(*) from contact c join user u on u.uid=c.uid where c.url='${actor_sql}' and u.nickname='${username_sql}' and c.rel in (1,3) and c.pending=0 and c.deleted=0;\""
+      ;;
+    castopod)
+      compose exec -T castopod-db /bin/sh -lc \
+        "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u castopod castopod -e \"select count(*) from cp_fediverse_follows f join cp_fediverse_actors follower on follower.id=f.actor_id join cp_fediverse_actors target on target.id=f.target_actor_id where follower.uri='${actor_sql}' and target.username='${username_sql}' and target.domain='castopod.test';\""
       ;;
   esac
 }
@@ -198,6 +202,9 @@ case "${TARGET}" in
     ;;
   friendica)
     compose logs --no-color friendica-app friendica-worker >&2 || true
+    ;;
+  castopod)
+    compose logs --no-color castopod-app >&2 || true
     ;;
 esac
 exit 1

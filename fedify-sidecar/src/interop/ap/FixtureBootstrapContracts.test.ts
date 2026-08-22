@@ -61,6 +61,31 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(bootstrap).toContain("compose up -d friendica-worker");
   });
 
+  it("creates a Castopod actor through the production podcast model", () => {
+    const bootstrap = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/bootstrap-castopod-account.sh"),
+      "utf8",
+    );
+    const command = readFileSync(
+      resolve(process.cwd(), "interop/ap/castopod/InteropCreatePodcast.php"),
+      "utf8",
+    );
+    const compose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.castopod.yml"),
+      "utf8",
+    );
+
+    expect(compose).toContain("castopod/castopod:1.9.0@sha256:3ad8970f");
+    expect(compose).not.toContain("CP_DISABLE_HTTPS");
+    expect(bootstrap).toContain("php spark install:init-database");
+    expect(bootstrap).toContain("php spark install:create-superadmin");
+    expect(bootstrap).toContain("php spark interop:create-podcast");
+    expect(command).toContain("new PodcastModel()");
+    expect(command).toContain("imagecreatetruecolor(1400, 1400)");
+    expect(command).not.toContain("private_key' =>");
+    expect(command).not.toContain("public_key' =>");
+  });
+
   it("uses an MX-reachable default for Mastodon CLI account validation", () => {
     const script = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/bootstrap-mastodon-account.sh"),

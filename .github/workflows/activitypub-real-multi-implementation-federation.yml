@@ -65,6 +65,12 @@ jobs:
             compose_overlay: fedify-sidecar/interop/ap/docker-compose.friendica.yml
             actor_uri: https://friendica.test/profile/interop
             remote_version: Friendica 2026.05@sha256:e496eeb34fc2c9eb24eae94d2835c39e9a715966f625db769b188427b61ece6d
+          - target: castopod
+            target_host: castopod.test
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.castopod.yml
+            actor_uri: https://castopod.test/@interop
+            remote_version: Castopod 1.9.0@sha256:3ad8970f1decc9c9009502be3efedcf2f5d9fda5c7c9fd85a4408edc84a0bbb9
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ACTIVITYPODS_SHA: '948e53cc67c7b383f28b69aff8f7a6dc217b1166'
@@ -75,6 +81,7 @@ jobs:
       PIXELFED_OVERLAY: fedify-sidecar/interop/ap/docker-compose.pixelfed.yml
       MISSKEY_OVERLAY: fedify-sidecar/interop/ap/docker-compose.misskey.yml
       FRIENDICA_OVERLAY: fedify-sidecar/interop/ap/docker-compose.friendica.yml
+      CASTOPOD_OVERLAY: fedify-sidecar/interop/ap/docker-compose.castopod.yml
       BONFIRE_OVERLAY: fedify-sidecar/interop/ap/docker-compose.bonfire.yml
       TARGET: ${{ matrix.target }}
       TARGET_HOST: ${{ matrix.target_host }}
@@ -131,12 +138,16 @@ jobs:
           misskey_user_password="$(openssl rand -hex 32)"
           friendica_db_password="$(openssl rand -hex 32)"
           friendica_db_root_password="$(openssl rand -hex 32)"
+          castopod_db_password="$(openssl rand -hex 32)"
+          castopod_db_root_password="$(openssl rand -hex 32)"
+          castopod_analytics_salt="$(openssl rand -hex 32)"
+          castopod_admin_password="$(openssl rand -hex 32)"
           bonfire_db_password="$(openssl rand -hex 32)"
           bonfire_secret_key_base="$(openssl rand -hex 64)"
           bonfire_signing_salt="$(openssl rand -hex 32)"
           bonfire_encryption_salt="$(openssl rand -hex 32)"
           bonfire_release_cookie="$(openssl rand -hex 32)"
-          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
+          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
           {
             echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
             echo "SIDECAR_TOKEN=${sidecar_token}"
@@ -149,6 +160,10 @@ jobs:
             echo "MISSKEY_USER_PASSWORD=${misskey_user_password}"
             echo "FRIENDICA_DB_PASSWORD=${friendica_db_password}"
             echo "FRIENDICA_DB_ROOT_PASSWORD=${friendica_db_root_password}"
+            echo "CASTOPOD_DB_PASSWORD=${castopod_db_password}"
+            echo "CASTOPOD_DB_ROOT_PASSWORD=${castopod_db_root_password}"
+            echo "CASTOPOD_ANALYTICS_SALT=${castopod_analytics_salt}"
+            echo "CASTOPOD_ADMIN_PASSWORD=${castopod_admin_password}"
             echo "BONFIRE_DB_PASSWORD=${bonfire_db_password}"
             echo "BONFIRE_SECRET_KEY_BASE=${bonfire_secret_key_base}"
             echo "BONFIRE_SIGNING_SALT=${bonfire_signing_salt}"
@@ -251,6 +266,11 @@ jobs:
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_FRIENDICA_OVERLAY="${FRIENDICA_OVERLAY}" \
               AP_INTEROP_FRIENDICA_USERNAME="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-friendica-account.sh
+              ;;
+            castopod)
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_CASTOPOD_OVERLAY="${CASTOPOD_OVERLAY}" \
+              AP_INTEROP_CASTOPOD_HANDLE="${TARGET_USERNAME}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-castopod-account.sh
               ;;
             bonfire)
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_BONFIRE_OVERLAY="${BONFIRE_OVERLAY}" \
@@ -507,6 +527,7 @@ jobs:
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app 2>/dev/null || true ;;
             friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true ;;
+            castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app 2>/dev/null || true ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
           esac
 
@@ -528,6 +549,9 @@ jobs:
           fi
           if [[ "${TARGET}" == friendica ]]; then
             docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" down -v || true
+          fi
+          if [[ "${TARGET}" == castopod ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" down -v || true
           fi
           if [[ "${TARGET}" == bonfire ]]; then
             docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" down -v || true

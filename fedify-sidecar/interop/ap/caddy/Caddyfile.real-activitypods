@@ -43,6 +43,11 @@ https://friendica.test {
   reverse_proxy friendica-app:80
 }
 
+https://castopod.test {
+  tls /certs/castopod.test.crt /certs/castopod.test.key
+  reverse_proxy castopod-app:8000
+}
+
 # Canonical public ActivityPods actor/key surface for the live federation proof.
 # The backend remains a host process so the exact PR checkout is exercised;
 # Caddy supplies the local trusted TLS name that remote implementations can
