@@ -1,0 +1,63 @@
+services:
+  ap-proof-router:
+    image: caddy:2.8-alpine
+    profiles: ["real-activitypods"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./caddy/Caddyfile.real-activitypods:/etc/caddy/Caddyfile:ro
+      - ./runtime/certs:/certs:ro
+    ports:
+      - "127.0.0.1:443:443"
+    networks:
+      ap-interop:
+        aliases:
+          - activitypods
+          - gotosocial
+          - mastodon
+          - akkoma
+          - pixelfed.test
+          - bonfire.test
+          - misskey.test
+          - friendica.test
+          - castopod.test
+          - activitypods.test
+
+  # Containerized real-ActivityPods sidecar proof. Keeping this service on the
+  # interop network lets the existing development-only private-host allowlist
+  # exercise HTTPS federation without weakening the production SSRF policy.
+  fedify-sidecar:
+    environment:
+      # Directional, Docker-network-only alias for the host signing recorder.
+      # The public actor/key surface remains HTTPS through ap-proof-router.
+      ACTIVITYPODS_URL: http://activitypods-internal:3001
+      ACTIVITYPODS_TOKEN: ${ACTIVITYPODS_TOKEN:?ACTIVITYPODS_TOKEN is required}
+      ATPROTO_PASSWORD_VERIFY_TOKEN: ${ATPROTO_PASSWORD_VERIFY_TOKEN:-}
+      SIDECAR_TOKEN: ${SIDECAR_TOKEN:?SIDECAR_TOKEN is required}
+      SIDECAR_STARTUP_MODE: blocking
+      DOMAIN: activitypods
+      AP_RELAY_LOCAL_ACTOR_URI: https://activitypods/users/relay
+      REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: "true"
+      REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES: "1"
+      REDIS_STREAM_PAYLOAD_BROTLI_QUALITY: "0"
+      ENABLE_INBOUND_WORKER: "false"
+      ENABLE_OUTBOUND_WORKER: "true"
+      ENABLE_OUTBOX_INTENT_WORKER: "true"
+      ENABLE_FEDIFY_RUNTIME_INTEGRATION: "false"
+      ENABLE_FEP_3AB2_STREAMING: "false"
+      ENABLE_OPENSEARCH_INDEXER: "false"
+      ENABLE_XRPC_SERVER: "false"
+      ENABLE_MEDIA_ASSET_SYNC: "false"
+      ENABLE_ACCOUNT_PROVISIONING: "false"
+      ENABLE_ENTRYWAY: "false"
+      ENABLE_FOLLOWERS_SYNC: "false"
+      ENABLE_MRF_ADMIN_API: "false"
+      ENABLE_MODERATION_BRIDGE_API: "false"
+      ENABLE_CANONICAL_EVENT_LOG: "false"
+      ENABLE_CANONICAL_NOTIFICATIONS: "false"
+      ENABLE_AT_JETSTREAM: "false"
+      ENABLE_AT_EXTERNAL_FIREHOSE: "false"
+    extra_hosts:
+      - "activitypods-internal:${AP_SIGNING_PROXY_DOCKER_HOST:-host-gateway}"
+    ports:
+      - "127.0.0.1:8080:8080"

@@ -1,0 +1,54 @@
+services:
+  bonfire-db:
+    image: postgis/postgis:17-3.5-alpine@sha256:966243672c7d98cb996f26854a790b3b76e3cb77455d6eeb19d72ff82d20e7af
+    environment:
+      POSTGRES_DB: bonfire_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${BONFIRE_DB_PASSWORD:?BONFIRE_DB_PASSWORD is required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bonfire_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    volumes:
+      - ap_interop_bonfire_db:/var/lib/postgresql/data
+    networks:
+      - ap-interop
+
+  bonfire-app:
+    image: bonfirenetworks/bonfire:1.0.6-social-amd64@sha256:55084069242e4e09619081ca4f05102a8805325371003f79a5bc50d2e91dae05
+    environment:
+      HOSTNAME: bonfire.test
+      SERVER_PORT: "4000"
+      PUBLIC_PORT: "443"
+      POSTGRES_HOST: bonfire-db
+      POSTGRES_USER: postgres
+      POSTGRES_DB: bonfire_db
+      POSTGRES_PASSWORD: ${BONFIRE_DB_PASSWORD:?BONFIRE_DB_PASSWORD is required}
+      SECRET_KEY_BASE: ${BONFIRE_SECRET_KEY_BASE:?BONFIRE_SECRET_KEY_BASE is required}
+      SIGNING_SALT: ${BONFIRE_SIGNING_SALT:?BONFIRE_SIGNING_SALT is required}
+      ENCRYPTION_SALT: ${BONFIRE_ENCRYPTION_SALT:?BONFIRE_ENCRYPTION_SALT is required}
+      RELEASE_COOKIE: ${BONFIRE_RELEASE_COOKIE:?BONFIRE_RELEASE_COOKIE is required}
+      MAIL_BACKEND: none
+      SEARCH_ADAPTER: none
+      FLAVOUR: social
+      MIX_ENV: prod
+      SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
+    depends_on:
+      bonfire-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/ >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 24
+      start_period: 90s
+    volumes:
+      - ap_interop_bonfire_uploads:/opt/app/data/uploads
+      - ./runtime:/interop/runtime:ro
+    networks:
+      - ap-interop
+
+volumes:
+  ap_interop_bonfire_db:
+  ap_interop_bonfire_uploads:

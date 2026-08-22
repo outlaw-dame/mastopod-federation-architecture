@@ -24,6 +24,8 @@ npm exec -- vitest run \
   src/adsp/tests/RemoteFixtureRunner.test.ts \
   src/adsp/tests/RemoteFixtureSettlement.test.ts \
   src/queue/tests/RedisStreamsQueue.test.ts \
+  src/queue/tests/RedisStreamPayloadCodec.test.ts \
+  src/queue/tests/RedisStreamsQueueCompression.test.ts \
   src/queue/tests/DelayedOutboundQueue.test.ts \
   src/delivery/tests/ApdmReplayHorizon.test.ts \
   src/delivery/tests/DurableHandoffIdempotency.test.ts \

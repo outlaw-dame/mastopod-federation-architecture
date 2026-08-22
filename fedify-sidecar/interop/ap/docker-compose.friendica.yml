@@ -1,0 +1,67 @@
+services:
+  friendica-db:
+    image: mariadb:11.4@sha256:4f1d8d202fcf7bcb3902f63af09f9c1a050c2922a89652f22abaec0d4f015e83
+    environment:
+      MARIADB_DATABASE: friendica
+      MARIADB_USER: friendica
+      MARIADB_PASSWORD: ${FRIENDICA_DB_PASSWORD:?FRIENDICA_DB_PASSWORD is required}
+      MARIADB_ROOT_PASSWORD: ${FRIENDICA_DB_ROOT_PASSWORD:?FRIENDICA_DB_ROOT_PASSWORD is required}
+    healthcheck:
+      test: ["CMD-SHELL", "healthcheck.sh --connect --innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ap_interop_friendica_db:/var/lib/mysql
+    networks:
+      - ap-interop
+
+  friendica-app:
+    image: friendica:2026.05@sha256:e496eeb34fc2c9eb24eae94d2835c39e9a715966f625db769b188427b61ece6d
+    depends_on:
+      friendica-db:
+        condition: service_healthy
+    environment: &friendica_environment
+      # Friendica concatenates ActivityPub route paths onto its configured
+      # base URL. A trailing slash produces non-canonical //inbox URLs and
+      # invalidates request-target interoperability for shared-inbox delivery.
+      FRIENDICA_URL: https://friendica.test
+      FRIENDICA_ADMIN_MAIL: interop-admin@friendi.ca
+      FRIENDICA_TZ: UTC
+      FRIENDICA_LANG: en
+      MYSQL_HOST: friendica-db
+      MYSQL_DATABASE: friendica
+      MYSQL_USER: friendica
+      MYSQL_PASSWORD: ${FRIENDICA_DB_PASSWORD:?FRIENDICA_DB_PASSWORD is required}
+      SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
+      CURL_CA_BUNDLE: /interop/runtime/certs/rootCA.crt
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'Accept: application/activity+json' http://127.0.0.1/profile/interop >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    volumes:
+      - ap_interop_friendica_html:/var/www/html
+      - ./runtime/certs:/interop/runtime/certs:ro
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+    networks:
+      - ap-interop
+
+  friendica-worker:
+    image: friendica:2026.05@sha256:e496eeb34fc2c9eb24eae94d2835c39e9a715966f625db769b188427b61ece6d
+    entrypoint: /cron.sh
+    depends_on:
+      friendica-app:
+        condition: service_healthy
+    environment: *friendica_environment
+    volumes:
+      - ap_interop_friendica_html:/var/www/html
+      - ./runtime/certs:/interop/runtime/certs:ro
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+    networks:
+      - ap-interop
+
+volumes:
+  ap_interop_friendica_db:
+  ap_interop_friendica_html:
