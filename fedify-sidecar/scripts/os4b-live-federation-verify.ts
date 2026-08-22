@@ -10,6 +10,7 @@ const marker = process.env.OS4B_FEDERATION_MARKER;
 const expected = Number(process.env.OS4B_FEDERATION_COUNT ?? 240);
 const timeoutMs = Number(process.env.OS4B_FEDERATION_TIMEOUT_MS ?? 120000);
 if (!marker) throw new Error('OS4B_FEDERATION_MARKER is required');
+const invalidMarker = `${marker}-invalid-signature`;
 
 const os = new Client({ node: opensearchUrl });
 const redis = createClient({ url: redisUrl });
@@ -20,10 +21,14 @@ const consumer = kafka.consumer({ groupId: `os4b-live-verify-${Date.now()}` });
 await consumer.connect();
 await consumer.subscribe({ topic: 'ap.stream2.remote-public.v1', fromBeginning: true });
 let stream2Matched = 0;
-let firehoseMatched = 0;
+let stream2Invalid = 0;
 const observed = new Set<string>();
 await consumer.run({ eachMessage: async ({ message }) => {
   const raw = message.value?.toString() ?? '';
+  if (raw.includes(invalidMarker)) {
+    stream2Invalid++;
+    return;
+  }
   if (!raw.includes(marker)) return;
   try {
     const event = JSON.parse(raw);
@@ -39,8 +44,14 @@ const firehoseConsumer = kafka.consumer({ groupId: `os4b-live-firehose-verify-${
 await firehoseConsumer.connect();
 await firehoseConsumer.subscribe({ topic: 'ap.firehose.v1', fromBeginning: true });
 const firehoseIds = new Set<string>();
+let firehoseMatched = 0;
+let firehoseInvalid = 0;
 await firehoseConsumer.run({ eachMessage: async ({ message }) => {
   const raw = message.value?.toString() ?? '';
+  if (raw.includes(invalidMarker)) {
+    firehoseInvalid++;
+    return;
+  }
   if (!raw.includes(marker)) return;
   try {
     const event = JSON.parse(raw);
@@ -52,19 +63,55 @@ await firehoseConsumer.run({ eachMessage: async ({ message }) => {
   } catch {}
 } });
 
-const startedAt = Date.now();
-let searchHits = 0;
-let inboundPending = Number.POSITIVE_INFINITY;
-while (Date.now() - startedAt < timeoutMs) {
+async function searchCount(text: string): Promise<number> {
   await os.indices.refresh({ index: 'public-content-v1' }).catch(() => undefined);
   const response: any = await os.search({
     index: 'public-content-v1',
-    body: { size: 0, query: { match_phrase: { text: marker } } },
+    body: { size: 0, query: { match_phrase: { text } } },
   }).catch(() => null);
-  searchHits = Number(response?.body?.hits?.total?.value ?? 0);
+  return Number(response?.body?.hits?.total?.value ?? 0);
+}
+
+async function inboundEvidence() {
+  const rows = await redis.xRange('ap:queue:inbound:v1', '-', '+').catch(() => [] as any[]);
+  let valid = 0;
+  let invalid = 0;
+  for (const row of rows as any[]) {
+    const raw = JSON.stringify(row?.message ?? {});
+    if (raw.includes(invalidMarker)) invalid++;
+    else if (raw.includes(marker)) valid++;
+  }
+  return { valid, invalid, totalEntries: rows.length };
+}
+
+const startedAt = Date.now();
+let searchHits = 0;
+let invalidSearchHits = Number.POSITIVE_INFINITY;
+let inboundPending = Number.POSITIVE_INFINITY;
+let inboundObserved = 0;
+let inboundInvalid = Number.POSITIVE_INFINITY;
+let inboundTotalEntries = 0;
+while (Date.now() - startedAt < timeoutMs) {
+  searchHits = await searchCount(marker);
+  invalidSearchHits = await searchCount(invalidMarker);
   const pendingRows = await redis.xPending('ap:queue:inbound:v1', 'sidecar-workers').catch(() => null as any);
-  inboundPending = typeof pendingRows?.pending === 'number' ? pendingRows.pending : 0;
-  if (searchHits === expected && stream2Matched === expected && firehoseMatched === expected && inboundPending === 0) break;
+  inboundPending = typeof pendingRows?.pending === 'number' ? pendingRows.pending : Number.POSITIVE_INFINITY;
+  const inbound = await inboundEvidence();
+  inboundObserved = inbound.valid;
+  inboundInvalid = inbound.invalid;
+  inboundTotalEntries = inbound.totalEntries;
+
+  if (
+    searchHits === expected
+    && stream2Matched === expected
+    && firehoseMatched === expected
+    && inboundObserved === expected
+    && inboundPending === 0
+    && invalidSearchHits === 0
+    && inboundInvalid === 0
+    && stream2Invalid === 0
+    && firehoseInvalid === 0
+  ) break;
   await new Promise((resolve) => setTimeout(resolve, 500));
 }
 
@@ -74,13 +121,31 @@ await redis.quit();
 await os.close();
 
 const result = {
-  ok: searchHits === expected && stream2Matched === expected && firehoseMatched === expected && inboundPending === 0,
+  ok:
+    searchHits === expected
+    && stream2Matched === expected
+    && firehoseMatched === expected
+    && inboundObserved === expected
+    && inboundPending === 0
+    && invalidSearchHits === 0
+    && inboundInvalid === 0
+    && stream2Invalid === 0
+    && firehoseInvalid === 0,
   marker,
+  invalidMarker,
   expected,
   searchHits,
   stream2Matched,
   firehoseMatched,
+  inboundObserved,
+  inboundTotalEntries,
   inboundPending,
+  negativeControl: {
+    inboundInvalid,
+    stream2Invalid,
+    firehoseInvalid,
+    invalidSearchHits,
+  },
   searchableWithinMs: Date.now() - startedAt,
 };
 console.log(JSON.stringify(result, null, 2));
