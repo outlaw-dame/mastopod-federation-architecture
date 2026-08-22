@@ -7,7 +7,7 @@ import { runActivityPodsRemoteOriginCli } from "../src/adsp/RemoteFixtureActivit
 
 const execFileAsync = promisify(execFile);
 const storagePreflight = fileURLToPath(
-  new URL("../../scripts/ci/verify-ap-federation-storage.sh", import.meta.url),
+  new URL("../src/adsp/ci/verify-ap-federation-storage.sh", import.meta.url),
 );
 
 async function verifyActivityPodsStorage(): Promise<void> {
