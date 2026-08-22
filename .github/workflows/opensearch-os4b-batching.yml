@@ -1,0 +1,64 @@
+name: OpenSearch OS4b Batching
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/scripts/benchmark-opensearch-os4b-batching.ts'
+      - 'fedify-sidecar/src/search/**'
+      - '.github/workflows/opensearch-os4b-batching.yml'
+      - 'docs/opensearch-os4b-batching-plan.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+      - name: Install sidecar dependencies
+        run: npm ci --prefix fedify-sidecar
+      - name: Start isolated OpenSearch 3.8
+        run: |
+          docker run -d --name os4b-opensearch \
+            -p 19200:9200 \
+            -e discovery.type=single-node \
+            -e DISABLE_SECURITY_PLUGIN=true \
+            -e 'OPENSEARCH_JAVA_OPTS=-Xms768m -Xmx768m' \
+            --memory=1536m --cpus=2 \
+            opensearchproject/opensearch:3.8.0
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:19200/_cluster/health | grep -qv '"status":"red"'; then exit 0; fi
+            sleep 2
+          done
+          docker logs os4b-opensearch
+          exit 1
+      - name: Run matched OS4b matrix
+        env:
+          OPENSEARCH_URL: http://127.0.0.1:19200
+          OS4B_DOCS_PER_ARM: '3000'
+          OS4B_REPEATS: '3'
+        run: |
+          mkdir -p artifacts/os4b
+          set -o pipefail
+          npx --prefix fedify-sidecar tsx fedify-sidecar/scripts/benchmark-opensearch-os4b-batching.ts | tee artifacts/os4b/benchmark.json
+      - name: Upload OS4b evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensearch-os4b-batching
+          path: artifacts/os4b/benchmark.json
+          if-no-files-found: error
+      - name: Diagnostics
+        if: failure()
+        run: docker logs --tail 300 os4b-opensearch || true
+      - name: Cleanup
+        if: always()
+        run: docker rm -f os4b-opensearch || true
