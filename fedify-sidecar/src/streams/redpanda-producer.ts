@@ -12,9 +12,10 @@
  */
 
 import { createHash } from "node:crypto";
-import { Kafka, Producer, CompressionTypes, logLevel } from "kafkajs";
+import { Kafka, Producer, type CompressionTypes, logLevel } from "kafkajs";
 import { logger } from "../utils/logger.js";
 import type { PublicSearchConsentSignal } from "../utils/searchConsent.js";
+import { ensureRedpandaCompressionCodec } from "./kafka-compression.js";
 
 // ============================================================================
 // Types
@@ -361,21 +362,14 @@ export class RedPandaProducer {
 // ============================================================================
 
 export function createRedPandaProducer(overrides?: Partial<RedPandaConfig>): RedPandaProducer {
-  const compressionEnv = (process.env["REDPANDA_COMPRESSION"] || "gzip").toLowerCase();
-  const compressionType = (() => {
-    switch (compressionEnv) {
-      case "gzip":
-        return CompressionTypes.GZIP;
-      case "snappy":
-        return CompressionTypes.Snappy;
-      case "lz4":
-        return CompressionTypes.LZ4;
-      case "zstd":
-        return CompressionTypes.ZSTD;
-      default:
-        return CompressionTypes.GZIP;
-    }
-  })();
+  // Modern Redpanda preserves the producer's batch codec rather than
+  // recompressing at the broker. Zstd level 1 is the default here because these
+  // streams contain repetitive JSON and prioritize throughput/CPU as well as
+  // storage. Unsupported codecs/runtime combinations fail during construction,
+  // not on the first production message.
+  const compressionType = ensureRedpandaCompressionCodec(
+    process.env["REDPANDA_COMPRESSION"] ?? "zstd",
+  );
 
   const config: RedPandaConfig = {
     brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092").split(","),
@@ -383,7 +377,7 @@ export function createRedPandaProducer(overrides?: Partial<RedPandaConfig>): Red
     connectionTimeout: parseInt(process.env["REDPANDA_CONNECTION_TIMEOUT"] || "10000", 10),
     requestTimeout: parseInt(process.env["REDPANDA_REQUEST_TIMEOUT"] || "30000", 10),
     // STREAM1_TOPIC is the canonical env var shared with the protocol-bridge
-    // consumer (protocolBridgeApSourceTopic in config).  REDPANDA_STREAM1_TOPIC
+    // consumer (protocolBridgeApSourceTopic in config). REDPANDA_STREAM1_TOPIC
     // is an alias kept for backwards-compat — prefer the shared name.
     stream1Topic: process.env["STREAM1_TOPIC"] || process.env["REDPANDA_STREAM1_TOPIC"] || "ap.stream1.local-public.v1",
     stream2Topic: process.env["STREAM2_TOPIC"] || process.env["REDPANDA_STREAM2_TOPIC"] || "ap.stream2.remote-public.v1",
@@ -403,46 +397,45 @@ export function createRedPandaProducer(overrides?: Partial<RedPandaConfig>): Red
 // ============================================================================
 
 export const TOPIC_CONFIGS = {
-  // Stream1: Local public activities
+  // Redpanda stores producer-compressed batches as-is. Keep topic compression
+  // at producer semantics so the broker never becomes an accidental CPU-bound
+  // recompression layer and mixed producer upgrades remain interoperable.
   [process.env["STREAM1_TOPIC"] || process.env["REDPANDA_STREAM1_TOPIC"] || "ap.stream1.local-public.v1"]: {
     numPartitions: 12,
     replicationFactor: 3,
     configEntries: [
       { name: "retention.ms", value: "604800000" },  // 7 days
       { name: "cleanup.policy", value: "delete" },
-      { name: "compression.type", value: "zstd" },
+      { name: "compression.type", value: "producer" },
     ],
   },
   
-  // Stream2: Remote public activities
   [process.env["STREAM2_TOPIC"] || process.env["REDPANDA_STREAM2_TOPIC"] || "ap.stream2.remote-public.v1"]: {
     numPartitions: 12,
     replicationFactor: 3,
     configEntries: [
       { name: "retention.ms", value: "604800000" },  // 7 days
       { name: "cleanup.policy", value: "delete" },
-      { name: "compression.type", value: "zstd" },
+      { name: "compression.type", value: "producer" },
     ],
   },
   
-  // Firehose: Combined Stream1 + Stream2
   [process.env["FIREHOSE_TOPIC"] || process.env["REDPANDA_FIREHOSE_TOPIC"] || "ap.firehose.v1"]: {
     numPartitions: 24,
     replicationFactor: 3,
     configEntries: [
       { name: "retention.ms", value: "604800000" },  // 7 days
       { name: "cleanup.policy", value: "delete" },
-      { name: "compression.type", value: "zstd" },
+      { name: "compression.type", value: "producer" },
     ],
   },
   
-  // Tombstones: Delete events (compacted)
   [process.env["TOMBSTONE_TOPIC"] || process.env["REDPANDA_TOMBSTONE_TOPIC"] || "ap.tombstones.v1"]: {
     numPartitions: 6,
     replicationFactor: 3,
     configEntries: [
       { name: "cleanup.policy", value: "compact" },
-      { name: "compression.type", value: "zstd" },
+      { name: "compression.type", value: "producer" },
       { name: "min.cleanable.dirty.ratio", value: "0.5" },
       { name: "delete.retention.ms", value: "86400000" },  // 1 day
     ],
