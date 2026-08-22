@@ -8,6 +8,7 @@ import type { AtToApProjectionWorker } from "../workers/AtToApProjectionWorker.j
 import type { ActivityPubBridgeIngressPort } from "./ActivityPubBridgeIngressClient.js";
 import { OutboxIntentDeduper, extractOutboxIntentId } from "../../utils/OutboxIntentDeduper.js";
 import type { CanonicalNotificationConsumer } from "../notifications/CanonicalNotificationConsumer.js";
+import { ensureRedpandaCompressionCodec } from "../../streams/kafka-compression.js";
 
 export interface ProtocolBridgeRuntimeConfig {
   brokers: string[];
@@ -369,6 +370,11 @@ export class ProtocolBridgeRuntime {
 function buildKafkaConsumerFactory(
   config: ProtocolBridgeRuntimeConfig,
 ): (groupId: string) => Consumer {
+  // This runtime is independently constructible, so its ability to decode
+  // producer-compressed batches must not depend on another consumer having
+  // initialized KafkaJS's process-global codec table first.
+  ensureRedpandaCompressionCodec();
+
   const kafka = new Kafka({
     clientId: `${config.clientId}-protocol-bridge`,
     brokers: config.brokers,
