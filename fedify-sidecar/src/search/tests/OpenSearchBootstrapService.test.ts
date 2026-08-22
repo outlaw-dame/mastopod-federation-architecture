@@ -25,6 +25,7 @@ function buildHealthyClusterStub(calls: StubCallRecord[]) {
         return { body: {} };
       }),
       putMapping: vi.fn(async () => ({ body: {} })),
+      putSettings: vi.fn(async () => ({ body: {} })),
     },
     close: vi.fn(async () => {}),
   };
@@ -43,6 +44,10 @@ function buildAlreadyExistsStub(calls: StubCallRecord[]) {
       }),
       putMapping: vi.fn(async () => {
         calls.push({ method: 'indices.putMapping', args: [] });
+        return { body: {} };
+      }),
+      putSettings: vi.fn(async (args: Record<string, unknown>) => {
+        calls.push({ method: 'indices.putSettings', args: [args] });
         return { body: {} };
       }),
     },
@@ -69,6 +74,7 @@ describe('OpenSearchBootstrapService', () => {
     await service.bootstrap();
 
     expect(stub.indices.create).toHaveBeenCalledTimes(2);
+    expect(stub.indices.putSettings).not.toHaveBeenCalled();
     const creates = calls.filter((call) => call.method === 'indices.create');
     const createdIndices = creates.map((call) => call.args[0]);
     expect(createdIndices).toEqual(expect.arrayContaining(['public-content-v1', 'public-author-v1']));
@@ -94,7 +100,7 @@ describe('OpenSearchBootstrapService', () => {
     expect(calls[0]?.method).toBe('cluster.health');
   });
 
-  it('is idempotent and applies additive mappings to existing indices', async () => {
+  it('clears the legacy content default pipeline and applies additive mappings on existing indices', async () => {
     const calls: StubCallRecord[] = [];
     const stub = buildAlreadyExistsStub(calls);
     const service = new OpenSearchBootstrapService(FAST_CONFIG);
@@ -104,6 +110,11 @@ describe('OpenSearchBootstrapService', () => {
 
     expect(stub.indices.create).not.toHaveBeenCalled();
     expect(stub.indices.putMapping).toHaveBeenCalledTimes(2);
+    expect(stub.indices.putSettings).toHaveBeenCalledTimes(1);
+    expect(stub.indices.putSettings).toHaveBeenCalledWith({
+      index: 'public-content-v1',
+      body: { index: { default_pipeline: '_none' } },
+    });
   });
 
   it('retries unhealthy cluster probes until healthy', async () => {
@@ -119,6 +130,7 @@ describe('OpenSearchBootstrapService', () => {
         exists: vi.fn(async () => ({ body: false })),
         create: vi.fn(async () => ({ body: {} })),
         putMapping: vi.fn(async () => ({ body: {} })),
+        putSettings: vi.fn(async () => ({ body: {} })),
       },
       close: vi.fn(async () => {}),
     };
@@ -152,6 +164,7 @@ describe('OpenSearchBootstrapService', () => {
       indices: {
         exists: vi.fn(async () => ({ body: true })),
         create: vi.fn(async () => ({ body: {} })),
+        putSettings: vi.fn(async () => ({ body: {} })),
         putMapping: vi.fn(async () => {
           throw new Error('mapper [text] cannot be changed');
         }),
@@ -160,6 +173,26 @@ describe('OpenSearchBootstrapService', () => {
     };
 
     await expect(service.bootstrap()).resolves.toBeUndefined();
+  });
+
+  it('fails closed if the legacy content default pipeline cannot be disabled', async () => {
+    const service = new OpenSearchBootstrapService({
+      ...FAST_CONFIG,
+      maxRetries: 1,
+    });
+    (service as any).client = {
+      cluster: { health: vi.fn(async () => ({ body: { status: 'yellow' } })) },
+      indices: {
+        exists: vi.fn(async () => ({ body: true })),
+        putSettings: vi.fn(async () => {
+          throw new Error('put settings rejected');
+        }),
+        putMapping: vi.fn(async () => ({ body: {} })),
+      },
+      close: vi.fn(async () => {}),
+    };
+
+    await expect(service.bootstrap()).rejects.toThrow(/put settings rejected/);
   });
 
   it('enforces the bootstrap deadline', async () => {
