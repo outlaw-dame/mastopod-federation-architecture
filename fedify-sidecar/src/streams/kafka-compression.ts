@@ -1,9 +1,8 @@
 import * as zlib from "node:zlib";
-import {
-  CompressionCodecs,
-  CompressionTypes,
-  type CompressionTypes as CompressionType,
-} from "kafkajs";
+import kafkaJs from "kafkajs";
+import type { CompressionTypes as CompressionType } from "kafkajs";
+
+const { CompressionCodecs, CompressionTypes } = kafkaJs;
 
 export type RedpandaCompressionName = "none" | "gzip" | "zstd";
 
