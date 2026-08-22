@@ -1,0 +1,5 @@
+services:
+  fedify-sidecar:
+    environment:
+      REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: "true"
+      REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES: "1"

@@ -3,6 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COMPOSE_FILE="${SCRIPT_DIR}/../docker-compose.ap-interop.yml"
+COMPOSE_OVERRIDE="${AP_INTEROP_COMPOSE_OVERRIDE:-}"
 CERTS_DIR="${SCRIPT_DIR}/../runtime/certs"
 RUNTIME_DIR="${SCRIPT_DIR}/../runtime/gotosocial"
 DB_FILE="${RUNTIME_DIR}/sqlite.db"
@@ -10,6 +11,14 @@ USERNAME="${AP_INTEROP_GOTOSOCIAL_USERNAME:-interop}"
 SKIP_BUILD="${AP_INTEROP_SKIP_BUILD:-0}"
 RESULT_FILE="${SCRIPT_DIR}/../runtime/gotosocial-proof-result.json"
 RESET_STATE="${AP_INTEROP_GOTOSOCIAL_RESET_STATE:-0}"
+
+compose() {
+  if [ -n "${COMPOSE_OVERRIDE}" ]; then
+    docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_OVERRIDE}" "$@"
+  else
+    docker compose -f "${COMPOSE_FILE}" "$@"
+  fi
+}
 
 ensure_gotosocial_runtime_dir() {
   mkdir -p "${RUNTIME_DIR}"
@@ -20,7 +29,7 @@ ensure_gotosocial_runtime_dir() {
 }
 
 reset_gotosocial_state() {
-  docker compose -f "${COMPOSE_FILE}" stop gotosocial-app >/dev/null 2>&1 || true
+  compose stop gotosocial-app >/dev/null 2>&1 || true
   rm -rf "${RUNTIME_DIR}"
   ensure_gotosocial_runtime_dir
   : > "${DB_FILE}"
@@ -41,7 +50,7 @@ if [ ! -f "${CERTS_DIR}/rootCA.crt" ] || [ ! -f "${CERTS_DIR}/sidecar.crt" ] || 
 fi
 
 if [ "${SKIP_BUILD}" != "1" ]; then
-  docker compose -f "${COMPOSE_FILE}" build \
+  compose build \
     mock-activitypods fedify-sidecar ap-interop-proof
 fi
 
@@ -51,15 +60,15 @@ if [ "${RESET_STATE}" = "1" ] || ! gotosocial_db_is_healthy; then
   reset_gotosocial_state
 fi
 
-docker compose -f "${COMPOSE_FILE}" --profile mastodon stop mastodon-web-app mastodon-sidekiq >/dev/null 2>&1 || true
-docker compose -f "${COMPOSE_FILE}" --profile akkoma stop akkoma-app >/dev/null 2>&1 || true
+compose --profile mastodon stop mastodon-web-app mastodon-sidekiq >/dev/null 2>&1 || true
+compose --profile akkoma stop akkoma-app >/dev/null 2>&1 || true
 
-docker compose -f "${COMPOSE_FILE}" up -d \
+compose up -d \
   redis redpanda mock-activitypods gotosocial-app
 
-docker compose -f "${COMPOSE_FILE}" run --rm fedify-sidecar npm run topics:bootstrap >/dev/null
+compose run --rm fedify-sidecar npm run topics:bootstrap >/dev/null
 
-docker compose -f "${COMPOSE_FILE}" up -d \
+compose up -d \
   fedify-sidecar ap-proxy
 
 AP_INTEROP_GOTOSOCIAL_USERNAME="${USERNAME}" \
@@ -71,7 +80,7 @@ rm -f "${RESULT_FILE}"
 AP_INTEROP_TARGET=gotosocial \
 AP_INTEROP_TARGET_USERNAME="${USERNAME}" \
 AP_INTEROP_RESULT_PATH=/interop/runtime/gotosocial-proof-result.json \
-  docker compose -f "${COMPOSE_FILE}" --profile proof run --rm ap-interop-proof
+  compose --profile proof run --rm ap-interop-proof
 
 AP_INTEROP_TARGET=gotosocial \
 AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" \
