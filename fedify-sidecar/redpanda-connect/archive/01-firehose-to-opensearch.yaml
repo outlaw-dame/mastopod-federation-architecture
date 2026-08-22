@@ -1,0 +1,59 @@
+# OS4 ARCHIVE — NOT LOADED BY docker-compose.connect.yml
+#
+# This historical Redpanda Connect pipeline duplicated the canonical TypeScript
+# SearchIndexerService projection with a different schema/index (`ap-activities`).
+# OS4 designates SearchIndexerService -> public-content-v1/public-author-v1 as
+# the only canonical public-content ingestion path. This file is retained only
+# as migration evidence for its useful batching/DLQ ideas.
+
+input:
+  kafka_franz:
+    seed_brokers:
+      - "${REDPANDA_BROKER:redpanda:9092}"
+    topics:
+      - ap.firehose.v1
+    consumer_group: rpconnect-firehose-indexer-v1
+    start_offset: latest
+    auto_replay_nacks: false
+    commit_period: 5s
+    tls:
+      enabled: false
+
+pipeline:
+  processors:
+    - bloblang: |
+        root = this
+        root._connect_indexed_at = now().format("2006-01-02T15:04:05Z07:00")
+
+output:
+  fallback:
+    - label: os_activities
+      opensearch:
+        urls:
+          - "${OPENSEARCH_URL:http://opensearch:9200}"
+        index: ap-activities
+        id: "${!this.activityId | uuid_v4()}"
+        action: index
+        basic_auth:
+          enabled: ${OPENSEARCH_AUTH_ENABLED:false}
+          username: "${OPENSEARCH_USER:admin}"
+          password: "${OPENSEARCH_PASSWORD:admin}"
+        tls:
+          enabled: false
+        max_in_flight: 64
+        batching:
+          count: 500
+          period: 10s
+
+    - label: firehose_dlq
+      kafka_franz:
+        seed_brokers:
+          - "${REDPANDA_BROKER:redpanda:9092}"
+        topic: ap.firehose.dlq.v1
+        compression: zstd
+        metadata:
+          include_patterns:
+            - kafka_topic
+            - kafka_partition
+            - kafka_offset
+            - kafka_timestamp
