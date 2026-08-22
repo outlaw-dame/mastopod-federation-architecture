@@ -5,11 +5,12 @@ const host = process.env.OS4B_REMOTE_HOST ?? '127.0.0.1';
 const port = Number(process.env.OS4B_REMOTE_PORT ?? 18181);
 const publicHost = process.env.OS4B_REMOTE_PUBLIC_HOST ?? host;
 const publicPort = Number(process.env.OS4B_REMOTE_PUBLIC_PORT ?? port);
-const sidecarInbox = process.env.OS4B_SIDECAR_INBOX ?? 'http://127.0.0.1:18080/sharedInbox';
+const sidecarInbox = process.env.OS4B_SIDECAR_INBOX ?? 'http://127.0.0.1:18080/inbox';
 const sidecarHostHeader = process.env.OS4B_SIDECAR_HOST_HEADER ?? 'local.test';
 const count = Number(process.env.OS4B_FEDERATION_COUNT ?? 240);
 const concurrency = Math.max(1, Number(process.env.OS4B_FEDERATION_CONCURRENCY ?? 24));
 const marker = process.env.OS4B_FEDERATION_MARKER ?? `os4b-live-${Date.now()}`;
+const invalidMarker = `${marker}-invalid-signature`;
 const actorUri = `http://${publicHost}:${publicPort}/users/remote`;
 const keyId = `${actorUri}#main-key`;
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -31,12 +32,12 @@ app.get('/users/remote', async (_request, reply) => {
 
 await app.listen({ host, port });
 
-function buildActivity(i: number) {
+function buildActivity(i: number, contentMarker = marker) {
   const published = new Date(1_750_000_000_000 + i * 1000).toISOString();
-  const objectId = `${actorUri}/notes/${marker}-${i}`;
+  const objectId = `${actorUri}/notes/${contentMarker}-${i}`;
   return {
     '@context': 'https://www.w3.org/ns/activitystreams',
-    id: `${actorUri}/activities/${marker}-${i}`,
+    id: `${actorUri}/activities/${contentMarker}-${i}`,
     type: 'Create',
     actor: actorUri,
     to: ['https://www.w3.org/ns/activitystreams#Public'],
@@ -44,7 +45,7 @@ function buildActivity(i: number) {
       id: objectId,
       type: 'Note',
       attributedTo: actorUri,
-      content: `<p>${marker} live federation note ${i} kiwi orbit</p>`,
+      content: `<p>${contentMarker} live federation note ${i} kiwi orbit</p>`,
       published,
       to: ['https://www.w3.org/ns/activitystreams#Public'],
     },
@@ -73,30 +74,47 @@ function signedHeaders(body: string) {
   };
 }
 
+async function sendInvalidSignatureControl() {
+  const body = JSON.stringify(buildActivity(-1, invalidMarker));
+  const headers = signedHeaders(body);
+  headers.signature = `${headers.signature.slice(0, -8)}INVALID!`;
+  const response = await fetch(sidecarInbox, { method: 'POST', headers, body });
+  const responseBody = await response.text();
+  if (response.status >= 200 && response.status < 300) {
+    throw new Error(`invalid-signature control was accepted with ${response.status}: ${responseBody}`);
+  }
+  return { status: response.status, body: responseBody.slice(0, 512) };
+}
+
 const startedAt = Date.now();
 let next = 0;
 const latencies: number[] = [];
-const workers = Array.from({ length: concurrency }, async () => {
-  while (true) {
-    const i = next++;
-    if (i >= count) return;
-    const activity = buildActivity(i);
-    const body = JSON.stringify(activity);
-    const requestStartedAt = Date.now();
-    const response = await fetch(sidecarInbox, { method: 'POST', headers: signedHeaders(body), body });
-    latencies.push(Date.now() - requestStartedAt);
-    if (response.status !== 202) {
-      throw new Error(`federation POST ${i} returned ${response.status}: ${await response.text()}`);
-    }
-  }
-});
 
 try {
+  const invalidSignature = await sendInvalidSignatureControl();
+
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= count) return;
+      const activity = buildActivity(i);
+      const body = JSON.stringify(activity);
+      const requestStartedAt = Date.now();
+      const response = await fetch(sidecarInbox, { method: 'POST', headers: signedHeaders(body), body });
+      latencies.push(Date.now() - requestStartedAt);
+      if (response.status !== 202) {
+        throw new Error(`federation POST ${i} returned ${response.status}: ${await response.text()}`);
+      }
+    }
+  });
+
   await Promise.all(workers);
   const elapsedMs = Date.now() - startedAt;
   console.log(JSON.stringify({
     ok: true,
     marker,
+    invalidMarker,
+    invalidSignature,
     count,
     actorUri,
     sidecarInbox,
