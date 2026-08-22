@@ -3,11 +3,20 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COMPOSE_FILE="${SCRIPT_DIR}/../docker-compose.ap-interop.yml"
+COMPOSE_OVERRIDE="${AP_INTEROP_COMPOSE_OVERRIDE:-}"
 CERTS_DIR="${SCRIPT_DIR}/../runtime/certs"
 ENV_FILE="${SCRIPT_DIR}/../runtime/mastodon.env"
 USERNAME="${AP_INTEROP_MASTODON_USERNAME:-interop}"
 SKIP_BUILD="${AP_INTEROP_SKIP_BUILD:-0}"
 RESULT_FILE="${SCRIPT_DIR}/../runtime/mastodon-proof-result.json"
+
+compose() {
+  if [ -n "${COMPOSE_OVERRIDE}" ]; then
+    docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_OVERRIDE}" "$@"
+  else
+    docker compose -f "${COMPOSE_FILE}" "$@"
+  fi
+}
 
 if [ ! -f "${CERTS_DIR}/rootCA.crt" ] || [ ! -f "${CERTS_DIR}/sidecar.crt" ] || [ ! -f "${CERTS_DIR}/mastodon.crt" ]; then
   "${SCRIPT_DIR}/generate-certs.sh"
@@ -22,19 +31,19 @@ set -a
 set +a
 
 if [ "${SKIP_BUILD}" != "1" ]; then
-  docker compose -f "${COMPOSE_FILE}" build \
+  compose build \
     mock-activitypods fedify-sidecar ap-interop-proof
 fi
 
-docker compose -f "${COMPOSE_FILE}" stop gotosocial-app >/dev/null 2>&1 || true
-docker compose -f "${COMPOSE_FILE}" --profile akkoma stop akkoma-app >/dev/null 2>&1 || true
+compose stop gotosocial-app >/dev/null 2>&1 || true
+compose --profile akkoma stop akkoma-app >/dev/null 2>&1 || true
 
-docker compose -f "${COMPOSE_FILE}" --profile mastodon up -d \
+compose --profile mastodon up -d \
   redis redpanda mock-activitypods mastodon-db mastodon-redis
 
-docker compose -f "${COMPOSE_FILE}" run --rm fedify-sidecar npm run topics:bootstrap >/dev/null
+compose run --rm fedify-sidecar npm run topics:bootstrap >/dev/null
 
-docker compose -f "${COMPOSE_FILE}" --profile mastodon up -d \
+compose --profile mastodon up -d \
   fedify-sidecar ap-proxy
 
 AP_INTEROP_MASTODON_ENV_FILE="${ENV_FILE}" \
@@ -47,7 +56,7 @@ rm -f "${RESULT_FILE}"
 AP_INTEROP_TARGET=mastodon \
 AP_INTEROP_TARGET_USERNAME="${USERNAME}" \
 AP_INTEROP_RESULT_PATH=/interop/runtime/mastodon-proof-result.json \
-  docker compose -f "${COMPOSE_FILE}" --profile proof run --rm ap-interop-proof
+  compose --profile proof run --rm ap-interop-proof
 
 AP_INTEROP_TARGET=mastodon \
 AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" \

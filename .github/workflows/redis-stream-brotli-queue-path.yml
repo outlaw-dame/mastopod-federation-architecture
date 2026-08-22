@@ -46,7 +46,7 @@ jobs:
           REDIS_BROTLI_QUEUE_BENCHMARK_OUTPUT: ../measurements/redis-stream-brotli-queue-path/evidence.json
         run: npx tsx scripts/benchmark-redis-stream-brotli-queue-path.ts
 
-      - name: Validate evidence contract and promotion guardrails
+      - name: Validate evidence contract and frozen ADSP guards
         run: |
           node - <<'NODE'
           const fs = require('node:fs');
@@ -60,18 +60,43 @@ jobs:
             }
             if (!(result.comparisons.p50MemoryReduction > 1)) throw new Error(`no memory reduction for ${result.name}`);
           }
-          const guards = evidence.frozenAdspComparison;
-          if (!guards || guards.p95Pass !== true) {
-            throw new Error(`Brotli p95 queue-path latency exceeded ${guards?.p95LatencyAllowedRatio ?? 'missing'}x guardrail`);
+          const guards = evidence.guards;
+          const frozen = evidence.frozenAdspComparison;
+          if (!guards || !frozen) throw new Error('missing frozen ADSP performance evidence');
+          for (const [name, value] of Object.entries({
+            maxP95ElapsedRatio: guards.maxP95ElapsedRatio,
+            maxP99ElapsedRatio: guards.maxP99ElapsedRatio,
+            maxP95CpuRatio: guards.maxP95CpuRatio,
+            minMemoryReduction: guards.minMemoryReduction,
+          })) {
+            if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+              throw new Error(`invalid ADSP guard metric ${name}: ${value}`);
+            }
           }
-          if (guards.p99Pass !== true) {
-            throw new Error(`Brotli p99 queue-path latency exceeded ${guards.p99LatencyAllowedRatio}x guardrail`);
+
+          const frozenThresholds = {
+            p95LatencyAllowedRatio: 1.10,
+            p99LatencyAllowedRatio: 1.15,
+            cpuAllowedRatio: 1.15,
+            minimumMaterialMemoryImprovementRatio: 1.10,
+          };
+          for (const [name, expected] of Object.entries(frozenThresholds)) {
+            if (frozen[name] !== expected) {
+              throw new Error(`frozen ADSP threshold drifted for ${name}: expected ${expected}, got ${frozen[name]}`);
+            }
           }
-          if (guards.cpuPass !== true) {
-            throw new Error(`Brotli queue-path CPU exceeded ${guards.cpuAllowedRatio}x guardrail`);
+
+          if (frozen.p95Pass !== true || guards.maxP95ElapsedRatio > frozenThresholds.p95LatencyAllowedRatio) {
+            throw new Error(`p95 queue-path latency guard failed: ${guards.maxP95ElapsedRatio} > ${frozenThresholds.p95LatencyAllowedRatio}`);
           }
-          if (guards.memoryPass !== true) {
-            throw new Error(`Brotli memory improvement missed ${guards.minimumMaterialMemoryImprovementRatio}x guardrail`);
+          if (frozen.p99Pass !== true || guards.maxP99ElapsedRatio > frozenThresholds.p99LatencyAllowedRatio) {
+            throw new Error(`p99 queue-path latency guard failed: ${guards.maxP99ElapsedRatio} > ${frozenThresholds.p99LatencyAllowedRatio}`);
+          }
+          if (frozen.cpuPass !== true || guards.maxP95CpuRatio > frozenThresholds.cpuAllowedRatio) {
+            throw new Error(`p95 process CPU guard failed: ${guards.maxP95CpuRatio} > ${frozenThresholds.cpuAllowedRatio}`);
+          }
+          if (frozen.memoryPass !== true || guards.minMemoryReduction < frozenThresholds.minimumMaterialMemoryImprovementRatio) {
+            throw new Error(`Redis memory materiality guard failed: ${guards.minMemoryReduction} < ${frozenThresholds.minimumMaterialMemoryImprovementRatio}`);
           }
           NODE
 

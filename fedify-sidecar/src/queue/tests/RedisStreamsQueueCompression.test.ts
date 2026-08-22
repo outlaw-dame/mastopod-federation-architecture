@@ -73,11 +73,11 @@ const activity = JSON.stringify({
   object: { type: "Note", content: "activitypub ".repeat(3000) },
 });
 
-const targets = Array.from({ length: 32 }, (_, index) => ({
-  inboxUrl: `https://remote.example/users/recipient-${index}/inbox`,
-  deliveryUrl: "https://remote.example/inbox",
-  sharedInboxUrl: "https://remote.example/inbox",
-  targetDomain: "remote.example",
+const targets = Array.from({ length: 128 }, (_, index) => ({
+  inboxUrl: `https://remote-${index % 8}.example/users/user-${index}/inbox`,
+  deliveryUrl: `https://remote-${index % 8}.example/inbox`,
+  sharedInboxUrl: `https://remote-${index % 8}.example/inbox`,
+  targetDomain: `remote-${index % 8}.example`,
 }));
 
 function makeIntent(): OutboxIntent {
@@ -143,7 +143,7 @@ describe("RedisStreamsQueue compression boundary", () => {
     await queue.disconnect();
   });
 
-  it("compresses Activity and target fields only when explicitly enabled", async () => {
+  it("compresses large Activity and target fields only when explicitly enabled", async () => {
     const { admin } = installClients();
     const queue = new RedisStreamsQueue({
       payloadCompression: { writeEnabled: true, minBytes: 1 },
