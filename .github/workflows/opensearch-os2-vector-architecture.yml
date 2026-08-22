@@ -1,0 +1,115 @@
+name: OpenSearch OS2 Vector Architecture
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/scripts/benchmark-search-vector-architecture.mjs'
+      - '.github/workflows/opensearch-os2-vector-architecture.yml'
+      - 'docs/opensearch-os2-vector-architecture.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opensearch-os2-vector-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  whole-deployment-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.0'
+
+      - name: Prepare OpenSearch host requirements
+        run: |
+          sudo sysctl -w vm.max_map_count=262144
+          docker version
+          node --version
+
+      - name: Syntax-check OS2 benchmark
+        working-directory: fedify-sidecar
+        run: node --check scripts/benchmark-search-vector-architecture.mjs
+
+      - name: Run repeated matched whole-deployment benchmark
+        working-directory: fedify-sidecar
+        env:
+          OPENSEARCH_BENCH_IMAGE: opensearchproject/opensearch:3.8.0
+          QDRANT_BENCH_IMAGE: qdrant/qdrant:v1.19.0
+          SEARCH_VECTOR_BENCH_DOCS: '6000'
+          SEARCH_VECTOR_BENCH_VECTOR_DIM: '1024'
+          SEARCH_VECTOR_BENCH_QUERY_SAMPLES: '40'
+          SEARCH_VECTOR_BENCH_RECALL_SAMPLES: '16'
+          SEARCH_VECTOR_BENCH_REPEATS: '3'
+          SEARCH_VECTOR_BENCH_BULK_DOCS: '200'
+          SEARCH_VECTOR_BENCH_OUTPUT: ../measurements/opensearch-os2/summary.json
+        run: |
+          set +e
+          node scripts/benchmark-search-vector-architecture.mjs
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ ! -s ../measurements/opensearch-os2/summary.json ]; then
+            exit "$status"
+          fi
+          # A future-vector candidate is allowed to fail its quality gate in OS2.
+          # The next step validates that current-runtime evidence is complete and
+          # that the failed future candidate is explicitly represented.
+
+      - name: Validate evidence contract
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const summary = JSON.parse(readFileSync('measurements/opensearch-os2/summary.json', 'utf8'));
+          if (summary.version !== 3) throw new Error('unexpected OS2 evidence version');
+          if (summary.images?.openSearch !== 'opensearchproject/opensearch:3.8.0') throw new Error('wrong OpenSearch image');
+          if (summary.images?.qdrant !== 'qdrant/qdrant:v1.19.0') throw new Error('wrong Qdrant image');
+          if (summary.methodology?.repeats !== 3) throw new Error('expected three repeated measurements');
+          if (summary.results?.length !== 3 || summary.raw?.length !== 9) throw new Error('incomplete repeated architecture evidence');
+          const ids = new Set(summary.results.map((r) => r.arm));
+          for (const id of ['opensearch-lexical', 'opensearch-vector-32x', 'opensearch-plus-qdrant']) {
+            if (!ids.has(id)) throw new Error(`missing arm ${id}`);
+          }
+          if (summary.decisions?.currentRuntime?.pass !== true || summary.decisions?.currentRuntime?.selected !== 'opensearch-lexical') {
+            throw new Error(`current runtime decision invalid: ${JSON.stringify(summary.decisions?.currentRuntime)}`);
+          }
+          for (const arm of summary.results.filter((r) => r.query?.vector)) {
+            if (arm.repeats !== 3) throw new Error(`${arm.arm} missing repeats`);
+            if (arm.query.vector.exactSelfTop1Rate < 0.95) throw new Error(`${arm.arm} exact-self top1 correctness failed`);
+            if (!(arm.query.vector.annRecallAt10 > 0 && arm.query.vector.annRecallAt10 <= 1)) throw new Error(`${arm.arm} invalid ANN recall evidence`);
+            if (!(arm.resources?.diskBytes > 0 && arm.resources?.settledMemoryBytes > 0 && arm.ingest?.serviceCpuMs > 0)) throw new Error(`${arm.arm} missing resource evidence`);
+          }
+          const qdrant = summary.results.find((r) => r.arm === 'opensearch-plus-qdrant');
+          if (qdrant.query.vector.annRecallAt10 < 0.90) throw new Error('no tested future-vector architecture satisfies the frozen recall guard');
+          if (summary.decisions?.futureVector?.pass === false && !String(summary.decisions.futureVector.reason).includes('recall@10')) {
+            throw new Error(`unexpected future-vector failure: ${summary.decisions.futureVector.reason}`);
+          }
+          console.log(JSON.stringify({ results: summary.results, comparisons: summary.comparisons, decisions: summary.decisions }, null, 2));
+          NODE
+
+      - name: Show container diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker logs --tail=200 os2-opensearch || true
+          docker logs --tail=200 os2-qdrant || true
+
+      - name: Cleanup benchmark containers
+        if: always()
+        run: |
+          docker rm -f os2-opensearch os2-qdrant 2>/dev/null || true
+
+      - name: Upload OS2 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensearch-os2-vector-architecture-${{ github.sha }}
+          path: measurements/opensearch-os2/
+          if-no-files-found: error
+          retention-days: 14
