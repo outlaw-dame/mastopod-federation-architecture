@@ -18,12 +18,16 @@ afterEach(() => {
 });
 
 describe("Redpanda Kafka compression", () => {
-  it("recognizes the Node runtime boundary for built-in Zstd", () => {
+  it("recognizes the exact Node runtime boundaries for built-in Zstd", () => {
     expect(hasNativeZstdSupport("20.19.0")).toBe(false);
+    expect(hasNativeZstdSupport("21.7.3")).toBe(false);
     expect(hasNativeZstdSupport("22.14.9")).toBe(false);
     expect(hasNativeZstdSupport("22.15.0")).toBe(true);
     expect(hasNativeZstdSupport("22.23.2")).toBe(true);
+    expect(hasNativeZstdSupport("23.0.0")).toBe(false);
+    expect(hasNativeZstdSupport("23.7.9")).toBe(false);
     expect(hasNativeZstdSupport("23.8.0")).toBe(true);
+    expect(hasNativeZstdSupport("24.0.0")).toBe(true);
   });
 
   it("uses Zstd level 1 by default and validates explicit levels", () => {
