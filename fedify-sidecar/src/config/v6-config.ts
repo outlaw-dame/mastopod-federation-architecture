@@ -4,6 +4,28 @@
  * Canonical environment-driven configuration for the V6 architecture.
  */
 
+export type SearchBackend = 'opensearch' | 'qdrant' | 'dual';
+
+export function resolveSearchBackend(raw: string | undefined): SearchBackend {
+  if (raw === 'opensearch' || raw === 'qdrant' || raw === 'dual') return raw;
+  return 'opensearch';
+}
+
+/**
+ * Normalize the process-level value as soon as canonical V6 configuration is
+ * loaded. `src/index.ts` still has a legacy inline parser; static imports run
+ * before that entrypoint constructs its config object, so this keeps bare-node,
+ * systemd, Docker and compose startup on one OpenSearch-first policy without
+ * silently treating an unset/invalid value as the historical dual backend.
+ */
+export function normalizeSearchBackendEnvironment(): SearchBackend {
+  const backend = resolveSearchBackend(process.env['SEARCH_BACKEND']);
+  process.env['SEARCH_BACKEND'] = backend;
+  return backend;
+}
+
+const normalizedSearchBackend = normalizeSearchBackendEnvironment();
+
 export const serverConfig = {
   port: parseInt(process.env['SIDECAR_PORT'] || '8080', 10),
   host: process.env['SIDECAR_HOST'] || '0.0.0.0',
@@ -92,15 +114,8 @@ export const opensearchConfig = {
   },
 };
 
-export type SearchBackend = 'opensearch' | 'qdrant' | 'dual';
-
-export function resolveSearchBackend(raw: string | undefined): SearchBackend {
-  if (raw === 'opensearch' || raw === 'qdrant' || raw === 'dual') return raw;
-  return 'opensearch';
-}
-
 export const searchBackendConfig = {
-  backend: resolveSearchBackend(process.env['SEARCH_BACKEND']),
+  backend: normalizedSearchBackend,
   qdrantUrl: process.env['QDRANT_URL'] || 'http://localhost:6333',
   qdrantCollectionName: process.env['QDRANT_COLLECTION_NAME'] || 'public-content-v1',
   qdrantVectorSize: parseInt(process.env['QDRANT_VECTOR_SIZE'] || '1024', 10),
