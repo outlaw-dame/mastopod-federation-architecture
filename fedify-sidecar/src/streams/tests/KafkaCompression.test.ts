@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CompressionCodecs, CompressionTypes } from "kafkajs";
+import kafkaJs from "kafkajs";
 import {
   hasNativeZstdSupport,
   parseZstdLevel,
   resolveRedpandaCompression,
 } from "../kafka-compression.js";
 
+const { CompressionCodecs, CompressionTypes } = kafkaJs;
 const originalLevel = process.env["REDPANDA_ZSTD_LEVEL"];
 
 afterEach(() => {
