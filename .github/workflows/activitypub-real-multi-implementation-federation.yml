@@ -53,6 +53,18 @@ jobs:
             compose_overlay: fedify-sidecar/interop/ap/docker-compose.pixelfed.yml
             actor_uri: https://pixelfed.test/users/interop
             remote_version: Pixelfed v0.12.7@e33026a9e5334d2c124a7321f8b15d4329b8961f
+          - target: misskey
+            target_host: misskey.test
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.misskey.yml
+            actor_uri: https://misskey.test/@interop
+            remote_version: Misskey 2026.7.0@sha256:2fd5c68fb02a354979caeb37560e0dea50d8a84b78a7b0d769e4e9cf426a4b68
+          - target: friendica
+            target_host: friendica.test
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.friendica.yml
+            actor_uri: https://friendica.test/profile/interop
+            remote_version: Friendica 2026.05@sha256:e496eeb34fc2c9eb24eae94d2835c39e9a715966f625db769b188427b61ece6d
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ACTIVITYPODS_SHA: '948e53cc67c7b383f28b69aff8f7a6dc217b1166'
@@ -61,6 +73,8 @@ jobs:
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       PIXELFED_OVERLAY: fedify-sidecar/interop/ap/docker-compose.pixelfed.yml
+      MISSKEY_OVERLAY: fedify-sidecar/interop/ap/docker-compose.misskey.yml
+      FRIENDICA_OVERLAY: fedify-sidecar/interop/ap/docker-compose.friendica.yml
       BONFIRE_OVERLAY: fedify-sidecar/interop/ap/docker-compose.bonfire.yml
       TARGET: ${{ matrix.target }}
       TARGET_HOST: ${{ matrix.target_host }}
@@ -112,12 +126,17 @@ jobs:
           pixelfed_db_password="$(openssl rand -hex 32)"
           pixelfed_db_root_password="$(openssl rand -hex 32)"
           pixelfed_app_key="base64:$(openssl rand -base64 32)"
+          misskey_db_password="$(openssl rand -hex 32)"
+          misskey_setup_password="$(openssl rand -hex 32)"
+          misskey_user_password="$(openssl rand -hex 32)"
+          friendica_db_password="$(openssl rand -hex 32)"
+          friendica_db_root_password="$(openssl rand -hex 32)"
           bonfire_db_password="$(openssl rand -hex 32)"
           bonfire_secret_key_base="$(openssl rand -hex 64)"
           bonfire_signing_salt="$(openssl rand -hex 32)"
           bonfire_encryption_salt="$(openssl rand -hex 32)"
           bonfire_release_cookie="$(openssl rand -hex 32)"
-          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
+          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
           {
             echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
             echo "SIDECAR_TOKEN=${sidecar_token}"
@@ -125,6 +144,11 @@ jobs:
             echo "PIXELFED_DB_PASSWORD=${pixelfed_db_password}"
             echo "PIXELFED_DB_ROOT_PASSWORD=${pixelfed_db_root_password}"
             echo "PIXELFED_APP_KEY=${pixelfed_app_key}"
+            echo "MISSKEY_DB_PASSWORD=${misskey_db_password}"
+            echo "MISSKEY_SETUP_PASSWORD=${misskey_setup_password}"
+            echo "MISSKEY_USER_PASSWORD=${misskey_user_password}"
+            echo "FRIENDICA_DB_PASSWORD=${friendica_db_password}"
+            echo "FRIENDICA_DB_ROOT_PASSWORD=${friendica_db_root_password}"
             echo "BONFIRE_DB_PASSWORD=${bonfire_db_password}"
             echo "BONFIRE_SECRET_KEY_BASE=${bonfire_secret_key_base}"
             echo "BONFIRE_SIGNING_SALT=${bonfire_signing_salt}"
@@ -214,6 +238,19 @@ jobs:
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_PIXELFED_OVERLAY="${PIXELFED_OVERLAY}" \
               AP_INTEROP_PIXELFED_USERNAME="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-pixelfed-account.sh
+              ;;
+            misskey)
+              fedify-sidecar/interop/ap/scripts/prepare-misskey-config.sh
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_MISSKEY_OVERLAY="${MISSKEY_OVERLAY}" \
+              AP_INTEROP_MISSKEY_USERNAME="${TARGET_USERNAME}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-misskey-account.sh
+              . fedify-sidecar/interop/ap/runtime/misskey-actor.env
+              echo "TARGET_ACTOR_URI=${TARGET_ACTOR_URI}" >> "${GITHUB_ENV}"
+              ;;
+            friendica)
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_FRIENDICA_OVERLAY="${FRIENDICA_OVERLAY}" \
+              AP_INTEROP_FRIENDICA_USERNAME="${TARGET_USERNAME}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-friendica-account.sh
               ;;
             bonfire)
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_BONFIRE_OVERLAY="${BONFIRE_OVERLAY}" \
@@ -468,6 +505,8 @@ jobs:
             gotosocial) docker compose -f "${COMPOSE_FILE}" logs --no-color gotosocial-app 2>/dev/null || true ;;
             akkoma) docker compose -f "${COMPOSE_FILE}" --profile akkoma logs --no-color akkoma-app 2>/dev/null || true ;;
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
+            misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app 2>/dev/null || true ;;
+            friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
           esac
 
@@ -483,6 +522,12 @@ jobs:
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods down -v || true
           if [[ "${TARGET}" == pixelfed ]]; then
             docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" down -v || true
+          fi
+          if [[ "${TARGET}" == misskey ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" down -v || true
+          fi
+          if [[ "${TARGET}" == friendica ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" down -v || true
           fi
           if [[ "${TARGET}" == bonfire ]]; then
             docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" down -v || true

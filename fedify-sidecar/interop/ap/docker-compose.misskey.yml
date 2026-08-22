@@ -1,0 +1,55 @@
+services:
+  misskey-db:
+    image: postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    environment:
+      POSTGRES_DB: misskey
+      POSTGRES_USER: misskey
+      POSTGRES_PASSWORD: ${MISSKEY_DB_PASSWORD:?MISSKEY_DB_PASSWORD is required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U misskey -d misskey"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ap_interop_misskey_db:/var/lib/postgresql/data
+    networks:
+      - ap-interop
+
+  misskey-redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - ap_interop_misskey_redis:/data
+    networks:
+      - ap-interop
+
+  misskey-app:
+    image: misskey/misskey:2026.7.0@sha256:2fd5c68fb02a354979caeb37560e0dea50d8a84b78a7b0d769e4e9cf426a4b68
+    depends_on:
+      misskey-db:
+        condition: service_healthy
+      misskey-redis:
+        condition: service_healthy
+    environment:
+      NODE_EXTRA_CA_CERTS: /interop/runtime/certs/rootCA.crt
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/meta',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    volumes:
+      - ./runtime/misskey/default.yml:/misskey/.config/default.yml:ro
+      - ./runtime/certs:/interop/runtime/certs:ro
+      - ap_interop_misskey_files:/misskey/files
+    networks:
+      - ap-interop
+
+volumes:
+  ap_interop_misskey_db:
+  ap_interop_misskey_redis:
+  ap_interop_misskey_files:

@@ -19,6 +19,48 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain('docker image inspect "${IMAGE}"');
   });
 
+  it("bootstraps Misskey without exposing directional credentials", () => {
+    const prepare = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/prepare-misskey-config.sh"),
+      "utf8",
+    );
+    const bootstrap = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/bootstrap-misskey-account.sh"),
+      "utf8",
+    );
+    const compose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.misskey.yml"),
+      "utf8",
+    );
+
+    expect(prepare).toContain("umask 077");
+    expect(prepare).toContain("allowedPrivateNetworks:");
+    expect(prepare).toContain("172.31.240.0/24");
+    expect(bootstrap).toContain('-e AP_INTEROP_SETUP_PASSWORD="${MISSKEY_SETUP_PASSWORD}"');
+    expect(bootstrap).not.toContain("console.log");
+    expect(bootstrap).toContain("TARGET_ACTOR_URI=https://misskey.test/users/%s");
+    expect(compose).toContain("misskey/misskey:2026.7.0@sha256:2fd5c68f");
+    expect(compose).toContain("postgres:18-alpine@sha256:d3e1620b");
+  });
+
+  it("uses Friendica's official installer and required background worker", () => {
+    const bootstrap = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/bootstrap-friendica-account.sh"),
+      "utf8",
+    );
+    const compose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.friendica.yml"),
+      "utf8",
+    );
+
+    expect(compose).toContain("friendica:2026.05@sha256:e496eeb3");
+    expect(compose).toContain("entrypoint: /cron.sh");
+    expect(compose).toContain("CURL_CA_BUNDLE: /interop/runtime/certs/rootCA.crt");
+    expect(compose).not.toContain("FRIENDICA_NO_VALIDATION");
+    expect(bootstrap).toContain("php bin/console.php user add");
+    expect(bootstrap).toContain("compose up -d friendica-worker");
+  });
+
   it("uses an MX-reachable default for Mastodon CLI account validation", () => {
     const script = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/bootstrap-mastodon-account.sh"),

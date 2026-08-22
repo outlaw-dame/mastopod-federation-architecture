@@ -44,12 +44,12 @@ if [ -n "${COMPOSE_OVERLAY}" ]; then
 fi
 
 if [ -z "${TARGET}" ] || [ -z "${ACTOR_URI}" ]; then
-  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire> <actor-uri> [local-username]" >&2
+  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica> <actor-uri> [local-username]" >&2
   exit 2
 fi
 
 case "${TARGET}" in
-  mastodon|gotosocial|akkoma|pixelfed|bonfire) ;;
+  mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica) ;;
   *) fail "unsupported target '${TARGET}'" ;;
 esac
 case "${EXPECTED_COUNT}:${ATTEMPTS}:${DELAY_SECONDS}" in
@@ -111,6 +111,14 @@ query_count() {
       value=$(printf '%s\n' "${output}" | awk '/^[01]$/{value=$0} END{print value}')
       [ -n "${value}" ] || return 1
       printf '%s\n' "${value}"
+      ;;
+    misskey)
+      compose exec -T misskey-db /bin/sh -lc \
+        "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U misskey -d misskey -v ON_ERROR_STOP=1 -tAc \"select count(*) from \\\"following\\\" f join \\\"user\\\" follower on follower.id=f.\\\"followerId\\\" join \\\"user\\\" target on target.id=f.\\\"followeeId\\\" where follower.uri='${actor_sql}' and target.username='${username_sql}' and target.host is null;\""
+      ;;
+    friendica)
+      compose exec -T friendica-db /bin/sh -lc \
+        "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"select count(*) from contact c join user u on u.uid=c.uid where c.url='${actor_sql}' and u.nickname='${username_sql}' and c.rel in (1,3) and c.pending=0 and c.deleted=0;\""
       ;;
   esac
 }
@@ -184,6 +192,12 @@ case "${TARGET}" in
     ;;
   bonfire)
     compose logs --no-color bonfire-app >&2 || true
+    ;;
+  misskey)
+    compose logs --no-color misskey-app >&2 || true
+    ;;
+  friendica)
+    compose logs --no-color friendica-app friendica-worker >&2 || true
     ;;
 esac
 exit 1

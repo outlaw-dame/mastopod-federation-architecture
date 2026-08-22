@@ -18,6 +18,8 @@ services:
           - akkoma
           - pixelfed.test
           - bonfire.test
+          - misskey.test
+          - friendica.test
           - activitypods.test
 
   # Containerized real-ActivityPods sidecar proof. Keeping this service on the
