@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'fedify-sidecar/scripts/benchmark-redpanda-compression-rf3.ts'
+      - 'fedify-sidecar/scripts/analyze-redpanda-compression-rf3.mjs'
       - 'fedify-sidecar/src/streams/kafka-compression.ts'
       - '.github/workflows/redpanda-compression-rf3.yml'
   workflow_dispatch:
@@ -47,6 +48,30 @@ jobs:
           REDPANDA_RF3_OUTPUT: ../measurements/redpanda-compression-rf3/summary.json
         run: npm exec -- tsx scripts/benchmark-redpanda-compression-rf3.ts
 
+      - name: Analyze RF3 promotion decision
+        working-directory: fedify-sidecar
+        env:
+          REDPANDA_RF3_INPUT: ../measurements/redpanda-compression-rf3/summary.json
+          REDPANDA_RF3_DECISION_OUTPUT: ../measurements/redpanda-compression-rf3/decision.json
+        run: node scripts/analyze-redpanda-compression-rf3.mjs
+
+      - name: Validate production Zstd level against RF3 evidence
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const summary = JSON.parse(fs.readFileSync('measurements/redpanda-compression-rf3/summary.json', 'utf8'));
+          const decision = JSON.parse(fs.readFileSync('measurements/redpanda-compression-rf3/decision.json', 'utf8'));
+          const expected = ['gzip','zstd-1','zstd-2','zstd-3'];
+          if (summary.version !== 1 || summary.methodology?.brokers !== 3 || summary.methodology?.replicationFactor !== 3 || summary.methodology?.repeats !== 3) {
+            throw new Error('RF3 methodology contract drift');
+          }
+          if (JSON.stringify(summary.medians.map((x) => x.arm)) !== JSON.stringify(expected)) throw new Error('RF3 arm drift');
+          const z1 = decision.comparisons.find((x) => x.arm === 'zstd-1');
+          if (!z1 || !z1.eligible) throw new Error(`Zstd-1 is not RF3-eligible: ${JSON.stringify(z1?.reasons)}`);
+          if (decision.selectedArm !== 'zstd-1') throw new Error(`RF3 analyzer selected ${decision.selectedArm}, expected zstd-1 for current production config`);
+          console.log(JSON.stringify({ selectedArm: decision.selectedArm, zstd1: z1 }, null, 2));
+          NODE
+
       - name: Capture runner context
         if: always()
         run: |
@@ -65,28 +90,6 @@ jobs:
           path: measurements/redpanda-compression-rf3
           if-no-files-found: error
           retention-days: 30
-
-      - name: Validate production Zstd level against RF3 evidence
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs');
-          const summary = JSON.parse(fs.readFileSync('measurements/redpanda-compression-rf3/summary.json', 'utf8'));
-          const expected = ['gzip','zstd-1','zstd-2','zstd-3'];
-          if (summary.version !== 1 || summary.methodology?.brokers !== 3 || summary.methodology?.replicationFactor !== 3 || summary.methodology?.repeats !== 3) {
-            throw new Error('RF3 methodology contract drift');
-          }
-          if (JSON.stringify(summary.medians.map((x) => x.arm)) !== JSON.stringify(expected)) throw new Error('RF3 arm drift');
-          const z2 = summary.comparisons.find((x) => x.arm === 'zstd-2');
-          if (!z2) throw new Error('Zstd-2 comparison missing');
-          const r = z2.ratiosToGzip;
-          if (r.topicDisk > 1.25) throw new Error(`Zstd-2 RF3 disk ${r.topicDisk}x > 1.25x GZIP`);
-          if (r.clusterNetwork > 1.25) throw new Error(`Zstd-2 RF3 network ${r.clusterNetwork}x > 1.25x GZIP`);
-          if (r.totalCpu > 0.85) throw new Error(`Zstd-2 RF3 total CPU ${r.totalCpu}x > 0.85x GZIP`);
-          if (r.singletonP95 > 1.15) throw new Error(`Zstd-2 RF3 p95 ${r.singletonP95}x > 1.15x GZIP`);
-          if (r.singletonP99 > 1.20) throw new Error(`Zstd-2 RF3 p99 ${r.singletonP99}x > 1.20x GZIP`);
-          if (summary.selectedArm !== 'zstd-2') throw new Error(`RF3 selected ${summary.selectedArm}, expected zstd-2 for current production config`);
-          console.log(JSON.stringify({ selectedArm: summary.selectedArm, zstd2: r }, null, 2));
-          NODE
 
       - name: Cleanup cluster
         if: always()
