@@ -5,6 +5,7 @@ on:
     paths:
       - 'fedify-sidecar/src/search/**'
       - 'fedify-sidecar/src/delivery/**'
+      - 'fedify-sidecar/src/federation/**'
       - 'fedify-sidecar/src/streams/**'
       - 'fedify-sidecar/scripts/os4b-live-federation-*.ts'
       - '.github/workflows/opensearch-os4b-live-federation.yml'
@@ -65,7 +66,7 @@ jobs:
             docker exec os4b-live-redpanda rpk topic create "$topic" >/dev/null
           done
 
-      - name: Start mock ActivityPods authority and canonical sidecar runtime
+      - name: Start mock ActivityPods authority and canonical Fedify sidecar runtime
         run: |
           set -euo pipefail
           mkdir -p artifacts/os4b-live /tmp/os4b-live-authority
@@ -99,7 +100,7 @@ jobs:
             SEARCH_BACKEND=opensearch OPENSEARCH_URL=http://127.0.0.1:19200 OPENSEARCH_SSL_VERIFY=false \
             ENABLE_INBOUND_WORKER=true ENABLE_OPENSEARCH_INDEXER=true \
             ENABLE_OUTBOUND_WORKER=false ENABLE_OUTBOX_INTENT_WORKER=false \
-            ENABLE_FEDIFY_RUNTIME_INTEGRATION=false ENABLE_XRPC_SERVER=false \
+            ENABLE_FEDIFY_RUNTIME_INTEGRATION=true ENABLE_XRPC_SERVER=false \
             ENABLE_MEDIA_ASSET_SYNC=false ENABLE_ACCOUNT_PROVISIONING=false ENABLE_ENTRYWAY=false \
             ENABLE_FOLLOWERS_SYNC=false ENABLE_MRF_ADMIN_API=false ENABLE_MODERATION_BRIDGE_API=false \
             ENABLE_CANONICAL_EVENT_LOG=false ENABLE_CANONICAL_NOTIFICATIONS=false \
@@ -116,21 +117,21 @@ jobs:
           done
           if [[ "$ready" != true ]]; then cat artifacts/os4b-live/sidecar.log; exit 1; fi
 
-      - name: Send genuinely signed remote ActivityPub Create Notes
+      - name: Send genuinely signed remote ActivityPub Create Notes through Fedify inbox
         working-directory: fedify-sidecar
         env:
           OS4B_REMOTE_HOST: 127.0.0.1
           OS4B_REMOTE_PORT: '18181'
           OS4B_REMOTE_PUBLIC_HOST: 127.0.0.1
           OS4B_REMOTE_PUBLIC_PORT: '18181'
-          OS4B_SIDECAR_INBOX: http://127.0.0.1:18080/sharedInbox
+          OS4B_SIDECAR_INBOX: http://127.0.0.1:18080/inbox
           OS4B_SIDECAR_HOST_HEADER: local.test
           OS4B_FEDERATION_CONCURRENCY: '24'
         run: |
           set -o pipefail
           npm exec -- tsx scripts/os4b-live-federation-remote.ts | tee ../artifacts/os4b-live/send.json
 
-      - name: Prove federation to Stream2/firehose to canonical OpenSearch projection
+      - name: Prove Fedify to Redis to Stream2/firehose to canonical OpenSearch projection
         working-directory: fedify-sidecar
         run: |
           set -o pipefail
