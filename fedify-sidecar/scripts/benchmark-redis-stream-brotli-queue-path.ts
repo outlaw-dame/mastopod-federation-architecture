@@ -195,10 +195,14 @@ async function runSample(input: {
   return { elapsedMs, cpuMicros, intentBytes, outboundBytes, completedOutbound };
 }
 
-async function createArmQueue(caseName: string, arm: Arm) {
+async function createArmQueue(caseName: string, arm: Arm, endpoints: number) {
   const token = `${process.pid}-${Date.now()}-${caseName}-${arm}`;
   const intentStream = `ap:bench:brotli-queue:${token}:intent`;
   const outboundStream = `ap:bench:brotli-queue:${token}:outbound`;
+  // Retention is deliberately independent of the percentile sample population.
+  // Keep enough entries to measure a representative steady-state Stream while
+  // preventing 100+ benchmark iterations from accumulating multi-gigabyte keys.
+  const maxStreamLength = Math.max(100, endpoints * 2);
   const queue = new RedisStreamsQueue({
     redisUrl: REDIS_URL,
     outboxIntentStreamKey: intentStream,
@@ -212,7 +216,7 @@ async function createArmQueue(caseName: string, arm: Arm) {
     consumerGroup: `bench-${token}`,
     blockTimeoutMs: 50,
     claimIdleTimeMs: 60_000,
-    maxStreamLength: 100_000,
+    maxStreamLength,
     readBatchCount: 250,
     claimBatchCount: 250,
     payloadCompression: {
@@ -235,8 +239,8 @@ async function main() {
       const activity = makeActivity(testCase.activityBytes);
       const targets = makeTargets(testCase.recipients, testCase.endpoints);
       const arms = {
-        plaintext: await createArmQueue(testCase.name, "plaintext"),
-        brotli: await createArmQueue(testCase.name, "brotli"),
+        plaintext: await createArmQueue(testCase.name, "plaintext", testCase.endpoints),
+        brotli: await createArmQueue(testCase.name, "brotli", testCase.endpoints),
       };
       const samples: Record<Arm, Sample[]> = { plaintext: [], brotli: [] };
 
