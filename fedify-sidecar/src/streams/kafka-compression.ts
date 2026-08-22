@@ -6,7 +6,6 @@ const { CompressionCodecs, CompressionTypes } = kafkaJs;
 
 export type RedpandaCompressionName = "none" | "gzip" | "zstd";
 
-const ZSTD_MIN_NODE = { major: 22, minor: 15 } as const;
 const DEFAULT_ZSTD_LEVEL = 1;
 const MIN_ZSTD_LEVEL = -131072;
 const MAX_ZSTD_LEVEL = 22;
@@ -33,9 +32,10 @@ function parseNodeVersion(version = process.versions.node): { major: number; min
 
 export function hasNativeZstdSupport(version = process.versions.node): boolean {
   const { major, minor } = parseNodeVersion(version);
-  if (major > ZSTD_MIN_NODE.major) return true;
-  if (major < ZSTD_MIN_NODE.major) return false;
-  return minor >= ZSTD_MIN_NODE.minor;
+  if (major < 22) return false;
+  if (major === 22) return minor >= 15;
+  if (major === 23) return minor >= 8;
+  return true;
 }
 
 export function defaultRedpandaCompressionName(): RedpandaCompressionName {
@@ -69,7 +69,7 @@ function zstdOptions(level: number): Record<string, unknown> {
 function registerNativeZstdCodec(level: number): void {
   if (!hasNativeZstdSupport()) {
     throw new Error(
-      `REDPANDA_COMPRESSION=zstd requires Node.js >= ${ZSTD_MIN_NODE.major}.${ZSTD_MIN_NODE.minor}; current runtime is ${process.versions.node}`,
+      `REDPANDA_COMPRESSION=zstd requires Node.js >=22.15, Node.js >=23.8, or a later major; current runtime is ${process.versions.node}`,
     );
   }
 
@@ -138,8 +138,17 @@ export function resolveRedpandaCompression(
   }
 }
 
-export function ensureRedpandaCompressionCodec(
-  raw = process.env["REDPANDA_COMPRESSION"] ?? defaultRedpandaCompressionName(),
-): CompressionType {
-  return resolveRedpandaCompression(raw).type;
+export function ensureRedpandaCompressionCodec(raw?: string): CompressionType {
+  // Several legacy call sites supplied `env ?? "zstd"`. Preserve the declared
+  // Node >=20 package contract by treating that literal as an implicit default
+  // when the environment itself is unset; native-capable runtimes still choose
+  // Zstd while older supported runtimes remain on KafkaJS's built-in GZIP.
+  const configured = process.env["REDPANDA_COMPRESSION"];
+  const selected =
+    configured !== undefined
+      ? configured
+      : raw === undefined || raw.trim().toLowerCase() === "zstd"
+        ? defaultRedpandaCompressionName()
+        : raw;
+  return resolveRedpandaCompression(selected).type;
 }
