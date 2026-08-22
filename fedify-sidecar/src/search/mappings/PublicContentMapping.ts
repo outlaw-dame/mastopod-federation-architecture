@@ -1,49 +1,50 @@
 /**
- * V6.5 Phase 5.5: Unified OpenSearch Read Stack
+ * OS3: canonical lexical/faceted OpenSearch mapping for public-content-v1.
  *
- * OpenSearch mapping for public-content-v1
+ * Vector fields are intentionally absent from the active Tier-3 projection.
+ * OS2 proved that current production call sites do not perform semantic/ANN
+ * retrieval, so paying indexing/storage cost for a dormant knn_vector is not
+ * part of the current runtime architecture.
  */
 
 export const PublicContentMapping = {
   settings: {
     index: {
-      knn: true,
       number_of_shards: 3,
       number_of_replicas: 1,
-      default_pipeline: "public-content-ingest-v1"
     },
     analysis: {
       analyzer: {
         content_text_analyzer: {
-          type: "custom",
-          tokenizer: "standard",
-          filter: ["lowercase"]
-        }
-      }
-    }
+          type: 'custom',
+          tokenizer: 'standard',
+          filter: ['lowercase'],
+        },
+      },
+    },
   },
   mappings: {
-    dynamic: "strict",
+    dynamic: 'strict',
     properties: {
-      stableDocId:        { type: 'keyword' },
+      stableDocId: { type: 'keyword' },
       canonicalContentId: { type: 'keyword' },
 
-      protocolPresence:   { type: 'keyword' },
-      sourceKind:         { type: 'keyword' },
+      protocolPresence: { type: 'keyword' },
+      sourceKind: { type: 'keyword' },
 
       ap: {
         properties: {
           objectUri: { type: 'keyword' },
-          activityUri: { type: 'keyword' }
-        }
+          activityUri: { type: 'keyword' },
+        },
       },
 
       at: {
         properties: {
           uri: { type: 'keyword' },
           cid: { type: 'keyword' },
-          did: { type: 'keyword' }
-        }
+          did: { type: 'keyword' },
+        },
       },
 
       author: {
@@ -58,11 +59,11 @@ export const PublicContentMapping = {
             fields: {
               raw: {
                 type: 'keyword',
-                ignore_above: 256
-              }
-            }
-          }
-        }
+                ignore_above: 256,
+              },
+            },
+          },
+        },
       },
 
       text: {
@@ -71,27 +72,27 @@ export const PublicContentMapping = {
         fields: {
           raw: {
             type: 'keyword',
-            ignore_above: 32766
-          }
-        }
+            ignore_above: 32766,
+          },
+        },
       },
       textRaw: {
         type: 'keyword',
         index: false,
-        doc_values: false
+        doc_values: false,
       },
 
       createdAt: {
         type: 'date',
-        format: 'strict_date_optional_time||epoch_millis'
+        format: 'strict_date_optional_time||epoch_millis',
       },
       updatedAt: {
         type: 'date',
-        format: 'strict_date_optional_time||epoch_millis'
+        format: 'strict_date_optional_time||epoch_millis',
       },
       indexedAt: {
         type: 'date',
-        format: 'strict_date_optional_time||epoch_millis'
+        format: 'strict_date_optional_time||epoch_millis',
       },
 
       langs: { type: 'keyword' },
@@ -107,8 +108,8 @@ export const PublicContentMapping = {
         properties: {
           likeCount: { type: 'integer' },
           repostCount: { type: 'integer' },
-          replyCount: { type: 'integer' }
-        }
+          replyCount: { type: 'integer' },
+        },
       },
 
       ranking: {
@@ -116,24 +117,11 @@ export const PublicContentMapping = {
           recencyBucket: { type: 'keyword' },
           localAffinityScore: { type: 'float' },
           graphAffinityScore: { type: 'float' },
-          qualityScore: { type: 'float' }
-        }
+          qualityScore: { type: 'float' },
+        },
       },
 
-      embedding: {
-        type: 'knn_vector',
-        dimension: 1024,
-        space_type: 'cosinesimil',
-        mode: 'on_disk',
-        compression_level: '16x'
-      },
-      embeddingStatus: { type: 'keyword' },
-      embeddingUpdatedAt: {
-        type: 'date',
-        format: 'strict_date_optional_time||epoch_millis'
-      },
-
-      isDeleted: { type: 'boolean' }
-    }
-  }
-};
+      isDeleted: { type: 'boolean' },
+    },
+  },
+} as const;
