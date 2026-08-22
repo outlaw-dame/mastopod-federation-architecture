@@ -1,4 +1,4 @@
-# Redpanda Connect overlay — adds OpenSearch, LocalStack, and the Connect service.
+# Redpanda Connect overlay — auxiliary pipelines only.
 #
 # Usage (local dev, compose v2):
 #   docker compose \
@@ -6,28 +6,26 @@
 #     -f redpanda-connect/docker-compose.connect.yml \
 #     up
 #
-# The Connect service loads all pipelines from redpanda-connect/streams/ at
-# startup. Individual pipelines can be hot-reloaded via the streams REST API:
-#   curl -X PUT http://localhost:4195/streams/01-firehose-to-opensearch \
-#     -d @redpanda-connect/streams/01-firehose-to-opensearch.yaml
+# OS4 boundary:
+# - SearchIndexerService is the sole ap.firehose.v1 -> public search projector.
+# - redpanda-connect/streams/ no longer contains the historical duplicate
+#   firehose -> ap-activities pipeline.
+# - archived pipelines live under redpanda-connect/archive/ and are not loaded by
+#   the streams-mode glob below.
 #
-# Prometheus metrics:  http://localhost:4195/metrics
-# OpenSearch Dashboards UI is NOT included here; add OpenSearch Dashboards
-# (port 5601) separately if needed.
-
-version: "3.8"
+# Prometheus metrics: http://localhost:4195/metrics
 
 services:
   # ============================================================================
-  # OpenSearch (activity index + MRF rejection index)
+  # OpenSearch (shared auxiliary search/audit dependency)
   # ============================================================================
   opensearch:
-    image: opensearchproject/opensearch:2.13.0
+    image: opensearchproject/opensearch:3.8.0
     container_name: fedify-opensearch
     environment:
       - discovery.type=single-node
       - DISABLE_SECURITY_PLUGIN=true
-      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Admin1234!}
+      - DISABLE_INSTALL_DEMO_CONFIG=true
       - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
     ports:
       - "9200:9200"
@@ -43,7 +41,6 @@ services:
 
   # ============================================================================
   # LocalStack (S3 emulation for local dev / CI)
-  # Set S3_ENDPOINT=http://localstack:4566 in .env to use this instead of AWS.
   # ============================================================================
   localstack:
     image: localstack/localstack:3
@@ -52,7 +49,6 @@ services:
       - SERVICES=s3
       - DEFAULT_REGION=${AWS_REGION:-us-east-1}
       - AWS_DEFAULT_REGION=${AWS_REGION:-us-east-1}
-      # Disable LocalStack Pro features — only OSS S3 is needed.
       - DISABLE_PRO_FEATURES=1
     ports:
       - "4566:4566"
@@ -66,11 +62,6 @@ services:
     networks:
       - fedify
 
-  # ============================================================================
-  # Init — creates the S3 archive bucket in LocalStack on first start.
-  # Exits immediately after creation. Safe to re-run; bucket-already-exists
-  # errors are ignored.
-  # ============================================================================
   init-localstack:
     image: amazon/aws-cli:latest
     container_name: fedify-init-localstack
@@ -90,32 +81,27 @@ services:
     restart: "no"
 
   # ============================================================================
-  # Redpanda Connect
+  # Redpanda Connect — auxiliary pipelines only
   # ============================================================================
   redpanda-connect:
     image: redpandadata/connect:latest
     container_name: fedify-rpconnect
-    # Run in streams mode so each pipeline YAML is a hot-reloadable unit.
     command: ["streams", "--config", "/redpanda-connect/config.yaml", "/redpanda-connect/streams/*.yaml"]
     volumes:
       - ./config.yaml:/redpanda-connect/config.yaml:ro
       - ./streams:/redpanda-connect/streams:ro
     environment:
-      # Redpanda
       REDPANDA_BROKER: "redpanda:9092"
-      # OpenSearch
       OPENSEARCH_URL: "http://opensearch:9200"
       OPENSEARCH_AUTH_ENABLED: "false"
       OPENSEARCH_USER: "${OPENSEARCH_USER:-admin}"
       OPENSEARCH_PASSWORD: "${OPENSEARCH_PASSWORD:-admin}"
-      # S3 / LocalStack
       S3_ARCHIVE_BUCKET: "${S3_ARCHIVE_BUCKET:-fedify-archive}"
       S3_ENDPOINT: "${S3_ENDPOINT:-http://localstack:4566}"
       AWS_REGION: "${AWS_REGION:-us-east-1}"
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-test}"
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-test}"
       AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
-      # Logging
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     ports:
       - "4195:4195"
