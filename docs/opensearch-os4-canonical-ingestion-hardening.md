@@ -35,11 +35,15 @@ The canonical design therefore has no rollback lease. For events carrying an `ou
 4. record the completion marker with bounded TTL;
 5. explicitly resolve the source Kafka offset.
 
+The OS4 completion namespace is `search:completed-outbox-intent:v1`, deliberately separate from the earlier `search:outbox-intent` pre-side-effect lease namespace. Old leases can therefore never be mistaken for proof that the OS4 projection completed.
+
 If projection fails, no completion marker is written and the source offset remains unresolved. If completion recording is temporarily unavailable, the deduper can fall back to its process-local marker; the successful projection may be replayed later, but replay causes duplicate idempotent work rather than silent projection loss. That trade is intentional: at-least-once duplicate work is safer than a durable pre-side-effect claim that can suppress a missing projection.
 
-### Bounded poison-message retries and DLQ
+### Bounded poison-message retries and governed DLQ
 
-Search projection retries are bounded by `SEARCH_INDEXER_MAX_PROCESSING_ATTEMPTS` (default 5). An event that exhausts the limit is written unchanged to `SEARCH_INDEXER_DLQ_TOPIC` (default `ap.search-indexer.dlq.v1`) with headers recording:
+Search projection retries are bounded by `SEARCH_INDEXER_MAX_PROCESSING_ATTEMPTS` (default 5). An event that exhausts the limit is written unchanged to `SEARCH_INDEXER_DLQ_TOPIC`.
+
+The default is the existing governed `ap.firehose.dlq.v1` topic rather than an OS4-only ad-hoc topic. Redpanda topic governance already provisions and verifies this DLQ across development/staging/production profiles, so production behavior does not depend on broker auto-topic creation. Search-indexer failures remain distinguishable through headers recording:
 
 - source topic;
 - source partition;
@@ -81,6 +85,7 @@ This OS4 hardening slice is not mergeable unless CI proves:
 - transient projection failure records no completion marker and resolves no offset;
 - poison-event DLQ publication precedes offset resolution;
 - DLQ publication failure leaves the source offset unresolved;
+- the default DLQ is the already-governed `ap.firehose.dlq.v1` topic;
 - the duplicate Redpanda Connect firehose sink is absent from the active streams directory;
 - archived pipeline evidence is not loaded by the active streams glob;
 - auxiliary Redpanda Connect OpenSearch uses the same 3.8 server generation as the canonical deployment.
