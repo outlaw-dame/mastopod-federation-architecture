@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSearchIndexerService } from '../service/SearchIndexerService.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function makePayload(raw: string, pause = vi.fn(() => vi.fn())) {
   const resolveOffset = vi.fn();
@@ -48,6 +52,7 @@ function failingService(maxProcessingAttempts: number) {
 
 describe('OS4 search replay ordering', () => {
   it('releases a claimed intent and leaves the offset unresolved on transient failure', async () => {
+    vi.useFakeTimers();
     const { service, claim, release, send } = failingService(2);
     const raw = JSON.stringify({ outboxIntentId: 'intent-os4', activity: { id: 'a1' } });
     const { payload, resolveOffset, heartbeat, pause } = makePayload(raw);
@@ -60,6 +65,7 @@ describe('OS4 search replay ordering', () => {
     expect(resolveOffset).not.toHaveBeenCalled();
     expect(heartbeat).not.toHaveBeenCalled();
     expect(pause).toHaveBeenCalledOnce();
+    vi.clearAllTimers();
   });
 
   it('publishes the original payload to DLQ before resolving a poison offset', async () => {
