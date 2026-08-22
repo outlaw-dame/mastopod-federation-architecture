@@ -11,13 +11,14 @@ set -euo pipefail
 # this boundary; the subsequent real signup + outbox execution proves dynamic
 # per-user dataset provisioning and ActivityPub persistence end to end.
 #
-# Probe the actual SPARQL query endpoint rather than Fuseki administrative
-# endpoints, which may be access-controlled independently of application data.
-# Use the same GET ASK form that the earlier interop preflight proved against
-# Fuseki. A successful SPARQL response is the queryability contract; parsing a
-# particular serialization is not part of the storage-readiness assertion.
+# Probe the actual authenticated SPARQL query endpoint rather than Fuseki
+# administrative endpoints. The pinned ActivityPods fixture protects Fuseki
+# with the same credentials its bootstrap script uses, so an anonymous probe
+# would test authorization failure rather than dataset queryability.
 
 FUSEKI_URL="${FUSEKI_URL:-http://localhost:3030}"
+FUSEKI_USER="${FUSEKI_USER:-admin}"
+FUSEKI_PASSWORD="${FUSEKI_PASSWORD:-admin}"
 WAIT_SECONDS="${WAIT_SECONDS:-120}"
 AUTH_DATASET="${ACTIVITYPODS_AUTH_DATASET:-settings}"
 
@@ -34,6 +35,7 @@ fi
 probe_dataset() {
   local dataset="$1"
   curl --fail --silent --show-error --max-time 2 \
+    -u "${FUSEKI_USER}:${FUSEKI_PASSWORD}" \
     "${FUSEKI_URL%/}/${dataset}/query?query=ASK%20%7B%7D" \
     >/dev/null 2>&1
 }
@@ -52,4 +54,4 @@ if [[ "${ready}" != true ]]; then
   exit 1
 fi
 
-echo "ActivityPods storage bootstrap readiness verified via SPARQL ASK: ${AUTH_DATASET}"
+echo "ActivityPods storage bootstrap readiness verified via authenticated SPARQL ASK: ${AUTH_DATASET}"
