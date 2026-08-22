@@ -12,10 +12,13 @@ describe('OS3 search runtime policy', () => {
   });
 
   it('does not force an OpenSearch refresh for normal content mutations', async () => {
+    const update = vi.fn(async (_args: Record<string, unknown>) => ({ body: {} }));
+    const deleteDocument = vi.fn(async (_args: Record<string, unknown>) => ({ body: {} }));
+    const deleteByQuery = vi.fn(async (_args: Record<string, unknown>) => ({ body: {} }));
     const client = {
-      update: vi.fn(async () => ({ body: {} })),
-      delete: vi.fn(async () => ({ body: {} })),
-      deleteByQuery: vi.fn(async () => ({ body: {} })),
+      update,
+      delete: deleteDocument,
+      deleteByQuery,
     };
     const store = new DefaultOpenSearchClient(client as any);
 
@@ -24,24 +27,26 @@ describe('OS3 search runtime policy', () => {
     await store.delete('doc-1');
     await store.deleteByAuthor({ canonicalId: 'actor-1' });
 
-    for (const call of client.update.mock.calls) {
-      expect(call[0]).not.toHaveProperty('refresh');
+    for (const [args] of update.mock.calls) {
+      expect(args).not.toHaveProperty('refresh');
     }
-    expect(client.delete.mock.calls[0]?.[0]).not.toHaveProperty('refresh');
-    expect(client.deleteByQuery.mock.calls[0]?.[0]).not.toHaveProperty('refresh');
+    expect(deleteDocument.mock.calls[0]?.[0]).not.toHaveProperty('refresh');
+    expect(deleteByQuery.mock.calls[0]?.[0]).not.toHaveProperty('refresh');
   });
 
   it('does not force an OpenSearch refresh for author mutations', async () => {
+    const update = vi.fn(async (_args: Record<string, unknown>) => ({ body: {} }));
+    const deleteDocument = vi.fn(async (_args: Record<string, unknown>) => ({ body: {} }));
     const client = {
-      update: vi.fn(async () => ({ body: {} })),
-      delete: vi.fn(async () => ({ body: {} })),
+      update,
+      delete: deleteDocument,
     };
     const store = new DefaultOpenSearchAuthorClient(client as any);
 
     await store.upsert('actor-1', { stableAuthorId: 'actor-1' } as any);
     await store.delete('actor-1');
 
-    expect(client.update.mock.calls[0]?.[0]).not.toHaveProperty('refresh');
-    expect(client.delete.mock.calls[0]?.[0]).not.toHaveProperty('refresh');
+    expect(update.mock.calls[0]?.[0]).not.toHaveProperty('refresh');
+    expect(deleteDocument.mock.calls[0]?.[0]).not.toHaveProperty('refresh');
   });
 });
