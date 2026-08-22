@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { resolveSearchBackend } from '../../config/v6-config.js';
+import {
+  normalizeSearchBackendEnvironment,
+  resolveSearchBackend,
+} from '../../config/v6-config.js';
 import { DefaultOpenSearchAuthorClient, DefaultOpenSearchClient } from '../writer/OpenSearchClient.js';
 
 describe('OS3 search runtime policy', () => {
@@ -9,6 +12,26 @@ describe('OS3 search runtime policy', () => {
     expect(resolveSearchBackend('opensearch')).toBe('opensearch');
     expect(resolveSearchBackend('qdrant')).toBe('qdrant');
     expect(resolveSearchBackend('dual')).toBe('dual');
+  });
+
+  it('normalizes the process environment before the legacy entrypoint parser reads it', () => {
+    const original = process.env['SEARCH_BACKEND'];
+    try {
+      delete process.env['SEARCH_BACKEND'];
+      expect(normalizeSearchBackendEnvironment()).toBe('opensearch');
+      expect(process.env['SEARCH_BACKEND']).toBe('opensearch');
+
+      process.env['SEARCH_BACKEND'] = 'invalid';
+      expect(normalizeSearchBackendEnvironment()).toBe('opensearch');
+      expect(process.env['SEARCH_BACKEND']).toBe('opensearch');
+
+      process.env['SEARCH_BACKEND'] = 'qdrant';
+      expect(normalizeSearchBackendEnvironment()).toBe('qdrant');
+      expect(process.env['SEARCH_BACKEND']).toBe('qdrant');
+    } finally {
+      if (original === undefined) delete process.env['SEARCH_BACKEND'];
+      else process.env['SEARCH_BACKEND'] = original;
+    }
   });
 
   it('does not force an OpenSearch refresh for normal content mutations', async () => {
