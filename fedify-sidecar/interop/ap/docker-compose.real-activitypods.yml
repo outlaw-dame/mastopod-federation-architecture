@@ -25,7 +25,9 @@ services:
   # exercise HTTPS federation without weakening the production SSRF policy.
   fedify-sidecar:
     environment:
-      ACTIVITYPODS_URL: http://host.docker.internal:3001
+      # Directional, Docker-network-only alias for the host signing recorder.
+      # The public actor/key surface remains HTTPS through ap-proof-router.
+      ACTIVITYPODS_URL: http://activitypods-internal:3001
       ACTIVITYPODS_TOKEN: ${ACTIVITYPODS_TOKEN:?ACTIVITYPODS_TOKEN is required}
       ATPROTO_PASSWORD_VERIFY_TOKEN: ${ATPROTO_PASSWORD_VERIFY_TOKEN:-}
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:?SIDECAR_TOKEN is required}
@@ -51,6 +53,6 @@ services:
       ENABLE_AT_JETSTREAM: "false"
       ENABLE_AT_EXTERNAL_FIREHOSE: "false"
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "activitypods-internal:host-gateway"
     ports:
       - "127.0.0.1:8080:8080"
