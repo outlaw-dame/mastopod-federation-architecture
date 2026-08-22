@@ -308,7 +308,7 @@ export function createSearchIndexerService(
     groupId: process.env['SEARCH_INDEXER_CONSUMER_GROUP'] ?? 'search-indexer-v1',
     firehoseTopic: process.env['REDPANDA_FIREHOSE_TOPIC'] ?? 'ap.firehose.v1',
     tombstoneTopic: process.env['REDPANDA_TOMBSTONE_TOPIC'] ?? 'ap.tombstones.v1',
-    dlqTopic: process.env['SEARCH_INDEXER_DLQ_TOPIC'] ?? 'ap.search-indexer.dlq.v1',
+    dlqTopic: process.env['SEARCH_INDEXER_DLQ_TOPIC'] ?? 'ap.firehose.dlq.v1',
     opensearchUrl: process.env['OPENSEARCH_URL'] ?? 'http://localhost:9200',
     opensearchUsername: process.env['OPENSEARCH_USERNAME'],
     opensearchPassword: process.env['OPENSEARCH_PASSWORD'],
