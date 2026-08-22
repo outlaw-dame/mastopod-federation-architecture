@@ -43,7 +43,8 @@ jobs:
       - name: Run matched OS4b matrix
         env:
           OPENSEARCH_URL: http://127.0.0.1:19200
-          OS4B_DOCS_PER_ARM: '3000'
+          OS4B_OPENSEARCH_CONTAINER: os4b-opensearch
+          OS4B_DOCS_PER_ARM: '10000'
           OS4B_REPEATS: '3'
         run: |
           mkdir -p artifacts/os4b
