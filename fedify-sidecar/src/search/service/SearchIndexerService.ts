@@ -1,12 +1,13 @@
 /**
  * Dedicated public search projection consumer.
  *
- * Current OS3 architecture selects OpenSearch lexical/faceted storage by
- * default. Qdrant and dual modes remain explicit opt-in compatibility paths for
- * future vector experiments; they are not part of the default deployment.
+ * OS4 designates this TypeScript projector as the canonical Redpanda -> public
+ * search ingestion path. It preserves partition ordering, bounds poison-event
+ * retries, routes exhausted events to a replayable DLQ, and resumes KafkaJS
+ * backpressure explicitly after transient failures.
  */
 
-import { Kafka, Consumer, EachBatchPayload, logLevel } from 'kafkajs';
+import { Kafka, Consumer, Producer, EachBatchPayload, logLevel } from 'kafkajs';
 import { Client as OpenSearchNativeClient } from '@opensearch-project/opensearch';
 import { logger } from '../../utils/logger.js';
 import { resolveSearchBackend } from '../../config/v6-config.js';
@@ -40,6 +41,7 @@ export interface SearchIndexerServiceConfig {
   groupId: string;
   firehoseTopic: string;
   tombstoneTopic: string;
+  dlqTopic: string;
 
   opensearchUrl: string;
   opensearchUsername?: string;
@@ -56,9 +58,11 @@ export interface SearchIndexerServiceConfig {
   redis: {
     get(key: string): Promise<string | null>;
     set(key: string, value: string, ...args: Array<string | number>): Promise<unknown>;
+    del(key: string): Promise<unknown>;
   } | null;
 
   backpressureRetryDelayMs: number;
+  maxProcessingAttempts: number;
   outboxIntentDedupTtlSec: number;
 }
 
@@ -80,6 +84,7 @@ export class SearchIndexerService {
   private readonly config: SearchIndexerServiceConfig;
   private readonly kafka: Kafka;
   private readonly consumer: Consumer;
+  private readonly producer: Producer;
   private readonly bus: SearchEventBus;
   private readonly projector: ApSearchProjector;
   private readonly writer: PublicContentIndexWriter;
@@ -87,6 +92,7 @@ export class SearchIndexerService {
   private readonly contentStore: DefaultOpenSearchClient | DefaultQdrantContentClient;
   private readonly authorStore: DefaultOpenSearchAuthorClient | NoopPublicAuthorStore;
   private readonly outboxIntentDeduper: OutboxIntentDeduper;
+  private readonly processingAttempts = new Map<string, number>();
 
   private isRunning = false;
   private backpressureActive = false;
@@ -105,6 +111,7 @@ export class SearchIndexerService {
       logLevel: logLevel.WARN,
     });
     this.consumer = this.kafka.consumer({ groupId: config.groupId });
+    this.producer = this.kafka.producer();
 
     const enableOpenSearch =
       config.searchBackend === 'opensearch' || config.searchBackend === 'dual';
@@ -200,6 +207,7 @@ export class SearchIndexerService {
     if (this.isRunning) return;
     this.isRunning = true;
 
+    await this.producer.connect();
     await this.consumer.connect();
     await this.consumer.subscribe({
       topics: [this.config.firehoseTopic, this.config.tombstoneTopic],
@@ -215,8 +223,10 @@ export class SearchIndexerService {
     logger.info('[SearchIndexerService] Started', {
       firehoseTopic: this.config.firehoseTopic,
       tombstoneTopic: this.config.tombstoneTopic,
+      dlqTopic: this.config.dlqTopic,
       groupId: this.config.groupId,
       backend: this.config.searchBackend,
+      maxProcessingAttempts: this.config.maxProcessingAttempts,
     });
   }
 
@@ -224,6 +234,7 @@ export class SearchIndexerService {
     if (!this.isRunning) return;
     this.isRunning = false;
     await this.consumer.disconnect();
+    await this.producer.disconnect();
     logger.info('[SearchIndexerService] Stopped');
   }
 
@@ -232,34 +243,38 @@ export class SearchIndexerService {
 
     for (const message of batch.messages) {
       if (!isRunning() || isStale()) break;
+      if (this.backpressureActive) return;
 
-      if (this.backpressureActive) {
-        pause();
-        return;
-      }
+      const retryKey = `${batch.topic}:${batch.partition}:${message.offset}`;
+      let raw: string | undefined;
+      let outboxIntentId: string | undefined;
+      let dedupeClaimed = false;
 
       try {
-        const raw = message.value?.toString();
+        raw = message.value?.toString();
         if (!raw) {
           resolveOffset(message.offset);
+          this.processingAttempts.delete(retryKey);
           continue;
         }
 
         const event = JSON.parse(raw) as Record<string, unknown>;
-        const outboxIntentId = extractOutboxIntentId(
+        outboxIntentId = extractOutboxIntentId(
           event,
           message.headers as Record<string, Buffer | string | undefined> | undefined,
         );
 
         if (outboxIntentId) {
-          const claimed = await this.outboxIntentDeduper.claim(outboxIntentId);
-          if (!claimed) {
+          dedupeClaimed = await this.outboxIntentDeduper.claim(outboxIntentId);
+          if (!dedupeClaimed) {
             logger.debug('[SearchIndexerService] Skipping duplicate local outbox intent replay', {
               outboxIntentId,
               topic: batch.topic,
+              partition: batch.partition,
               offset: message.offset,
             });
             resolveOffset(message.offset);
+            this.processingAttempts.delete(retryKey);
             await heartbeat();
             continue;
           }
@@ -275,6 +290,7 @@ export class SearchIndexerService {
               source: consent.source,
             });
             resolveOffset(message.offset);
+            this.processingAttempts.delete(retryKey);
             await heartbeat();
             continue;
           }
@@ -283,12 +299,51 @@ export class SearchIndexerService {
         }
 
         resolveOffset(message.offset);
+        this.processingAttempts.delete(retryKey);
         await heartbeat();
       } catch (error: unknown) {
-        logger.error('[SearchIndexerService] Message processing error — activating backpressure', {
+        if (dedupeClaimed && outboxIntentId) {
+          try {
+            await this.outboxIntentDeduper.release(outboxIntentId);
+          } catch (releaseError: unknown) {
+            logger.error('[SearchIndexerService] Cannot release dedupe claim after failed projection', {
+              outboxIntentId,
+              topic: batch.topic,
+              partition: batch.partition,
+              offset: message.offset,
+              error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+            });
+            throw releaseError;
+          }
+        }
+
+        const attempts = (this.processingAttempts.get(retryKey) ?? 0) + 1;
+        this.processingAttempts.set(retryKey, attempts);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+
+        if (attempts >= this.config.maxProcessingAttempts && raw) {
+          await this.publishDlq(batch.topic, batch.partition, message.offset, raw, message.headers, errorMessage, attempts);
+          resolveOffset(message.offset);
+          this.processingAttempts.delete(retryKey);
+          await heartbeat();
+          logger.error('[SearchIndexerService] Poison search event moved to DLQ', {
+            topic: batch.topic,
+            partition: batch.partition,
+            offset: message.offset,
+            dlqTopic: this.config.dlqTopic,
+            attempts,
+            error: errorMessage,
+          });
+          continue;
+        }
+
+        logger.warn('[SearchIndexerService] Message processing failed — pausing before replay', {
           topic: batch.topic,
+          partition: batch.partition,
           offset: message.offset,
-          error: error instanceof Error ? error.message : String(error),
+          attempts,
+          maxAttempts: this.config.maxProcessingAttempts,
+          error: errorMessage,
         });
         this.activateBackpressure(pause);
         return;
@@ -296,17 +351,45 @@ export class SearchIndexerService {
     }
   }
 
-  private activateBackpressure(pause: () => void): void {
+  private async publishDlq(
+    sourceTopic: string,
+    partition: number,
+    offset: string,
+    raw: string,
+    originalHeaders: Record<string, Buffer | string | undefined> | undefined,
+    error: string,
+    attempts: number,
+  ): Promise<void> {
+    const headers: Record<string, string | Buffer | undefined> = {
+      ...originalHeaders,
+      'search-dlq-source-topic': sourceTopic,
+      'search-dlq-source-partition': String(partition),
+      'search-dlq-source-offset': offset,
+      'search-dlq-error': error.slice(0, 1024),
+      'search-dlq-attempts': String(attempts),
+      'search-dlq-failed-at': new Date().toISOString(),
+    };
+
+    await this.producer.send({
+      topic: this.config.dlqTopic,
+      messages: [{ value: raw, headers }],
+    });
+  }
+
+  private activateBackpressure(pause: () => () => void): void {
     if (this.backpressureActive) return;
     this.backpressureActive = true;
-    pause();
+    const resume = pause();
+
     logger.warn('[SearchIndexerService] Backpressure active — consumer paused', {
       retryInMs: this.config.backpressureRetryDelayMs,
     });
 
     setTimeout(() => {
+      if (!this.isRunning) return;
       this.backpressureActive = false;
-      logger.info('[SearchIndexerService] Backpressure cleared — consumer will resume on next poll');
+      resume();
+      logger.info('[SearchIndexerService] Backpressure cleared — consumer resumed');
     }, this.config.backpressureRetryDelayMs);
   }
 }
@@ -321,6 +404,7 @@ export function createSearchIndexerService(
     groupId: process.env['SEARCH_INDEXER_CONSUMER_GROUP'] ?? 'search-indexer-v1',
     firehoseTopic: process.env['REDPANDA_FIREHOSE_TOPIC'] ?? 'ap.firehose.v1',
     tombstoneTopic: process.env['REDPANDA_TOMBSTONE_TOPIC'] ?? 'ap.tombstones.v1',
+    dlqTopic: process.env['SEARCH_INDEXER_DLQ_TOPIC'] ?? 'ap.search-indexer.dlq.v1',
     opensearchUrl: process.env['OPENSEARCH_URL'] ?? 'http://localhost:9200',
     opensearchUsername: process.env['OPENSEARCH_USERNAME'],
     opensearchPassword: process.env['OPENSEARCH_PASSWORD'],
@@ -335,6 +419,10 @@ export function createSearchIndexerService(
     backpressureRetryDelayMs: parseInt(
       process.env['SEARCH_INDEXER_BACKPRESSURE_RETRY_MS'] ?? '10000',
       10,
+    ),
+    maxProcessingAttempts: Math.max(
+      1,
+      parseInt(process.env['SEARCH_INDEXER_MAX_PROCESSING_ATTEMPTS'] ?? '5', 10),
     ),
     outboxIntentDedupTtlSec: parseInt(
       process.env['SEARCH_INDEXER_OUTBOX_INTENT_DEDUP_TTL_SEC'] ?? `${60 * 60 * 24 * 7}`,
