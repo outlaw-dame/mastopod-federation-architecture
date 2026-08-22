@@ -9,14 +9,14 @@ afterEach(() => {
 });
 
 describe('OS4 canonical search ingestion policy', () => {
-  it('defaults to bounded retries and a replayable search DLQ', () => {
+  it('defaults to bounded retries and the governed firehose DLQ', () => {
     const service = createSearchIndexerService({
       brokers: ['localhost:9092'],
       redis: null,
     });
     const config = (service as any).config;
 
-    expect(config.dlqTopic).toBe('ap.search-indexer.dlq.v1');
+    expect(config.dlqTopic).toBe('ap.firehose.dlq.v1');
     expect(config.maxProcessingAttempts).toBe(5);
     expect(config.backpressureRetryDelayMs).toBeGreaterThan(0);
   });
