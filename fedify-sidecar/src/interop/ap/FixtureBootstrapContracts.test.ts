@@ -43,6 +43,11 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(compose).toContain("postgres:18-alpine@sha256:d3e1620b");
     expect(compose).toContain("ap_interop_misskey_db:/var/lib/postgresql");
     expect(compose).not.toContain("ap_interop_misskey_db:/var/lib/postgresql/data");
+    expect(compose).toContain("misskey-config-init:");
+    expect(compose).toContain('user: "0:0"');
+    expect(compose).toContain("chmod 0600 /target/default.yml");
+    expect(compose).toContain("condition: service_completed_successfully");
+    expect(compose).toContain("ap_interop_misskey_config:/misskey/.config:ro");
   });
 
   it("uses Friendica's official installer and required background worker", () => {
@@ -95,7 +100,8 @@ describe("real federation fixture bootstrap contracts", () => {
 
     expect(compose).toContain("castopod/castopod:1.9.0@sha256:3ad8970f");
     expect(compose).not.toContain("CP_DISABLE_HTTPS");
-    expect(bootstrap).toContain('preg_match("/^cache\\\\.redis\\\\.database=0$/m", $env) === 1');
+    expect(bootstrap).toContain('grep -qx "cache.redis.database=0" .env');
+    expect(bootstrap).toContain("http://127.0.0.1:8000/");
     expect(bootstrap).toContain("php spark install:init-database");
     expect(bootstrap).toContain("php spark install:create-superadmin");
     expect(bootstrap).toContain("php spark interop:create-podcast");
@@ -202,6 +208,8 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain("follow_request_count=");
     expect(script).toContain("failed_job_count=");
     expect(script).toContain('LLEN "queues:${queue}"');
+    expect(script).toContain("ActivityPubFetchService::fetchRequest");
+    expect(script).toContain('"bytes" => is_string($response) ? strlen($response) : 0');
     expect(script).not.toContain("LRANGE");
   });
 });

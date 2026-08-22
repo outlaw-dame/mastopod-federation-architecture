@@ -30,6 +30,19 @@ services:
     networks:
       - ap-interop
 
+  misskey-config-init:
+    image: misskey/misskey:2026.7.0@sha256:2fd5c68fb02a354979caeb37560e0dea50d8a84b78a7b0d769e4e9cf426a4b68
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        cp /source/default.yml /target/default.yml
+        chown misskey:misskey /target/default.yml
+        chmod 0600 /target/default.yml
+    volumes:
+      - ./runtime/misskey/default.yml:/source/default.yml:ro
+      - ap_interop_misskey_config:/target
+
   misskey-app:
     image: misskey/misskey:2026.7.0@sha256:2fd5c68fb02a354979caeb37560e0dea50d8a84b78a7b0d769e4e9cf426a4b68
     depends_on:
@@ -37,6 +50,8 @@ services:
         condition: service_healthy
       misskey-redis:
         condition: service_healthy
+      misskey-config-init:
+        condition: service_completed_successfully
     environment:
       NODE_EXTRA_CA_CERTS: /interop/runtime/certs/rootCA.crt
     healthcheck:
@@ -46,7 +61,7 @@ services:
       retries: 30
       start_period: 60s
     volumes:
-      - ./runtime/misskey/default.yml:/misskey/.config/default.yml:ro
+      - ap_interop_misskey_config:/misskey/.config:ro
       - ./runtime/certs:/interop/runtime/certs:ro
       - ap_interop_misskey_files:/misskey/files
     networks:
@@ -55,4 +70,5 @@ services:
 volumes:
   ap_interop_misskey_db:
   ap_interop_misskey_redis:
+  ap_interop_misskey_config:
   ap_interop_misskey_files:

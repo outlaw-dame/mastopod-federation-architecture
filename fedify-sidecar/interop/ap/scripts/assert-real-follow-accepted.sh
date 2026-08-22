@@ -142,6 +142,12 @@ pixelfed_diagnostics() {
     printf 'queue=%s ready=%s reserved=%s delayed=%s\n' "${queue}" "${ready}" "${reserved}" "${delayed}" >&2
   done
   compose exec -T pixelfed-horizon php artisan horizon:status >&2 || echo "Pixelfed Horizon status unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" pixelfed-app /bin/sh -lc \
+    'curl --connect-timeout 5 --max-time 30 -sS -D - -H "Accept: application/activity+json" "$AP_INTEROP_ACTOR_URI"' \
+    >&2 || echo "Pixelfed in-container actor fetch unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" pixelfed-app php artisan tinker --execute=\
+'$response = App\\Services\\ActivityPubFetchService::fetchRequest(getenv("AP_INTEROP_ACTOR_URI")); dump(["type" => gettype($response), "bytes" => is_string($response) ? strlen($response) : 0, "body" => $response]);' \
+    >&2 || echo "Pixelfed application actor-fetch diagnostic unavailable" >&2
 }
 
 query_error_file=$(mktemp "${TMPDIR:-/tmp}/ap-follow-query.XXXXXX")

@@ -25,11 +25,12 @@ ready=false
 attempt=1
 while [ "${attempt}" -le 60 ]; do
   # The image is considered started before its official entrypoint finishes
-  # rendering .env one section at a time. A merely non-empty file can still be
-  # a partial file, and invoking Spark in that window fails before CodeIgniter
-  # defines its environment constants. `cache.redis.database` is the final
-  # setting emitted for this fixture, so require that exact configured value.
-  if compose exec -T castopod-app php -r '$env = @file_get_contents(".env"); exit(is_file("spark") && is_string($env) && preg_match("/^cache\\.redis\\.database=0$/m", $env) === 1 ? 0 : 1);'; then
+  # rendering .env one section at a time and before starting its supervised
+  # HTTP server. The image can already contain a complete-looking .env, so the
+  # file alone is not an entrypoint-completion signal. Require both the final
+  # fixture setting and a live local HTTP response from the supervised server.
+  if compose exec -T castopod-app sh -c \
+    'grep -qx "cache.redis.database=0" .env && curl --connect-timeout 1 --max-time 2 -sS -o /dev/null http://127.0.0.1:8000/'; then
     ready=true
     break
   fi
@@ -37,7 +38,7 @@ while [ "${attempt}" -le 60 ]; do
   attempt=$((attempt + 1))
 done
 [ "${ready}" = true ] || {
-  echo "Castopod entrypoint did not finish rendering its runtime environment" >&2
+  echo "Castopod entrypoint did not finish its runtime configuration and supervised HTTP startup" >&2
   compose logs --no-color castopod-app >&2
   exit 1
 }
