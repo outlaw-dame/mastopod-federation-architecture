@@ -15,7 +15,7 @@ permissions:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
 
     services:
       redis:
@@ -44,6 +44,8 @@ jobs:
         env:
           REDIS_URL: redis://127.0.0.1:6379
           REDIS_BROTLI_QUEUE_BENCHMARK_OUTPUT: ../measurements/redis-stream-brotli-queue-path/evidence.json
+          REDIS_BROTLI_QUEUE_BENCHMARK_SAMPLES: '100'
+          REDIS_BROTLI_QUEUE_BENCHMARK_WARMUPS: '2'
         run: npx tsx scripts/benchmark-redis-stream-brotli-queue-path.ts
 
       - name: Validate evidence contract and frozen ADSP guards
@@ -52,7 +54,9 @@ jobs:
           const fs = require('node:fs');
           const evidence = JSON.parse(fs.readFileSync('measurements/redis-stream-brotli-queue-path/evidence.json', 'utf8'));
           if (evidence.schema !== 'apdm-redis-stream-brotli-queue-path.v1') throw new Error('unexpected evidence schema');
-          if (evidence.measuredSamplesPerArm < 5 || evidence.warmupSamplesPerArm < 1) throw new Error('insufficient sample count');
+          if (evidence.measuredSamplesPerArm < 100 || evidence.warmupSamplesPerArm < 2) {
+            throw new Error(`insufficient CI sample population: measured=${evidence.measuredSamplesPerArm}, warmup=${evidence.warmupSamplesPerArm}`);
+          }
           if (!Array.isArray(evidence.results) || evidence.results.length !== 3) throw new Error('unexpected scenario matrix');
           for (const result of evidence.results) {
             if (result.plaintext.completedOutbound !== result.endpoints || result.brotli.completedOutbound !== result.endpoints) {

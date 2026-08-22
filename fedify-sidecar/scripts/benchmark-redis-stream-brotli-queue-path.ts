@@ -10,8 +10,19 @@ import {
 
 const REDIS_URL = process.env["REDIS_URL"] ?? "redis://127.0.0.1:6379";
 const OUTPUT_PATH = process.env["REDIS_BROTLI_QUEUE_BENCHMARK_OUTPUT"];
-const MEASURED_SAMPLES = 5;
-const WARMUP_SAMPLES = 1;
+
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive safe integer; received ${raw}`);
+  }
+  return value;
+}
+
+const MEASURED_SAMPLES = positiveIntegerEnv("REDIS_BROTLI_QUEUE_BENCHMARK_SAMPLES", 5);
+const WARMUP_SAMPLES = positiveIntegerEnv("REDIS_BROTLI_QUEUE_BENCHMARK_WARMUPS", 1);
 
 const CASES = [
   { name: "medium-high-collapse", activityBytes: 20 * 1024, recipients: 10_000, endpoints: 10 },
@@ -184,10 +195,14 @@ async function runSample(input: {
   return { elapsedMs, cpuMicros, intentBytes, outboundBytes, completedOutbound };
 }
 
-async function createArmQueue(caseName: string, arm: Arm) {
+async function createArmQueue(caseName: string, arm: Arm, endpoints: number) {
   const token = `${process.pid}-${Date.now()}-${caseName}-${arm}`;
   const intentStream = `ap:bench:brotli-queue:${token}:intent`;
   const outboundStream = `ap:bench:brotli-queue:${token}:outbound`;
+  // Retention is deliberately independent of the percentile sample population.
+  // Keep enough entries to measure a representative steady-state Stream while
+  // preventing 100+ benchmark iterations from accumulating multi-gigabyte keys.
+  const maxStreamLength = Math.max(100, endpoints * 2);
   const queue = new RedisStreamsQueue({
     redisUrl: REDIS_URL,
     outboxIntentStreamKey: intentStream,
@@ -201,7 +216,7 @@ async function createArmQueue(caseName: string, arm: Arm) {
     consumerGroup: `bench-${token}`,
     blockTimeoutMs: 50,
     claimIdleTimeMs: 60_000,
-    maxStreamLength: 100_000,
+    maxStreamLength,
     readBatchCount: 250,
     claimBatchCount: 250,
     payloadCompression: {
@@ -224,8 +239,8 @@ async function main() {
       const activity = makeActivity(testCase.activityBytes);
       const targets = makeTargets(testCase.recipients, testCase.endpoints);
       const arms = {
-        plaintext: await createArmQueue(testCase.name, "plaintext"),
-        brotli: await createArmQueue(testCase.name, "brotli"),
+        plaintext: await createArmQueue(testCase.name, "plaintext", testCase.endpoints),
+        brotli: await createArmQueue(testCase.name, "brotli", testCase.endpoints),
       };
       const samples: Record<Arm, Sample[]> = { plaintext: [], brotli: [] };
 
