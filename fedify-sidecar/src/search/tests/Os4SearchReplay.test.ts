@@ -89,7 +89,7 @@ describe('OS4 search replay ordering', () => {
     vi.clearAllTimers();
   });
 
-  it('publishes the original payload to DLQ before resolving a poison offset', async () => {
+  it('publishes the original payload to the governed DLQ before resolving a poison offset', async () => {
     const { service, claim, send } = serviceWithProjector({ fail: true, maxProcessingAttempts: 1 });
     const raw = JSON.stringify({ outboxIntentId: 'intent-os4', activity: { id: 'a2' } });
     const { payload, resolveOffset, heartbeat, pause } = makePayload(raw);
@@ -101,7 +101,7 @@ describe('OS4 search replay ordering', () => {
     expect(send).toHaveBeenCalledOnce();
 
     const record = send.mock.calls[0]?.[0] as any;
-    expect(record.topic).toBe('ap.search-indexer.dlq.v1');
+    expect(record.topic).toBe('ap.firehose.dlq.v1');
     expect(record.messages[0].value).toBe(raw);
     expect(record.messages[0].headers['search-dlq-source-topic']).toBe('ap.firehose.v1');
     expect(record.messages[0].headers['search-dlq-source-partition']).toBe('2');
