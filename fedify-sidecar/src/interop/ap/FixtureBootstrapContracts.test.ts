@@ -28,4 +28,15 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(migrateIndex).toBeGreaterThan(-1);
     expect(startIndex).toBeGreaterThan(migrateIndex);
   });
+
+  it("resolves CI compose overlays from the repository workspace before querying persistence", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+
+    expect(script).toContain('[ -f "${GITHUB_WORKSPACE}/${path}" ]');
+    expect(script).toContain('COMPOSE_FILE=$(canonicalize_compose_path "${COMPOSE_FILE}")');
+    expect(script).toContain('COMPOSE_OVERLAY=$(canonicalize_compose_path "${COMPOSE_OVERLAY}")');
+  });
 });

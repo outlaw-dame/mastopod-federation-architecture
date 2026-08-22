@@ -11,6 +11,28 @@ EXPECTED_COUNT="${AP_INTEROP_EXPECTED_FOLLOW_COUNT:-1}"
 ATTEMPTS="${AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS:-60}"
 DELAY_SECONDS="${AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS:-2}"
 
+canonicalize_compose_path() {
+  path="$1"
+  case "${path}" in
+    /*) printf '%s\n' "${path}" ;;
+    *)
+      if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -f "${GITHUB_WORKSPACE}/${path}" ]; then
+        printf '%s\n' "${GITHUB_WORKSPACE}/${path}"
+      elif [ -f "${path}" ]; then
+        path_dir=$(CDPATH= cd -- "$(dirname -- "${path}")" && pwd)
+        printf '%s/%s\n' "${path_dir}" "$(basename -- "${path}")"
+      else
+        printf '%s\n' "${path}"
+      fi
+      ;;
+  esac
+}
+
+COMPOSE_FILE=$(canonicalize_compose_path "${COMPOSE_FILE}")
+if [ -n "${COMPOSE_OVERLAY}" ]; then
+  COMPOSE_OVERLAY=$(canonicalize_compose_path "${COMPOSE_OVERLAY}")
+fi
+
 if [ -z "${TARGET}" ] || [ -z "${ACTOR_URI}" ]; then
   echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire> <actor-uri> [local-username]" >&2
   exit 2

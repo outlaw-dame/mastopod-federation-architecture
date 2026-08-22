@@ -55,7 +55,7 @@ jobs:
             remote_version: Pixelfed v0.12.7@e33026a9e5334d2c124a7321f8b15d4329b8961f
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '046fb83b04a1ea21270334b761033805e02ba6c7'
+      ACTIVITYPODS_SHA: '948e53cc67c7b383f28b69aff8f7a6dc217b1166'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
