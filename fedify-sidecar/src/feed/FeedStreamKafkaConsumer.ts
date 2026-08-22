@@ -6,19 +6,12 @@
  * to SSE and WebSocket clients via GET /internal/feed/stream.
  *
  * Topic → DurableStreamName mapping:
- *   ap.stream1.local-public.v1   → "stream1"  (local public ActivityEvents)
- *   ap.stream2.remote-public.v1  → "stream2"  (remote public ActivityEvents)
- *   canonical.v1                 → "canonical" (CanonicalV1Events)
+ *   ap.stream1.local-public.v1   → "stream1"
+ *   ap.stream2.remote-public.v1  → "stream2"
+ *   canonical.v1                 → "canonical"
  *
- * Firehose (ap.firehose.v1) is intentionally excluded from the default set
- * because it contains the same messages as stream1 + stream2 combined.
- * Pass enabledStreams: ["stream1","stream2","canonical","firehose"] to opt in.
- *
- * Message mapping:
- *   ActivityEvent  → StreamEnvelope with schema "ap.activity.v1"
- *   CanonicalV1Event → StreamEnvelope with schema "canonical.intent.v1"
- *
- * Cursor format: base64url-encoded JSON { p: partition, o: offset }
+ * Firehose is intentionally excluded from the default set because it contains
+ * the same messages as Stream1 + Stream2 combined.
  */
 
 import { Kafka, logLevel, type Consumer } from "kafkajs";
@@ -27,45 +20,23 @@ import type { DurableStreamSubscriptionService } from "./DurableStreamSubscripti
 import type { DurableStreamName, StreamEnvelope } from "./DurableStreamContracts.js";
 import type { ActivityEvent } from "../streams/redpanda-producer.js";
 import type { CanonicalV1Event } from "../streams/v6-topology.js";
-
-// ---------------------------------------------------------------------------
-// Public configuration
-// ---------------------------------------------------------------------------
+import { ensureRedpandaCompressionCodec } from "../streams/kafka-compression.js";
 
 export interface FeedStreamKafkaConsumerOptions {
   brokers: string[];
   clientId: string;
-  /** Kafka consumer group. Use a dedicated group so offsets are tracked independently. */
   groupId: string;
-
-  // Topic names (resolved from env by the caller)
   stream1Topic: string;
   stream2Topic: string;
   canonicalTopic: string;
   firehoseTopic: string;
-
-  /**
-   * Which DurableStreamNames to consume.
-   * Defaults to ["stream1", "stream2", "canonical"].
-   * Include "firehose" only if you specifically need a merged stream without
-   * also subscribing to stream1 / stream2.
-   */
   enabledStreams?: ReadonlyArray<DurableStreamName>;
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/** Encode a Kafka partition + offset into an opaque cursor string. */
 function encodeCursor(partition: number, offset: string): string {
   return Buffer.from(JSON.stringify({ p: partition, o: offset })).toString("base64url");
 }
 
-/**
- * Map a raw Kafka message value (already parsed) to a StreamEnvelope.
- * Returns null when the message cannot be mapped (e.g. missing required fields).
- */
 function buildActivityEnvelope(
   stream: DurableStreamName,
   partition: number,
@@ -113,14 +84,9 @@ function buildCanonicalEnvelope(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Main class
-// ---------------------------------------------------------------------------
-
 export class FeedStreamKafkaConsumer {
   private readonly consumer: Consumer;
   private readonly service: DurableStreamSubscriptionService;
-  /** Maps each subscribed topic to the DurableStreamName it represents. */
   private readonly topicToStream: ReadonlyMap<string, DurableStreamName>;
   private readonly groupId: string;
   private running = false;
@@ -131,6 +97,11 @@ export class FeedStreamKafkaConsumer {
   ) {
     this.service = service;
     this.groupId = options.groupId;
+
+    // KafkaJS compression codecs are process-global. Register the configured
+    // codec in consumer-only processes too; otherwise a valid Zstd batch would
+    // fail during decode even though this process never produces a message.
+    ensureRedpandaCompressionCodec(process.env["REDPANDA_COMPRESSION"] ?? "zstd");
 
     const kafka = new Kafka({
       clientId: options.clientId,
@@ -144,7 +115,6 @@ export class FeedStreamKafkaConsumer {
 
     this.consumer = kafka.consumer({
       groupId: options.groupId,
-      // Avoid unnecessary rebalances under high load
       sessionTimeout: 30_000,
       heartbeatInterval: 3_000,
     });
@@ -161,11 +131,6 @@ export class FeedStreamKafkaConsumer {
     this.topicToStream = topicToStream;
   }
 
-  /**
-   * Connect to the Kafka broker and begin consuming.
-   * Non-blocking — errors are logged, not thrown, so the server
-   * can start even if Redpanda is momentarily unavailable.
-   */
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
@@ -214,7 +179,6 @@ export class FeedStreamKafkaConsumer {
     });
   }
 
-  /** Gracefully disconnect from the broker. */
   async shutdown(): Promise<void> {
     if (!this.running) return;
     this.running = false;
