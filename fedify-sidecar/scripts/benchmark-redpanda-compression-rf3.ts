@@ -91,6 +91,7 @@ async function main(): Promise<void> {
       batchSize: BATCH,
       freshClusterPerArmPerRepeat: true,
       isolatedWarmupTopic: true,
+      storageMetric: "sum of replicated disk bytes for the measured bulk topic only; the separate singleton latency topic is excluded so storage, raw-byte, event-count, CPU, and network metrics describe the same bulk workload",
       networkMetric: "sum of RX+TX deltas across all three broker containers; this intentionally counts work at both endpoints and is used only for matched relative comparison",
     },
     runs,
@@ -165,7 +166,7 @@ async function measure(repeat: number, arm: Arm): Promise<Run> {
   const singleton = mixedMessages(LATENCY_COUNT, 900); const singletonAck: number[] = [];
   for (const message of singleton) { const started = performance.now(); await producer.send({ topic: latencyTopic, messages: [message], compression: codec, acks: -1 }); singletonAck.push(performance.now() - started); }
   await producer.disconnect(); await sleep(1_200); syncAll();
-  const totalTopicDiskBytes = diskAll(topic) + diskAll(latencyTopic);
+  const totalTopicDiskBytes = diskAll(topic);
 
   const beforeConsume = clusterCounters(); const cpu1 = process.cpuUsage(); const consumeStart = performance.now();
   await consumeExactly(kafka, topic, MESSAGE_COUNT);
@@ -229,4 +230,4 @@ function round(v: number): number { return Number(v.toFixed(6)); }
 function positive(name: string, fallback: number): number { const n=Number.parseInt(process.env[name] ?? String(fallback),10); if(!Number.isInteger(n)||n<=0) throw new Error(`${name} must be positive`); return n; }
 function must<T>(v:T|undefined,label:string):T { if(v===undefined) throw new Error(`Missing ${label}`); return v; }
 function dir(path:string):string { const i=path.lastIndexOf("/"); return i<0?".":path.slice(0,i); }
-function sleep(ms:number):Promise<void>{return new Promise((resolve)=>setTimeout(resolve,ms));}
+function sleep(ms:number):Promise<void>{return new Promise((resolve)=>setTimeout(resolve,ms)); }
