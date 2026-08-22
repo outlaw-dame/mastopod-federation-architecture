@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import Redis from "ioredis";
 import { Kafka, logLevel } from "kafkajs";
+import { ensureRedpandaCompressionCodec } from "../src/streams/kafka-compression.js";
 
 const sidecarUrl = process.env["ZERO_TARGET_SIDECAR_URL"] ?? "http://127.0.0.1:8080";
 const sidecarToken = process.env["SIDECAR_TOKEN"];
@@ -17,6 +18,11 @@ const outputPath = process.env["ZERO_TARGET_STREAM1_PROOF_OUTPUT"] ?? "zero-targ
 
 if (!sidecarToken) throw new Error("SIDECAR_TOKEN is required");
 if (brokers.length === 0) throw new Error("REDPANDA_BROKERS must contain at least one broker");
+
+// The proof is an independent KafkaJS consumer process. Register the same
+// codec table the sidecar uses so the proof verifies the actual wire batch
+// rather than depending on an unrelated import side effect in the producer.
+ensureRedpandaCompressionCodec();
 
 const proofId = `zero-target-${randomUUID()}`;
 const intentId = `apdm-v1-${proofId}`;
@@ -125,7 +131,6 @@ while (Date.now() < deadline) {
 
 await consumer.disconnect();
 
-// Give any accidentally-created outbound job enough time to become observable.
 await new Promise(resolve => setTimeout(resolve, 500));
 const outboundLengthAfter = await redis.xlen(outboundStreamKey);
 await redis.quit();
