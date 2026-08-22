@@ -40,7 +40,7 @@ function serviceWithProjector(options: { fail?: boolean; maxProcessingAttempts?:
   });
   const has = vi.fn(async () => false);
   const claim = vi.fn(async () => true);
-  const send = vi.fn(async () => []);
+  const send = vi.fn(async (_record: Record<string, unknown>) => []);
   const onApFirehoseEvent = options.fail
     ? vi.fn(async () => { throw new Error('opensearch unavailable'); })
     : vi.fn(async () => undefined);
@@ -114,7 +114,7 @@ describe('OS4 search replay ordering', () => {
   it('does not resolve the source offset if DLQ publication fails', async () => {
     const { service } = serviceWithProjector({ fail: true, maxProcessingAttempts: 1 });
     (service as any).producer = {
-      send: vi.fn(async () => { throw new Error('redpanda unavailable'); }),
+      send: vi.fn(async (_record: Record<string, unknown>) => { throw new Error('redpanda unavailable'); }),
     };
     const raw = JSON.stringify({ outboxIntentId: 'intent-os4', activity: { id: 'a3' } });
     const { payload, resolveOffset, heartbeat } = makePayload(raw);
