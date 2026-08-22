@@ -1,15 +1,23 @@
 import { afterEach, describe, expect, it } from "vitest";
 import kafkaJs from "kafkajs";
 import {
+  defaultRedpandaCompressionName,
+  ensureRedpandaCompressionCodec,
   hasNativeZstdSupport,
   parseZstdLevel,
   resolveRedpandaCompression,
 } from "../kafka-compression.js";
 
 const { CompressionCodecs, CompressionTypes } = kafkaJs;
+const originalCompression = process.env["REDPANDA_COMPRESSION"];
 const originalLevel = process.env["REDPANDA_ZSTD_LEVEL"];
 
 afterEach(() => {
+  if (originalCompression === undefined) {
+    delete process.env["REDPANDA_COMPRESSION"];
+  } else {
+    process.env["REDPANDA_COMPRESSION"] = originalCompression;
+  }
   if (originalLevel === undefined) {
     delete process.env["REDPANDA_ZSTD_LEVEL"];
   } else {
@@ -28,6 +36,18 @@ describe("Redpanda Kafka compression", () => {
     expect(hasNativeZstdSupport("23.7.9")).toBe(false);
     expect(hasNativeZstdSupport("23.8.0")).toBe(true);
     expect(hasNativeZstdSupport("24.0.0")).toBe(true);
+  });
+
+  it("keeps gzip as the package-level rolling-upgrade-safe default", () => {
+    delete process.env["REDPANDA_COMPRESSION"];
+    expect(defaultRedpandaCompressionName()).toBe("gzip");
+    expect(resolveRedpandaCompression()).toMatchObject({
+      name: "gzip",
+      type: CompressionTypes.GZIP,
+    });
+    // Legacy call sites historically supplied env ?? "zstd". That must not
+    // silently opt a mixed Node 20/22 fleet into a codec older consumers lack.
+    expect(ensureRedpandaCompressionCodec("zstd")).toBe(CompressionTypes.GZIP);
   });
 
   it("uses Zstd level 1 by default and validates explicit levels", () => {
@@ -59,7 +79,8 @@ describe("Redpanda Kafka compression", () => {
   });
 
   it("registers a working native Zstd codec that round-trips representative ActivityPub JSON", async () => {
-    const resolved = resolveRedpandaCompression("zstd");
+    process.env["REDPANDA_COMPRESSION"] = "zstd";
+    const resolved = resolveRedpandaCompression();
     expect(resolved.name).toBe("zstd");
     expect(resolved.type).toBe(CompressionTypes.ZSTD);
     expect(resolved.zstdLevel).toBe(1);
@@ -87,5 +108,16 @@ describe("Redpanda Kafka compression", () => {
 
     expect(Buffer.from(decompressed).equals(activity)).toBe(true);
     expect(compressed.byteLength).toBeLessThan(activity.byteLength);
+  });
+
+  it("keeps the Zstd decoder registered after switching new writes to gzip", () => {
+    process.env["REDPANDA_COMPRESSION"] = "zstd";
+    resolveRedpandaCompression();
+    process.env["REDPANDA_COMPRESSION"] = "gzip";
+    expect(resolveRedpandaCompression()).toMatchObject({
+      name: "gzip",
+      type: CompressionTypes.GZIP,
+    });
+    expect(CompressionCodecs[CompressionTypes.ZSTD]).toBeTypeOf("function");
   });
 });
