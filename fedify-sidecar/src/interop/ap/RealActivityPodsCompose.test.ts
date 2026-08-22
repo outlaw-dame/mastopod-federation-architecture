@@ -33,6 +33,8 @@ describe("real ActivityPods sidecar compose authority", () => {
     );
 
     expect(workflow).toContain("Signing proxy must bind only to the private Docker gateway");
+    expect(workflow).toContain("ps -aq ap-proof-router");
+    expect(workflow).toContain("ActivityPub proof router container is unavailable");
     expect(workflow).toContain("run --rm --no-deps fedify-sidecar npm run topics:bootstrap");
     expect(workflow).not.toContain("AP_SIGNING_PROXY_HOST=0.0.0.0");
   });

@@ -233,9 +233,12 @@ jobs:
         run: |
           set -euo pipefail
           : > "${EVIDENCE_DIR}/signing-api.jsonl"
-          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
-          network_id="$(docker inspect "${router_container}" --format '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}')"
-          signing_proxy_host="$(docker network inspect "${network_id}" --format '{{(index .IPAM.Config 0).Gateway}}')"
+          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -aq ap-proof-router)"
+          if [[ -z "${router_container}" ]]; then
+            echo "ActivityPub proof router container is unavailable" >&2
+            exit 1
+          fi
+          signing_proxy_host="$(docker inspect "${router_container}" --format '{{range .NetworkSettings.Networks}}{{println .Gateway}}{{end}}' | head -n 1)"
           node - "${signing_proxy_host}" <<'NODE'
           const { isIP } = require('node:net');
           const value = process.argv[2];
