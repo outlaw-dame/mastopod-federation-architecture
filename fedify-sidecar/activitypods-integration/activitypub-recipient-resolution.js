@@ -8,6 +8,25 @@ const PUBLIC_AUDIENCE_URIS = new Set([
 
 const LOCALHOST_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
 
+// Direct relationship activities need the recipient actor's inbox. Some
+// implementations advertise a shared inbox but acknowledge a Follow sent
+// there without applying the relationship. Keeping these activities on the
+// actor inbox also preserves the one-recipient authority represented by the
+// delivery plan.
+const ACTOR_INBOX_ACTIVITY_TYPES = new Set(["Follow"]);
+
+function requiresActorInboxDelivery(activity) {
+  const values = Array.isArray(activity?.type) ? activity.type : [activity?.type];
+  return values.some((value) => {
+    if (typeof value !== "string") {
+      return false;
+    }
+    const normalized = value.trim();
+    return ACTOR_INBOX_ACTIVITY_TYPES.has(normalized)
+      || ACTOR_INBOX_ACTIVITY_TYPES.has(normalized.replace(/^https:\/\/www\.w3\.org\/ns\/activitystreams#/u, ""));
+  });
+}
+
 function normalizeUrl(value, { allowLocalHttp = true } = {}) {
   if (typeof value !== "string") {
     return null;
@@ -255,7 +274,9 @@ async function resolveDeliveryTargets({
         continue;
       }
 
-      const sharedInboxUrl = normalizeUrl(actorDoc?.endpoints?.sharedInbox);
+      const sharedInboxUrl = requiresActorInboxDelivery(activity)
+        ? null
+        : normalizeUrl(actorDoc?.endpoints?.sharedInbox);
       const deliveryUrl = sharedInboxUrl || inboxUrl;
       const targetDomain = new URL(deliveryUrl).hostname.toLowerCase();
 
@@ -413,5 +434,6 @@ module.exports = {
   getActivityActorUri,
   groupTargetsByDomain,
   normalizeUrl,
+  requiresActorInboxDelivery,
   resolveDeliveryTargets,
 };
