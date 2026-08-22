@@ -123,7 +123,10 @@ export class SearchIndexerService {
       : new InMemorySearchDocAliasCache();
     const dedupService = new DefaultSearchDedupService(aliasCache);
     this.outboxIntentDeduper = new OutboxIntentDeduper({
-      prefix: 'search:outbox-intent',
+      // Deliberately distinct from the pre-OS4 `search:outbox-intent` lease
+      // namespace. Old pre-side-effect claims must never be interpreted as
+      // evidence that an OS4 projection completed successfully.
+      prefix: 'search:completed-outbox-intent:v1',
       ttlSeconds: config.outboxIntentDedupTtlSec,
       store: config.redis,
     });
