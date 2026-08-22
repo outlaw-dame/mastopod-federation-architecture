@@ -7,6 +7,7 @@ on:
       - "fedify-sidecar/scripts/benchmark-redpanda-compression.ts"
       - "fedify-sidecar/scripts/analyze-redpanda-compression-benchmarks.mjs"
       - "fedify-sidecar/src/streams/kafka-compression.ts"
+      - "fedify-sidecar/src/streams/tests/KafkaCompression.test.ts"
       - "fedify-sidecar/src/streams/redpanda-producer.ts"
       - "fedify-sidecar/package.json"
       - "fedify-sidecar/package-lock.json"
@@ -20,6 +21,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  node20-compatibility:
+    name: Node 20 compression fallback contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.5"
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Prove Node 20 fallback and explicit-Zstd fail-closed behavior
+        working-directory: fedify-sidecar
+        run: npm exec -- vitest run src/streams/tests/KafkaCompression.test.ts
+
   benchmark:
     name: matched codec and Zstd-level matrix / trial ${{ matrix.trial }}
     runs-on: ubuntu-24.04
