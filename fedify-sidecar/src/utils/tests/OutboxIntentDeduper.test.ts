@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OutboxIntentDeduper, extractOutboxIntentId } from "../OutboxIntentDeduper.js";
 
 describe("OutboxIntentDeduper", () => {
-  it("dedupes in memory when no shared store is available", async () => {
+  it("checks completion without mutating the in-memory marker", async () => {
     let now = 1_000;
     const deduper = new OutboxIntentDeduper({
       prefix: "test",
@@ -16,27 +16,22 @@ describe("OutboxIntentDeduper", () => {
       now: () => now,
     });
 
+    await expect(deduper.has("intent-1")).resolves.toBe(false);
     await expect(deduper.claim("intent-1")).resolves.toBe(true);
+    await expect(deduper.has("intent-1")).resolves.toBe(true);
     await expect(deduper.claim("intent-1")).resolves.toBe(false);
 
     now += 61_000;
+    await expect(deduper.has("intent-1")).resolves.toBe(false);
     await expect(deduper.claim("intent-1")).resolves.toBe(true);
   });
 
-  it("releases an in-memory claim so a failed side effect can retry", async () => {
-    const deduper = new OutboxIntentDeduper({ prefix: "test", ttlSeconds: 60 });
-    await expect(deduper.claim("intent-retry")).resolves.toBe(true);
-    await deduper.release("intent-retry");
-    await expect(deduper.claim("intent-retry")).resolves.toBe(true);
-  });
-
-  it("uses SET NX EX and DEL semantics with a shared store", async () => {
+  it("uses GET for completion checks and SET NX EX for completion recording", async () => {
     const store = {
-      set: vi.fn()
-        .mockResolvedValueOnce("OK")
+      get: vi.fn()
         .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce("OK"),
-      del: vi.fn().mockResolvedValue(1),
+        .mockResolvedValueOnce("1"),
+      set: vi.fn().mockResolvedValue("OK"),
     };
     const deduper = new OutboxIntentDeduper({
       prefix: "search",
@@ -44,23 +39,28 @@ describe("OutboxIntentDeduper", () => {
       store,
     });
 
+    await expect(deduper.has("intent-2")).resolves.toBe(false);
     await expect(deduper.claim("intent-2")).resolves.toBe(true);
-    await expect(deduper.claim("intent-2")).resolves.toBe(false);
-    expect(store.set).toHaveBeenNthCalledWith(1, "search:intent-2", "1", "EX", 30, "NX");
+    await expect(deduper.has("intent-2")).resolves.toBe(true);
 
-    await deduper.release("intent-2");
-    expect(store.del).toHaveBeenCalledWith("search:intent-2");
-    await expect(deduper.claim("intent-2")).resolves.toBe(true);
+    expect(store.get).toHaveBeenNthCalledWith(1, "search:intent-2");
+    expect(store.set).toHaveBeenCalledWith("search:intent-2", "1", "EX", 30, "NX");
   });
 
-  it("fails closed when a shared store cannot release a durable claim", async () => {
+  it("falls back to memory when a shared completion read is unavailable", async () => {
+    const store = {
+      get: vi.fn().mockRejectedValue(new Error("redis unavailable")),
+      set: vi.fn().mockRejectedValue(new Error("redis unavailable")),
+    };
     const deduper = new OutboxIntentDeduper({
       prefix: "search",
       ttlSeconds: 30,
-      store: { set: vi.fn().mockResolvedValue("OK") },
+      store,
     });
+
+    await expect(deduper.has("intent-3")).resolves.toBe(false);
     await expect(deduper.claim("intent-3")).resolves.toBe(true);
-    await expect(deduper.release("intent-3")).rejects.toThrow(/does not support release/);
+    await expect(deduper.has("intent-3")).resolves.toBe(true);
   });
 });
 
