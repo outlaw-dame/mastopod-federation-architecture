@@ -1,5 +1,6 @@
 import { Kafka, logLevel, type Consumer, type EachBatchPayload } from "kafkajs";
 import type { CanonicalV1Event } from "../../streams/v6-topology.js";
+import { ensureRedpandaCompressionCodec } from "../../streams/kafka-compression.js";
 
 export interface CanonicalReportEventConsumerLogger {
   info(message: string, meta?: Record<string, unknown>): void;
@@ -38,6 +39,11 @@ export class CanonicalReportEventConsumer {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+
+    // canonical.v1 is producer-compressed, and this moderation consumer can
+    // run independently of the main feed consumers. Register the codec locally
+    // so retained Zstd batches remain readable regardless of startup order.
+    ensureRedpandaCompressionCodec();
 
     const kafka = new Kafka({
       clientId: `${this.config.clientId}-${this.config.consumerName}`,
