@@ -1,9 +1,7 @@
 /**
- * V6.5 Phase 5.25: Unified Public Indexing Addendum
- *
  * PublicContentIndexWriter
  * Consumes: search.public.upsert.v1, search.public.delete.v1
- * Writes: OpenSearch public-content-v1 index
+ * Writes: canonical Tier-3 public content projection.
  */
 
 import {
@@ -35,63 +33,59 @@ export class PublicContentIndexWriter {
   constructor(
     private readonly osClient: PublicContentStore,
     private readonly aliasCache: SearchDocAliasCache,
-    private readonly dedupService: SearchDedupService
+    private readonly dedupService: SearchDedupService,
   ) {}
 
   async onUpsert(event: SearchPublicUpsertV1): Promise<void> {
     if (event.upsertKind === 'partial') {
-      // For partial upserts, we just update the existing document
-      // In a real system, we'd need to handle the case where the document doesn't exist yet
-      // For this phase, we assume it exists or we ignore it
       return;
     }
 
-    // 1. Determine the target stableDocId using DedupService
     const targetDocId = await this.dedupService.resolveStableDocId(event);
-
-    // 2. Fetch existing document if any
     const existingDoc = await this.osClient.get(targetDocId);
 
-    // 3. Check if we should merge (for remote content)
     if (existingDoc && existingDoc.sourceKind === 'remote' && event.sourceKind === 'remote') {
       const shouldMerge = await this.dedupService.shouldMergeRemoteDuplicate(existingDoc, event);
       if (!shouldMerge) {
-        // If we shouldn't merge, we need a new stableDocId to avoid overwriting
-        // In a real system, we might append a hash or timestamp
-        // For now, we'll just log and skip to avoid corrupting the index
         console.warn(`Skipping merge for remote duplicate: ${targetDocId}`);
         return;
       }
     }
 
-    // 4. Merge or create
-    const doc: Partial<PublicContentDocument> = existingDoc ? { ...existingDoc } : {
-      stableDocId: targetDocId,
-      canonicalContentId: event.canonicalContentId,
-      protocolPresence: [],
-      sourceKind: event.sourceKind,
-      author: event.author,
-      text: event.content.text,
-      createdAt: event.content.createdAt,
-      langs: event.content.langs,
-      tags: event.content.tags,
-      emojis: event.content.emojis,
-      replyToStableId: event.relations?.replyToStableId,
-      quoteOfStableId: event.relations?.quoteOfStableId,
-      hasMedia: event.media?.hasMedia || false,
-      mediaCount: event.media?.mediaCount || 0,
-      embeddingStatus: 'pending',
-      isDeleted: false,
-      indexedAt: new Date().toISOString()
-    };
+    const doc: Partial<PublicContentDocument> = existingDoc
+      ? { ...existingDoc }
+      : {
+          stableDocId: targetDocId,
+          canonicalContentId: event.canonicalContentId,
+          protocolPresence: [],
+          sourceKind: event.sourceKind,
+          author: event.author,
+          text: event.content.text,
+          createdAt: event.content.createdAt,
+          langs: event.content.langs,
+          tags: event.content.tags,
+          emojis: event.content.emojis,
+          replyToStableId: event.relations?.replyToStableId,
+          quoteOfStableId: event.relations?.quoteOfStableId,
+          hasMedia: event.media?.hasMedia || false,
+          mediaCount: event.media?.mediaCount || 0,
+          isDeleted: false,
+          indexedAt: new Date().toISOString(),
+        };
 
-    // Update protocol presence
+    // Old documents read from an upgraded physical index may still contain
+    // Phase-5.5 embedding metadata. Never copy that retired state forward into
+    // OS3 writes, especially when the fresh strict mapping no longer declares it.
+    delete doc.embedding;
+    delete doc.sparseEmbedding;
+    delete doc.embeddingStatus;
+    delete doc.embeddingUpdatedAt;
+
     if (!doc.protocolPresence) doc.protocolPresence = [];
     if (!doc.protocolPresence.includes(event.protocolSource)) {
       doc.protocolPresence.push(event.protocolSource);
     }
 
-    // Update AP/AT specific fields
     if (event.ap) {
       doc.ap = { ...doc.ap, ...event.ap };
     }
@@ -99,19 +93,16 @@ export class PublicContentIndexWriter {
       doc.at = { ...doc.at, ...event.at };
     }
 
-    // Initialize engagement if new
     if (!existingDoc) {
       doc.engagement = {
         likeCount: 0,
         repostCount: 0,
-        replyCount: 0
+        replyCount: 0,
       };
     }
 
-    // 5. Upsert to OpenSearch
     await this.osClient.upsert(targetDocId, doc);
 
-    // 6. Update alias cache
     if (event.canonicalContentId) {
       await this.aliasCache.setCanonicalId(event.canonicalContentId, targetDocId);
     }
@@ -134,26 +125,29 @@ export class PublicContentIndexWriter {
         if (params.replyDelta != null) ctx._source.engagement.replyCount += params.replyDelta;
         ctx._source.indexedAt = params.indexedAt;
       `;
-      
+
       await this.osClient.updateScripted(event.stableDocId, script, {
         likeDelta: event.deltas.likeCount,
         repostDelta: event.deltas.repostCount,
         replyDelta: event.deltas.replyCount,
-        indexedAt: event.indexedAt
+        indexedAt: event.indexedAt,
       });
     } else if (event.partialFields) {
+      // Partial fields originate from canonical search events. Explicitly strip
+      // retired vector metadata so compatibility callers cannot reintroduce it.
+      const partialFields = { ...event.partialFields } as Partial<PublicContentDocument>;
+      delete partialFields.embedding;
+      delete partialFields.sparseEmbedding;
+      delete partialFields.embeddingStatus;
+      delete partialFields.embeddingUpdatedAt;
       await this.osClient.upsert(event.stableDocId, {
-        ...event.partialFields,
-        indexedAt: event.indexedAt
+        ...partialFields,
+        indexedAt: event.indexedAt,
       });
     }
   }
 
   async onDelete(event: SearchPublicDeleteV1): Promise<void> {
-    // Tombstones from the AP projector are emitted with ap:objectUri as the
-    // stableDocId, but local content was indexed under its canonicalContentId
-    // (the raw objectUri, without the ap: prefix).  Resolve via alias cache so
-    // deletes always hit the right document.
     const resolvedId = await this.resolveDeleteStableDocId(event.stableDocId);
 
     if (event.deleteMode === 'hard') {
@@ -163,7 +157,7 @@ export class PublicContentIndexWriter {
       if (existingDoc) {
         await this.osClient.upsert(resolvedId, {
           isDeleted: true,
-          indexedAt: new Date().toISOString()
+          indexedAt: new Date().toISOString(),
         });
       }
     }
@@ -173,11 +167,6 @@ export class PublicContentIndexWriter {
     await this.osClient.deleteByAuthor(event.author);
   }
 
-  /**
-   * Resolve the actual stableDocId to use for a delete operation.
-   * Tombstones may arrive with ap: or at: prefixed IDs; if the alias cache
-   * has a mapping for the underlying URI, use that instead.
-   */
   private async resolveDeleteStableDocId(stableDocId: string): Promise<string> {
     if (stableDocId.startsWith('ap:')) {
       const resolved = await this.aliasCache.getByApUri(stableDocId.slice(3));

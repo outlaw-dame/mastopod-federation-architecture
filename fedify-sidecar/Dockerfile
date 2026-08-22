@@ -3,14 +3,11 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-# Enable corepack for pnpm
 RUN corepack enable
 
-# Install dependencies
 COPY package.json pnpm-lock.yaml* ./
 RUN pnpm install --frozen-lockfile || npm install
 
-# Copy source and build
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
@@ -20,38 +17,34 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-# Enable corepack for pnpm
 RUN corepack enable
 
-# Install production dependencies only
 COPY package.json pnpm-lock.yaml* ./
 RUN pnpm install --frozen-lockfile --prod || npm install --production
 
-# Copy built files
 COPY --from=builder /app/dist ./dist
 
-# Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S fedify -u 1001 -G nodejs
 
 USER fedify
 
-# Environment
 ENV NODE_ENV=production
 ENV PORT=3001
-# The official image is Node 22 and therefore has native Zstandard support.
-# Repeated single-broker and three-broker RF3 measurements select Zstd level 1
-# as the balanced event-log setting: lower CPU and higher throughput than GZIP,
-# with replicated disk/network at or below GZIP and materially better tail
-# latency than Zstd level 2. Operators can roll writes back to gzip with
-# REDPANDA_COMPRESSION=gzip while capable consumers retain the Zstd decoder for
-# historical batches.
+
+# OS3: current Tier-3 public-query architecture is OpenSearch lexical/faceted.
+# Explicit deployments can still override this environment variable for an
+# isolated future-vector experiment, but the production image no longer falls
+# into the historical dual/Qdrant topology when SEARCH_BACKEND is omitted.
+ENV SEARCH_BACKEND=opensearch
+
+# Node 22 provides native Zstandard support. Existing Redpanda evidence selected
+# level 1 as the balanced event-log operating point.
 ENV REDPANDA_COMPRESSION=zstd
 ENV REDPANDA_ZSTD_LEVEL=1
 
 EXPOSE 3001
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1
 

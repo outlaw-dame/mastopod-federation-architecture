@@ -1,0 +1,92 @@
+name: OpenSearch OS3 Compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/src/search/**'
+      - 'fedify-sidecar/src/config/**'
+      - 'fedify-sidecar/scripts/smoke-opensearch-3-8.ts'
+      - 'fedify-sidecar/docker-compose.v6.yml'
+      - 'fedify-sidecar/Dockerfile'
+      - 'fedify-sidecar/.env.v6.example'
+      - '.github/workflows/opensearch-os3-compatibility.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opensearch-os3-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.0'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install sidecar dependencies
+        working-directory: fedify-sidecar
+        run: npm ci
+
+      - name: Validate OS3 compose topology
+        working-directory: fedify-sidecar
+        run: |
+          docker compose -f docker-compose.v6.yml config > /tmp/os3-compose.yml
+          grep -F "opensearchproject/opensearch:3.8.0" /tmp/os3-compose.yml
+          grep -A8 -F "SEARCH_BACKEND: opensearch" /tmp/os3-compose.yml >/dev/null || grep -F "SEARCH_BACKEND: opensearch" /tmp/os3-compose.yml
+          if docker compose -f docker-compose.v6.yml config --services | grep -qx qdrant; then
+            echo "Qdrant must not be part of the default compose profile" >&2
+            exit 1
+          fi
+          docker compose -f docker-compose.v6.yml --profile vector-experimental config --services | grep -qx qdrant
+
+      - name: Start OpenSearch 3.8
+        run: |
+          sudo sysctl -w vm.max_map_count=262144
+          docker run -d --name os3-opensearch \
+            -p 19200:9200 \
+            -e discovery.type=single-node \
+            -e DISABLE_SECURITY_PLUGIN=true \
+            -e DISABLE_INSTALL_DEMO_CONFIG=true \
+            -e OPENSEARCH_JAVA_OPTS='-Xms512m -Xmx512m' \
+            --ulimit memlock=-1:-1 \
+            --ulimit nofile=65536:65536 \
+            opensearchproject/opensearch:3.8.0
+          for attempt in $(seq 1 60); do
+            if curl -fsS 'http://127.0.0.1:19200/_cluster/health?wait_for_status=yellow&timeout=2s' >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs --tail=200 os3-opensearch
+          exit 1
+
+      - name: Run repository client compatibility smoke
+        working-directory: fedify-sidecar
+        env:
+          OPENSEARCH_URL: http://127.0.0.1:19200
+        run: npx tsx scripts/smoke-opensearch-3-8.ts
+
+      - name: Run focused OS3 unit tests
+        working-directory: fedify-sidecar
+        run: npx vitest run src/search/tests/OpenSearchBootstrapService.test.ts src/search/tests/Os3SearchPolicy.test.ts
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker logs --tail=250 os3-opensearch || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f os3-opensearch 2>/dev/null || true
