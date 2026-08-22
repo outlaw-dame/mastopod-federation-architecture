@@ -11,7 +11,10 @@ export interface ResolvedRedpandaCompression {
   zstdLevel?: number;
 }
 
-const DEFAULT_ZSTD_LEVEL = 1;
+// Three independent live Redpanda trials across realistic ActivityPub payloads
+// selected level 2 as the only Zstd level that repeatedly stayed inside the
+// GZIP-relative p95/p99 and CPU gates while materially improving throughput.
+const DEFAULT_ZSTD_LEVEL = 2;
 const MIN_ZSTD_LEVEL = -131072;
 const MAX_ZSTD_LEVEL = 22;
 
