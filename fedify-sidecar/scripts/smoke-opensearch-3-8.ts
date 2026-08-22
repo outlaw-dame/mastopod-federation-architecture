@@ -84,7 +84,9 @@ async function exerciseRepositoryWriterAndClients(): Promise<void> {
   await contentWriter.onUpsert({
     upsertKind: 'full',
     stableDocId: 'os3-doc-1',
-    canonicalContentId: 'https://example.test/posts/os3-doc-1',
+    // Match the test's expected stable ID while still exercising the writer's
+    // canonical-ID preference in DefaultSearchDedupService.
+    canonicalContentId: 'os3-doc-1',
     protocolSource: 'ap',
     sourceKind: 'remote',
     ap: { objectUri: 'https://example.test/posts/os3-doc-1' },
