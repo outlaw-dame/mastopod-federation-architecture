@@ -99,7 +99,7 @@ jobs:
         working-directory: fedify-sidecar
         env:
           REDPANDA_COMPRESSION: zstd
-          REDPANDA_ZSTD_LEVEL: '1'
+          REDPANDA_ZSTD_LEVEL: '2'
         run: |
           npm exec -- vitest run \
             src/streams/tests/KafkaCompression.test.ts \
@@ -111,7 +111,7 @@ jobs:
         env:
           REDPANDA_BROKERS: 127.0.0.1:19092
           REDPANDA_COMPRESSION: zstd
-          REDPANDA_ZSTD_LEVEL: '1'
+          REDPANDA_ZSTD_LEVEL: '2'
           STREAM1_TOPIC: ap.stream1.local-public.v1
           STREAM2_TOPIC: ap.stream2.remote-public.v1
           FIREHOSE_TOPIC: ap.firehose.v1
