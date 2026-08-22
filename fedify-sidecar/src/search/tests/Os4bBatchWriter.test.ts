@@ -50,7 +50,7 @@ describe('OS4b ordered batch writer', () => {
     expect(store.getAll()).toHaveLength(1);
   });
 
-  it('reports the exact first failed bulk source index and withholds failed aliases', async () => {
+  it('reports the exact first failed bulk source index and reconciles every successful item alias', async () => {
     const docs = new Map<string, any>();
     const store: PublicContentStore = {
       get: async (id) => docs.get(id) ?? null,
@@ -75,7 +75,8 @@ describe('OS4b ordered batch writer', () => {
     expect((failure as PublicContentBatchError).failedIndex).toBe(1);
     expect(await aliases.getByApUri('https://example.test/posts/a')).toBe('ap:https://example.test/posts/a');
     expect(await aliases.getByApUri('https://example.test/posts/b')).toBeNull();
-    expect(await aliases.getByApUri('https://example.test/posts/c')).toBeNull();
+    expect(await aliases.getByApUri('https://example.test/posts/c')).toBe('ap:https://example.test/posts/c');
+    expect(docs.has('ap:https://example.test/posts/c')).toBe(true);
   });
 
   it('does not publish aliases when the bulk request itself fails', async () => {
