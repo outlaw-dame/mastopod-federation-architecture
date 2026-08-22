@@ -5,6 +5,20 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("real federation fixture bootstrap contracts", () => {
+  it("bounds retries for transient Pixelfed image-build downloads", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/build-pixelfed-fixture.sh"),
+      "utf8",
+    );
+
+    expect(script).toContain("MAX_ATTEMPTS=${AP_INTEROP_BUILD_MAX_ATTEMPTS:-3}");
+    expect(script).toContain("MAX_ATTEMPTS > 5");
+    expect(script).toContain('! -f "${CONTEXT}/Dockerfile"');
+    expect(script).toContain('while ! docker build --tag "${IMAGE}" "${CONTEXT}"');
+    expect(script).toContain("delay=$((5 * (2 ** (attempt - 1))))");
+    expect(script).toContain('docker image inspect "${IMAGE}"');
+  });
+
   it("uses an MX-reachable default for Mastodon CLI account validation", () => {
     const script = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/bootstrap-mastodon-account.sh"),

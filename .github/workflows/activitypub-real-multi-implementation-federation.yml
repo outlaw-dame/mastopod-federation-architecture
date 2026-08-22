@@ -209,7 +209,7 @@ jobs:
                 fedify-sidecar/interop/ap/scripts/bootstrap-akkoma-account.sh
               ;;
             pixelfed)
-              docker build --tag "${PIXELFED_IMAGE}" pixelfed
+              fedify-sidecar/interop/ap/scripts/build-pixelfed-fixture.sh
               fedify-sidecar/interop/ap/scripts/prepare-pixelfed-env.sh
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_PIXELFED_OVERLAY="${PIXELFED_OVERLAY}" \
               AP_INTEROP_PIXELFED_USERNAME="${TARGET_USERNAME}" \
