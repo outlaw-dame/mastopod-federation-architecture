@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { CompressionTypes, Kafka, Producer, logLevel, type IHeaders } from "kafkajs";
+import { Kafka, Producer, logLevel, type CompressionTypes, type IHeaders } from "kafkajs";
 import type {
   CoreIdentityEvent,
   EventMetadata,
   EventPublisher,
 } from "./CoreIdentityEvents.js";
 import { sanitizeJsonObject } from "../../utils/safe-json.js";
+import { resolveRedpandaCompression } from "../../streams/kafka-compression.js";
 
 export interface RedpandaEventPublisherConfig {
   brokers: string[];
@@ -49,7 +50,8 @@ export class RedpandaEventPublisher implements EventPublisher {
     this.source = config.source ?? "fedify-sidecar";
     this.maxEventBytes = config.maxEventBytes ?? 512_000;
     this.maxBatchSize = config.maxBatchSize ?? 64;
-    this.compression = resolveCompression(config.compression ?? "zstd");
+    const resolvedCompression = resolveRedpandaCompression(config.compression ?? "zstd");
+    this.compression = resolvedCompression.name === "none" ? undefined : resolvedCompression.type;
     this.producer = producer ?? createProducer(config);
   }
 
@@ -169,24 +171,6 @@ function createProducer(config: RedpandaEventPublisherConfig): Producer {
     allowAutoTopicCreation: false,
     transactionTimeout: 30_000,
   });
-}
-
-function resolveCompression(
-  value: RedpandaEventPublisherConfig["compression"],
-): CompressionTypes | undefined {
-  switch (value) {
-    case "gzip":
-      return CompressionTypes.GZIP;
-    case "snappy":
-      return CompressionTypes.Snappy;
-    case "lz4":
-      return CompressionTypes.LZ4;
-    case "zstd":
-      return CompressionTypes.ZSTD;
-    case "none":
-    default:
-      return undefined;
-  }
 }
 
 function buildMetadata(
