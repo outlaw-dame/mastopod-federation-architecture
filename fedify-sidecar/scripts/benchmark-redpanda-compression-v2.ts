@@ -77,7 +77,7 @@ void main();
 
 async function main(): Promise<void> {
   mkdirSync(dirname(OUTPUT), { recursive: true });
-  docker(["pull", IMAGE], { stdio: "inherit" });
+  docker(["pull", IMAGE]);
   const raw: Measurement[] = [];
   try {
     for (let repeat = 1; repeat <= REPEATS; repeat += 1) {
@@ -397,7 +397,7 @@ function stopBroker(): void { try { docker(["rm", "-f", CONTAINER]); } catch {} 
 function syncBroker(): void { try { docker(["exec", CONTAINER, "sync"]); } catch {} }
 function counters(): Counters { const cpu = dockerText(["exec", CONTAINER, "sh", "-c", "awk '/usage_usec/ {print $2}' /sys/fs/cgroup/cpu.stat"]); const memory = dockerText(["exec", CONTAINER, "cat", "/sys/fs/cgroup/memory.current"]); const rx = dockerText(["exec", CONTAINER, "cat", "/sys/class/net/eth0/statistics/rx_bytes"]); const tx = dockerText(["exec", CONTAINER, "cat", "/sys/class/net/eth0/statistics/tx_bytes"]); return { cpuUsec: Number(cpu), memoryBytes: Number(memory), rxBytes: Number(rx), txBytes: Number(tx) }; }
 function diskUsage(topic: string): number { const output = dockerText(["exec", CONTAINER, "sh", "-c", `du -sb /var/lib/redpanda/data/kafka/${topic}-* 2>/dev/null | awk '{s+=$1} END {print s+0}'`]); return Number(output); }
-function docker(args: string[], options: { stdio?: "inherit" } = {}): string { return execFileSync("docker", args, { encoding: "utf8", stdio: options.stdio ?? "pipe" }).trim(); }
+function docker(args: string[], options: { stdio?: "inherit" } = {}): string { const result = execFileSync("docker", args, { encoding: "utf8", stdio: options.stdio ?? "pipe" }); return typeof result === "string" ? result.trim() : ""; }
 function dockerText(args: string[]): string { return docker(args); }
 function cpuMs(usage: NodeJS.CpuUsage): number { return (usage.user + usage.system) / 1000; }
 function percentiles(values: number[]): Percentiles { const sorted = [...values].sort((a, b) => a - b); return { p50: round(q(sorted, 0.50)), p95: round(q(sorted, 0.95)), p99: round(q(sorted, 0.99)), max: round(sorted.at(-1) ?? 0) }; }
