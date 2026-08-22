@@ -38,6 +38,7 @@ import { ActivityPubToCanonicalTranslator } from "../protocol-bridge/activitypub
 import { serializeCanonicalIntent } from "../protocol-bridge/canonical/CanonicalIntentPublisher.js";
 import { DefaultRetryClassifier } from "../protocol-bridge/workers/Retry.js";
 import type { ActivityEvent } from "../streams/redpanda-producer.js";
+import { ensureRedpandaCompressionCodec } from "../streams/kafka-compression.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -95,6 +96,12 @@ export class UnifiedFeedBridge {
     private readonly options: UnifiedFeedBridgeOptions,
     private readonly service: DurableStreamSubscriptionService,
   ) {
+    // KafkaJS compression codecs are process-global, but this bridge can run
+    // independently of the other feed consumers. Register the configured
+    // decoder before constructing the client so Zstd batches never depend on
+    // unrelated startup order.
+    ensureRedpandaCompressionCodec();
+
     this.kafka = new Kafka({
       clientId: options.clientId,
       brokers: options.brokers,
