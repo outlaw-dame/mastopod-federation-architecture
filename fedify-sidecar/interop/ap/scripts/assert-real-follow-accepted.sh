@@ -146,8 +146,23 @@ pixelfed_diagnostics() {
     'curl --connect-timeout 5 --max-time 30 -sS -D - -H "Accept: application/activity+json" "$AP_INTEROP_ACTOR_URI"' \
     >&2 || echo "Pixelfed in-container actor fetch unavailable" >&2
   compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" pixelfed-app php artisan tinker --execute=\
-'$response = App\\Services\\ActivityPubFetchService::fetchRequest(getenv("AP_INTEROP_ACTOR_URI")); dump(["type" => gettype($response), "bytes" => is_string($response) ? strlen($response) : 0, "body" => $response]);' \
+'$response = App\Services\ActivityPubFetchService::fetchRequest(getenv("AP_INTEROP_ACTOR_URI")); dump(["type" => gettype($response), "bytes" => is_string($response) ? strlen($response) : 0]);' \
     >&2 || echo "Pixelfed application actor-fetch diagnostic unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" pixelfed-app php artisan tinker --execute=\
+'try { $url = getenv("AP_INTEROP_ACTOR_URI"); $headers = App\Util\ActivityPub\HttpSignature::instanceActorSign($url, false, ["Accept" => "application/activity+json"], "get"); $headers["Accept"] = "application/activity+json"; $response = Illuminate\Support\Facades\Http::withOptions(["allow_redirects" => ["max" => 2, "protocols" => ["https"]]])->withHeaders($headers)->timeout(30)->connectTimeout(5)->get($url); dump(["status" => $response->status(), "contentType" => $response->header("Content-Type"), "bytes" => strlen($response->body())]); } catch (Throwable $error) { dump(["errorClass" => get_class($error), "error" => $error->getMessage()]); }' \
+    >&2 || echo "Pixelfed signed actor-fetch diagnostic unavailable" >&2
+}
+
+friendica_diagnostics() {
+  echo "Friendica fail-closed persistence diagnostics:" >&2
+  compose exec -T friendica-db /bin/sh -lc \
+    "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"
+      select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';
+      select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';
+      select concat('inbox_receiver_count=', count(*)) from \`inbox-entry-receiver\` r join \`inbox-entry\` e on e.id=r.\`queue-id\` where e.signer='${actor_sql}';
+      select concat('introduction_count=', count(*)) from intro i join contact c on c.id=i.\`contact-id\` where c.url='${actor_sql}';
+      select concat('pending_worker_count=', count(*), ',retrying_worker_count=', coalesce(sum(retrial > 0),0)) from workerqueue where done=0;\"" \
+    >&2 || echo "Friendica database diagnostics unavailable" >&2
 }
 
 query_error_file=$(mktemp "${TMPDIR:-/tmp}/ap-follow-query.XXXXXX")
@@ -207,6 +222,7 @@ case "${TARGET}" in
     compose logs --no-color misskey-app >&2 || true
     ;;
   friendica)
+    friendica_diagnostics
     compose logs --no-color friendica-app friendica-worker >&2 || true
     ;;
   castopod)

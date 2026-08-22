@@ -43,12 +43,24 @@ done
   exit 1
 }
 
-compose exec -T castopod-app php spark install:init-database
+# Castopod 1.9.0's pinned spark front controller does not load its production
+# Boot file before constructing the logger. Prepending that unmodified,
+# image-owned Boot file supplies the intended production CI_DEBUG=false value
+# without patching the server or weakening its federation runtime.
+spark() {
+  compose exec -T castopod-app php \
+    -d auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php \
+    spark "$@"
+}
+
+spark install:init-database
 if ! compose exec -T castopod-db /bin/sh -lc \
   "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u castopod castopod -e \"select 1 from cp_users where username='interop-admin' limit 1;\"" | grep -qx 1; then
   printf '%s\n%s\n' "${CASTOPOD_ADMIN_PASSWORD}" "${CASTOPOD_ADMIN_PASSWORD}" | \
-    compose exec -T castopod-app php spark install:create-superadmin -n interop-admin -e interop@castopod.org
+    spark install:create-superadmin -n interop-admin -e interop@castopod.org
 fi
-compose exec -T -e AP_INTEROP_CASTOPOD_HANDLE="${HANDLE}" castopod-app php spark interop:create-podcast
+compose exec -T -e AP_INTEROP_CASTOPOD_HANDLE="${HANDLE}" castopod-app php \
+  -d auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php \
+  spark interop:create-podcast
 
 echo "Bootstrapped Castopod federation target ${HANDLE}"

@@ -293,7 +293,10 @@ jobs:
             readiness_accept='application/jrd+json'
           fi
           ready=false
-          for attempt in $(seq 1 90); do
+          # First-boot migrations for larger fixtures (notably Misskey) can
+          # legitimately outlive the common three-minute window. Keep this
+          # bounded while allowing five minutes for the real actor endpoint.
+          for attempt in $(seq 1 150); do
             if curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS \
               -H "Accept: ${readiness_accept}" "${readiness_uri}" >/dev/null; then ready=true; break; fi
             sleep 2

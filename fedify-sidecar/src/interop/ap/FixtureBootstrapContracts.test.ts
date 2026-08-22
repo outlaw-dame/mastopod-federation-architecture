@@ -19,6 +19,19 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain('docker image inspect "${IMAGE}"');
   });
 
+  it("runs Pixelfed actor-fetch diagnostics without malformed PHP namespaces", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+
+    expect(script).toContain("App\\Services\\ActivityPubFetchService::fetchRequest");
+    expect(script).toContain("App\\Util\\ActivityPub\\HttpSignature::instanceActorSign");
+    expect(script).toContain('"contentType" => $response->header("Content-Type")');
+    expect(script).not.toContain("App\\\\Services\\\\ActivityPubFetchService");
+    expect(script).not.toContain('dump(["type" => gettype($response), "bytes" => is_string($response) ? strlen($response) : 0, "body" => $response])');
+  });
+
   it("bootstraps Misskey without exposing directional credentials", () => {
     const prepare = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/prepare-misskey-config.sh"),
@@ -102,9 +115,13 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(compose).not.toContain("CP_DISABLE_HTTPS");
     expect(bootstrap).toContain('grep -qx "cache.redis.database=0" .env');
     expect(bootstrap).toContain("http://127.0.0.1:8000/");
-    expect(bootstrap).toContain("php spark install:init-database");
-    expect(bootstrap).toContain("php spark install:create-superadmin");
-    expect(bootstrap).toContain("php spark interop:create-podcast");
+    expect(bootstrap).toContain(
+      "-d auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php",
+    );
+    expect(bootstrap).toContain("spark install:init-database");
+    expect(bootstrap).toContain("spark install:create-superadmin");
+    expect(bootstrap).toContain("spark interop:create-podcast");
+    expect(bootstrap).not.toContain("define('CI_DEBUG'");
     expect(command).toContain("new PodcastModel()");
     expect(command).toContain("imagecreatetruecolor(1400, 1400)");
     expect(command).not.toContain("private_key' =>");
@@ -211,5 +228,21 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain("ActivityPubFetchService::fetchRequest");
     expect(script).toContain('"bytes" => is_string($response) ? strlen($response) : 0');
     expect(script).not.toContain("LRANGE");
+  });
+
+  it("records Friendica inbox and relationship state without exposing queued payloads", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+
+    expect(script).toContain("Friendica fail-closed persistence diagnostics:");
+    expect(script).toContain("remote_contact_count=");
+    expect(script).toContain("inbox_entry_count=");
+    expect(script).toContain("inbox_receiver_count=");
+    expect(script).toContain("introduction_count=");
+    expect(script).toContain("pending_worker_count=");
+    expect(script).not.toContain("select parameter from workerqueue");
+    expect(script).not.toContain("select activity from \\`inbox-entry\\`");
   });
 });
