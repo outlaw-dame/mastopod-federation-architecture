@@ -3,6 +3,7 @@ import {
   OpenSearchBootstrapService,
   type OpenSearchBootstrapConfig,
 } from '../src/search/service/OpenSearchBootstrapService.js';
+import { PublicContentMapping } from '../src/search/mappings/PublicContentMapping.js';
 import {
   DefaultOpenSearchAuthorClient,
   DefaultOpenSearchClient,
@@ -30,7 +31,26 @@ try {
   assert(version.startsWith('3.8.'), `expected OpenSearch 3.8.x, got ${version}`);
 
   await bootstrap.bootstrap();
+  await assertFreshLexicalMapping();
+  await exerciseRepositoryClients();
+  await assertLegacyPipelineMigration();
 
+  console.log(JSON.stringify({
+    openSearchVersion: version,
+    lexicalQuery: 'passed',
+    contentCrud: 'passed',
+    authorCrud: 'passed',
+    scriptedUpdate: 'passed',
+    vectorFieldsPresent: false,
+    freshDefaultPipelinePresent: false,
+    legacyDefaultPipelineCleared: true,
+  }, null, 2));
+} finally {
+  await bootstrap.close().catch(() => undefined);
+  await native.close().catch(() => undefined);
+}
+
+async function assertFreshLexicalMapping(): Promise<void> {
   const mappingResponse = await native.indices.getMapping({ index: 'public-content-v1' });
   const contentMapping = mappingResponse.body?.['public-content-v1']?.mappings as any;
   assert(contentMapping, 'public-content-v1 mapping missing');
@@ -42,8 +62,10 @@ try {
   const indexSettings = settingsResponse.body?.['public-content-v1']?.settings?.index as Record<string, unknown> | undefined;
   assert(indexSettings, 'public-content-v1 settings missing');
   assert(indexSettings['knn'] !== 'true', 'active index must not enable k-NN');
-  assert(indexSettings['default_pipeline'] === undefined, 'active index must not require an ingest pipeline');
+  assert(indexSettings['default_pipeline'] === undefined, 'fresh active index must not require an ingest pipeline');
+}
 
+async function exerciseRepositoryClients(): Promise<void> {
   const now = new Date().toISOString();
   await contentStore.upsert('os3-doc-1', {
     stableDocId: 'os3-doc-1',
@@ -120,19 +142,61 @@ try {
   await native.indices.refresh({ index: 'public-content-v1,public-author-v1' });
   assert((await contentStore.get('os3-doc-1')) === null, 'content delete failed');
   assert((await authorStore.get('os3-author-1')) === null, 'author delete failed');
+}
 
-  console.log(JSON.stringify({
-    openSearchVersion: version,
-    lexicalQuery: 'passed',
-    contentCrud: 'passed',
-    authorCrud: 'passed',
-    scriptedUpdate: 'passed',
-    vectorFieldsPresent: false,
-    defaultPipelinePresent: false,
-  }, null, 2));
-} finally {
-  await bootstrap.close().catch(() => undefined);
-  await native.close().catch(() => undefined);
+async function assertLegacyPipelineMigration(): Promise<void> {
+  await native.indices.delete({ index: 'public-content-v1' });
+  await native.ingest.putPipeline({
+    id: 'os3-legacy-embedding-pipeline',
+    body: {
+      description: 'OS3 migration smoke legacy pipeline',
+      processors: [{ set: { field: 'embeddingStatus', value: 'legacy-pipeline-ran' } }],
+    },
+  });
+
+  await native.indices.create({
+    index: 'public-content-v1',
+    body: {
+      settings: {
+        ...PublicContentMapping.settings,
+        index: {
+          ...PublicContentMapping.settings.index,
+          default_pipeline: 'os3-legacy-embedding-pipeline',
+        },
+      },
+      mappings: PublicContentMapping.mappings,
+    },
+  });
+
+  const before = await native.indices.getSettings({ index: 'public-content-v1' });
+  const beforePipeline = before.body?.['public-content-v1']?.settings?.index?.['default_pipeline'];
+  assert(beforePipeline === 'os3-legacy-embedding-pipeline', 'failed to construct legacy default-pipeline fixture');
+
+  await bootstrap.bootstrap();
+
+  const after = await native.indices.getSettings({ index: 'public-content-v1' });
+  const afterPipeline = after.body?.['public-content-v1']?.settings?.index?.['default_pipeline'];
+  assert(afterPipeline === '_none', `legacy default pipeline was not disabled; got ${String(afterPipeline)}`);
+
+  const now = new Date().toISOString();
+  await contentStore.upsert('os3-migrated-doc', {
+    stableDocId: 'os3-migrated-doc',
+    protocolPresence: ['activitypub'],
+    sourceKind: 'remote',
+    author: { canonicalId: 'os3-migrated-author' },
+    text: 'migration sentinel',
+    createdAt: now,
+    indexedAt: now,
+    hasMedia: false,
+    mediaCount: 0,
+    isDeleted: false,
+  });
+  await native.indices.refresh({ index: 'public-content-v1' });
+  const migrated = await contentStore.get('os3-migrated-doc');
+  assert(migrated, 'migrated content write failed');
+  assert((migrated as any).embeddingStatus === undefined, 'legacy ingest pipeline still mutated new content');
+
+  await native.ingest.deletePipeline({ id: 'os3-legacy-embedding-pipeline' });
 }
 
 function assert(condition: unknown, message: string): asserts condition {
