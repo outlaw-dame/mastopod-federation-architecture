@@ -35,8 +35,14 @@ type Run = {
   consumer: { wallMs: number; cpuMs: number; eventsPerSecond: number };
   cluster: { producerCpuMs: number; consumerCpuMs: number; producerNetworkBytes: number; consumerNetworkBytes: number; memoryBytesAfterProduce: number };
 };
-
 type Median = Omit<Run, "repeat"> & { repeats: number; totalCpuMsPerThousandEvents: number; diskBytesPerEvent: number; clusterNetworkBytesPerEvent: number };
+
+type TopicSpec = {
+  topic: string;
+  numPartitions: number;
+  replicationFactor: number;
+  configEntries: Array<{ name: string; value: string }>;
+};
 
 void main();
 
@@ -89,6 +95,7 @@ async function main(): Promise<void> {
       batchSize: BATCH,
       freshClusterPerArmPerRepeat: true,
       isolatedWarmupTopic: true,
+      explicitRf3MembershipGate: true,
       storageMetric: "sum of replicated disk bytes for the measured bulk topic only; the separate singleton latency topic is excluded so storage, raw-byte, event-count, CPU, and network metrics describe the same bulk workload",
       networkMetric: "sum of RX+TX deltas across all three broker containers; this intentionally counts work at both endpoints and is used only for matched relative comparison",
       decisionPolicy: "none; this script is measurement-only and analyze-redpanda-compression-rf3.mjs is the sole promotion authority",
@@ -107,7 +114,7 @@ async function startCluster(): Promise<void> {
   for (const node of nodes) {
     const args = ["run", "-d", "--name", node.name, "--network", NETWORK, "--network-alias", node.host, "-p", `${node.external}:${node.external}`, IMAGE,
       "redpanda", "start", "--overprovisioned", "--smp", "1", "--memory", "768M", "--reserve-memory", "0M", "--check=false", "--node-id", String(node.nodeId),
-      "--rpc-addr", `0.0.0.0:33145`, "--advertise-rpc-addr", `${node.host}:33145`,
+      "--rpc-addr", "0.0.0.0:33145", "--advertise-rpc-addr", `${node.host}:33145`,
       "--kafka-addr", `internal://0.0.0.0:9092,external://0.0.0.0:${node.external}`,
       "--advertise-kafka-addr", `internal://${node.host}:9092,external://127.0.0.1:${node.external}`];
     if (node.nodeId !== 0) args.push("--seeds", "redpanda-0:33145");
@@ -117,13 +124,12 @@ async function startCluster(): Promise<void> {
     try {
       const brokers = dockerText(["exec", nodes[0].name, "rpk", "cluster", "info"]);
       docker(["exec", nodes[0].name, "rpk", "cluster", "health", "--exit-when-healthy"]);
-      const ids = [...brokers.matchAll(/\b\d+\b/g)].length;
-      if (brokers.includes("redpanda-1") && brokers.includes("redpanda-2") || ids >= 3) return;
+      if (nodes.every((node) => brokers.includes(node.host))) return;
     } catch {}
     await sleep(500);
   }
   for (const node of nodes) { try { console.error(dockerText(["logs", node.name])); } catch {} }
-  throw new Error("Three-broker Redpanda cluster did not become healthy");
+  throw new Error("Three-broker Redpanda cluster did not expose all three registered brokers as healthy");
 }
 
 function stopCluster(): void {
@@ -131,12 +137,28 @@ function stopCluster(): void {
   try { docker(["network", "rm", NETWORK]); } catch {}
 }
 
+async function createRf3Topics(admin: ReturnType<InstanceType<typeof Kafka>["admin"]>, topics: TopicSpec[]): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 60; attempt += 1) {
+    try {
+      await admin.createTopics({ waitForLeaders: true, topics });
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("Replication-factor is invalid") && !message.includes("INVALID_REPLICATION_FACTOR")) throw error;
+      await sleep(500);
+    }
+  }
+  throw new Error(`RF3 topic creation did not converge after 30s: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
 async function warmup(arm: Arm): Promise<void> {
   const kafka = client(`warmup-${arm.id}`);
   const admin = kafka.admin(); const producer = kafka.producer({ allowAutoTopicCreation: false });
   const topic = `rf3-warmup-${arm.id}-${randomUUID().slice(0, 8)}`;
   await admin.connect();
-  await admin.createTopics({ waitForLeaders: true, topics: [{ topic, numPartitions: 3, replicationFactor: 3, configEntries: [{ name: "compression.type", value: "producer" }] }] });
+  await createRf3Topics(admin, [{ topic, numPartitions: 3, replicationFactor: 3, configEntries: [{ name: "compression.type", value: "producer" }] }]);
   await producer.connect();
   const messages = mixedMessages(300);
   for (let i = 0; i < 3; i += 1) await producer.send({ topic, messages, compression: compression(arm), acks: -1 });
@@ -149,7 +171,7 @@ async function measure(repeat: number, arm: Arm): Promise<Run> {
   const topic = `rf3-${arm.id}-${randomUUID().slice(0, 8)}`;
   const latencyTopic = `${topic}-latency`;
   await admin.connect();
-  await admin.createTopics({ waitForLeaders: true, topics: [topic, latencyTopic].map((name) => ({ topic: name, numPartitions: 6, replicationFactor: 3, configEntries: [{ name: "compression.type", value: "producer" }, { name: "cleanup.policy", value: "delete" }] })) });
+  await createRf3Topics(admin, [topic, latencyTopic].map((name) => ({ topic: name, numPartitions: 6, replicationFactor: 3, configEntries: [{ name: "compression.type", value: "producer" }, { name: "cleanup.policy", value: "delete" }] })));
   await producer.connect();
   const messages = mixedMessages(MESSAGE_COUNT);
   const rawBytes = messages.reduce((sum, message) => sum + Buffer.byteLength(message.value), 0);
