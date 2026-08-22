@@ -91,6 +91,7 @@ const rows = fs.existsSync(evidencePath)
     })()
   : [];
 const matches = [];
+const successfulPostCalls = [];
 
 for (const row of rows) {
   if (row.schema !== 'ap.real-signing-api-call.v1') continue;
@@ -101,6 +102,15 @@ for (const row of rows) {
   if (requestIds.some(id => typeof id !== 'string' || id.length === 0) || new Set(requestIds).size !== requestIds.length) continue;
 
   row.request.requests.forEach((requestItem, index) => {
+    const result = row.response.results[index];
+    if (result?.ok === true && requestItem?.method === 'POST' && /^ap_post_v1(?:_ct)?$/u.test(requestItem?.profile || '')) {
+      successfulPostCalls.push({
+        requestId: requestItem.requestId,
+        actorUri: requestItem.actorUri,
+        targetHost: requestItem.target?.host,
+        targetPath: requestItem.target?.path
+      });
+    }
     if (requestItem.actorUri !== actorUri) return;
     if (requestItem.method !== 'POST' || requestItem.profile !== 'ap_post_v1') return;
     if (requestItem.target?.host !== deliveryUrl.host) return;
@@ -110,7 +120,6 @@ for (const row of rows) {
     let activity;
     try { activity = JSON.parse(requestItem.body.bytes); } catch { return; }
     if (activity?.type !== 'Follow' || activity?.id !== activityId || activity?.actor !== actorUri || activity?.object !== remoteActorUri) return;
-    const result = row.response.results[index];
     if (!result || result.ok !== true || result.requestId !== requestItem.requestId) return;
     const keyId = result.meta?.keyId;
     const signature = result.outHeaders?.Signature;
@@ -136,8 +145,8 @@ for (const row of rows) {
   });
 }
 
-if (matches.length !== 1) {
-  console.error(`expected exactly one successful ActivityPods signing result for actor=${actorUri} targetHost=${targetHost}; observed ${matches.length}`);
+if (matches.length !== 1 || successfulPostCalls.length !== 1) {
+  console.error(`expected one plan-bound successful ActivityPods POST signing result for actor=${actorUri} targetHost=${targetHost}; exact=${matches.length} allSuccessfulPosts=${successfulPostCalls.length}`);
   process.exit(1);
 }
 
@@ -152,6 +161,7 @@ const evidence = {
   deliveredInboxPaths: [...new Set(matches.map(match => match.targetPath))],
   bodySha256Base64: [...new Set(matches.map(match => match.bodySha256Base64))],
   successfulSigningCalls: matches.length,
+  allSuccessfulPostSigningCalls: successfulPostCalls.length,
   signerKeyIds: [...new Set(matches.map(match => match.keyId))],
   requestIds: [...new Set(matches.map(match => match.requestId))]
 };

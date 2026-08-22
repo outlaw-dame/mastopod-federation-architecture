@@ -42,6 +42,8 @@ describe("real ActivityPods sidecar compose authority", () => {
     );
     expect(workflow).toContain("run --rm --no-deps fedify-sidecar npm run topics:bootstrap");
     expect(workflow).not.toContain("AP_SIGNING_PROXY_HOST=0.0.0.0");
+    expect(workflow).toContain("Reset ActivityPods state between authority modes");
+    expect(workflow).toContain("sudo rm -rf data/fuseki_test data/redis_test");
   });
 
   it("enforces governed Redpanda topics in the real multi-implementation lane", () => {
@@ -53,5 +55,6 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(workflow).toContain("npm run --prefix fedify-sidecar topics:bootstrap");
     expect(workflow).toContain("REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true");
     expect(workflow).not.toContain("REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false");
+    expect(workflow).toContain("Reset ActivityPods state between authority modes");
   });
 });

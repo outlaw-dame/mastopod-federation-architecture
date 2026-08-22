@@ -305,6 +305,18 @@ jobs:
           done
           exit 1
 
+      - name: Reset ActivityPods state between authority modes
+        working-directory: activitypods/pod-provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose-test.yml down
+          sudo rm -rf data/fuseki_test data/redis_test
+          mkdir -p data/fuseki_test data/redis_test
+          docker compose -f docker-compose-test.yml up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
+          docker compose -f docker-compose-test.yml exec -T redis redis-cli PING
+
       - name: Start signer recorder and sidecar
         working-directory: fedify-sidecar
         shell: bash
