@@ -11,10 +11,11 @@ export interface ResolvedRedpandaCompression {
   zstdLevel?: number;
 }
 
-// Three independent live Redpanda trials across realistic ActivityPub payloads
-// selected level 2 as the only Zstd level that repeatedly stayed inside the
-// GZIP-relative p95/p99 and CPU gates while materially improving throughput.
-const DEFAULT_ZSTD_LEVEL = 2;
+// Repeated live Redpanda trials and a three-broker RF3 proof select level 1 as
+// the best balanced operating point for this ActivityPub event-log workload:
+// it preserves low tail latency while materially reducing CPU and increasing
+// throughput, without increasing replicated disk/network versus GZIP.
+const DEFAULT_ZSTD_LEVEL = 1;
 const MIN_ZSTD_LEVEL = -131072;
 const MAX_ZSTD_LEVEL = 22;
 
