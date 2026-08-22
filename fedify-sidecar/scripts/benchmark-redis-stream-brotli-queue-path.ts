@@ -10,8 +10,19 @@ import {
 
 const REDIS_URL = process.env["REDIS_URL"] ?? "redis://127.0.0.1:6379";
 const OUTPUT_PATH = process.env["REDIS_BROTLI_QUEUE_BENCHMARK_OUTPUT"];
-const MEASURED_SAMPLES = 5;
-const WARMUP_SAMPLES = 1;
+
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive safe integer; received ${raw}`);
+  }
+  return value;
+}
+
+const MEASURED_SAMPLES = positiveIntegerEnv("REDIS_BROTLI_QUEUE_BENCHMARK_SAMPLES", 5);
+const WARMUP_SAMPLES = positiveIntegerEnv("REDIS_BROTLI_QUEUE_BENCHMARK_WARMUPS", 1);
 
 const CASES = [
   { name: "medium-high-collapse", activityBytes: 20 * 1024, recipients: 10_000, endpoints: 10 },
