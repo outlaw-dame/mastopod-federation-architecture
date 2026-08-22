@@ -95,7 +95,7 @@ describe("real federation fixture bootstrap contracts", () => {
 
     expect(compose).toContain("castopod/castopod:1.9.0@sha256:3ad8970f");
     expect(compose).not.toContain("CP_DISABLE_HTTPS");
-    expect(bootstrap).toContain('is_file(".env") && filesize(".env") > 0');
+    expect(bootstrap).toContain('preg_match("/^cache\\\\.redis\\\\.database=0$/m", $env) === 1');
     expect(bootstrap).toContain("php spark install:init-database");
     expect(bootstrap).toContain("php spark install:create-superadmin");
     expect(bootstrap).toContain("php spark interop:create-podcast");

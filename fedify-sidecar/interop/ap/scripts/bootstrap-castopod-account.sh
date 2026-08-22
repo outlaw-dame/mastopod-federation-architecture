@@ -25,10 +25,11 @@ ready=false
 attempt=1
 while [ "${attempt}" -le 60 ]; do
   # The image is considered started before its official entrypoint finishes
-  # rendering .env. Invoking Spark during that window can fail before
-  # CodeIgniter defines its environment constants. Require both the CLI and
-  # the non-empty generated environment file before running installer tasks.
-  if compose exec -T castopod-app php -r 'exit(is_file("spark") && is_file(".env") && filesize(".env") > 0 ? 0 : 1);'; then
+  # rendering .env one section at a time. A merely non-empty file can still be
+  # a partial file, and invoking Spark in that window fails before CodeIgniter
+  # defines its environment constants. `cache.redis.database` is the final
+  # setting emitted for this fixture, so require that exact configured value.
+  if compose exec -T castopod-app php -r '$env = @file_get_contents(".env"); exit(is_file("spark") && is_string($env) && preg_match("/^cache\\.redis\\.database=0$/m", $env) === 1 ? 0 : 1);'; then
     ready=true
     break
   fi
