@@ -56,7 +56,7 @@ jobs:
           ready=false
           for i in $(seq 1 90); do
             redis_ok=false; redpanda_ok=false; opensearch_ok=false
-            redis-cli -p 16379 ping 2>/dev/null | grep -q PONG && redis_ok=true || true
+            docker exec os4b-live-redis redis-cli PING 2>/dev/null | grep -q PONG && redis_ok=true || true
             docker exec os4b-live-redpanda rpk cluster info --brokers=127.0.0.1:19092 >/dev/null 2>&1 && redpanda_ok=true || true
             curl -fsS http://127.0.0.1:19200/_cluster/health 2>/dev/null | grep -qv '"status":"red"' && opensearch_ok=true || true
             if $redis_ok && $redpanda_ok && $opensearch_ok; then
@@ -67,6 +67,7 @@ jobs:
           done
           if [[ "$ready" != true ]]; then
             echo "Dependency readiness failed: redis=${redis_ok} redpanda=${redpanda_ok} opensearch=${opensearch_ok}" | tee artifacts/os4b-live/dependency-readiness.txt
+            docker exec os4b-live-redis redis-cli PING >> artifacts/os4b-live/dependency-readiness.txt 2>&1 || true
             docker exec os4b-live-redpanda rpk cluster info --brokers=127.0.0.1:19092 >> artifacts/os4b-live/dependency-readiness.txt 2>&1 || true
             curl -sS http://127.0.0.1:19200/_cluster/health >> artifacts/os4b-live/dependency-readiness.txt 2>&1 || true
             exit 1
