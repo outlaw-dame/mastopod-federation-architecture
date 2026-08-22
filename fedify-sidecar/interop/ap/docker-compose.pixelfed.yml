@@ -59,6 +59,7 @@ services:
       - ap_interop_pixelfed_storage:/var/www/html/storage
       - ap_interop_pixelfed_cache:/var/www/html/bootstrap/cache
       - ./runtime:/interop/runtime:ro
+      - ./fixtures/pixelfed/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
     networks:
       - ap-interop
 
@@ -80,6 +81,7 @@ services:
       - ap_interop_pixelfed_storage:/var/www/html/storage
       - ap_interop_pixelfed_cache:/var/www/html/bootstrap/cache
       - ./runtime:/interop/runtime:ro
+      - ./fixtures/pixelfed/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
     networks:
       - ap-interop
 

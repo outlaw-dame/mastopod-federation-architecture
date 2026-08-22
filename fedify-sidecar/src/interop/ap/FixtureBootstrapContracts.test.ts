@@ -32,6 +32,23 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).not.toContain('dump(["type" => gettype($response), "bytes" => is_string($response) ? strlen($response) : 0, "body" => $response])');
   });
 
+  it("keeps TLS verification enabled for Pixelfed application fetches", () => {
+    const compose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.pixelfed.yml"),
+      "utf8",
+    );
+    const phpConfig = readFileSync(
+      resolve(process.cwd(), "interop/ap/fixtures/pixelfed/interop-ca.ini"),
+      "utf8",
+    );
+
+    expect(compose.match(/zz-interop-ca\.ini:ro/g)).toHaveLength(2);
+    expect(phpConfig).toContain("curl.cainfo=/interop/runtime/certs/rootCA.crt");
+    expect(phpConfig).toContain("openssl.cafile=/interop/runtime/certs/rootCA.crt");
+    expect(compose).not.toContain("GuzzleHttp\\RequestOptions::VERIFY: false");
+    expect(compose).not.toContain("CURLOPT_SSL_VERIFYPEER");
+  });
+
   it("bootstraps Misskey without exposing directional credentials", () => {
     const prepare = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/prepare-misskey-config.sh"),
@@ -120,6 +137,8 @@ describe("real federation fixture bootstrap contracts", () => {
     );
     expect(bootstrap).toContain("spark install:init-database");
     expect(bootstrap).toContain("spark install:create-superadmin");
+    expect(bootstrap).toContain("-n interopadmin");
+    expect(bootstrap).not.toContain("interop-admin");
     expect(bootstrap).toContain("spark interop:create-podcast");
     expect(bootstrap).not.toContain("define('CI_DEBUG'");
     expect(command).toContain("new PodcastModel()");
@@ -244,5 +263,49 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain("pending_worker_count=");
     expect(script).not.toContain("select parameter from workerqueue");
     expect(script).not.toContain("select activity from \\`inbox-entry\\`");
+  });
+
+  it("passes quoted Friendica table names to MariaDB as SQL, not shell substitutions", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ap-friendica-diagnostics-"));
+    try {
+      const composePath = join(directory, "compose.yml");
+      const dockerPath = join(directory, "docker");
+      const capturePath = join(directory, "diagnostics.sql");
+      writeFileSync(composePath, "services: {}\n");
+      writeFileSync(dockerPath, `#!/bin/sh
+case "$*" in
+  *"select count(*) from contact c join user"*) printf '0\\n'; exit 0 ;;
+  *"mariadb --batch --skip-column-names -u friendica friendica"*) cat > "$AP_INTEROP_SQL_CAPTURE"; exit 0 ;;
+  *) exit 0 ;;
+esac
+`);
+      chmodSync(dockerPath, 0o700);
+
+      const result = spawnSync("sh", [
+        resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+        "friendica",
+        "https://activitypods.example/users/alice",
+        "interop",
+      ], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${directory}:${process.env["PATH"] ?? ""}`,
+          AP_INTEROP_COMPOSE_FILE: composePath,
+          AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS: "1",
+          AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS: "0",
+          AP_INTEROP_SQL_CAPTURE: capturePath,
+        },
+      });
+
+      expect(result.status).toBe(1);
+      const sql = readFileSync(capturePath, "utf8");
+      expect(sql).toContain("from `inbox-entry`");
+      expect(sql).toContain("from `inbox-entry-receiver`");
+      expect(sql).toContain("r.`queue-id`");
+      expect(result.stderr).not.toContain("not found");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

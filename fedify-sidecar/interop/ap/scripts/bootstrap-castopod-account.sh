@@ -55,9 +55,9 @@ spark() {
 
 spark install:init-database
 if ! compose exec -T castopod-db /bin/sh -lc \
-  "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u castopod castopod -e \"select 1 from cp_users where username='interop-admin' limit 1;\"" | grep -qx 1; then
+  "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u castopod castopod -e \"select 1 from cp_users where username='interopadmin' limit 1;\"" | grep -qx 1; then
   printf '%s\n%s\n' "${CASTOPOD_ADMIN_PASSWORD}" "${CASTOPOD_ADMIN_PASSWORD}" | \
-    spark install:create-superadmin -n interop-admin -e interop@castopod.org
+    spark install:create-superadmin -n interopadmin -e interop@castopod.org
 fi
 compose exec -T -e AP_INTEROP_CASTOPOD_HANDLE="${HANDLE}" castopod-app php \
   -d auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php \
