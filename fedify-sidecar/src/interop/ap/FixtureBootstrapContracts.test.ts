@@ -73,4 +73,17 @@ describe("real federation fixture bootstrap contracts", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("records bounded Pixelfed processing diagnostics without dumping queued payloads", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+
+    expect(script).toContain("remote_profile_count=");
+    expect(script).toContain("follow_request_count=");
+    expect(script).toContain("failed_job_count=");
+    expect(script).toContain('LLEN "queues:${queue}"');
+    expect(script).not.toContain("LRANGE");
+  });
 });

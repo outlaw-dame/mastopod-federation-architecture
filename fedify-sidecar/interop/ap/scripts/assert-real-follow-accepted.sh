@@ -115,6 +115,23 @@ query_count() {
   esac
 }
 
+pixelfed_diagnostics() {
+  echo "Pixelfed fail-closed persistence diagnostics:" >&2
+  compose exec -T pixelfed-db /bin/sh -lc \
+    "MYSQL_PWD=\"\$MYSQL_PASSWORD\" mysql --batch --skip-column-names -u pixelfed pixelfed -e \"
+      select concat('remote_profile_count=', count(*), ',key_id_matches=', coalesce(sum(key_id=concat(remote_url, '/keys/main')),0), ',public_key_count=', coalesce(sum(public_key is not null),0)) from profiles where remote_url='${actor_sql}';
+      select concat('local_target_count=', count(*), ',private_count=', coalesce(sum(is_private=1),0)) from profiles where username='${username_sql}' and domain is null;
+      select concat('follow_request_count=', count(*)) from follow_requests fr join profiles follower on follower.id=fr.follower_id join profiles target on target.id=fr.following_id where follower.remote_url='${actor_sql}' and target.username='${username_sql}' and target.domain is null;
+      select concat('failed_job_count=', count(*)) from failed_jobs;\"" >&2 || echo "Pixelfed database diagnostics unavailable" >&2
+  for queue in follow shared; do
+    ready=$(compose exec -T pixelfed-redis redis-cli --raw LLEN "queues:${queue}" 2>/dev/null || printf 'unknown')
+    reserved=$(compose exec -T pixelfed-redis redis-cli --raw ZCARD "queues:${queue}:reserved" 2>/dev/null || printf 'unknown')
+    delayed=$(compose exec -T pixelfed-redis redis-cli --raw ZCARD "queues:${queue}:delayed" 2>/dev/null || printf 'unknown')
+    printf 'queue=%s ready=%s reserved=%s delayed=%s\n' "${queue}" "${ready}" "${reserved}" "${delayed}" >&2
+  done
+  compose exec -T pixelfed-horizon php artisan horizon:status >&2 || echo "Pixelfed Horizon status unavailable" >&2
+}
+
 query_error_file=$(mktemp "${TMPDIR:-/tmp}/ap-follow-query.XXXXXX")
 trap 'rm -f "${query_error_file}"' EXIT HUP INT TERM
 query_failures=0
@@ -162,6 +179,7 @@ case "${TARGET}" in
     compose --profile akkoma logs --no-color akkoma-app >&2 || true
     ;;
   pixelfed)
+    pixelfed_diagnostics
     compose logs --no-color pixelfed-app pixelfed-horizon >&2 || true
     ;;
   bonfire)
