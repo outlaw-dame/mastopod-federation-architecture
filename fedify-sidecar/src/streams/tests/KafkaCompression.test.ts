@@ -46,8 +46,6 @@ describe("Redpanda Kafka compression", () => {
       name: "gzip",
       type: CompressionTypes.GZIP,
     });
-    // Legacy call sites historically supplied env ?? "zstd". That must not
-    // silently opt a mixed Node 20/22 fleet into a codec older consumers lack.
     expect(resolveConfiguredRedpandaCompression("zstd")).toMatchObject({
       name: "gzip",
       type: CompressionTypes.GZIP,
@@ -55,8 +53,12 @@ describe("Redpanda Kafka compression", () => {
     expect(ensureRedpandaCompressionCodec("zstd")).toBe(CompressionTypes.GZIP);
   });
 
-  it("keeps an explicitly configured process-wide Zstd setting authoritative", () => {
+  it("keeps explicit Zstd authoritative on capable runtimes and fails closed otherwise", () => {
     process.env["REDPANDA_COMPRESSION"] = "zstd";
+    if (!hasNativeZstdSupport()) {
+      expect(() => resolveConfiguredRedpandaCompression("gzip")).toThrow(/requires Node\.js >=22\.15/u);
+      return;
+    }
     expect(resolveConfiguredRedpandaCompression("gzip")).toMatchObject({
       name: "zstd",
       type: CompressionTypes.ZSTD,
@@ -92,8 +94,13 @@ describe("Redpanda Kafka compression", () => {
     expect(() => resolveRedpandaCompression("brotli")).toThrow(/Unsupported REDPANDA_COMPRESSION/u);
   });
 
-  it("registers a working native Zstd codec that round-trips representative ActivityPub JSON", async () => {
+  it("round-trips representative ActivityPub JSON with native Zstd when available", async () => {
     process.env["REDPANDA_COMPRESSION"] = "zstd";
+    if (!hasNativeZstdSupport()) {
+      expect(() => resolveRedpandaCompression()).toThrow(/requires Node\.js >=22\.15/u);
+      return;
+    }
+
     const resolved = resolveRedpandaCompression();
     expect(resolved.name).toBe("zstd");
     expect(resolved.type).toBe(CompressionTypes.ZSTD);
@@ -124,8 +131,13 @@ describe("Redpanda Kafka compression", () => {
     expect(compressed.byteLength).toBeLessThan(activity.byteLength);
   });
 
-  it("keeps the Zstd decoder registered after switching new writes to gzip", () => {
+  it("keeps the Zstd decoder registered after switching new writes to gzip on capable runtimes", () => {
     process.env["REDPANDA_COMPRESSION"] = "zstd";
+    if (!hasNativeZstdSupport()) {
+      expect(() => resolveRedpandaCompression()).toThrow(/requires Node\.js >=22\.15/u);
+      return;
+    }
+
     resolveRedpandaCompression();
     process.env["REDPANDA_COMPRESSION"] = "gzip";
     expect(resolveRedpandaCompression()).toMatchObject({
