@@ -13,21 +13,33 @@ Redpanda Connect remains available for auxiliary pipelines whose responsibilitie
 
 ## Reliability changes
 
+### Explicit Kafka offset ownership
+
+OS4 runs KafkaJS with `eachBatchAutoResolve: false`. The consumer therefore advances only offsets it explicitly resolves after successful handling. Returning from a paused batch cannot implicitly commit the failed event or later records from the fetched batch.
+
 ### Real KafkaJS pause/resume
 
 Before OS4, `SearchIndexerService` called the KafkaJS `pause()` callback but discarded its returned `resume()` function. Clearing an internal Boolean did not resume a paused consumer.
 
 OS4 stores that callback and invokes it after the bounded retry delay. Partition processing therefore resumes after transient OpenSearch failures.
 
-### Dedupe claim rollback
+### Post-success completion dedupe
 
-The search consumer claims local `outboxIntentId` values before projecting them. Previously, if the downstream projection failed, the Kafka offset remained unresolved but the dedupe claim survived. A retry could then be skipped as an already-processed duplicate.
+The original OS4 prototype acquired a durable `outboxIntentId` claim before projection and attempted to release it after failure. Review showed that rollback leases introduce two loss/race modes: a Redis release failure can leave a stale claim that suppresses replay, and an unconditional delete can remove another worker's reacquired claim.
 
-`OutboxIntentDeduper.release()` now allows the consumer to undo a claim when the side effect fails. Redis-backed release uses `DEL`; a configured shared store that cannot release fails closed instead of silently accepting possible projection loss.
+The canonical design therefore has no rollback lease. For events carrying an `outboxIntentId`, the sequence is:
+
+1. check whether the completion marker already exists;
+2. if complete, resolve the duplicate source offset without re-projecting;
+3. otherwise perform the idempotent Tier-3 projection;
+4. record the completion marker with bounded TTL;
+5. explicitly resolve the source Kafka offset.
+
+If projection fails, no completion marker is written and the source offset remains unresolved. If completion recording is temporarily unavailable, the deduper can fall back to its process-local marker; the successful projection may be replayed later, but replay causes duplicate idempotent work rather than silent projection loss. That trade is intentional: at-least-once duplicate work is safer than a durable pre-side-effect claim that can suppress a missing projection.
 
 ### Bounded poison-message retries and DLQ
 
-Search projection retries are now bounded by `SEARCH_INDEXER_MAX_PROCESSING_ATTEMPTS` (default 5). An event that exhausts the limit is written unchanged to `SEARCH_INDEXER_DLQ_TOPIC` (default `ap.search-indexer.dlq.v1`) with headers recording:
+Search projection retries are bounded by `SEARCH_INDEXER_MAX_PROCESSING_ATTEMPTS` (default 5). An event that exhausts the limit is written unchanged to `SEARCH_INDEXER_DLQ_TOPIC` (default `ap.search-indexer.dlq.v1`) with headers recording:
 
 - source topic;
 - source partition;
@@ -54,21 +66,25 @@ The OS4 benchmark should therefore compare bounded canonical micro-batch strateg
 4. alias-cache consistency;
 5. offset resolution only after the corresponding OpenSearch side effect succeeds.
 
-The selected batch/flush parameters become production inputs to OS5 resource/topology benchmarking; they are not guessed in this phase.
+The selected batch/flush parameters become production inputs to OS5 resource/topology benchmarking; they are not guessed in this hardening slice.
 
 ## Validation invariants
 
-OS4 is not complete unless CI proves:
+This OS4 hardening slice is not mergeable unless CI proves:
 
 - Fast Checks remain green;
 - AP interop remains green;
-- the canonical search indexer defaults to bounded retry + DLQ settings;
+- the OpenSearch 3.8 live compatibility lane remains green;
+- KafkaJS batch auto-resolution is disabled;
 - backpressure calls the actual KafkaJS resume callback;
-- dedupe release works in memory and through shared-store `DEL` semantics;
+- completion markers are recorded only after successful projection and before source-offset resolution;
+- transient projection failure records no completion marker and resolves no offset;
+- poison-event DLQ publication precedes offset resolution;
+- DLQ publication failure leaves the source offset unresolved;
 - the duplicate Redpanda Connect firehose sink is absent from the active streams directory;
 - archived pipeline evidence is not loaded by the active streams glob;
 - auxiliary Redpanda Connect OpenSearch uses the same 3.8 server generation as the canonical deployment.
 
 ## Deferred to later phases
 
-OS5 owns minimum-resource/topology measurement. OS6 owns stored-field codec/level measurement. OS7 owns `_source`/derived-source storage work. OS8 owns shard/replica/rollover/retention/snapshot policy. OS4 does not pre-empt those measurements.
+OS5 owns minimum-resource/topology measurement. OS6 owns stored-field codec/level measurement. OS7 owns `_source`/derived-source storage work. OS8 owns shard/replica/rollover/retention/snapshot policy. The remaining OS4 batching/throughput measurement must preserve the replay invariants above and does not pre-empt those later phases.
