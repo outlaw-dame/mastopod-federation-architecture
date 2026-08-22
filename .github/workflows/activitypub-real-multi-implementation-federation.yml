@@ -178,9 +178,8 @@ jobs:
             sleep 1
           done
           [[ "${ready}" == true ]]
-          for topic in ap.stream1.local-public.v1 ap.stream2.remote-public.v1 ap.firehose.v1 ap.tombstones.v1 canonical.v1; do
-            docker exec "ap-real-redpanda-${TARGET}" rpk topic create "${topic}" >/dev/null
-          done
+          REDPANDA_BROKERS=127.0.0.1:19092 REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development \
+            npm run --prefix fedify-sidecar topics:bootstrap
 
       - name: Start pinned remote implementation and proof router
         shell: bash
@@ -320,7 +319,8 @@ jobs:
           NODE_ENV=development PORT=8080 HOST=127.0.0.1 DOMAIN="${ACTIVITYPODS_HOST}" SIDECAR_STARTUP_MODE=blocking \
           AP_INTEROP_ENABLE_MEDIA_FIXTURES=true APDM_INTEROP_PRIVATE_HOSTS="${TARGET_HOST}" \
           REDIS_URL=redis://127.0.0.1:6379 APDM_COMPLETION_MARKER_V2_CUTOVER=fresh REDPANDA_BROKERS=127.0.0.1:19092 \
-          REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 \
+          REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development \
+          STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 \
           FIREHOSE_TOPIC=ap.firehose.v1 TOMBSTONE_TOPIC=ap.tombstones.v1 ACTIVITYPODS_URL=http://127.0.0.1:3001 \
           ACTIVITYPODS_TOKEN="${ACTIVITYPODS_TOKEN}" SIDECAR_TOKEN="${SIDECAR_TOKEN}" ENABLE_OUTBOUND_WORKER=true ENABLE_OUTBOX_INTENT_WORKER=true \
           ENABLE_INBOUND_WORKER=false ENABLE_ORIGIN_RECONCILIATION=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=false ENABLE_OPENSEARCH_INDEXER=false \

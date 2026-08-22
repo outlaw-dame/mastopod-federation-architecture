@@ -87,10 +87,16 @@ describe("ActivityPods signing recording proxy", () => {
 
     try {
       await waitForProxy(proxyPort, child);
+      const unrelatedResponse = await fetch(`http://127.0.0.1:${proxyPort}/api/internal/other`, {
+        method: "POST",
+        body: "{}"
+      });
+      expect(unrelatedResponse.status).toBe(404);
       const response = await fetch(`http://127.0.0.1:${proxyPort}/api/internal/signatures/batch`, {
         method: "POST",
         headers: {
           authorization: "Bearer super-secret-token",
+          cookie: "session=also-secret",
           "content-type": "application/json"
         },
         body: JSON.stringify({ requests: [{ requestId: "request-1" }] })
@@ -113,7 +119,7 @@ describe("ActivityPods signing recording proxy", () => {
         method: "POST",
         path: "/api/internal/signatures/batch",
         responseStatus: 207,
-        requestHeaders: { authorization: "<redacted>" },
+        requestHeaders: { authorization: "<redacted>", cookie: "<redacted>" },
         response: { results: [{ requestId: "request-1", ok: true }] }
       });
     } finally {

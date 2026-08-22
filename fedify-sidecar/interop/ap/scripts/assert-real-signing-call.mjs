@@ -8,6 +8,9 @@ if (!evidencePath || !originPath || !targetHost) {
   process.exit(2);
 }
 
+const MAX_EVIDENCE_BYTES = 10 * 1024 * 1024;
+const EXPECTED_SIGNED_HEADERS = '(request-target) host date digest';
+
 const origin = JSON.parse(fs.readFileSync(originPath, 'utf8'));
 if (origin.ok !== true || origin.mode !== 'external' || origin.durableHandoffQueued !== true || origin.nativeRemotePostSuppressed !== true) {
   console.error('external origin evidence does not prove the fail-closed sidecar handoff invariants');
@@ -51,13 +54,17 @@ const sharedInboxUrl = remoteDeliveryTarget.sharedInboxUrl === undefined
   : parseCredentialFreeUrl(remoteDeliveryTarget.sharedInboxUrl);
 const deliveryUrl = parseCredentialFreeUrl(remoteDeliveryTarget.deliveryUrl);
 const expectedDeliveryUrl = sharedInboxUrl || inboxUrl;
+const requestedTarget = parseCredentialFreeUrl(`https://${targetHost}`);
 if (
   !inboxUrl ||
   (remoteDeliveryTarget.sharedInboxUrl !== undefined && !sharedInboxUrl) ||
   !deliveryUrl ||
   !expectedDeliveryUrl ||
+  !requestedTarget ||
+  requestedTarget.pathname !== '/' ||
+  requestedTarget.search !== '' ||
   deliveryUrl.href !== expectedDeliveryUrl.href ||
-  deliveryUrl.host !== targetHost ||
+  deliveryUrl.host !== requestedTarget.host ||
   remoteDeliveryTarget.targetDomain !== deliveryUrl.hostname.toLowerCase()
 ) {
   console.error('external origin remote delivery target is invalid or does not match the requested host');
@@ -73,7 +80,15 @@ actorUrl.pathname = `${actorUrl.pathname.replace(/\/$/u, '')}/keys/main`;
 const expectedKeyId = actorUrl.toString();
 
 const rows = fs.existsSync(evidencePath)
-  ? fs.readFileSync(evidencePath, 'utf8').split(/\n/u).filter(Boolean).map(line => JSON.parse(line))
+  ? (() => {
+      if (fs.statSync(evidencePath).size > MAX_EVIDENCE_BYTES) {
+        throw new Error('signing evidence exceeds the 10 MiB safety limit');
+      }
+      return fs.readFileSync(evidencePath, 'utf8').split(/\n/u).filter(Boolean).map((line, index) => {
+        try { return JSON.parse(line); }
+        catch { throw new Error(`signing evidence line ${index + 1} is not valid JSON`); }
+      });
+    })()
   : [];
 const matches = [];
 
@@ -81,6 +96,9 @@ for (const row of rows) {
   if (row.schema !== 'ap.real-signing-api-call.v1') continue;
   if (row.path !== '/api/internal/signatures/batch' || row.responseStatus !== 200) continue;
   if (!Array.isArray(row.request?.requests) || !Array.isArray(row.response?.results)) continue;
+  if (row.request.requests.length !== row.response.results.length) continue;
+  const requestIds = row.request.requests.map(item => item?.requestId);
+  if (requestIds.some(id => typeof id !== 'string' || id.length === 0) || new Set(requestIds).size !== requestIds.length) continue;
 
   row.request.requests.forEach((requestItem, index) => {
     if (requestItem.actorUri !== actorUri) return;
@@ -97,10 +115,14 @@ for (const row of rows) {
     const keyId = result.meta?.keyId;
     const signature = result.outHeaders?.Signature;
     const digest = result.outHeaders?.Digest;
+    const date = result.outHeaders?.Date;
     const bodySha256Base64 = createHash('sha256').update(requestItem.body.bytes, 'utf8').digest('base64');
     if (keyId !== expectedKeyId) return;
     if (typeof signature !== 'string' || !signature.includes(`keyId="${keyId}"`)) return;
+    if (!signature.includes(`headers="${EXPECTED_SIGNED_HEADERS}"`)) return;
+    if (typeof date !== 'string' || !Number.isFinite(Date.parse(date))) return;
     if (digest !== `SHA-256=${bodySha256Base64}` || result.meta?.bodySha256Base64 !== bodySha256Base64) return;
+    if (result.meta?.signedHeaders !== EXPECTED_SIGNED_HEADERS || result.meta?.algorithm !== 'rsa-sha256') return;
     matches.push({
       requestId: requestItem.requestId,
       actorUri,
@@ -114,8 +136,8 @@ for (const row of rows) {
   });
 }
 
-if (matches.length === 0) {
-  console.error(`no exact successful ActivityPods signing result for actor=${actorUri} targetHost=${targetHost}`);
+if (matches.length !== 1) {
+  console.error(`expected exactly one successful ActivityPods signing result for actor=${actorUri} targetHost=${targetHost}; observed ${matches.length}`);
   process.exit(1);
 }
 

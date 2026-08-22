@@ -43,4 +43,15 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(workflow).toContain("run --rm --no-deps fedify-sidecar npm run topics:bootstrap");
     expect(workflow).not.toContain("AP_SIGNING_PROXY_HOST=0.0.0.0");
   });
+
+  it("enforces governed Redpanda topics in the real multi-implementation lane", () => {
+    const workflow = readFileSync(
+      resolve("../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toContain("npm run --prefix fedify-sidecar topics:bootstrap");
+    expect(workflow).toContain("REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true");
+    expect(workflow).not.toContain("REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false");
+  });
 });

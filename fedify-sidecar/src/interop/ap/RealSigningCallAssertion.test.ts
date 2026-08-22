@@ -16,6 +16,11 @@ function fixture(overrides: {
   keyId?: string;
   deliveryUrl?: string;
   remoteTargetActorUri?: string;
+  signedHeaders?: string;
+  algorithm?: string;
+  date?: string;
+  duplicate?: boolean;
+  malformedJson?: boolean;
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "real-signing-assertion-"));
   directories.push(directory);
@@ -47,7 +52,8 @@ function fixture(overrides: {
     }
   }));
   const keyId = overrides.keyId ?? `${activity.actor}/keys/main`;
-  writeFileSync(callsPath, `${JSON.stringify({
+  const signedHeaders = overrides.signedHeaders ?? "(request-target) host date digest";
+  const call = {
     schema: "ap.real-signing-api-call.v1",
     path: "/api/internal/signatures/batch",
     responseStatus: 200,
@@ -63,12 +69,16 @@ function fixture(overrides: {
       requestId: "request-1",
       ok: true,
       outHeaders: {
-        Signature: `keyId="${keyId}"`,
+        Date: overrides.date ?? "Fri, 21 Aug 2026 12:00:00 GMT",
+        Signature: `keyId="${keyId}",algorithm="rsa-sha256",headers="${signedHeaders}",signature="proof"`,
         Digest: overrides.digest ?? `SHA-256=${bodySha256Base64}`
       },
-      meta: { keyId, bodySha256Base64 }
+      meta: { keyId, algorithm: overrides.algorithm ?? "rsa-sha256", signedHeaders, bodySha256Base64 }
     }] }
-  })}\n`);
+  };
+  writeFileSync(callsPath, overrides.malformedJson
+    ? '{not-json}\n'
+    : `${JSON.stringify(call)}\n${overrides.duplicate ? `${JSON.stringify(call)}\n` : ""}`);
   return { callsPath, originPath };
 }
 
@@ -100,7 +110,12 @@ describe("real ActivityPods signing call assertion", () => {
     [{ requestPath: "/users/bob/inbox" }, "signed path outside the selected shared inbox"],
     [{ keyId: "https://activitypods/users/alice#main-key" }, "legacy key fragment instead of the exact published key document"],
     [{ deliveryUrl: "https://mastodon/users/bob/inbox" }, "delivery URL inconsistent with the authoritative shared inbox"],
-    [{ remoteTargetActorUri: "https://mastodon/users/mallory" }, "remote target actor drift"]
+    [{ remoteTargetActorUri: "https://mastodon/users/mallory" }, "remote target actor drift"],
+    [{ signedHeaders: "(request-target) host date" }, "digest omitted from the signed components"],
+    [{ algorithm: "hs2019" }, "unexpected signing algorithm"],
+    [{ date: "not-a-date" }, "invalid signed Date header"],
+    [{ duplicate: true }, "duplicate successful signing calls"],
+    [{ malformedJson: true }, "malformed evidence"],
   ])("rejects %s (%s)", (overrides, _label) => {
     const paths = fixture(overrides);
     expect(run(paths.callsPath, paths.originPath).status).not.toBe(0);

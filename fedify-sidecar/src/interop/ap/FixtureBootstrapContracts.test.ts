@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("real federation fixture bootstrap contracts", () => {
@@ -38,5 +40,37 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain('[ -f "${GITHUB_WORKSPACE}/${path}" ]');
     expect(script).toContain('COMPOSE_FILE=$(canonicalize_compose_path "${COMPOSE_FILE}")');
     expect(script).toContain('COMPOSE_OVERLAY=$(canonicalize_compose_path "${COMPOSE_OVERLAY}")');
+  });
+
+  it("fails closed when every remote persistence query fails", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ap-follow-query-failure-"));
+    try {
+      const composePath = join(directory, "compose.yml");
+      const dockerPath = join(directory, "docker");
+      writeFileSync(composePath, "services: {}\n");
+      writeFileSync(dockerPath, "#!/bin/sh\necho 'database unavailable' >&2\nexit 17\n");
+      chmodSync(dockerPath, 0o700);
+      const result = spawnSync("sh", [
+        resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+        "mastodon",
+        "https://activitypods.example/users/alice",
+        "interop",
+      ], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${directory}:${process.env["PATH"] ?? ""}`,
+          AP_INTEROP_COMPOSE_FILE: composePath,
+          AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS: "1",
+          AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS: "0",
+        },
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("remote state is unknown");
+      expect(result.stderr).not.toContain("observed count=0");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
