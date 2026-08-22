@@ -11,6 +11,17 @@ const KEY_ID = `${ACTOR_ID}#main-key`;
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
 
+type FixtureState = {
+  token: string;
+  objectId: string;
+  createId: string;
+  updateId: string;
+  deleteId: string;
+  initialContent: string;
+  updatedContent: string;
+};
+let fixture: FixtureState | null = null;
+
 function actorDocument() {
   return {
     "@context": "https://www.w3.org/ns/activitystreams",
@@ -23,13 +34,13 @@ function actorDocument() {
   };
 }
 
-function note(activityId: string, objectId: string, content: string, type = "Create") {
+function activity(activityId: string, objectId: string, content: string, type: "Create" | "Update" | "Delete") {
   const now = new Date().toISOString();
   if (type === "Delete") {
     return {
       "@context": "https://www.w3.org/ns/activitystreams",
       id: activityId,
-      type: "Delete",
+      type,
       actor: ACTOR_ID,
       object: { id: objectId, type: "Tombstone" },
       to: ["https://www.w3.org/ns/activitystreams#Public"],
@@ -47,6 +58,7 @@ function note(activityId: string, objectId: string, content: string, type = "Cre
       attributedTo: ACTOR_ID,
       content,
       published: now,
+      updated: type === "Update" ? now : undefined,
       to: ["https://www.w3.org/ns/activitystreams#Public"],
     },
     to: ["https://www.w3.org/ns/activitystreams#Public"],
@@ -54,8 +66,8 @@ function note(activityId: string, objectId: string, content: string, type = "Cre
   };
 }
 
-async function signedPost(activity: Record<string, unknown>): Promise<{ status: number; body: string }> {
-  const body = JSON.stringify(activity);
+async function signedPost(payload: Record<string, unknown>): Promise<number> {
+  const body = JSON.stringify(payload);
   const target = new URL(SIDECAR_INBOX);
   const date = new Date().toUTCString();
   const digest = `SHA-256=${createHash("sha256").update(body).digest("base64")}`;
@@ -69,8 +81,6 @@ async function signedPost(activity: Record<string, unknown>): Promise<{ status: 
   signer.update(signingString);
   signer.end();
   const signature = signer.sign(privateKey, "base64");
-  const signatureHeader = `keyId="${KEY_ID}",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="${signature}"`;
-
   const response = await fetch(SIDECAR_INBOX, {
     method: "POST",
     headers: {
@@ -78,34 +88,42 @@ async function signedPost(activity: Record<string, unknown>): Promise<{ status: 
       "content-type": "application/activity+json",
       date,
       digest,
-      signature: signatureHeader,
+      signature: `keyId="${KEY_ID}",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="${signature}"`,
       host: target.host,
     },
     body,
     signal: AbortSignal.timeout(15_000),
   });
-  return { status: response.status, body: await response.text() };
+  if (!response.ok) {
+    throw new Error(`Inbox POST failed: ${response.status} ${await response.text()}`);
+  }
+  return response.status;
 }
 
-async function runSequence() {
+function ensureFixture(): FixtureState {
+  if (fixture) return fixture;
   const token = randomUUID();
-  const objectId = `${PUBLIC_ORIGIN}/notes/${token}`;
-  const createId = `${PUBLIC_ORIGIN}/activities/create-${token}`;
-  const updateId = `${PUBLIC_ORIGIN}/activities/update-${token}`;
-  const deleteId = `${PUBLIC_ORIGIN}/activities/delete-${token}`;
-  const initialContent = `OS4b live federation ${token} initial`;
-  const updatedContent = `OS4b live federation ${token} updated`;
+  fixture = {
+    token,
+    objectId: `${PUBLIC_ORIGIN}/notes/${token}`,
+    createId: `${PUBLIC_ORIGIN}/activities/create-${token}`,
+    updateId: `${PUBLIC_ORIGIN}/activities/update-${token}`,
+    deleteId: `${PUBLIC_ORIGIN}/activities/delete-${token}`,
+    initialContent: `OS4b live federation ${token} initial`,
+    updatedContent: `OS4b live federation ${token} updated`,
+  };
+  return fixture;
+}
 
-  const create = await signedPost(note(createId, objectId, initialContent));
-  if (create.status < 200 || create.status >= 300) throw new Error(`Create inbox POST failed: ${create.status} ${create.body}`);
-  await new Promise((resolve) => setTimeout(resolve, 750));
-  const update = await signedPost(note(updateId, objectId, updatedContent, "Update"));
-  if (update.status < 200 || update.status >= 300) throw new Error(`Update inbox POST failed: ${update.status} ${update.body}`);
-  await new Promise((resolve) => setTimeout(resolve, 750));
-  const del = await signedPost(note(deleteId, objectId, "", "Delete"));
-  if (del.status < 200 || del.status >= 300) throw new Error(`Delete inbox POST failed: ${del.status} ${del.body}`);
-
-  return { actorId: ACTOR_ID, objectId, createId, updateId, deleteId, initialContent, updatedContent, statuses: { create: create.status, update: update.status, delete: del.status } };
+async function sendStage(stage: "create" | "update" | "delete") {
+  const f = ensureFixture();
+  const payload = stage === "create"
+    ? activity(f.createId, f.objectId, f.initialContent, "Create")
+    : stage === "update"
+      ? activity(f.updateId, f.objectId, f.updatedContent, "Update")
+      : activity(f.deleteId, f.objectId, "", "Delete");
+  const status = await signedPost(payload);
+  return { ...f, actorId: ACTOR_ID, stage, status };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -120,8 +138,14 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(actorDocument()));
       return;
     }
-    if (req.method === "POST" && req.url === "/send-sequence") {
-      const result = await runSequence();
+    if (req.method === "GET" && req.url === "/fixture") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ...ensureFixture(), actorId: ACTOR_ID }));
+      return;
+    }
+    const match = req.method === "POST" ? /^\/send\/(create|update|delete)$/.exec(req.url ?? "") : null;
+    if (match) {
+      const result = await sendStage(match[1] as "create" | "update" | "delete");
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(result));
       return;
