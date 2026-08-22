@@ -40,12 +40,14 @@ USER fedify
 ENV NODE_ENV=production
 ENV PORT=3001
 # The official image is Node 22 and therefore has native Zstandard support.
-# Producer-side Zstd level 2 is the measured Redpanda event-log setting from
-# three independent real-broker trials. Operators can roll writes back to gzip
-# with REDPANDA_COMPRESSION=gzip while capable consumers retain the Zstd
-# decoder for historical batches.
+# Repeated single-broker and three-broker RF3 measurements select Zstd level 1
+# as the balanced event-log setting: lower CPU and higher throughput than GZIP,
+# with replicated disk/network at or below GZIP and materially better tail
+# latency than Zstd level 2. Operators can roll writes back to gzip with
+# REDPANDA_COMPRESSION=gzip while capable consumers retain the Zstd decoder for
+# historical batches.
 ENV REDPANDA_COMPRESSION=zstd
-ENV REDPANDA_ZSTD_LEVEL=2
+ENV REDPANDA_ZSTD_LEVEL=1
 
 EXPOSE 3001
 
