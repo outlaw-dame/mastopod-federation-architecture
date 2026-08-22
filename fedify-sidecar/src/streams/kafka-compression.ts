@@ -38,8 +38,16 @@ export function hasNativeZstdSupport(version = process.versions.node): boolean {
   return true;
 }
 
+/**
+ * Keep the package-level default compatible with the declared Node >=20
+ * runtime. Zstd is the preferred production codec, but enabling it implicitly
+ * based only on one process's runtime is unsafe during a mixed Node 20/22
+ * rolling deployment: a Node 22 producer could write Zstd batches that an
+ * older KafkaJS consumer cannot decode. Official Node 22 images/deployments
+ * opt into Zstd explicitly with REDPANDA_COMPRESSION=zstd.
+ */
 export function defaultRedpandaCompressionName(): RedpandaCompressionName {
-  return hasNativeZstdSupport() ? "zstd" : "gzip";
+  return "gzip";
 }
 
 export function parseZstdLevel(raw = process.env["REDPANDA_ZSTD_LEVEL"]): number {
@@ -111,7 +119,7 @@ export function resolveRedpandaCompression(
   // Kafka logs can contain batches written before a producer codec rollback.
   // On capable runtimes, keep the Zstd decoder registered even when new
   // batches are configured as gzip/none so historical Zstd batches remain
-  // consumable during and after a rollback.
+  // consumable during and after a compression-only rollback.
   if (name !== "zstd" && hasNativeZstdSupport()) {
     registerNativeZstdCodec(DEFAULT_ZSTD_LEVEL);
   }
@@ -139,10 +147,10 @@ export function resolveRedpandaCompression(
 }
 
 export function ensureRedpandaCompressionCodec(raw?: string): CompressionType {
-  // Several legacy call sites supplied `env ?? "zstd"`. Preserve the declared
-  // Node >=20 package contract by treating that literal as an implicit default
-  // when the environment itself is unset; native-capable runtimes still choose
-  // Zstd while older supported runtimes remain on KafkaJS's built-in GZIP.
+  // Legacy call sites pass `process.env.REDPANDA_COMPRESSION ?? "zstd"`.
+  // Treat that literal only as their historical implicit default when the env
+  // variable itself is absent, so package-level Node 20 compatibility is not
+  // accidentally converted into an automatic mixed-fleet Zstd rollout.
   const configured = process.env["REDPANDA_COMPRESSION"];
   const selected =
     configured !== undefined
