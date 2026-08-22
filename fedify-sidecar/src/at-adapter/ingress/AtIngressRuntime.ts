@@ -2,6 +2,7 @@ import { Kafka, logLevel, type Consumer, type EachBatchPayload } from "kafkajs";
 import type { AtFirehoseRawEnvelope } from "./AtIngressEvents.js";
 import type { AtFirehoseConsumer, AtFirehoseSource } from "./AtFirehoseConsumer.js";
 import type { AtIngressVerifier } from "./AtIngressVerifier.js";
+import { ensureRedpandaCompressionCodec } from "../../streams/kafka-compression.js";
 
 export interface AtIngressRuntimeConfig {
   brokers: string[];
@@ -174,6 +175,8 @@ export class AtIngressRuntime {
 function buildKafkaConsumerFactory(
   config: AtIngressRuntimeConfig,
 ): (groupId: string) => Consumer {
+  ensureRedpandaCompressionCodec();
+
   const kafka = new Kafka({
     clientId: `${config.clientId}-at-ingress`,
     brokers: config.brokers,
