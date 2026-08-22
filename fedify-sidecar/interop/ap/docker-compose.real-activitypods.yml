@@ -55,6 +55,6 @@ services:
       ENABLE_AT_JETSTREAM: "false"
       ENABLE_AT_EXTERNAL_FIREHOSE: "false"
     extra_hosts:
-      - "activitypods-internal:host-gateway"
+      - "activitypods-internal:${AP_SIGNING_PROXY_DOCKER_HOST:-host-gateway}"
     ports:
       - "127.0.0.1:8080:8080"

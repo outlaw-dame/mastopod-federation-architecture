@@ -250,6 +250,7 @@ jobs:
           );
           if (!privateIpv4) throw new Error(`Signing proxy must bind only to the private Docker gateway, got ${value}`);
           NODE
+          echo "AP_SIGNING_PROXY_DOCKER_HOST=${signing_proxy_host}" >> "${GITHUB_ENV}"
           AP_SIGNING_PROXY_HOST="${signing_proxy_host}" \
           AP_SIGNING_PROXY_PORT=3001 \
           AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 \
