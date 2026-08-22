@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 120
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '21dc38f0b54de9264c2890d068e00b7cbd097cd9'
+      ACTIVITYPODS_SHA: '071e0e403e2e714f3a0a1702ce52bf582582f1b4'
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       MASTODON_USERNAME: interop
@@ -233,7 +233,21 @@ jobs:
         run: |
           set -euo pipefail
           : > "${EVIDENCE_DIR}/signing-api.jsonl"
-          AP_SIGNING_PROXY_HOST=127.0.0.1 \
+          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
+          network_id="$(docker inspect "${router_container}" --format '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}')"
+          signing_proxy_host="$(docker network inspect "${network_id}" --format '{{(index .IPAM.Config 0).Gateway}}')"
+          node - "${signing_proxy_host}" <<'NODE'
+          const { isIP } = require('node:net');
+          const value = process.argv[2];
+          const octets = value.split('.').map(part => Number.parseInt(part, 10));
+          const privateIpv4 = isIP(value) === 4 && (
+            octets[0] === 10 ||
+            (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+            (octets[0] === 192 && octets[1] === 168)
+          );
+          if (!privateIpv4) throw new Error(`Signing proxy must bind only to the private Docker gateway, got ${value}`);
+          NODE
+          AP_SIGNING_PROXY_HOST="${signing_proxy_host}" \
           AP_SIGNING_PROXY_PORT=3001 \
           AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 \
           AP_SIGNING_PROXY_TARGET_PORT=3000 \
@@ -247,7 +261,11 @@ jobs:
         run: |
           set -euo pipefail
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
-            up -d redis redpanda mock-activitypods fedify-sidecar
+            up -d redis redpanda mock-activitypods
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            run --rm --no-deps fedify-sidecar npm run topics:bootstrap
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            up -d fedify-sidecar
           ready=false
           for attempt in $(seq 1 120); do
             if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null; then

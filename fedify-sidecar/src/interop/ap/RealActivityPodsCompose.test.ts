@@ -21,6 +21,19 @@ describe("real ActivityPods sidecar compose authority", () => {
     const sidecar = overlay.services?.["fedify-sidecar"];
 
     expect(sidecar?.environment?.["ACTIVITYPODS_URL"]).toBe("http://activitypods-internal:3001");
+    expect(sidecar?.environment?.["SIDECAR_STARTUP_MODE"]).toBe("blocking");
+    expect(sidecar?.environment?.["ENABLE_FEP_3AB2_STREAMING"]).toBe("false");
     expect(sidecar?.extra_hosts).toEqual(["activitypods-internal:host-gateway"]);
+  });
+
+  it("keeps the recorder on the validated private bridge and bootstraps governed topics", () => {
+    const workflow = readFileSync(
+      resolve("../.github/workflows/activitypub-real-two-mode-federation.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toContain("Signing proxy must bind only to the private Docker gateway");
+    expect(workflow).toContain("run --rm --no-deps fedify-sidecar npm run topics:bootstrap");
+    expect(workflow).not.toContain("AP_SIGNING_PROXY_HOST=0.0.0.0");
   });
 });
