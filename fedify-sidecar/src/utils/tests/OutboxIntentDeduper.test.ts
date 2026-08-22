@@ -23,11 +23,20 @@ describe("OutboxIntentDeduper", () => {
     await expect(deduper.claim("intent-1")).resolves.toBe(true);
   });
 
-  it("uses SET NX EX semantics when a shared store is available", async () => {
+  it("releases an in-memory claim so a failed side effect can retry", async () => {
+    const deduper = new OutboxIntentDeduper({ prefix: "test", ttlSeconds: 60 });
+    await expect(deduper.claim("intent-retry")).resolves.toBe(true);
+    await deduper.release("intent-retry");
+    await expect(deduper.claim("intent-retry")).resolves.toBe(true);
+  });
+
+  it("uses SET NX EX and DEL semantics with a shared store", async () => {
     const store = {
       set: vi.fn()
         .mockResolvedValueOnce("OK")
-        .mockResolvedValueOnce(null),
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce("OK"),
+      del: vi.fn().mockResolvedValue(1),
     };
     const deduper = new OutboxIntentDeduper({
       prefix: "search",
@@ -38,6 +47,20 @@ describe("OutboxIntentDeduper", () => {
     await expect(deduper.claim("intent-2")).resolves.toBe(true);
     await expect(deduper.claim("intent-2")).resolves.toBe(false);
     expect(store.set).toHaveBeenNthCalledWith(1, "search:intent-2", "1", "EX", 30, "NX");
+
+    await deduper.release("intent-2");
+    expect(store.del).toHaveBeenCalledWith("search:intent-2");
+    await expect(deduper.claim("intent-2")).resolves.toBe(true);
+  });
+
+  it("fails closed when a shared store cannot release a durable claim", async () => {
+    const deduper = new OutboxIntentDeduper({
+      prefix: "search",
+      ttlSeconds: 30,
+      store: { set: vi.fn().mockResolvedValue("OK") },
+    });
+    await expect(deduper.claim("intent-3")).resolves.toBe(true);
+    await expect(deduper.release("intent-3")).rejects.toThrow(/does not support release/);
   });
 });
 
@@ -47,7 +70,6 @@ describe("extractOutboxIntentId", () => {
       { outboxIntentId: "payload-intent" },
       { "outbox-intent-id": Buffer.from("header-intent", "utf8") },
     );
-
     expect(extracted).toBe("header-intent");
   });
 
