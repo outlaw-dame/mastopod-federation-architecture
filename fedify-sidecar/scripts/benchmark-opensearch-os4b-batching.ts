@@ -53,12 +53,16 @@ function containerCpuMs(): number {
   return Number(match[1]) / 1000;
 }
 
+function appendBulkUpdate(body: any[], index: string, id: string, document: ReturnType<typeof doc>) {
+  body.push({ update: { _index: index, _id: id } }, { doc: document, doc_as_upsert: true });
+}
+
 async function warmup() {
   const index = 'os4b-warmup';
   await client.indices.create({ index, body: { settings: PublicContentMapping.settings, mappings: PublicContentMapping.mappings } });
   for (let start = 0; start < 3000; start += 100) {
     const body: any[] = [];
-    for (let i = start; i < start + 100; i++) body.push({ index: { _index: index, _id: `warm-${i}` } }, doc(i, 'warm'));
+    for (let i = start; i < start + 100; i++) appendBulkUpdate(body, index, `warm-${i}`, doc(i, 'warm'));
     const response: any = await client.bulk({ body, refresh: false });
     if (response.body?.errors) throw new Error('warmup bulk response contained item errors');
   }
@@ -84,14 +88,14 @@ async function runArm(arm: Arm, repeat: number) {
   if (arm.batchSize === 1) {
     for (let i = 0; i < docsPerArm; i++) {
       const s = performance.now();
-      await client.index({ index, id: `os4b-${i}`, body: doc(i), refresh: false });
+      await client.update({ index, id: `os4b-${i}`, body: { doc: doc(i), doc_as_upsert: true }, refresh: false });
       reqLatencies.push(performance.now() - s);
     }
   } else {
     for (let start = 0; start < docsPerArm; start += arm.batchSize) {
       const end = Math.min(docsPerArm, start + arm.batchSize);
       const body: any[] = [];
-      for (let i = start; i < end; i++) body.push({ index: { _index: index, _id: `os4b-${i}` } }, doc(i));
+      for (let i = start; i < end; i++) appendBulkUpdate(body, index, `os4b-${i}`, doc(i));
       const s = performance.now();
       const response: any = await client.bulk({ body, refresh: false });
       reqLatencies.push(performance.now() - s);
@@ -170,7 +174,20 @@ try {
   }));
   const eligible = evaluated.filter((x) => x.eligible);
   const frontier = pareto(eligible);
-  const output = { openSearchVersion: version.body.version.number, docsPerArm, repeats, methodology: { warmupDocs: 3000, armOrder: 'rotated/reversed', openSearchCpu: 'container cgroup usage_usec' }, raw, summaries: evaluated, pareto: frontier };
+  const output = {
+    openSearchVersion: version.body.version.number,
+    docsPerArm,
+    repeats,
+    methodology: {
+      operation: 'update+doc_as_upsert (matches DefaultOpenSearchClient.upsert)',
+      warmupDocs: 3000,
+      armOrder: 'rotated/reversed',
+      openSearchCpu: 'container cgroup usage_usec',
+    },
+    raw,
+    summaries: evaluated,
+    pareto: frontier,
+  };
   console.log(JSON.stringify(output, null, 2));
   if (frontier.length === 0) throw new Error('OS4b found no bulk candidate meeting frozen throughput/CPU/latency gates');
 } finally {
