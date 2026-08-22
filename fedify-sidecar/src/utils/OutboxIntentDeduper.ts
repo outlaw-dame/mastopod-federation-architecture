@@ -2,6 +2,7 @@ import { logger } from "./logger.js";
 
 export interface OutboxIntentDeduperStore {
   set(key: string, value: string, ...args: Array<string | number>): Promise<unknown>;
+  del?(key: string): Promise<unknown>;
 }
 
 export interface OutboxIntentDeduperConfig {
@@ -16,6 +17,11 @@ export interface OutboxIntentDeduperConfig {
  *
  * Redis-backed mode uses SET NX EX for cross-process dedupe.
  * In-memory mode is the fallback for isolated tests or single-process consumers.
+ *
+ * OS4 adds release() so a consumer that claims before a downstream side effect
+ * can relinquish the claim when that side effect fails. Without this, a Kafka
+ * retry can be incorrectly suppressed as a duplicate and silently lose the
+ * rebuildable projection update.
  */
 export class OutboxIntentDeduper {
   private readonly prefix: string;
@@ -33,9 +39,7 @@ export class OutboxIntentDeduper {
 
   async claim(intentId: string): Promise<boolean> {
     const normalized = intentId.trim();
-    if (!normalized) {
-      return true;
-    }
+    if (!normalized) return true;
 
     if (this.store) {
       try {
@@ -58,24 +62,31 @@ export class OutboxIntentDeduper {
     this.prune();
     const now = this.now();
     const existing = this.memory.get(normalized);
-    if (existing && existing > now) {
-      return false;
-    }
+    if (existing && existing > now) return false;
 
     this.memory.set(normalized, now + this.ttlMs);
     return true;
   }
 
-  private prune(): void {
-    if (this.memory.size === 0) {
-      return;
+  async release(intentId: string): Promise<void> {
+    const normalized = intentId.trim();
+    if (!normalized) return;
+
+    this.memory.delete(normalized);
+
+    if (!this.store) return;
+    if (!this.store.del) {
+      throw new Error("Outbox intent dedupe store does not support release/del");
     }
 
+    await this.store.del(`${this.prefix}:${normalized}`);
+  }
+
+  private prune(): void {
+    if (this.memory.size === 0) return;
     const now = this.now();
     for (const [intentId, expiresAt] of this.memory) {
-      if (expiresAt <= now) {
-        this.memory.delete(intentId);
-      }
+      if (expiresAt <= now) this.memory.delete(intentId);
     }
   }
 }
@@ -90,14 +101,10 @@ export function extractOutboxIntentId(
   }
   if (headerValue instanceof Buffer) {
     const decoded = headerValue.toString("utf8").trim();
-    if (decoded.length > 0) {
-      return decoded;
-    }
+    if (decoded.length > 0) return decoded;
   }
 
-  if (!event || typeof event !== "object" || Array.isArray(event)) {
-    return undefined;
-  }
+  if (!event || typeof event !== "object" || Array.isArray(event)) return undefined;
 
   const candidate = event as Record<string, unknown>;
   return typeof candidate["outboxIntentId"] === "string" && candidate["outboxIntentId"].trim().length > 0
