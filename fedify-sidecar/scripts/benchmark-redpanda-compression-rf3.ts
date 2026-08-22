@@ -73,8 +73,6 @@ async function main(): Promise<void> {
       singletonP99: r(entry.producer.singletonAckMs.p99, gzip.producer.singletonAckMs.p99),
     },
   }));
-  const candidates = comparisons.filter((entry) => entry.arm !== "gzip" && entry.ratiosToGzip.topicDisk <= 1.25 && entry.ratiosToGzip.clusterNetwork <= 1.25 && entry.ratiosToGzip.totalCpu <= 0.85 && entry.ratiosToGzip.singletonP95 <= 1.15 && entry.ratiosToGzip.singletonP99 <= 1.20);
-  candidates.sort((a, b) => a.ratiosToGzip.totalCpu - b.ratiosToGzip.totalCpu || a.ratiosToGzip.clusterNetwork - b.ratiosToGzip.clusterNetwork);
   const summary = {
     version: 1,
     generatedAt: new Date().toISOString(),
@@ -93,14 +91,14 @@ async function main(): Promise<void> {
       isolatedWarmupTopic: true,
       storageMetric: "sum of replicated disk bytes for the measured bulk topic only; the separate singleton latency topic is excluded so storage, raw-byte, event-count, CPU, and network metrics describe the same bulk workload",
       networkMetric: "sum of RX+TX deltas across all three broker containers; this intentionally counts work at both endpoints and is used only for matched relative comparison",
+      decisionPolicy: "none; this script is measurement-only and analyze-redpanda-compression-rf3.mjs is the sole promotion authority",
     },
     runs,
     medians,
     comparisons,
-    selectedArm: candidates[0]?.arm ?? "gzip",
   };
   writeFileSync(OUTPUT, `${JSON.stringify(summary, null, 2)}\n`);
-  console.log(JSON.stringify({ medians, comparisons, selectedArm: summary.selectedArm }, null, 2));
+  console.log(JSON.stringify({ medians, comparisons }, null, 2));
 }
 
 async function startCluster(): Promise<void> {
