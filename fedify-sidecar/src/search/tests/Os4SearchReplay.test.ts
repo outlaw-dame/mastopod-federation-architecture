@@ -31,36 +31,57 @@ function makePayload(raw: string, pause = vi.fn(() => vi.fn())) {
   };
 }
 
-function failingService(maxProcessingAttempts: number) {
+function serviceWithProjector(options: { fail?: boolean; maxProcessingAttempts?: number } = {}) {
   const service = createSearchIndexerService({
     brokers: ['localhost:9092'],
     redis: null,
-    maxProcessingAttempts,
+    maxProcessingAttempts: options.maxProcessingAttempts ?? 2,
     backpressureRetryDelayMs: 60_000,
   });
+  const has = vi.fn(async () => false);
   const claim = vi.fn(async () => true);
-  const release = vi.fn(async () => undefined);
   const send = vi.fn(async () => []);
-  (service as any).outboxIntentDeduper = { claim, release };
+  const onApFirehoseEvent = options.fail
+    ? vi.fn(async () => { throw new Error('opensearch unavailable'); })
+    : vi.fn(async () => undefined);
+  (service as any).outboxIntentDeduper = { has, claim };
   (service as any).producer = { send };
   (service as any).projector = {
-    onApFirehoseEvent: vi.fn(async () => { throw new Error('opensearch unavailable'); }),
-    onApTombstoneEvent: vi.fn(async () => { throw new Error('opensearch unavailable'); }),
+    onApFirehoseEvent,
+    onApTombstoneEvent: onApFirehoseEvent,
   };
-  return { service, claim, release, send };
+  return { service, has, claim, send, onApFirehoseEvent };
 }
 
 describe('OS4 search replay ordering', () => {
-  it('releases a claimed intent and leaves the offset unresolved on transient failure', async () => {
+  it('records completion only after a successful projection and before resolving the offset', async () => {
+    const { service, has, claim, onApFirehoseEvent } = serviceWithProjector();
+    const raw = JSON.stringify({ outboxIntentId: 'intent-os4', activity: { id: 'success' } });
+    const { payload, resolveOffset, heartbeat } = makePayload(raw);
+    const order: string[] = [];
+
+    has.mockImplementation(async () => { order.push('has'); return false; });
+    onApFirehoseEvent.mockImplementation(async () => { order.push('project'); });
+    claim.mockImplementation(async () => { order.push('complete'); return true; });
+    resolveOffset.mockImplementation(() => { order.push('resolve'); });
+
+    await (service as any).processBatch(payload);
+
+    expect(order).toEqual(['has', 'project', 'complete', 'resolve']);
+    expect(resolveOffset).toHaveBeenCalledWith('17');
+    expect(heartbeat).toHaveBeenCalledOnce();
+  });
+
+  it('does not record completion or resolve the offset on transient projection failure', async () => {
     vi.useFakeTimers();
-    const { service, claim, release, send } = failingService(2);
+    const { service, has, claim, send } = serviceWithProjector({ fail: true, maxProcessingAttempts: 2 });
     const raw = JSON.stringify({ outboxIntentId: 'intent-os4', activity: { id: 'a1' } });
     const { payload, resolveOffset, heartbeat, pause } = makePayload(raw);
 
     await (service as any).processBatch(payload);
 
-    expect(claim).toHaveBeenCalledWith('intent-os4');
-    expect(release).toHaveBeenCalledWith('intent-os4');
+    expect(has).toHaveBeenCalledWith('intent-os4');
+    expect(claim).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
     expect(resolveOffset).not.toHaveBeenCalled();
     expect(heartbeat).not.toHaveBeenCalled();
@@ -69,13 +90,13 @@ describe('OS4 search replay ordering', () => {
   });
 
   it('publishes the original payload to DLQ before resolving a poison offset', async () => {
-    const { service, release, send } = failingService(1);
+    const { service, claim, send } = serviceWithProjector({ fail: true, maxProcessingAttempts: 1 });
     const raw = JSON.stringify({ outboxIntentId: 'intent-os4', activity: { id: 'a2' } });
     const { payload, resolveOffset, heartbeat, pause } = makePayload(raw);
 
     await (service as any).processBatch(payload);
 
-    expect(release).toHaveBeenCalledWith('intent-os4');
+    expect(claim).not.toHaveBeenCalled();
     expect(pause).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledOnce();
 
@@ -91,7 +112,7 @@ describe('OS4 search replay ordering', () => {
   });
 
   it('does not resolve the source offset if DLQ publication fails', async () => {
-    const { service } = failingService(1);
+    const { service } = serviceWithProjector({ fail: true, maxProcessingAttempts: 1 });
     (service as any).producer = {
       send: vi.fn(async () => { throw new Error('redpanda unavailable'); }),
     };
