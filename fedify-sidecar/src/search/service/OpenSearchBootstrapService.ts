@@ -115,6 +115,9 @@ export class OpenSearchBootstrapService {
       const exists = await this.client.indices.exists({ index: indexName });
       if (exists.body === true) {
         logger.info('[OpenSearchBootstrap] Index already exists', { index: indexName });
+        if (indexName === CONTENT_INDEX) {
+          await this.clearLegacyDefaultPipeline(indexName);
+        }
         await this.safeUpdateMappings(indexName, mapping.mappings);
         return;
       }
@@ -127,6 +130,27 @@ export class OpenSearchBootstrapService {
         },
       });
       logger.info('[OpenSearchBootstrap] Index created', { index: indexName });
+    });
+  }
+
+  /**
+   * Older public-content-v1 indices may still point at the Phase 5.5 embedding
+   * ingest pipeline. OpenSearch uses `_none` to explicitly disable a default
+   * pipeline. Clearing it is required before operators can safely remove the
+   * obsolete pipeline and prevents legacy embedding-status mutation on new
+   * lexical-only documents.
+   */
+  private async clearLegacyDefaultPipeline(indexName: string): Promise<void> {
+    await this.client.indices.putSettings({
+      index: indexName,
+      body: {
+        index: {
+          default_pipeline: '_none',
+        },
+      },
+    });
+    logger.info('[OpenSearchBootstrap] Cleared legacy default ingest pipeline', {
+      index: indexName,
     });
   }
 
