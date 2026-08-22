@@ -50,7 +50,9 @@ export class RedpandaEventPublisher implements EventPublisher {
     this.source = config.source ?? "fedify-sidecar";
     this.maxEventBytes = config.maxEventBytes ?? 512_000;
     this.maxBatchSize = config.maxBatchSize ?? 64;
-    const resolvedCompression = resolveRedpandaCompression(config.compression ?? "zstd");
+    const resolvedCompression = config.compression === undefined
+      ? resolveRedpandaCompression()
+      : resolveRedpandaCompression(config.compression);
     this.compression = resolvedCompression.name === "none" ? undefined : resolvedCompression.type;
     this.producer = producer ?? createProducer(config);
   }
