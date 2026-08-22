@@ -11,7 +11,10 @@ services:
       timeout: 5s
       retries: 20
     volumes:
-      - ap_interop_misskey_db:/var/lib/postgresql/data
+      # PostgreSQL 18 moved versioned clusters below /var/lib/postgresql.
+      # Match Misskey's own 2026.7.0 compose contract so initialization does
+      # not reject a mount at the legacy pre-18 PGDATA path.
+      - ap_interop_misskey_db:/var/lib/postgresql
     networks:
       - ap-interop
 

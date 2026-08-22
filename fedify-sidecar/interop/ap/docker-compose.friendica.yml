@@ -22,7 +22,10 @@ services:
       friendica-db:
         condition: service_healthy
     environment: &friendica_environment
-      FRIENDICA_URL: https://friendica.test/
+      # Friendica concatenates ActivityPub route paths onto its configured
+      # base URL. A trailing slash produces non-canonical //inbox URLs and
+      # invalidates request-target interoperability for shared-inbox delivery.
+      FRIENDICA_URL: https://friendica.test
       FRIENDICA_ADMIN_MAIL: interop-admin@friendi.ca
       FRIENDICA_TZ: UTC
       FRIENDICA_LANG: en

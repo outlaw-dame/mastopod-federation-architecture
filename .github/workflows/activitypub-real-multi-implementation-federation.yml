@@ -73,7 +73,7 @@ jobs:
             remote_version: Castopod 1.9.0@sha256:3ad8970f1decc9c9009502be3efedcf2f5d9fda5c7c9fd85a4408edc84a0bbb9
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '948e53cc67c7b383f28b69aff8f7a6dc217b1166'
+      ACTIVITYPODS_SHA: '5dbc74e66ae05dd9a78843b8d9c9f73bc4ee84d7'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -335,6 +335,7 @@ jobs:
           [[ "${ready}" == true ]]
 
       - name: Prove native federation and remote persistence
+        id: native-proof
         continue-on-error: true
         working-directory: activitypods/pod-provider/backend
         shell: bash
@@ -444,6 +445,8 @@ jobs:
           [[ "${ready}" == true ]]
 
       - name: Prove sidecar federation, remote persistence, and real ActivityPods signer
+        id: external-proof
+        continue-on-error: true
         working-directory: activitypods/pod-provider/backend
         shell: bash
         env:
@@ -468,37 +471,51 @@ jobs:
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-signing.json"
 
       - name: Build exact implementation evidence summary
+        if: always()
         shell: bash
         env:
           REMOTE_VERSION: ${{ matrix.remote_version }}
+          NATIVE_PROOF_OUTCOME: ${{ steps.native-proof.outcome }}
+          EXTERNAL_PROOF_OUTCOME: ${{ steps.external-proof.outcome }}
         run: |
           set -euo pipefail
           node - <<'NODE'
           const fs = require('fs');
           const root = process.env.EVIDENCE_DIR;
-          const nativeOrigin = JSON.parse(fs.readFileSync(`${root}/native-origin.json`, 'utf8'));
-          const nativeAcceptance = JSON.parse(fs.readFileSync(`${root}/native-acceptance.json`, 'utf8'));
-          const externalOrigin = JSON.parse(fs.readFileSync(`${root}/external-origin.json`, 'utf8'));
-          const externalAcceptance = JSON.parse(fs.readFileSync(`${root}/external-acceptance.json`, 'utf8'));
-          const signing = JSON.parse(fs.readFileSync(`${root}/external-signing.json`, 'utf8'));
-          if (!nativeOrigin.ok || !nativeAcceptance.ok || !externalAcceptance.ok || !signing.ok ||
-              externalOrigin.ok !== true || externalOrigin.mode !== 'external' ||
-              externalOrigin.durableHandoffQueued !== true || externalOrigin.nativeRemotePostSuppressed !== true ||
-              signing.activityId !== externalOrigin.activityId || signing.actorUri !== externalOrigin.actorUri) {
-            throw new Error('incomplete or invalid external-delivery evidence');
-          }
+          const readJson = name => {
+            try { return JSON.parse(fs.readFileSync(`${root}/${name}`, 'utf8')); }
+            catch { return null; }
+          };
+          const nativeOrigin = readJson('native-origin.json');
+          const nativeAcceptance = readJson('native-acceptance.json');
+          const externalOrigin = readJson('external-origin.json');
+          const externalAcceptance = readJson('external-acceptance.json');
+          const signing = readJson('external-signing.json');
+          const nativeComplete = process.env.NATIVE_PROOF_OUTCOME === 'success' &&
+            nativeOrigin?.ok === true && nativeOrigin?.mode === 'native' && nativeAcceptance?.ok === true;
+          const externalComplete = process.env.EXTERNAL_PROOF_OUTCOME === 'success' &&
+            externalOrigin?.ok === true && externalOrigin?.mode === 'external' &&
+            externalOrigin?.durableHandoffQueued === true && externalOrigin?.nativeRemotePostSuppressed === true &&
+            externalAcceptance?.ok === true && signing?.ok === true &&
+            signing?.activityId === externalOrigin?.activityId && signing?.actorUri === externalOrigin?.actorUri;
+          const complete = nativeComplete && externalComplete;
           const summary = {
             schema: 'activitypods.activitypub.real-multi-implementation.v1',
-            complete: true,
+            complete,
             target: process.env.TARGET,
             remoteVersion: process.env.REMOTE_VERSION,
             activityPodsSha: process.env.ACTIVITYPODS_SHA,
             federationSha: process.env.FEDERATION_SHA,
-            native: { actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, sidecarRunning: false },
-            external: { actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64 }
+            native: nativeComplete
+              ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, sidecarRunning: false }
+              : { complete: false, stepOutcome: process.env.NATIVE_PROOF_OUTCOME },
+            external: externalComplete
+              ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64 }
+              : { complete: false, stepOutcome: process.env.EXTERNAL_PROOF_OUTCOME }
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
           console.log(JSON.stringify(summary, null, 2));
+          if (!complete) throw new Error('both federation modes require valid remote-persistence and signer evidence');
           NODE
 
       - name: Upload implementation evidence
@@ -525,9 +542,9 @@ jobs:
             gotosocial) docker compose -f "${COMPOSE_FILE}" logs --no-color gotosocial-app 2>/dev/null || true ;;
             akkoma) docker compose -f "${COMPOSE_FILE}" --profile akkoma logs --no-color akkoma-app 2>/dev/null || true ;;
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
-            misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app 2>/dev/null || true ;;
+            misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
             friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true ;;
-            castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app 2>/dev/null || true ;;
+            castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
           esac
 

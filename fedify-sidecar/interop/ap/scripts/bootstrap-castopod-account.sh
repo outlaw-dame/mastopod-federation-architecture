@@ -24,11 +24,22 @@ compose up -d castopod-db castopod-redis castopod-app
 ready=false
 attempt=1
 while [ "${attempt}" -le 60 ]; do
-  if compose exec -T castopod-app php -r 'exit(is_file("spark") ? 0 : 1);'; then ready=true; break; fi
+  # The image is considered started before its official entrypoint finishes
+  # rendering .env. Invoking Spark during that window can fail before
+  # CodeIgniter defines its environment constants. Require both the CLI and
+  # the non-empty generated environment file before running installer tasks.
+  if compose exec -T castopod-app php -r 'exit(is_file("spark") && is_file(".env") && filesize(".env") > 0 ? 0 : 1);'; then
+    ready=true
+    break
+  fi
   sleep 2
   attempt=$((attempt + 1))
 done
-[ "${ready}" = true ] || { compose logs --no-color castopod-app >&2; exit 1; }
+[ "${ready}" = true ] || {
+  echo "Castopod entrypoint did not finish rendering its runtime environment" >&2
+  compose logs --no-color castopod-app >&2
+  exit 1
+}
 
 compose exec -T castopod-app php spark install:init-database
 if ! compose exec -T castopod-db /bin/sh -lc \

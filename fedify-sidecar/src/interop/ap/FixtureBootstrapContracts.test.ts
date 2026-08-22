@@ -41,6 +41,8 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(bootstrap).toContain("TARGET_ACTOR_URI=https://misskey.test/users/%s");
     expect(compose).toContain("misskey/misskey:2026.7.0@sha256:2fd5c68f");
     expect(compose).toContain("postgres:18-alpine@sha256:d3e1620b");
+    expect(compose).toContain("ap_interop_misskey_db:/var/lib/postgresql");
+    expect(compose).not.toContain("ap_interop_misskey_db:/var/lib/postgresql/data");
   });
 
   it("uses Friendica's official installer and required background worker", () => {
@@ -55,10 +57,26 @@ describe("real federation fixture bootstrap contracts", () => {
 
     expect(compose).toContain("friendica:2026.05@sha256:e496eeb3");
     expect(compose).toContain("entrypoint: /cron.sh");
+    expect(compose).toContain("FRIENDICA_URL: https://friendica.test\n");
+    expect(compose).not.toContain("FRIENDICA_URL: https://friendica.test/\n");
     expect(compose).toContain("CURL_CA_BUNDLE: /interop/runtime/certs/rootCA.crt");
     expect(compose).not.toContain("FRIENDICA_NO_VALIDATION");
     expect(bootstrap).toContain("php bin/console.php user add");
     expect(bootstrap).toContain("compose up -d friendica-worker");
+  });
+
+  it("records each mode outcome and fails closed on incomplete evidence", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toContain("id: native-proof");
+    expect(workflow).toContain("id: external-proof");
+    expect(workflow).toContain("NATIVE_PROOF_OUTCOME: ${{ steps.native-proof.outcome }}");
+    expect(workflow).toContain("EXTERNAL_PROOF_OUTCOME: ${{ steps.external-proof.outcome }}");
+    expect(workflow).toContain("complete: false, stepOutcome:");
+    expect(workflow).toContain("if (!complete) throw new Error");
   });
 
   it("creates a Castopod actor through the production podcast model", () => {
@@ -77,6 +95,7 @@ describe("real federation fixture bootstrap contracts", () => {
 
     expect(compose).toContain("castopod/castopod:1.9.0@sha256:3ad8970f");
     expect(compose).not.toContain("CP_DISABLE_HTTPS");
+    expect(bootstrap).toContain('is_file(".env") && filesize(".env") > 0');
     expect(bootstrap).toContain("php spark install:init-database");
     expect(bootstrap).toContain("php spark install:create-superadmin");
     expect(bootstrap).toContain("php spark interop:create-podcast");
@@ -84,6 +103,24 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(command).toContain("imagecreatetruecolor(1400, 1400)");
     expect(command).not.toContain("private_key' =>");
     expect(command).not.toContain("public_key' =>");
+  });
+
+  it("does not mislabel hosted-service blockers or unproven candidates as coverage", () => {
+    const coverage = readFileSync(
+      resolve(process.cwd(), "interop/ap/EXTERNAL-IMPLEMENTATION-COVERAGE.md"),
+      "utf8",
+    );
+
+    expect(coverage).toContain("Pixelfed's MySQL database | Executable lane, but federation persistence is not yet proven");
+    expect(coverage).toContain("Exact-head candidate lane; not covered until CI proves both modes");
+    expect(coverage).toContain("Hosted Micro.blog blocker");
+    expect(coverage).toContain("Hosted write.as blocker");
+    expect(coverage).toContain("must not be reported as write.as coverage");
+    for (const target of ["Pixelfed", "Misskey", "Friendica", "Castopod", "Micro.blog", "write.as"]) {
+      const row = coverage.split("\n").find(line => line.startsWith(`| ${target} |`));
+      expect(row).toBeDefined();
+      expect(row).not.toMatch(/\| Covered\s*\|$/);
+    }
   });
 
   it("uses an MX-reachable default for Mastodon CLI account validation", () => {
