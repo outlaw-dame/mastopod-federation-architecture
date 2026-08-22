@@ -1,36 +1,15 @@
 /**
- * SearchIndexerService — Option 2: Dedicated Search Indexer Service
+ * Dedicated public search projection consumer.
  *
- * Self-contained pipeline:
- *
- *   ap.firehose.v1  ──►  ApSearchProjector  ──►  SearchEventBus
- *   ap.tombstones.v1                                    │
- *                                                       ▼
- *                                            PublicContentIndexWriter
- *                                                       │
- *                                                       ▼
- *                                             OpenSearch  public-content-v1
- *
- * Ownership:
- *   - Manages its own Kafka consumer group (never shares with other features).
- *   - Uses an in-process SearchEventBus so search events never go back to
- *     Redpanda (no extra topic hop required).
- *   - Falls back to InMemorySearchDocAliasCache when no Redis client is provided
- *     (suitable for single-process deployments and tests).
- *
- * Backpressure:
- *   - When IndexWriter throws, the consumer is paused and the failed payload is
- *     re-queued internally.  Retry begins after BACKPRESSURE_RETRY_DELAY_MS.
- *
- * Topic names:
- *   Defaults match the V6 topology (ap.firehose.v1, ap.tombstones.v1).
- *   Override via REDPANDA_FIREHOSE_TOPIC / REDPANDA_TOMBSTONE_TOPIC env vars or
- *   the config object.
+ * Current OS3 architecture selects OpenSearch lexical/faceted storage by
+ * default. Qdrant and dual modes remain explicit opt-in compatibility paths for
+ * future vector experiments; they are not part of the default deployment.
  */
 
 import { Kafka, Consumer, EachBatchPayload, logLevel } from 'kafkajs';
 import { Client as OpenSearchNativeClient } from '@opensearch-project/opensearch';
 import { logger } from '../../utils/logger.js';
+import { resolveSearchBackend } from '../../config/v6-config.js';
 import { ApSearchProjector } from '../projectors/ApSearchProjector.js';
 import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter.js';
 import { PublicAuthorIndexWriter } from '../writer/PublicAuthorIndexWriter.js';
@@ -55,72 +34,47 @@ import { OutboxIntentDeduper, extractOutboxIntentId } from '../../utils/OutboxIn
 import { normalizePublicSearchConsent } from '../../utils/searchConsent.js';
 import { ensureRedpandaCompressionCodec } from '../../streams/kafka-compression.js';
 
-// ─── Config ─────────────────────────────────────────────────────────────────
-
 export interface SearchIndexerServiceConfig {
-  /** Redpanda/Kafka broker list */
   brokers: string[];
-  /** KafkaJS clientId (should be unique per node) */
   clientId: string;
-  /** Consumer group ID — do NOT share with opensearch-indexer legacy group */
   groupId: string;
-
-  /** V6 firehose topic (default: ap.firehose.v1) */
   firehoseTopic: string;
-  /** V6 tombstone topic (default: ap.tombstones.v1) */
   tombstoneTopic: string;
 
-  /** OpenSearch node URL */
   opensearchUrl: string;
-  /** Optional basic-auth username */
   opensearchUsername?: string;
-  /** Optional basic-auth password */
   opensearchPassword?: string;
-  /** Whether to reject self-signed TLS certs (default: true) */
   opensearchSslVerify: boolean;
 
-  /** Active search backend. `dual` mirrors writes to Qdrant-ready payloads while retaining OpenSearch. */
   searchBackend: 'opensearch' | 'qdrant' | 'dual';
-  /** Qdrant base URL */
   qdrantUrl: string;
-  /** Optional Qdrant API key */
   qdrantApiKey?: string;
-  /** Qdrant collection name */
   qdrantCollectionName: string;
-  /** Qdrant dense vector size */
   qdrantVectorSize: number;
-  /** Qdrant request timeout */
   qdrantRequestTimeoutMs: number;
 
-  /** Redis client for alias cache (provide `null` to use in-memory fallback) */
   redis: {
     get(key: string): Promise<string | null>;
     set(key: string, value: string, ...args: Array<string | number>): Promise<unknown>;
   } | null;
 
-  /** How long to wait before retrying after a backend write failure (ms) */
   backpressureRetryDelayMs: number;
-  /** TTL for local outbox-intent dedupe keys. */
   outboxIntentDedupTtlSec: number;
 }
-
-// ─── No-op identity resolver ────────────────────────────────────────────────
-// Used by default when the full IdentityBindingRepository is not available
-// (i.e. most search-indexer deployments that don't need canonical-ID resolution).
 
 class PassThroughIdentityAliasResolver implements IdentityAliasResolver {
   async resolveByCanonicalId(canonicalId: string): Promise<ResolvedIdentity> {
     return { canonicalId };
   }
+
   async resolveByApUri(apUri: string): Promise<ResolvedIdentity> {
     return { apUri };
   }
+
   async resolveByAtDid(did: string): Promise<ResolvedIdentity> {
     return { atDid: did };
   }
 }
-
-// ─── Service ────────────────────────────────────────────────────────────────
 
 export class SearchIndexerService {
   private readonly config: SearchIndexerServiceConfig;
@@ -143,12 +97,8 @@ export class SearchIndexerService {
   ) {
     this.config = config;
 
-    // This service owns an independent Kafka consumer group and can be deployed
-    // without the feed consumer. Register the process-global codec table here so
-    // Zstd decode never depends on another component's construction order.
     ensureRedpandaCompressionCodec();
 
-    // ── Kafka consumer ───────────────────────────────────────────────────
     this.kafka = new Kafka({
       clientId: config.clientId,
       brokers: config.brokers,
@@ -156,9 +106,10 @@ export class SearchIndexerService {
     });
     this.consumer = this.kafka.consumer({ groupId: config.groupId });
 
-    // ── Search backend clients ──────────────────────────────────────────
-    const enableOpenSearch = config.searchBackend === 'opensearch' || config.searchBackend === 'dual';
-    const enableQdrant = config.searchBackend === 'qdrant' || config.searchBackend === 'dual';
+    const enableOpenSearch =
+      config.searchBackend === 'opensearch' || config.searchBackend === 'dual';
+    const enableQdrant =
+      config.searchBackend === 'qdrant' || config.searchBackend === 'dual';
 
     let openSearchClient: DefaultOpenSearchClient | undefined;
     let authorClient: DefaultOpenSearchAuthorClient | undefined;
@@ -196,29 +147,27 @@ export class SearchIndexerService {
     this.contentStore = qdrantClient ?? openSearchClient!;
     this.authorStore = authorClient ?? new NoopPublicAuthorStore();
 
-    // ── Alias cache ──────────────────────────────────────────────────────
     const aliasCache: SearchDocAliasCache = config.redis
       ? new RedisSearchDocAliasCache(config.redis)
       : new InMemorySearchDocAliasCache();
 
     const dedupService = new DefaultSearchDedupService(aliasCache);
     this.outboxIntentDeduper = new OutboxIntentDeduper({
-      prefix: "search:outbox-intent",
+      prefix: 'search:outbox-intent',
       ttlSeconds: config.outboxIntentDedupTtlSec,
       store: config.redis,
     });
 
-    // ── In-process event bus ──────────────────────────────────────────────
     this.bus = new SearchEventBus();
     this.writer = new PublicContentIndexWriter(this.contentStore, aliasCache, dedupService);
 
-    // Wire bus → writer
     this.bus.on('search.public.upsert.v1', async (payload) => {
       await this.writer.onUpsert(payload as SearchPublicUpsertV1);
     });
     this.bus.on('search.public.delete.v1', async (payload) => {
       await this.writer.onDelete(payload as SearchPublicDeleteV1);
     });
+
     this.authorWriter = new PublicAuthorIndexWriter(this.authorStore);
     this.bus.on('search.public.delete-by-author.v1', async (payload) => {
       await this.writer.onDeleteByAuthor(payload as SearchPublicDeleteByAuthorV1);
@@ -230,14 +179,10 @@ export class SearchIndexerService {
       await this.authorWriter.onDelete(payload as SearchAuthorDeleteV1);
     });
 
-    // ── Projector ────────────────────────────────────────────────────────
     const resolver = identityResolver ?? new PassThroughIdentityAliasResolver();
     this.projector = new ApSearchProjector(resolver, this.bus);
   }
 
-  /**
-   * Initialize the active backend (idempotent — safe to call on every startup).
-   */
   async initialize(): Promise<void> {
     if (this.contentStore instanceof DefaultOpenSearchClient) {
       await this.contentStore.initializeIndex();
@@ -245,14 +190,12 @@ export class SearchIndexerService {
     if (this.authorStore instanceof DefaultOpenSearchAuthorClient) {
       await this.authorStore.initializeIndex();
     }
+
     logger.info('[SearchIndexerService] Search backend initialized', {
       backend: this.config.searchBackend,
     });
   }
 
-  /**
-   * Start consuming from Redpanda and indexing into the configured search backend.
-   */
   async start(): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
@@ -277,9 +220,6 @@ export class SearchIndexerService {
     });
   }
 
-  /**
-   * Gracefully stop the consumer.
-   */
   async stop(): Promise<void> {
     if (!this.isRunning) return;
     this.isRunning = false;
@@ -287,15 +227,12 @@ export class SearchIndexerService {
     logger.info('[SearchIndexerService] Stopped');
   }
 
-  // ─── Private ───────────────────────────────────────────────────────────────
-
   private async processBatch(payload: EachBatchPayload): Promise<void> {
     const { batch, resolveOffset, heartbeat, isRunning, isStale, pause } = payload;
 
     for (const message of batch.messages) {
       if (!isRunning() || isStale()) break;
 
-      // Backpressure: wait until OpenSearch recovers
       if (this.backpressureActive) {
         pause();
         return;
@@ -313,10 +250,11 @@ export class SearchIndexerService {
           event,
           message.headers as Record<string, Buffer | string | undefined> | undefined,
         );
+
         if (outboxIntentId) {
           const claimed = await this.outboxIntentDeduper.claim(outboxIntentId);
           if (!claimed) {
-            logger.debug("[SearchIndexerService] Skipping duplicate local outbox intent replay", {
+            logger.debug('[SearchIndexerService] Skipping duplicate local outbox intent replay', {
               outboxIntentId,
               topic: batch.topic,
               offset: message.offset,
@@ -330,11 +268,10 @@ export class SearchIndexerService {
         if (batch.topic === this.config.tombstoneTopic) {
           await this.projector.onApTombstoneEvent(event);
         } else {
-          // FEP-268d consent gate: explicit opt-out skips indexing.
-          const consent = normalizePublicSearchConsent((event["meta"] as any)?.searchConsent);
+          const consent = normalizePublicSearchConsent((event['meta'] as any)?.searchConsent);
           if (consent?.isPublic === false) {
             logger.debug('[SearchIndexerService] Skipping non-searchable activity (FEP-268d)', {
-              activityId: (event["activity"] as any)?.id,
+              activityId: (event['activity'] as any)?.id,
               source: consent.source,
             });
             resolveOffset(message.offset);
@@ -347,12 +284,11 @@ export class SearchIndexerService {
 
         resolveOffset(message.offset);
         await heartbeat();
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
+      } catch (error: unknown) {
         logger.error('[SearchIndexerService] Message processing error — activating backpressure', {
           topic: batch.topic,
           offset: message.offset,
-          error: msg,
+          error: error instanceof Error ? error.message : String(error),
         });
         this.activateBackpressure(pause);
         return;
@@ -367,14 +303,13 @@ export class SearchIndexerService {
     logger.warn('[SearchIndexerService] Backpressure active — consumer paused', {
       retryInMs: this.config.backpressureRetryDelayMs,
     });
+
     setTimeout(() => {
       this.backpressureActive = false;
       logger.info('[SearchIndexerService] Backpressure cleared — consumer will resume on next poll');
     }, this.config.backpressureRetryDelayMs);
   }
 }
-
-// ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSearchIndexerService(
   overrides?: Partial<SearchIndexerServiceConfig>,
@@ -396,25 +331,17 @@ export function createSearchIndexerService(
     qdrantCollectionName: process.env['QDRANT_COLLECTION_NAME'] ?? 'public-content-v1',
     qdrantVectorSize: parseInt(process.env['QDRANT_VECTOR_SIZE'] ?? '1024', 10),
     qdrantRequestTimeoutMs: parseInt(process.env['QDRANT_REQUEST_TIMEOUT_MS'] ?? '5000', 10),
-    redis: null, // callers inject a Redis client if available
+    redis: null,
     backpressureRetryDelayMs: parseInt(
       process.env['SEARCH_INDEXER_BACKPRESSURE_RETRY_MS'] ?? '10000',
       10,
     ),
     outboxIntentDedupTtlSec: parseInt(
-      process.env["SEARCH_INDEXER_OUTBOX_INTENT_DEDUP_TTL_SEC"] ?? `${60 * 60 * 24 * 7}`,
+      process.env['SEARCH_INDEXER_OUTBOX_INTENT_DEDUP_TTL_SEC'] ?? `${60 * 60 * 24 * 7}`,
       10,
     ),
     ...overrides,
   };
 
   return new SearchIndexerService(config, identityResolver);
-}
-
-function resolveSearchBackend(raw: string | undefined): 'opensearch' | 'qdrant' | 'dual' {
-  if (raw === 'opensearch' || raw === 'qdrant' || raw === 'dual') {
-    return raw;
-  }
-
-  return 'dual';
 }
