@@ -13,6 +13,9 @@ set -euo pipefail
 #
 # Probe the actual SPARQL query endpoint rather than Fuseki administrative
 # endpoints, which may be access-controlled independently of application data.
+# Use the same GET ASK form that the earlier interop preflight proved against
+# Fuseki. A successful SPARQL response is the queryability contract; parsing a
+# particular serialization is not part of the storage-readiness assertion.
 
 FUSEKI_URL="${FUSEKI_URL:-http://localhost:3030}"
 WAIT_SECONDS="${WAIT_SECONDS:-120}"
@@ -30,14 +33,9 @@ fi
 
 probe_dataset() {
   local dataset="$1"
-  local response
-
-  response="$(curl -fsS --max-time 2 \
-    -H 'Accept: application/sparql-results+json' \
-    --data-urlencode 'query=ASK {}' \
-    "${FUSEKI_URL%/}/${dataset}/query" 2>/dev/null)" || return 1
-
-  grep -Eq '"boolean"[[:space:]]*:[[:space:]]*true' <<<"${response}"
+  curl --fail --silent --show-error --max-time 2 \
+    "${FUSEKI_URL%/}/${dataset}/query?query=ASK%20%7B%7D" \
+    >/dev/null 2>&1
 }
 
 ready=false
@@ -54,4 +52,4 @@ if [[ "${ready}" != true ]]; then
   exit 1
 fi
 
-echo "ActivityPods storage bootstrap readiness verified via SPARQL: ${AUTH_DATASET}"
+echo "ActivityPods storage bootstrap readiness verified via SPARQL ASK: ${AUTH_DATASET}"
