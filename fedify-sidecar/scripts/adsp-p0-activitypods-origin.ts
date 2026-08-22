@@ -14,7 +14,7 @@ async function verifyActivityPodsStorage(): Promise<void> {
   await execFileAsync("bash", [storagePreflight], {
     env: {
       ...process.env,
-      FUSEKI_URL: process.env["ADSP_ACTIVITYPODS_FUSEKI_URL"] ?? "http://127.0.0.1:3040",
+      FUSEKI_URL: process.env["ADSP_ACTIVITYPODS_FUSEKI_URL"] ?? "http://localhost:3040",
     },
   });
 }
