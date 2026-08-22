@@ -62,13 +62,13 @@ describe("Redpanda Kafka compression", () => {
     expect(resolveConfiguredRedpandaCompression("gzip")).toMatchObject({
       name: "zstd",
       type: CompressionTypes.ZSTD,
-      zstdLevel: 2,
+      zstdLevel: 1,
     });
   });
 
-  it("uses benchmark-selected Zstd level 2 by default and validates explicit levels", () => {
+  it("uses benchmark-selected Zstd level 1 by default and validates explicit levels", () => {
     delete process.env["REDPANDA_ZSTD_LEVEL"];
-    expect(parseZstdLevel()).toBe(2);
+    expect(parseZstdLevel()).toBe(1);
     expect(parseZstdLevel("-5")).toBe(-5);
     expect(parseZstdLevel("3")).toBe(3);
     expect(parseZstdLevel("22")).toBe(22);
@@ -104,7 +104,7 @@ describe("Redpanda Kafka compression", () => {
     const resolved = resolveRedpandaCompression();
     expect(resolved.name).toBe("zstd");
     expect(resolved.type).toBe(CompressionTypes.ZSTD);
-    expect(resolved.zstdLevel).toBe(2);
+    expect(resolved.zstdLevel).toBe(1);
 
     const codecFactory = CompressionCodecs[CompressionTypes.ZSTD];
     expect(codecFactory).toBeTypeOf("function");
