@@ -53,6 +53,7 @@ import type {
 } from '../events/SearchEvents.js';
 import { OutboxIntentDeduper, extractOutboxIntentId } from '../../utils/OutboxIntentDeduper.js';
 import { normalizePublicSearchConsent } from '../../utils/searchConsent.js';
+import { ensureRedpandaCompressionCodec } from '../../streams/kafka-compression.js';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -141,6 +142,11 @@ export class SearchIndexerService {
     identityResolver?: IdentityAliasResolver,
   ) {
     this.config = config;
+
+    // This service owns an independent Kafka consumer group and can be deployed
+    // without the feed consumer. Register the process-global codec table here so
+    // Zstd decode never depends on another component's construction order.
+    ensureRedpandaCompressionCodec();
 
     // ── Kafka consumer ───────────────────────────────────────────────────
     this.kafka = new Kafka({

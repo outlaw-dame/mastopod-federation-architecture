@@ -3,6 +3,7 @@ import type { Consumer, EachBatchPayload } from "kafkajs";
 import { request } from "undici";
 import { z } from "zod";
 import { DefaultRetryClassifier, withRetry } from "../protocol-bridge/workers/Retry.js";
+import { ensureRedpandaCompressionCodec } from "../streams/kafka-compression.js";
 
 const mediaAssetSchema = z.object({
   assetId: z.string().min(1),
@@ -104,6 +105,8 @@ export class MediaAssetSyncConsumer {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+
+    ensureRedpandaCompressionCodec();
 
     const kafka = new Kafka({
       clientId: `${this.config.clientId}-media-assets`,

@@ -1,0 +1,195 @@
+name: RedPanda Compression Benchmark
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/redpanda-compression-benchmark.yml"
+      - "fedify-sidecar/scripts/benchmark-redpanda-compression.ts"
+      - "fedify-sidecar/scripts/analyze-redpanda-compression-benchmarks.mjs"
+      - "fedify-sidecar/src/streams/kafka-compression.ts"
+      - "fedify-sidecar/src/streams/tests/KafkaCompression.test.ts"
+      - "fedify-sidecar/src/streams/redpanda-producer.ts"
+      - "fedify-sidecar/package.json"
+      - "fedify-sidecar/package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redpanda-compression-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node20-compatibility:
+    name: Node 20 compression fallback contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.5"
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Prove Node 20 fallback and explicit-Zstd fail-closed behavior
+        working-directory: fedify-sidecar
+        run: npm exec -- vitest run src/streams/tests/KafkaCompression.test.ts
+
+  benchmark:
+    name: matched codec and Zstd-level matrix / trial ${{ matrix.trial }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Prepare evidence directory
+        run: mkdir -p measurements/redpanda-compression
+
+      - name: Run matched real Redpanda compression matrix
+        working-directory: fedify-sidecar
+        env:
+          REDPANDA_BENCH_IMAGE: redpandadata/redpanda:v24.1.3
+          REDPANDA_BENCH_SAMPLES: "5"
+          REDPANDA_BENCH_LATENCY_SAMPLES: "3"
+          REDPANDA_BENCH_PARTITIONS: "6"
+          REDPANDA_BENCH_BATCH_SIZE: "100"
+          REDPANDA_BENCH_SETTLE_MS: "1200"
+          REDPANDA_COMPRESSION_BENCH_OUTPUT: ../measurements/redpanda-compression/summary.json
+        run: npm exec -- tsx scripts/benchmark-redpanda-compression.ts
+
+      - name: Validate per-trial evidence contract
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = 'measurements/redpanda-compression/summary.json';
+          const summary = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const expected = ['none', 'gzip', 'zstd--1', 'zstd-1', 'zstd-2', 'zstd-3', 'zstd-4', 'zstd-6'];
+          const observed = summary.arms.map((entry) => entry.arm.id);
+          if (JSON.stringify(observed) !== JSON.stringify(expected)) {
+            throw new Error(`Unexpected benchmark arms: ${JSON.stringify(observed)}`);
+          }
+          for (const arm of summary.arms) {
+            if (arm.scenarios.length !== 6) {
+              throw new Error(`${arm.arm.id} has ${arm.scenarios.length} scenarios; expected 6`);
+            }
+            for (const scenario of arm.scenarios) {
+              const numeric = [
+                scenario.rawBytes,
+                scenario.topicDiskBytes,
+                scenario.producer.wallMs,
+                scenario.producer.cpuMs,
+                scenario.producer.eventsPerSecond,
+                scenario.producer.ackLatencyMs.p95,
+                scenario.producer.ackLatencyMs.p99,
+                scenario.producer.brokerIngressBytes,
+                scenario.consumer.wallMs,
+                scenario.consumer.cpuMs,
+                scenario.consumer.eventsPerSecond,
+                scenario.consumer.brokerEgressBytes,
+              ];
+              if (numeric.some((value) => !Number.isFinite(value) || value < 0)) {
+                throw new Error(`Invalid numeric evidence for ${arm.arm.id}/${scenario.scenario.mode}/${scenario.scenario.id}`);
+              }
+            }
+          }
+          console.log(`Trial evidence complete: ${summary.arms.length} arms`);
+          NODE
+
+      - name: Capture runner and Docker context
+        if: always()
+        run: |
+          {
+            echo "trial=${{ matrix.trial }}"
+            echo "runner=$(uname -a)"
+            echo "docker=$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
+            echo "cpu_count=$(nproc)"
+            echo "memory_kib=$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+          } > measurements/redpanda-compression/runner.txt
+
+      - name: Upload trial evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redpanda-compression-trial-${{ matrix.trial }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redpanda-compression
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Cleanup benchmark broker
+        if: always()
+        run: docker rm -f redpanda-compression-bench >/dev/null 2>&1 || true
+
+  decide:
+    name: aggregate three independent trials
+    needs: benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download trial evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: redpanda-compression-trial-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redpanda-compression-trials
+          merge-multiple: false
+
+      - name: Build cross-run decision
+        run: |
+          mkdir -p measurements/redpanda-compression-decision
+          mapfile -t summaries < <(find measurements/redpanda-compression-trials -name summary.json -type f | sort)
+          if [[ "${#summaries[@]}" -ne 3 ]]; then
+            echo "Expected exactly 3 trial summaries, found ${#summaries[@]}" >&2
+            printf '%s\n' "${summaries[@]}" >&2
+            exit 1
+          fi
+          node fedify-sidecar/scripts/analyze-redpanda-compression-benchmarks.mjs \
+            "${summaries[@]}" \
+            --output=measurements/redpanda-compression-decision/decision.json
+
+      - name: Validate promotion decision
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const decision = JSON.parse(fs.readFileSync('measurements/redpanda-compression-decision/decision.json', 'utf8'));
+          if (decision.trialCount !== 3) throw new Error(`Expected 3 trials, got ${decision.trialCount}`);
+          if (!decision.selectedArm) throw new Error('No compression arm selected');
+          const selected = decision.arms.find((arm) => arm.arm === decision.selectedArm);
+          if (!selected?.eligible) throw new Error(`Selected arm ${decision.selectedArm} is not eligible`);
+          console.log(JSON.stringify({ selectedArm: decision.selectedArm, medians: selected.medians, rejectionReasons: selected.rejectionReasons }, null, 2));
+          NODE
+
+      - name: Upload aggregate decision
+        uses: actions/upload-artifact@v4
+        with:
+          name: redpanda-compression-decision-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redpanda-compression-decision
+          if-no-files-found: error
+          retention-days: 30

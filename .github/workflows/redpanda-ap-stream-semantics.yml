@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   redpanda-ap-stream-semantics:
-    name: prove Stream1 Stream2 and AP firehose on real RedPanda
+    name: prove Stream1 Stream2 and AP firehose on real RedPanda with Zstd
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -91,21 +91,27 @@ jobs:
             ap.tombstones.v1
           )
           for topic in "${topics[@]}"; do
-            docker exec ap-stream-proof-redpanda rpk topic create "${topic}"
+            docker exec ap-stream-proof-redpanda rpk topic create "${topic}" --config compression.type=producer
           done
           docker exec ap-stream-proof-redpanda rpk topic list > measurements/redpanda-ap-streams/topics-before.txt
 
-      - name: Run routing and producer semantic contracts
+      - name: Run routing producer and compression contracts
         working-directory: fedify-sidecar
+        env:
+          REDPANDA_COMPRESSION: zstd
+          REDPANDA_ZSTD_LEVEL: '1'
         run: |
           npm exec -- vitest run \
+            src/streams/tests/KafkaCompression.test.ts \
             src/streams/tests/RedPandaActivityPubStreams.test.ts \
             src/delivery/tests/StreamOriginAuthority.test.ts
 
-      - name: Prove real broker stream membership
+      - name: Prove real broker stream membership with Zstd producer batches
         working-directory: fedify-sidecar
         env:
           REDPANDA_BROKERS: 127.0.0.1:19092
+          REDPANDA_COMPRESSION: zstd
+          REDPANDA_ZSTD_LEVEL: '1'
           STREAM1_TOPIC: ap.stream1.local-public.v1
           STREAM2_TOPIC: ap.stream2.remote-public.v1
           FIREHOSE_TOPIC: ap.firehose.v1
@@ -127,7 +133,7 @@ jobs:
           for topic in "${topics[@]}"; do
             {
               echo "=== ${topic} ==="
-              docker exec ap-stream-proof-redpanda rpk topic describe "${topic}"
+              docker exec ap-stream-proof-redpanda rpk topic describe "${topic}" -c
             } >> measurements/redpanda-ap-streams/topics-after.txt 2>&1
           done
           docker logs ap-stream-proof-redpanda > measurements/redpanda-ap-streams/redpanda.log 2>&1

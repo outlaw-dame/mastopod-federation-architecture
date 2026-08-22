@@ -29,6 +29,7 @@ import { Kafka, logLevel } from "kafkajs";
 import type { Consumer, EachBatchPayload } from "kafkajs";
 import { request } from "undici";
 import type { CanonicalV1Event } from "../../streams/v6-topology.js";
+import { ensureRedpandaCompressionCodec } from "../../streams/kafka-compression.js";
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -135,6 +136,11 @@ export class CanonicalNotificationConsumer {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+
+    // canonical.v1 can contain producer-compressed Zstd batches. This consumer
+    // is independently constructible, so register the decoder here rather than
+    // relying on another sidecar component to have initialized KafkaJS first.
+    ensureRedpandaCompressionCodec();
 
     const kafka = new Kafka({
       clientId: `${this.config.clientId}-canonical-notifications`,

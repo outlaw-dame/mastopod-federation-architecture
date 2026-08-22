@@ -1,21 +1,21 @@
 /**
  * Streams Service
- * 
+ *
  * Manages the three core streams:
  * - Stream1: Local public activities (from pod outboxes)
  * - Stream2: Remote public activities (from Fedify inbox)
  * - Firehose: Combined Stream1 + Stream2
- * 
+ *
  * All streams are backed by RedPanda topics.
  */
 
-import { Kafka, Producer, Consumer, EachMessagePayload, CompressionTypes } from "kafkajs";
+import { Kafka, Producer, Consumer, EachMessagePayload, type CompressionTypes } from "kafkajs";
 import { logger } from "../utils/logger.js";
 import { config } from "../config/index.js";
 import { metrics } from "../metrics/index.js";
 import { OpenSearchService } from "../services/opensearch.js";
+import { ensureRedpandaCompressionCodec } from "./kafka-compression.js";
 
-// Stream topic names
 export const STREAM_TOPICS = {
   STREAM1_LOCAL: "stream1-local-public",
   STREAM2_REMOTE: "stream2-remote-public",
@@ -24,7 +24,6 @@ export const STREAM_TOPICS = {
 
 export type StreamTopic = typeof STREAM_TOPICS[keyof typeof STREAM_TOPICS];
 
-// Activity envelope for streams
 export interface StreamActivity {
   id: string;
   type: string;
@@ -38,18 +37,18 @@ export interface StreamActivity {
   raw: unknown;
 }
 
-/**
- * Streams Service
- * Handles publishing and consuming from Stream1, Stream2, and Firehose
- */
 export class StreamsService {
   private kafka: Kafka;
   private producer: Producer | null = null;
   private consumers = new Map<string, Consumer>();
   private isInitialized = false;
   private openSearchService: OpenSearchService | null = null;
+  private readonly compressionType: CompressionTypes;
 
   constructor() {
+    this.compressionType = ensureRedpandaCompressionCodec(
+      process.env["REDPANDA_COMPRESSION"] ?? "zstd",
+    );
     this.kafka = new Kafka({
       clientId: config.redpanda.clientId + "-streams",
       brokers: config.redpanda.brokers.split(","),
@@ -60,9 +59,6 @@ export class StreamsService {
     });
   }
 
-  /**
-   * Initialize the streams service
-   */
   async initialize(openSearchService?: OpenSearchService): Promise<void> {
     if (this.isInitialized) {
       return;
@@ -72,13 +68,11 @@ export class StreamsService {
 
     this.openSearchService = openSearchService ?? null;
 
-    // Create producer
     this.producer = this.kafka.producer({
       allowAutoTopicCreation: false,
     });
     await this.producer.connect();
 
-    // Ensure topics exist
     const admin = this.kafka.admin();
     await admin.connect();
 
@@ -93,9 +87,9 @@ export class StreamsService {
           numPartitions: 8,
           replicationFactor: 1,
           configEntries: [
-            { name: "retention.ms", value: "604800000" }, // 7 days
+            { name: "retention.ms", value: "604800000" },
             { name: "cleanup.policy", value: "delete" },
-            { name: "compression.type", value: "zstd" },
+            { name: "compression.type", value: "producer" },
           ],
         })),
       });
@@ -108,29 +102,16 @@ export class StreamsService {
     logger.info("Streams service initialized");
   }
 
-  /**
-   * Publish to Stream1 (local public activities)
-   */
   async publishToStream1(activity: StreamActivity): Promise<void> {
     await this.publish(STREAM_TOPICS.STREAM1_LOCAL, activity);
-    
-    // Also publish to Firehose
     await this.publish(STREAM_TOPICS.FIREHOSE, activity);
   }
 
-  /**
-   * Publish to Stream2 (remote public activities)
-   */
   async publishToStream2(activity: StreamActivity): Promise<void> {
     await this.publish(STREAM_TOPICS.STREAM2_REMOTE, activity);
-    
-    // Also publish to Firehose
     await this.publish(STREAM_TOPICS.FIREHOSE, activity);
   }
 
-  /**
-   * Publish activity to a stream topic
-   */
   private async publish(topic: StreamTopic, activity: StreamActivity): Promise<void> {
     if (!this.producer) {
       throw new Error("Streams service not initialized");
@@ -139,9 +120,9 @@ export class StreamsService {
     try {
       await this.producer.send({
         topic,
-        compression: CompressionTypes.ZSTD,
+        compression: this.compressionType,
         messages: [{
-          key: activity.actorDomain, // Partition by actor domain
+          key: activity.actorDomain,
           value: JSON.stringify(activity),
           headers: {
             "x-activity-type": activity.type,
@@ -164,9 +145,6 @@ export class StreamsService {
     }
   }
 
-  /**
-   * Start consuming from Firehose and indexing to OpenSearch
-   */
   async startFirehoseConsumer(): Promise<void> {
     if (!this.openSearchService) {
       logger.warn("OpenSearch service not configured, skipping Firehose consumer");
@@ -188,7 +166,6 @@ export class StreamsService {
 
     this.consumers.set(STREAM_TOPICS.FIREHOSE, consumer);
 
-    // Batch activities for bulk indexing
     let batch: StreamActivity[] = [];
     let batchTimeout: NodeJS.Timeout | null = null;
     const BATCH_SIZE = 100;
@@ -227,11 +204,9 @@ export class StreamsService {
 
           metrics.streamMessagesConsumed.inc({ stream: STREAM_TOPICS.FIREHOSE });
 
-          // Flush if batch is full
           if (batch.length >= BATCH_SIZE) {
             await flushBatch();
           } else if (!batchTimeout) {
-            // Set timeout for partial batch
             batchTimeout = setTimeout(flushBatch, BATCH_TIMEOUT_MS);
           }
         } catch (error) {
@@ -243,9 +218,6 @@ export class StreamsService {
     logger.info("Firehose consumer started");
   }
 
-  /**
-   * Create a StreamActivity from an ActivityPub activity
-   */
   static createStreamActivity(
     activity: unknown,
     origin: "local" | "remote"
@@ -255,7 +227,7 @@ export class StreamsService {
     const actorId = (
       typeof actorValue === "string" ? actorValue : (actorValue as any)?.id
     ) ?? "";
-    
+
     let actorDomain = "";
     try {
       actorDomain = new URL(actorId).hostname;
@@ -277,9 +249,6 @@ export class StreamsService {
     };
   }
 
-  /**
-   * Determine visibility of an activity
-   */
   private static determineVisibility(
     activity: Record<string, unknown>
   ): StreamActivity["visibility"] {
@@ -298,8 +267,7 @@ export class StreamsService {
       return "unlisted";
     }
 
-    // Check for followers collection
-    const hasFollowers = allRecipients.some(r => 
+    const hasFollowers = allRecipients.some(r =>
       r.includes("/followers") || r.includes("/following")
     );
 
@@ -310,9 +278,6 @@ export class StreamsService {
     return "direct";
   }
 
-  /**
-   * Normalize recipients to array of strings
-   */
   private static normalizeRecipients(recipients: unknown): string[] {
     if (!recipients) {
       return [];
@@ -329,17 +294,11 @@ export class StreamsService {
     return [];
   }
 
-  /**
-   * Check if an activity is public
-   */
   static isPublicActivity(activity: unknown): boolean {
     const visibility = this.createStreamActivity(activity, "local").visibility;
     return visibility === "public" || visibility === "unlisted";
   }
 
-  /**
-   * Stop all consumers
-   */
   async stop(): Promise<void> {
     logger.info("Stopping streams service...");
 
@@ -359,5 +318,4 @@ export class StreamsService {
   }
 }
 
-// Export singleton instance
 export const streamsService = new StreamsService();

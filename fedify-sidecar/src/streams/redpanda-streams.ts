@@ -1,70 +1,41 @@
 /**
  * RedPanda Streams Module
- * 
+ *
  * RedPanda is used as the streaming backbone for public activities (logs),
- * NOT as Fedify's work queue. This module handles:
- * 
- * - apub.public.local.v1 (Stream1): Public activities from local pods
- * - apub.public.remote.v1 (Stream2): Public activities from remote fediverse
- * - apub.public.firehose.v1: Combined local + remote for indexing
- * - apub.tombstone.v1: Delete/tombstone events for read model updates
- * 
- * Partition keys:
- * - Local: actorUri or podDataset
- * - Remote: originDomain
- * - Tombstone: objectId (for compaction)
+ * NOT as Fedify's work queue.
  */
 
-import { Kafka, Producer, Consumer, EachMessagePayload, CompressionTypes } from "kafkajs";
+import { Kafka, Producer, Consumer, EachMessagePayload, type CompressionTypes } from "kafkajs";
 import { createHash } from "node:crypto";
-import { ulid } from "ulid";
 import { logger } from "../utils/logger.js";
-
-// ============================================================================
-// Types
-// ============================================================================
+import { ensureRedpandaCompressionCodec } from "./kafka-compression.js";
 
 export interface RedPandaConfig {
   brokers: string[];
   clientId: string;
-  
-  // Topic names
   localPublicTopic: string;
   remotePublicTopic: string;
   firehoseTopic: string;
   tombstoneTopic: string;
-  
-  // Consumer settings
   consumerGroupId: string;
+  compressionType: CompressionTypes;
 }
 
-/**
- * Schema for local public activities (Stream1)
- * Emitted when ActivityPods commits a public activity to outbox
- */
 export interface LocalPublicActivity {
   schema: "ap.outbox.committed.v1";
   eventId: string;
   timestamp: string;
-  
-  // Source
   actorUri: string;
   podDataset?: string;
-  
-  // Activity
   activityId: string;
   objectId: string;
   activityType: string;
   activity: Record<string, unknown>;
-  
-  // Delivery targets (resolved by ActivityPods)
   deliveryTargets: Array<{
     recipientHost: string;
     inboxUrl: string;
     sharedInboxUrl?: string;
   }>;
-  
-  // Metadata
   meta: {
     isPublicIndexable: boolean;
     isDeleteOrTombstone: boolean;
@@ -72,66 +43,39 @@ export interface LocalPublicActivity {
   };
 }
 
-/**
- * Schema for remote public activities (Stream2)
- * Emitted when sidecar accepts a public activity from remote
- */
 export interface RemotePublicActivity {
   schema: "ap.inbound.accepted.v1";
   eventId: string;
   timestamp: string;
-  
-  // Origin
   originDomain: string;
   originActorUri: string;
-  
-  // Activity
   activityId: string;
   objectId?: string;
   activityType: string;
   activity: Record<string, unknown>;
-  
-  // Verification
   verification: {
     signatureVerified: boolean;
     keyId: string;
     verifiedAt: string;
   };
-  
-  // Metadata
   meta: {
     isPublicIndexable: boolean;
   };
 }
 
-/**
- * Schema for tombstone/delete events
- */
 export interface TombstoneEvent {
   schema: "ap.tombstone.v1";
   eventId: string;
   timestamp: string;
-  
-  // Object being deleted
   objectId: string;
   objectType?: string;
-  
-  // Actor who deleted
   actorUri: string;
-  
-  // Activity
   activityId: string;
   activityType: "Delete" | "Undo";
   activity: Record<string, unknown>;
-  
-  // Origin
   origin: "local" | "remote";
   originDomain?: string;
 }
-
-// ============================================================================
-// RedPanda Streams Implementation
-// ============================================================================
 
 export class RedPandaStreams {
   private kafka: Kafka;
@@ -147,10 +91,6 @@ export class RedPandaStreams {
       brokers: config.brokers,
     });
   }
-
-  // ==========================================================================
-  // Connection Management
-  // ==========================================================================
 
   async connect(): Promise<void> {
     if (this.isConnected) return;
@@ -179,25 +119,15 @@ export class RedPandaStreams {
     this.isConnected = false;
   }
 
-  // ==========================================================================
-  // Producers
-  // ==========================================================================
-
-  /**
-   * Produce a local public activity to Stream1.
-   * Partition key: actorUri (for per-actor ordering)
-   */
   async produceLocalPublic(activity: LocalPublicActivity): Promise<void> {
     if (!this.producer) throw new Error("Producer not connected");
 
-    const key = this.partitionKey(activity.actorUri);
-    
     await this.producer.send({
       topic: this.config.localPublicTopic,
-      compression: CompressionTypes.ZSTD,
+      compression: this.config.compressionType,
       messages: [
         {
-          key,
+          key: this.partitionKey(activity.actorUri),
           value: JSON.stringify(activity),
           headers: {
             schema: activity.schema,
@@ -214,21 +144,15 @@ export class RedPandaStreams {
     });
   }
 
-  /**
-   * Produce a remote public activity to Stream2.
-   * Partition key: originDomain (for per-domain isolation)
-   */
   async produceRemotePublic(activity: RemotePublicActivity): Promise<void> {
     if (!this.producer) throw new Error("Producer not connected");
 
-    const key = this.partitionKey(activity.originDomain);
-    
     await this.producer.send({
       topic: this.config.remotePublicTopic,
-      compression: CompressionTypes.ZSTD,
+      compression: this.config.compressionType,
       messages: [
         {
-          key,
+          key: this.partitionKey(activity.originDomain),
           value: JSON.stringify(activity),
           headers: {
             schema: activity.schema,
@@ -246,49 +170,38 @@ export class RedPandaStreams {
     });
   }
 
-  /**
-   * Produce to the firehose (combined stream).
-   * Called by a forwarder that reads local + remote and writes combined.
-   */
   async produceFirehose(activity: LocalPublicActivity | RemotePublicActivity): Promise<void> {
     if (!this.producer) throw new Error("Producer not connected");
 
-    // Determine partition key based on activity type
-    const key = "schema" in activity && activity.schema === "ap.outbox.committed.v1"
-      ? this.partitionKey((activity as LocalPublicActivity).actorUri)
-      : this.partitionKey((activity as RemotePublicActivity).originDomain);
-    
+    const key = activity.schema === "ap.outbox.committed.v1"
+      ? this.partitionKey(activity.actorUri)
+      : this.partitionKey(activity.originDomain);
+
     await this.producer.send({
       topic: this.config.firehoseTopic,
-      compression: CompressionTypes.ZSTD,
+      compression: this.config.compressionType,
       messages: [
         {
           key,
           value: JSON.stringify(activity),
           headers: {
-            schema: (activity as any).schema,
-            activityType: (activity as any).activityType,
+            schema: activity.schema,
+            activityType: activity.activityType,
           },
         },
       ],
     });
   }
 
-  /**
-   * Produce a tombstone event.
-   * Partition key: objectId (for compaction correctness)
-   */
   async produceTombstone(tombstone: TombstoneEvent): Promise<void> {
     if (!this.producer) throw new Error("Producer not connected");
 
-    const key = this.partitionKey(tombstone.objectId);
-    
     await this.producer.send({
       topic: this.config.tombstoneTopic,
-      compression: CompressionTypes.ZSTD,
+      compression: this.config.compressionType,
       messages: [
         {
-          key,
+          key: this.partitionKey(tombstone.objectId),
           value: JSON.stringify(tombstone),
           headers: {
             schema: tombstone.schema,
@@ -305,13 +218,6 @@ export class RedPandaStreams {
     });
   }
 
-  // ==========================================================================
-  // Consumers
-  // ==========================================================================
-
-  /**
-   * Create a consumer for the firehose (for OpenSearch indexing).
-   */
   async consumeFirehose(
     handler: (activity: LocalPublicActivity | RemotePublicActivity) => Promise<void>
   ): Promise<void> {
@@ -330,10 +236,9 @@ export class RedPandaStreams {
     await consumer.run({
       eachMessage: async ({ message }: EachMessagePayload) => {
         if (!message.value) return;
-        
+
         try {
-          const activity = JSON.parse(message.value.toString());
-          await handler(activity);
+          await handler(JSON.parse(message.value.toString()));
         } catch (err: any) {
           logger.error("Error processing firehose message", { error: err.message });
         }
@@ -345,9 +250,6 @@ export class RedPandaStreams {
     });
   }
 
-  /**
-   * Create a consumer for tombstones (for OpenSearch deletion).
-   */
   async consumeTombstones(
     handler: (tombstone: TombstoneEvent) => Promise<void>
   ): Promise<void> {
@@ -366,10 +268,9 @@ export class RedPandaStreams {
     await consumer.run({
       eachMessage: async ({ message }: EachMessagePayload) => {
         if (!message.value) return;
-        
+
         try {
-          const tombstone = JSON.parse(message.value.toString());
-          await handler(tombstone);
+          await handler(JSON.parse(message.value.toString()));
         } catch (err: any) {
           logger.error("Error processing tombstone message", { error: err.message });
         }
@@ -381,9 +282,6 @@ export class RedPandaStreams {
     });
   }
 
-  /**
-   * Create a consumer for local public activities (for delivery fanout).
-   */
   async consumeLocalPublic(
     handler: (activity: LocalPublicActivity) => Promise<void>
   ): Promise<void> {
@@ -402,10 +300,9 @@ export class RedPandaStreams {
     await consumer.run({
       eachMessage: async ({ message }: EachMessagePayload) => {
         if (!message.value) return;
-        
+
         try {
-          const activity = JSON.parse(message.value.toString());
-          await handler(activity);
+          await handler(JSON.parse(message.value.toString()));
         } catch (err: any) {
           logger.error("Error processing local public message", { error: err.message });
         }
@@ -417,23 +314,16 @@ export class RedPandaStreams {
     });
   }
 
-  // ==========================================================================
-  // Utilities
-  // ==========================================================================
-
-  /**
-   * Generate partition key (SHA256 hash for even distribution).
-   */
   private partitionKey(value: string): string {
     return createHash("sha256").update(value).digest("hex");
   }
 }
 
-// ============================================================================
-// Factory Function
-// ============================================================================
-
 export function createRedPandaStreams(config?: Partial<RedPandaConfig>): RedPandaStreams {
+  const compressionType = ensureRedpandaCompressionCodec(
+    process.env["REDPANDA_COMPRESSION"] ?? "zstd",
+  );
+
   const fullConfig: RedPandaConfig = {
     brokers: (process.env["REDPANDA_BROKERS"] || "localhost:9092").split(","),
     clientId: process.env["REDPANDA_CLIENT_ID"] || "fedify-sidecar",
@@ -442,40 +332,18 @@ export function createRedPandaStreams(config?: Partial<RedPandaConfig>): RedPand
     firehoseTopic: process.env["REDPANDA_FIREHOSE_TOPIC"] || "apub.public.firehose.v1",
     tombstoneTopic: process.env["REDPANDA_TOMBSTONE_TOPIC"] || "apub.tombstone.v1",
     consumerGroupId: process.env["REDPANDA_CONSUMER_GROUP"] || "fedify-sidecar",
+    compressionType,
     ...config,
   };
 
   return new RedPandaStreams(fullConfig);
 }
 
-// ============================================================================
-// Topic Creation Commands (for reference)
-// ============================================================================
-
 /**
  * RedPanda topic creation commands (run via rpk):
- * 
- * # Local public activities (Stream1)
- * rpk topic create apub.public.local.v1 \
- *   --partitions 12 \
- *   --config retention.ms=604800000 \
- *   --config cleanup.policy=delete
- * 
- * # Remote public activities (Stream2)
- * rpk topic create apub.public.remote.v1 \
- *   --partitions 12 \
- *   --config retention.ms=604800000 \
- *   --config cleanup.policy=delete
- * 
- * # Firehose (combined for indexing)
- * rpk topic create apub.public.firehose.v1 \
- *   --partitions 24 \
- *   --config retention.ms=2592000000 \
- *   --config cleanup.policy=delete
- * 
- * # Tombstones (with compaction for latest state)
- * rpk topic create apub.tombstone.v1 \
- *   --partitions 12 \
- *   --config retention.ms=7776000000 \
- *   --config cleanup.policy=compact,delete
+ *
+ * rpk topic create apub.public.local.v1 --partitions 12 --config retention.ms=604800000 --config cleanup.policy=delete --config compression.type=producer
+ * rpk topic create apub.public.remote.v1 --partitions 12 --config retention.ms=604800000 --config cleanup.policy=delete --config compression.type=producer
+ * rpk topic create apub.public.firehose.v1 --partitions 24 --config retention.ms=2592000000 --config cleanup.policy=delete --config compression.type=producer
+ * rpk topic create apub.tombstone.v1 --partitions 12 --config retention.ms=7776000000 --config cleanup.policy=compact,delete --config compression.type=producer
  */
