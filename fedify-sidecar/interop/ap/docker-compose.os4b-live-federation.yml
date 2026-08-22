@@ -1,0 +1,68 @@
+services:
+  opensearch:
+    image: opensearchproject/opensearch:3.8.0
+    environment:
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "127.0.0.1:19200:9200"
+    networks:
+      - ap-interop
+
+  fedify-sidecar:
+    environment:
+      ENABLE_OPENSEARCH_INDEXER: "true"
+      SEARCH_BACKEND: opensearch
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_SSL_VERIFY: "false"
+      APDM_INTEROP_PRIVATE_HOSTS: gotosocial,mastodon,akkoma,remote-content
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  remote-content-actor:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.interop
+    working_dir: /app
+    command: ["npx", "tsx", "src/interop/ap/ControlledRemoteContentActor.ts"]
+    environment:
+      REMOTE_CONTENT_HOST: 0.0.0.0
+      REMOTE_CONTENT_PORT: 8890
+      REMOTE_CONTENT_PUBLIC_ORIGIN: https://remote-content
+      REMOTE_CONTENT_SIDECAR_INBOX: https://sidecar/inbox
+      NODE_EXTRA_CA_CERTS: /interop/runtime/certs/rootCA.crt
+    volumes:
+      - ./runtime:/interop/runtime:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8890/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "127.0.0.1:18890:8890"
+    networks:
+      - ap-interop
+
+  ap-proxy:
+    volumes:
+      - ./caddy/Caddyfile.os4b-live:/etc/caddy/Caddyfile:ro
+      - ./runtime/certs:/certs:ro
+    networks:
+      ap-interop:
+        aliases:
+          - sidecar
+          - remote-content
+
+networks:
+  ap-interop:
