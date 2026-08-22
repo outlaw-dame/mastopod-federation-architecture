@@ -39,6 +39,12 @@ USER fedify
 # Environment
 ENV NODE_ENV=production
 ENV PORT=3001
+# The official image is Node 22 and therefore has native Zstandard support.
+# Producer-side Zstd level 1 is the preferred Redpanda event-log setting;
+# operators can roll writes back to gzip with REDPANDA_COMPRESSION=gzip while
+# capable consumers retain the Zstd decoder for historical batches.
+ENV REDPANDA_COMPRESSION=zstd
+ENV REDPANDA_ZSTD_LEVEL=1
 
 EXPOSE 3001
 
