@@ -82,9 +82,12 @@ export class PublicContentIndexWriter {
    * Ordered bulk fast path used by OS4b.
    *
    * Fresh unique documents are grouped into `_bulk` requests. Existing IDs and
-   * duplicate IDs stay sequential so merge/dedup semantics do not change. On a
-   * partial bulk failure, aliases are published only for the successful prefix
-   * and `failedIndex` identifies the first source event that must be replayed.
+   * duplicate IDs stay sequential so merge/dedup semantics do not change.
+   * OpenSearch bulk requests are non-transactional: when an item fails, later
+   * items may still succeed. We therefore publish aliases for every successful
+   * item before throwing the earliest source-index failure. This makes replay
+   * of the failed item/suffix safe even when OpenSearch committed a successful
+   * suffix in the original request.
    */
   async onUpsertBatch(events: SearchPublicUpsertV1[]): Promise<void> {
     if (events.length <= 1 || !this.osClient.getMany || !this.osClient.upsertMany) {
@@ -161,18 +164,35 @@ export class PublicContentIndexWriter {
         throw new PublicContentBatchError('OpenSearch bulk result cardinality mismatch', start);
       }
 
+      let earliestFailure: PublicContentBatchError | null = null;
       for (let j = 0; j < entries.length; j++) {
         const sourceIndex = start + j;
         const result = results[j]!;
         if (!result.ok) {
-          throw new PublicContentBatchError('OpenSearch bulk item failed', sourceIndex, result.error);
+          if (!earliestFailure) {
+            earliestFailure = new PublicContentBatchError(
+              'OpenSearch bulk item failed',
+              sourceIndex,
+              result.error,
+            );
+          }
+          continue;
         }
+
         try {
           await this.publishAliases(events[sourceIndex]!, entries[j]!.id);
         } catch (error) {
-          throw new PublicContentBatchError('Alias publication failed after bulk write', sourceIndex, error);
+          if (!earliestFailure || sourceIndex < earliestFailure.failedIndex) {
+            earliestFailure = new PublicContentBatchError(
+              'Alias publication failed after bulk write',
+              sourceIndex,
+              error,
+            );
+          }
         }
       }
+
+      if (earliestFailure) throw earliestFailure;
     }
   }
 
