@@ -1,0 +1,161 @@
+name: OpenSearch OS4b Live Federation
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/src/search/**'
+      - 'fedify-sidecar/src/delivery/**'
+      - 'fedify-sidecar/src/streams/**'
+      - 'fedify-sidecar/scripts/os4b-live-federation-*.ts'
+      - '.github/workflows/opensearch-os4b-live-federation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-federation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      REDIS_URL: redis://127.0.0.1:16379
+      REDPANDA_BROKERS: 127.0.0.1:19092
+      OPENSEARCH_URL: http://127.0.0.1:19200
+      OS4B_FEDERATION_COUNT: '240'
+      OS4B_FEDERATION_MARKER: os4b-live-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+      - name: Install sidecar dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Start Redis, Redpanda, and OpenSearch 3.8
+        run: |
+          set -euo pipefail
+          docker run -d --name os4b-live-redis -p 16379:6379 redis:7-alpine
+          docker run -d --name os4b-live-redpanda \
+            -p 19092:19092 \
+            redpandadata/redpanda:v25.1.4 \
+            redpanda start --overprovisioned --smp 1 --memory 768M --reserve-memory 0M --node-id 0 --check=false \
+              --kafka-addr external://0.0.0.0:19092 --advertise-kafka-addr external://127.0.0.1:19092
+          docker run -d --name os4b-live-opensearch \
+            -p 19200:9200 \
+            -e discovery.type=single-node \
+            -e DISABLE_SECURITY_PLUGIN=true \
+            -e 'OPENSEARCH_JAVA_OPTS=-Xms768m -Xmx768m' \
+            --memory=1536m --cpus=2 \
+            opensearchproject/opensearch:3.8.0
+
+          for i in $(seq 1 90); do
+            redis_ok=false; redpanda_ok=false; opensearch_ok=false
+            redis-cli -p 16379 ping 2>/dev/null | grep -q PONG && redis_ok=true || true
+            docker exec os4b-live-redpanda rpk cluster health --exit-when-healthy >/dev/null 2>&1 && redpanda_ok=true || true
+            curl -fsS http://127.0.0.1:19200/_cluster/health 2>/dev/null | grep -qv '"status":"red"' && opensearch_ok=true || true
+            if $redis_ok && $redpanda_ok && $opensearch_ok; then break; fi
+            sleep 2
+            if [[ $i -eq 90 ]]; then exit 1; fi
+          done
+
+          for topic in ap.stream1.local-public.v1 ap.stream2.remote-public.v1 ap.firehose.v1 ap.tombstones.v1 ap.firehose.dlq.v1; do
+            docker exec os4b-live-redpanda rpk topic create "$topic" >/dev/null
+          done
+
+      - name: Start mock ActivityPods authority and canonical sidecar runtime
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/os4b-live /tmp/os4b-live-authority
+          (
+            cd fedify-sidecar
+            MOCK_ACTIVITYPODS_HOST=127.0.0.1 \
+            MOCK_ACTIVITYPODS_PORT=8793 \
+            MOCK_ACTIVITYPODS_TOKEN=os4b-live-token \
+            MOCK_ACTIVITYPODS_LOCAL_DOMAIN=local.test \
+            MOCK_ACTIVITYPODS_KEY_DIR=/tmp/os4b-live-authority \
+              npm exec -- tsx src/interop/ap/MockActivityPodsAuthority.ts \
+              > ../artifacts/os4b-live/activitypods.log 2>&1
+          ) & echo $! > artifacts/os4b-live/activitypods.pid
+
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8793/health >/dev/null 2>&1 && break; sleep 1; done
+
+          (
+            cd fedify-sidecar
+            NODE_ENV=development \
+            PORT=18080 HOST=127.0.0.1 DOMAIN=local.test \
+            SIDECAR_TOKEN=os4b-live-token \
+            ACTIVITYPODS_URL=http://127.0.0.1:8793 ACTIVITYPODS_TOKEN=os4b-live-token \
+            REDIS_URL=redis://127.0.0.1:16379 \
+            REDPANDA_BROKERS=127.0.0.1:19092 \
+            REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false \
+            REDPANDA_COMPRESSION=zstd REDPANDA_ZSTD_LEVEL=1 \
+            STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 \
+            FIREHOSE_TOPIC=ap.firehose.v1 TOMBSTONE_TOPIC=ap.tombstones.v1 \
+            REDPANDA_FIREHOSE_TOPIC=ap.firehose.v1 REDPANDA_TOMBSTONE_TOPIC=ap.tombstones.v1 \
+            SEARCH_INDEXER_DLQ_TOPIC=ap.firehose.dlq.v1 SEARCH_INDEXER_MAX_BATCH_SIZE=100 \
+            SEARCH_BACKEND=opensearch OPENSEARCH_URL=http://127.0.0.1:19200 OPENSEARCH_SSL_VERIFY=false \
+            ENABLE_INBOUND_WORKER=true ENABLE_OPENSEARCH_INDEXER=true \
+            ENABLE_OUTBOUND_WORKER=false ENABLE_OUTBOX_INTENT_WORKER=false \
+            ENABLE_FEDIFY_RUNTIME_INTEGRATION=false ENABLE_XRPC_SERVER=false \
+            ENABLE_MEDIA_ASSET_SYNC=false ENABLE_ACCOUNT_PROVISIONING=false ENABLE_ENTRYWAY=false \
+            ENABLE_FOLLOWERS_SYNC=false ENABLE_MRF_ADMIN_API=false ENABLE_MODERATION_BRIDGE_API=false \
+            ENABLE_CANONICAL_EVENT_LOG=false ENABLE_CANONICAL_NOTIFICATIONS=false \
+            ENABLE_AT_JETSTREAM=false ENABLE_AT_EXTERNAL_FIREHOSE=false \
+            APDM_ALLOW_LOOPBACK_HTTP=true \
+              npm run server:dev > ../artifacts/os4b-live/sidecar.log 2>&1
+          ) & echo $! > artifacts/os4b-live/sidecar.pid
+
+          ready=false
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:18080/ready >/dev/null 2>&1; then ready=true; break; fi
+            if ! kill -0 "$(cat artifacts/os4b-live/sidecar.pid)" 2>/dev/null; then cat artifacts/os4b-live/sidecar.log; exit 1; fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then cat artifacts/os4b-live/sidecar.log; exit 1; fi
+
+      - name: Send genuinely signed remote ActivityPub Create Notes
+        working-directory: fedify-sidecar
+        env:
+          OS4B_REMOTE_HOST: 127.0.0.1
+          OS4B_REMOTE_PORT: '18181'
+          OS4B_REMOTE_PUBLIC_HOST: 127.0.0.1
+          OS4B_REMOTE_PUBLIC_PORT: '18181'
+          OS4B_SIDECAR_INBOX: http://127.0.0.1:18080/sharedInbox
+          OS4B_SIDECAR_HOST_HEADER: local.test
+          OS4B_FEDERATION_CONCURRENCY: '24'
+        run: |
+          set -o pipefail
+          npm exec -- tsx scripts/os4b-live-federation-remote.ts | tee ../artifacts/os4b-live/send.json
+
+      - name: Prove federation to Stream2/firehose to canonical OpenSearch projection
+        working-directory: fedify-sidecar
+        run: |
+          set -o pipefail
+          npm exec -- tsx scripts/os4b-live-federation-verify.ts | tee ../artifacts/os4b-live/verify.json
+
+      - name: Upload live federation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensearch-os4b-live-federation
+          path: artifacts/os4b-live/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          cat artifacts/os4b-live/sidecar.log 2>/dev/null || true
+          cat artifacts/os4b-live/activitypods.log 2>/dev/null || true
+          docker logs --tail 200 os4b-live-redpanda 2>/dev/null || true
+          docker logs --tail 200 os4b-live-opensearch 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$(cat artifacts/os4b-live/sidecar.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat artifacts/os4b-live/activitypods.pid 2>/dev/null)" 2>/dev/null || true
+          docker rm -f os4b-live-redis os4b-live-redpanda os4b-live-opensearch >/dev/null 2>&1 || true
