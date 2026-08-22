@@ -5,6 +5,7 @@ import {
   ensureRedpandaCompressionCodec,
   hasNativeZstdSupport,
   parseZstdLevel,
+  resolveConfiguredRedpandaCompression,
   resolveRedpandaCompression,
 } from "../kafka-compression.js";
 
@@ -47,7 +48,20 @@ describe("Redpanda Kafka compression", () => {
     });
     // Legacy call sites historically supplied env ?? "zstd". That must not
     // silently opt a mixed Node 20/22 fleet into a codec older consumers lack.
+    expect(resolveConfiguredRedpandaCompression("zstd")).toMatchObject({
+      name: "gzip",
+      type: CompressionTypes.GZIP,
+    });
     expect(ensureRedpandaCompressionCodec("zstd")).toBe(CompressionTypes.GZIP);
+  });
+
+  it("keeps an explicitly configured process-wide Zstd setting authoritative", () => {
+    process.env["REDPANDA_COMPRESSION"] = "zstd";
+    expect(resolveConfiguredRedpandaCompression("gzip")).toMatchObject({
+      name: "zstd",
+      type: CompressionTypes.ZSTD,
+      zstdLevel: 1,
+    });
   });
 
   it("uses Zstd level 1 by default and validates explicit levels", () => {
