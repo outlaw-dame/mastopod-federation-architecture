@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'fedify-sidecar/scripts/benchmark-opensearch-os4b-batching.ts'
+      - 'fedify-sidecar/scripts/benchmark-opensearch-os4b-writer.ts'
       - 'fedify-sidecar/src/search/**'
       - '.github/workflows/opensearch-os4b-batching.yml'
       - 'docs/opensearch-os4b-batching-plan.md'
@@ -15,7 +16,7 @@ permissions:
 jobs:
   benchmark:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,7 +41,7 @@ jobs:
           done
           docker logs os4b-opensearch
           exit 1
-      - name: Run matched OS4b matrix
+      - name: Run matched transport matrix
         env:
           OPENSEARCH_URL: http://127.0.0.1:19200
           OS4B_OPENSEARCH_CONTAINER: os4b-opensearch
@@ -49,13 +50,22 @@ jobs:
         run: |
           mkdir -p artifacts/os4b
           set -o pipefail
-          npx --prefix fedify-sidecar tsx fedify-sidecar/scripts/benchmark-opensearch-os4b-batching.ts | tee artifacts/os4b/benchmark.json
+          npx --prefix fedify-sidecar tsx fedify-sidecar/scripts/benchmark-opensearch-os4b-batching.ts | tee artifacts/os4b/transport.json
+      - name: Run canonical writer comparison
+        env:
+          OPENSEARCH_URL: http://127.0.0.1:19200
+          OS4B_OPENSEARCH_CONTAINER: os4b-opensearch
+          OS4B_WRITER_DOCS: '5000'
+          OS4B_WRITER_REPEATS: '3'
+        run: |
+          set -o pipefail
+          npx --prefix fedify-sidecar tsx fedify-sidecar/scripts/benchmark-opensearch-os4b-writer.ts | tee artifacts/os4b/writer.json
       - name: Upload OS4b evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: opensearch-os4b-batching
-          path: artifacts/os4b/benchmark.json
+          path: artifacts/os4b/*.json
           if-no-files-found: error
       - name: Diagnostics
         if: failure()
