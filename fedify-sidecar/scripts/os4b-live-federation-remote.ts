@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
-import { signRequest } from '@fedify/fedify';
+import { fetchKeyDetailed, signRequest, verifyRequestDetailed } from '@fedify/fedify';
+import { CryptographicKey } from '@fedify/fedify/vocab';
 
 const host = process.env.OS4B_REMOTE_HOST ?? '127.0.0.1';
 const port = Number(process.env.OS4B_REMOTE_PORT ?? 18181);
@@ -26,24 +27,25 @@ const keyPair = await crypto.subtle.generateKey(
 );
 const spki = Buffer.from(await crypto.subtle.exportKey('spki', keyPair.publicKey));
 const publicKeyPem = `-----BEGIN PUBLIC KEY-----\n${spki.toString('base64').match(/.{1,64}/g)!.join('\n')}\n-----END PUBLIC KEY-----\n`;
+const actorDocument = {
+  '@context': [
+    'https://www.w3.org/ns/activitystreams',
+    'https://w3id.org/security/v1',
+  ],
+  id: actorUri,
+  type: 'Person',
+  preferredUsername: 'remote',
+  url: actorUri,
+  inbox: `http://${publicHost}:${publicPort}/users/remote/inbox`,
+  publicKey: { id: keyId, owner: actorUri, publicKeyPem },
+};
 const app = Fastify({ logger: false });
 let actorDocumentFetches = 0;
 
 app.get('/health', async () => ({ ok: true }));
 app.get('/users/remote', async (_request, reply) => {
   actorDocumentFetches += 1;
-  reply.type('application/activity+json').send({
-    '@context': [
-      'https://www.w3.org/ns/activitystreams',
-      'https://w3id.org/security/v1',
-    ],
-    id: actorUri,
-    type: 'Person',
-    preferredUsername: 'remote',
-    url: actorUri,
-    inbox: `http://${publicHost}:${publicPort}/users/remote/inbox`,
-    publicKey: { id: keyId, owner: actorUri, publicKeyPem },
-  });
+  reply.type('application/activity+json').send(actorDocument);
 });
 
 await app.listen({ host, port });
@@ -69,7 +71,7 @@ function buildActivity(i: number, contentMarker = marker) {
   };
 }
 
-async function createSignedHeaders(body: string): Promise<Record<string, string>> {
+async function createSignedRequest(body: string): Promise<Request> {
   // Keep the Cavage signature surface minimal. Fedify's draft signer signs
   // every header present on the Request, so only expose Host before signing;
   // it then adds Date + Digest itself. Content-Type/Accept are transport
@@ -83,16 +85,63 @@ async function createSignedHeaders(body: string): Promise<Record<string, string>
     headers: { host: sidecarHostHeader },
     body: bodyBytes,
   });
-  const signed = await signRequest(unsigned, keyPair.privateKey, new URL(keyId), {
+  return await signRequest(unsigned, keyPair.privateKey, new URL(keyId), {
     spec: 'draft-cavage-http-signatures-12',
     body: bodyBytes,
   });
+}
+
+async function createSignedHeaders(body: string): Promise<Record<string, string>> {
+  const signed = await createSignedRequest(body);
   const headers: Record<string, string> = {};
   signed.headers.forEach((value, name) => { headers[name] = value; });
   headers.host = sidecarHostHeader;
   headers['content-type'] = 'application/activity+json';
   headers.accept = 'application/activity+json';
   return headers;
+}
+
+const localActorDocumentLoader = async (resource: string) => ({
+  contextUrl: null,
+  document: actorDocument,
+  documentUrl: resource,
+});
+
+async function runFedifySelfCheck() {
+  const body = JSON.stringify(buildActivity(-2, `${marker}-self-check`));
+  const signed = await createSignedRequest(body);
+  const fetched = await fetchKeyDetailed(new URL(keyId), CryptographicKey, {
+    documentLoader: localActorDocumentLoader,
+  });
+  const verification = await verifyRequestDetailed(signed.clone(), {
+    documentLoader: localActorDocumentLoader,
+    spec: 'draft-cavage-http-signatures-12',
+  });
+  const result = {
+    keyParsed: fetched.key != null,
+    keyCached: fetched.cached,
+    keyFetchError: fetched.fetchError == null
+      ? null
+      : ('status' in fetched.fetchError
+        ? { status: fetched.fetchError.status }
+        : { name: fetched.fetchError.error.name, message: fetched.fetchError.error.message }),
+    verified: verification.verified,
+    verificationReason: verification.verified
+      ? null
+      : {
+          type: verification.reason.type,
+          ...('keyId' in verification.reason
+            ? { keyId: verification.reason.keyId?.href ?? null }
+            : {}),
+        },
+    signedHeaders: signed.headers.get('signature'),
+    digest: signed.headers.get('digest'),
+    host: signed.headers.get('host'),
+  };
+  if (!result.keyParsed || !result.verified) {
+    throw new Error(`Fedify fixture self-check failed: ${JSON.stringify(result)}`);
+  }
+  return result;
 }
 
 async function sendInvalidSignatureControl() {
@@ -114,6 +163,7 @@ let next = 0;
 const latencies: number[] = [];
 
 try {
+  const fedifySelfCheck = await runFedifySelfCheck();
   const invalidSignature = await sendInvalidSignatureControl();
 
   const workers = Array.from({ length: concurrency }, async () => {
@@ -132,7 +182,8 @@ try {
       if (response.status !== 202) {
         throw new Error(
           `federation POST ${i} returned ${response.status}: ${await response.text()} `
-          + `(remote actor document fetches=${actorDocumentFetches})`,
+          + `(remote actor document fetches=${actorDocumentFetches}; `
+          + `selfCheck=${JSON.stringify(fedifySelfCheck)})`,
         );
       }
     }
@@ -145,6 +196,7 @@ try {
     marker,
     invalidMarker,
     invalidSignature,
+    fedifySelfCheck,
     count,
     actorUri,
     sidecarInbox,
