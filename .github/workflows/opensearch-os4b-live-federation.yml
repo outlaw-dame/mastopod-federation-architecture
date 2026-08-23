@@ -35,6 +35,24 @@ jobs:
       - name: Install sidecar dependencies
         run: npm ci --prefix fedify-sidecar
 
+      - name: Enable Fedify private-address document loading for isolated fixture only
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('fedify-sidecar/src/federation/FedifyFederationAdapter.ts')
+          source = path.read_text()
+          needle = 'const federation = createFederation<SidecarContext>({\n      kv,\n'
+          replacement = 'const federation = createFederation<SidecarContext>({\n      kv,\n      // OS4b isolated CI fixture only: remote actor/key is served from loopback.\n      // Production source keeps Fedify private-address fetching disabled.\n      allowPrivateAddress: true,\n'
+          matches = source.count(needle)
+          if matches != 1:
+              raise SystemExit(f'expected exactly one Fedify constructor site, found {matches}')
+          path.write_text(source.replace(needle, replacement, 1))
+          PY
+          mkdir -p artifacts/os4b-live
+          printf '%s\n' 'fedify_allow_private_address=true (isolated CI checkout only; not present in merged source)' \
+            > artifacts/os4b-live/fedify-fixture-security-mode.txt
+
       - name: Start Redis, Redpanda, and OpenSearch 3.8
         run: |
           set -euo pipefail
@@ -163,6 +181,7 @@ jobs:
         if: failure()
         run: |
           cat artifacts/os4b-live/dependency-readiness.txt 2>/dev/null || true
+          cat artifacts/os4b-live/fedify-fixture-security-mode.txt 2>/dev/null || true
           cat artifacts/os4b-live/sidecar.log 2>/dev/null || true
           cat artifacts/os4b-live/activitypods.log 2>/dev/null || true
           docker logs --tail 200 os4b-live-redpanda 2>/dev/null || true
