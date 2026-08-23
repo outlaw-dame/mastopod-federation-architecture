@@ -29,14 +29,16 @@ services:
   fedify-sidecar:
     environment:
       # Directional, Docker-network-only alias for the host signing recorder.
-      # The public actor/key surface remains HTTPS through ap-proof-router.
+      # The public ActivityPods actor/key surface remains HTTPS through
+      # ap-proof-router, while sidecar-owned service actors are published on the
+      # independently routed https://sidecar authority.
       ACTIVITYPODS_URL: http://activitypods-internal:3001
       ACTIVITYPODS_TOKEN: ${ACTIVITYPODS_TOKEN:?ACTIVITYPODS_TOKEN is required}
       ATPROTO_PASSWORD_VERIFY_TOKEN: ${ATPROTO_PASSWORD_VERIFY_TOKEN:-}
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:?SIDECAR_TOKEN is required}
       SIDECAR_STARTUP_MODE: blocking
-      DOMAIN: activitypods
-      AP_RELAY_LOCAL_ACTOR_URI: https://activitypods/users/relay
+      DOMAIN: sidecar
+      AP_RELAY_LOCAL_ACTOR_URI: https://sidecar/users/relay
       REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: "true"
       REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES: "1"
       REDIS_STREAM_PAYLOAD_BROTLI_QUALITY: "0"
