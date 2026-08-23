@@ -67,7 +67,8 @@ if (match.digest !== `SHA-256=${bodySha256Base64}`) {
 if (!Number.isInteger(match.bodyBytes) || match.bodyBytes <= 0) {
   fail('wire evidence has no positive body byte count');
 }
-const signature = parseSignature(requiredString(match.signature, 'wire.signature'));
+const wireSignatureValue = requiredString(match.signature, 'wire.signature');
+const signature = parseSignature(wireSignatureValue);
 if (signature.headers !== EXPECTED_SIGNED_HEADERS) {
   fail(`wire Signature headers must equal ${EXPECTED_SIGNED_HEADERS}`);
 }
@@ -75,7 +76,8 @@ if (signature.algorithm && signature.algorithm !== 'rsa-sha256') {
   fail(`wire Signature algorithm is not rsa-sha256: ${signature.algorithm}`);
 }
 if (!signature.signature) fail('wire Signature is missing cryptographic signature bytes');
-if (typeof match.date !== 'string' || !Number.isFinite(Date.parse(match.date))) {
+const wireDate = requiredString(match.date, 'wire.date');
+if (!Number.isFinite(Date.parse(wireDate))) {
   fail('wire Date header is missing or invalid');
 }
 
@@ -99,13 +101,17 @@ if (signingPath) {
     signing.signerKeyIds[0] !== expectedKeyId ||
     !Array.isArray(signing.bodySha256Base64) ||
     signing.bodySha256Base64.length !== 1 ||
-    signing.bodySha256Base64[0] !== bodySha256Base64
+    signing.bodySha256Base64[0] !== bodySha256Base64 ||
+    signing.signature !== wireSignatureValue ||
+    signing.date !== wireDate ||
+    signing.digest !== match.digest
   ) {
-    fail('ActivityPods signing-API evidence does not correlate exactly to the observed wire request');
+    fail('ActivityPods signing-API evidence does not match the observed wire request exactly');
   }
   signingCorrelation = {
     successfulSigningCalls: signing.successfulSigningCalls,
     requestIds: signing.requestIds,
+    exactSignedHeadersMatched: true,
   };
 }
 

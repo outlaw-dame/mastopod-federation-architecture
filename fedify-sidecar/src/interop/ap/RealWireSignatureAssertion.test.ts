@@ -15,6 +15,9 @@ function fixture(overrides: {
   digest?: string;
   duplicate?: boolean;
   signingMismatch?: boolean;
+  signingSignatureMismatch?: boolean;
+  signingDateMismatch?: boolean;
+  signingDigestMismatch?: boolean;
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "wire-signature-assertion-"));
   directories.push(directory);
@@ -65,6 +68,11 @@ function fixture(overrides: {
     bodySha256Base64: [overrides.signingMismatch ? "wrong" : bodySha],
     successfulSigningCalls: 1,
     requestIds: ["request-1"],
+    signature: overrides.signingSignatureMismatch
+      ? `keyId="${expectedKeyId}",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="different"`
+      : row.signature,
+    date: overrides.signingDateMismatch ? "Mon, 24 Aug 2026 12:00:00 GMT" : row.date,
+    digest: overrides.signingDigestMismatch ? "SHA-256=other" : row.digest,
   }));
   return { descriptorPath, wirePath, signingPath };
 }
@@ -85,7 +93,7 @@ afterEach(() => {
 });
 
 describe("real wire signature assertion", () => {
-  it("correlates an external ActivityPods wire signature with exact signer evidence", () => {
+  it("correlates an external ActivityPods wire signature with the exact signer result", () => {
     const result = run(fixture());
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
@@ -93,6 +101,9 @@ describe("real wire signature assertion", () => {
       mode: "external",
       keyId: "https://activitypods/users/alice/keys/main",
       bodySha256Base64: "proof-body-sha",
+      signingCorrelation: {
+        exactSignedHeadersMatched: true,
+      },
     });
   });
 
@@ -114,6 +125,9 @@ describe("real wire signature assertion", () => {
     [{ digest: "SHA-256=wrong" }, "wrong body digest"],
     [{ duplicate: true }, "duplicate matching wire request"],
     [{ signingMismatch: true }, "signing/wire body mismatch"],
+    [{ signingSignatureMismatch: true }, "signing/wire Signature mismatch"],
+    [{ signingDateMismatch: true }, "signing/wire Date mismatch"],
+    [{ signingDigestMismatch: true }, "signing/wire Digest mismatch"],
   ])("rejects %s (%s)", (overrides, _label) => {
     expect(run(fixture(overrides)).status).not.toBe(0);
   });
