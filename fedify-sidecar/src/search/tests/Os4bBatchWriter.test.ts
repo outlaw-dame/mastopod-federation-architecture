@@ -82,11 +82,15 @@ describe('OS4b ordered batch writer', () => {
   it('heals a successful suffix alias on replay when an earlier bulk item failed', async () => {
     const docs = new Map<string, any>();
     const bulkWrittenIds: string[] = [];
+    const sequentialWrittenIds: string[] = [];
     let bulkCall = 0;
     const store: PublicContentStore = {
       get: async (id) => docs.get(id) ?? null,
       getMany: async (ids) => new Map(ids.map((id) => [id, docs.get(id) ?? null])),
-      upsert: async (id, doc) => { docs.set(id, doc); },
+      upsert: async (id, doc) => {
+        sequentialWrittenIds.push(id);
+        docs.set(id, doc);
+      },
       upsertMany: async (entries) => {
         bulkCall += 1;
         return entries.map((entry, i) => {
@@ -138,6 +142,7 @@ describe('OS4b ordered batch writer', () => {
     expect(await aliases.getByApUri('https://example.test/posts/c')).toBe('ap:https://example.test/posts/c');
     expect(docs.size).toBe(3);
     expect(bulkWrittenIds.filter((id) => id === 'ap:https://example.test/posts/c')).toHaveLength(1);
+    expect(sequentialWrittenIds).not.toContain('ap:https://example.test/posts/c');
   });
 
   it('does not publish aliases when the bulk request itself fails', async () => {
