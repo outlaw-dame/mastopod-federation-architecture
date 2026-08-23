@@ -293,12 +293,15 @@ jobs:
             readiness_accept='application/jrd+json'
           fi
           ready=false
-          # First-boot migrations for larger fixtures (notably Misskey) can
-          # legitimately outlive the common three-minute window. Keep this
-          # bounded while allowing seven minutes for the real actor endpoint.
-          # Misskey 2026.7.0's post-setup migration restart measured just over
-          # six minutes on the hosted runner, after its setup API had returned.
-          for attempt in $(seq 1 210); do
+          readiness_attempts=90
+          # Misskey 2026.7.0's post-setup migration restart reached its actor
+          # endpoint two seconds after the former seven-minute bound on the
+          # hosted runner. Keep the common bound at three minutes and give only
+          # the pinned Misskey fixture a bounded nine-minute startup window.
+          if [[ "${TARGET}" == "misskey" ]]; then
+            readiness_attempts=270
+          fi
+          for attempt in $(seq 1 "${readiness_attempts}"); do
             if curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS \
               -H "Accept: ${readiness_accept}" "${readiness_uri}" >/dev/null; then ready=true; break; fi
             sleep 2
@@ -548,7 +551,10 @@ jobs:
             akkoma) docker compose -f "${COMPOSE_FILE}" --profile akkoma logs --no-color akkoma-app 2>/dev/null || true ;;
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
-            friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true ;;
+            # Friendica's invalid-signature log context includes complete
+            # request headers and bodies. The persistence assertion emits only
+            # fixed-message counters, so never dump raw Friendica logs here.
+            friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" ps friendica-app friendica-worker 2>/dev/null || true ;;
             castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
           esac

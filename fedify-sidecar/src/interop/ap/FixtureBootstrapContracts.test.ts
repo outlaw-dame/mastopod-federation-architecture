@@ -5,14 +5,17 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("real federation fixture bootstrap contracts", () => {
-  it("bounds slow post-setup actor readiness beyond Misskey's measured migration restart", () => {
+  it("gives only Misskey a longer bounded post-setup actor readiness window", () => {
     const workflow = readFileSync(
       resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
       "utf8",
     );
 
-    expect(workflow).toContain("for attempt in $(seq 1 210)");
-    expect(workflow).toContain("Misskey 2026.7.0's post-setup migration restart");
+    expect(workflow).toContain("readiness_attempts=90");
+    expect(workflow).toContain('if [[ "${TARGET}" == "misskey" ]]');
+    expect(workflow).toContain("readiness_attempts=270");
+    expect(workflow).toContain('seq 1 "${readiness_attempts}"');
+    expect(workflow).toContain("former seven-minute bound");
   });
 
   it("bounds retries for transient Pixelfed image-build downloads", () => {
@@ -111,6 +114,12 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(compose).toContain("FRIENDICA_URL: https://friendica.test\n");
     expect(compose).not.toContain("FRIENDICA_URL: https://friendica.test/\n");
     expect(compose).toContain("CURL_CA_BUNDLE: /interop/runtime/certs/rootCA.crt");
+    expect(compose).toContain("FRIENDICA_LOGFILE: /var/log/friendica/friendica.log");
+    expect(compose).toContain("FRIENDICA_LOGLEVEL: info");
+    expect(compose).toContain("FRIENDICA_LOGGER: stream");
+    expect(compose).toContain("friendica-log-init:");
+    expect(compose.match(/ap_interop_friendica_log:\/var\/log\/friendica/g)).toHaveLength(3);
+    expect(compose).toContain("condition: service_completed_successfully");
     expect(compose).not.toContain("FRIENDICA_NO_VALIDATION");
     expect(bootstrap).toContain("php bin/console.php user add");
     expect(bootstrap).toContain("compose up -d friendica-worker");
@@ -139,6 +148,10 @@ describe("real federation fixture bootstrap contracts", () => {
       resolve(process.cwd(), "interop/ap/castopod/InteropCreatePodcast.php"),
       "utf8",
     );
+    const bootConfig = readFileSync(
+      resolve(process.cwd(), "interop/ap/fixtures/castopod/interop-boot.ini"),
+      "utf8",
+    );
     const compose = readFileSync(
       resolve(process.cwd(), "interop/ap/docker-compose.castopod.yml"),
       "utf8",
@@ -148,8 +161,10 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(compose).not.toContain("CP_DISABLE_HTTPS");
     expect(bootstrap).toContain('grep -qx "cache.redis.database=0" .env');
     expect(bootstrap).toContain("http://127.0.0.1:8000/");
-    expect(bootstrap).toContain(
-      "-d auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php",
+    expect(compose).toContain("fixtures/php/interop-ca.ini");
+    expect(compose).toContain("fixtures/castopod/interop-boot.ini");
+    expect(bootConfig).toContain(
+      "auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php",
     );
     expect(bootstrap).toContain("spark install:init-database");
     expect(bootstrap).toContain("spark install:create-superadmin");
@@ -157,6 +172,7 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(bootstrap).not.toContain("interop-admin");
     expect(bootstrap).toContain("spark interop:create-podcast");
     expect(bootstrap).not.toContain("define('CI_DEBUG'");
+    expect(bootstrap).not.toContain("-d auto_prepend_file=");
     expect(command).toContain("new PodcastModel()");
     expect(command).toContain("where('username', 'interopadmin')");
     expect(command).not.toContain("interop-admin");
@@ -272,6 +288,10 @@ describe("real federation fixture bootstrap contracts", () => {
       resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
       "utf8",
     );
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
 
     expect(script).toContain("Friendica fail-closed persistence diagnostics:");
     expect(script).toContain("remote_contact_count=");
@@ -279,8 +299,15 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain("inbox_receiver_count=");
     expect(script).toContain("introduction_count=");
     expect(script).toContain("pending_worker_count=");
+    expect(script).toContain("actor_fetch_discard_count");
+    expect(script).toContain("invalid_http_signature_count");
+    expect(script).toContain("valid_http_signature_count");
+    expect(script).toContain('fopen("/var/log/friendica/friendica.log", "rb")');
     expect(script).not.toContain("select parameter from workerqueue");
     expect(script).not.toContain("select activity from \\`inbox-entry\\`");
+    expect(script).not.toContain("compose logs --no-color friendica-app friendica-worker");
+    expect(workflow).not.toContain("logs --no-color friendica-app friendica-worker");
+    expect(workflow).toContain("ps friendica-app friendica-worker");
   });
 
   it("passes quoted Friendica table names to MariaDB as SQL, not shell substitutions", () => {

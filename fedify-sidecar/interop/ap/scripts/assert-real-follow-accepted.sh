@@ -164,6 +164,33 @@ friendica_diagnostics() {
   } | compose exec -T friendica-db /bin/sh -lc \
     'MYSQL_PWD="$MARIADB_PASSWORD" mariadb --batch --skip-column-names -u friendica friendica' \
     >&2 || echo "Friendica database diagnostics unavailable" >&2
+  # Friendica's invalid-signature notice includes the full request headers and
+  # body. Count only fixed event messages so failure evidence cannot disclose
+  # credentials, signatures, or queued ActivityPub payloads.
+  compose exec -T friendica-app php -r '
+    $patterns = [
+      "actor_fetch_discard_count" => "Unable to retrieve AP contact for actor - message is discarded",
+      "invalid_http_signature_count" => "Invalid HTTP signature, message will not be trusted.",
+      "valid_http_signature_count" => "Valid HTTP signature",
+    ];
+    $counts = array_fill_keys(array_keys($patterns), 0);
+    $handle = @fopen("/var/log/friendica/friendica.log", "rb");
+    if ($handle === false) {
+      fwrite(STDERR, "friendica_log_status=unavailable\n");
+      exit(0);
+    }
+    while (($line = fgets($handle)) !== false) {
+      foreach ($patterns as $label => $message) {
+        if (str_contains($line, $message)) {
+          $counts[$label]++;
+        }
+      }
+    }
+    fclose($handle);
+    foreach ($counts as $label => $count) {
+      fwrite(STDERR, $label . "=" . $count . "\n");
+    }
+  ' >&2 || echo "Friendica log counters unavailable" >&2
 }
 
 query_error_file=$(mktemp "${TMPDIR:-/tmp}/ap-follow-query.XXXXXX")
@@ -224,7 +251,7 @@ case "${TARGET}" in
     ;;
   friendica)
     friendica_diagnostics
-    compose logs --no-color friendica-app friendica-worker >&2 || true
+    compose ps friendica-app friendica-worker >&2 || true
     ;;
   castopod)
     compose logs --no-color castopod-app >&2 || true

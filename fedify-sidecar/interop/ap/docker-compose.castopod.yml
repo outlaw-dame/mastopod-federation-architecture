@@ -56,6 +56,8 @@ services:
       - ap_interop_castopod_media:/var/www/castopod/public/media
       - ./castopod/InteropCreatePodcast.php:/var/www/castopod/app/Commands/InteropCreatePodcast.php:ro
       - ./runtime/certs:/interop/runtime/certs:ro
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+      - ./fixtures/castopod/interop-boot.ini:/usr/local/etc/php/conf.d/zz-interop-boot.ini:ro
     networks:
       - ap-interop
 
