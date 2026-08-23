@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PublicContentBatchError, PublicContentIndexWriter, type PublicContentStore } from '../writer/PublicContentIndexWriter.js';
 import { InMemoryOpenSearchClient } from '../writer/OpenSearchClient.js';
-import { InMemorySearchDocAliasCache } from '../writer/SearchDocAliasCache.js';
+import { InMemorySearchDocAliasCache, type SearchDocAliasCache } from '../writer/SearchDocAliasCache.js';
 import { DefaultSearchDedupService } from '../aliases/SearchDedupService.js';
 import type { SearchPublicUpsertV1 } from '../events/SearchEvents.js';
 
@@ -18,7 +18,7 @@ function event(id: string): SearchPublicUpsertV1 {
   };
 }
 
-function writer(store: PublicContentStore, aliases = new InMemorySearchDocAliasCache()) {
+function writer(store: PublicContentStore, aliases: SearchDocAliasCache = new InMemorySearchDocAliasCache()) {
   return { writer: new PublicContentIndexWriter(store, aliases, new DefaultSearchDedupService(aliases)), aliases };
 }
 
@@ -77,6 +77,67 @@ describe('OS4b ordered batch writer', () => {
     expect(await aliases.getByApUri('https://example.test/posts/b')).toBeNull();
     expect(await aliases.getByApUri('https://example.test/posts/c')).toBe('ap:https://example.test/posts/c');
     expect(docs.has('ap:https://example.test/posts/c')).toBe(true);
+  });
+
+  it('heals a successful suffix alias on replay when an earlier bulk item failed', async () => {
+    const docs = new Map<string, any>();
+    const bulkWrittenIds: string[] = [];
+    let bulkCall = 0;
+    const store: PublicContentStore = {
+      get: async (id) => docs.get(id) ?? null,
+      getMany: async (ids) => new Map(ids.map((id) => [id, docs.get(id) ?? null])),
+      upsert: async (id, doc) => { docs.set(id, doc); },
+      upsertMany: async (entries) => {
+        bulkCall += 1;
+        return entries.map((entry, i) => {
+          if (bulkCall === 1 && i === 1) {
+            return { ok: false, error: new Error('synthetic middle item failure') };
+          }
+          docs.set(entry.id, entry.doc);
+          bulkWrittenIds.push(entry.id);
+          return { ok: true };
+        });
+      },
+      updateScripted: async () => undefined,
+      delete: async () => undefined,
+      deleteByAuthor: async () => undefined,
+    };
+
+    const backingAliases = new InMemorySearchDocAliasCache();
+    let failSuffixAliasOnce = true;
+    const aliases: SearchDocAliasCache = {
+      getByCanonicalId: (id) => backingAliases.getByCanonicalId(id),
+      getByApUri: (uri) => backingAliases.getByApUri(uri),
+      getByAtUri: (uri) => backingAliases.getByAtUri(uri),
+      setCanonicalId: (id, stableDocId) => backingAliases.setCanonicalId(id, stableDocId),
+      setApUri: async (uri, stableDocId) => {
+        if (uri === 'https://example.test/posts/c' && failSuffixAliasOnce) {
+          failSuffixAliasOnce = false;
+          throw new Error('synthetic suffix alias failure');
+        }
+        await backingAliases.setApUri(uri, stableDocId);
+      },
+      setAtUri: (uri, stableDocId) => backingAliases.setAtUri(uri, stableDocId),
+    };
+    const { writer: target } = writer(store, aliases);
+    const batch = [event('a'), event('b'), event('c')];
+
+    let firstFailure: unknown;
+    try { await target.onUpsertBatch(batch); }
+    catch (error) { firstFailure = error; }
+
+    expect(firstFailure).toBeInstanceOf(PublicContentBatchError);
+    expect((firstFailure as PublicContentBatchError).failedIndex).toBe(1);
+    expect(await aliases.getByApUri('https://example.test/posts/c')).toBeNull();
+    expect(docs.has('ap:https://example.test/posts/c')).toBe(true);
+
+    await target.onUpsertBatch(batch);
+
+    expect(await aliases.getByApUri('https://example.test/posts/a')).toBe('ap:https://example.test/posts/a');
+    expect(await aliases.getByApUri('https://example.test/posts/b')).toBe('ap:https://example.test/posts/b');
+    expect(await aliases.getByApUri('https://example.test/posts/c')).toBe('ap:https://example.test/posts/c');
+    expect(docs.size).toBe(3);
+    expect(bulkWrittenIds.filter((id) => id === 'ap:https://example.test/posts/c')).toHaveLength(1);
   });
 
   it('does not publish aliases when the bulk request itself fails', async () => {
