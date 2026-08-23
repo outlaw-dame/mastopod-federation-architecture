@@ -8,6 +8,7 @@ import {
 } from "../delivery/apdm-replay-horizon.js";
 import {
   RedisStreamsQueue as CoreRedisStreamsQueue,
+  type InboundEnvelope,
   type QueueConfig,
   type OutboundJob,
 } from "./sidecar-redis-queue-core.js";
@@ -21,6 +22,37 @@ export const DELAYED_OUTBOUND_PARK_RETRY_MS = 1_000;
 export const DELAYED_OUTBOUND_PARK_MAX_RETRY_MS = 30_000;
 
 type DelayedRedisClient = ReturnType<typeof createClient>;
+
+/**
+ * Only genuine wire-verified Fedify ingress may retain the `fedify-v2`
+ * verification marker when entering the durable inbound queue.
+ *
+ * Synthetic reconciliation/backfill activities are fetched representations,
+ * not wire-authenticated ActivityPub actors. Benchmark injection is separately
+ * authenticated test traffic and is explicitly non-promotion evidence; it also
+ * does not prove a remote ActivityPub actor. All three historically reused the
+ * `fedify-v2` queue marker, which could cause InboundWorker to skip native HTTP
+ * signature verification and upgrade a self-claimed actor into the trusted
+ * ActivityPods bridge principal.
+ *
+ * Strip that overloaded marker before Redis. The normal inbound worker then
+ * executes its native verification path. Because these non-wire producers do
+ * not carry a valid remote HTTP Signature, they fail closed instead of crossing
+ * the preverified ActivityPods bridge.
+ */
+export function stripUnverifiedSyntheticVerification(envelope: InboundEnvelope): InboundEnvelope {
+  const isOriginReconciliation = envelope.headers["x-origin-reconciliation"] === "true";
+  const isRepliesBackfill = typeof envelope.headers["x-backfill-source"] === "string"
+    && envelope.headers["x-backfill-source"].length > 0;
+  const isBenchmark = envelope.headers["x-sidecar-benchmark"] === "1";
+
+  if ((!isOriginReconciliation && !isRepliesBackfill && !isBenchmark) || !envelope.verification) {
+    return envelope;
+  }
+
+  const { verification: _untrustedVerification, ...withoutVerification } = envelope;
+  return withoutVerification;
+}
 
 /**
  * Durability wrapper around the core Redis Streams queue.
@@ -97,6 +129,10 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
       await this.delayedRedis.quit();
     }
     await super.disconnect();
+  }
+
+  override async enqueueInbound(envelope: InboundEnvelope): Promise<void> {
+    await super.enqueueInbound(stripUnverifiedSyntheticVerification(envelope));
   }
 
   override async enqueueOutbound(job: OutboundJob): Promise<void> {

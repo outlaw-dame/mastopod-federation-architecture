@@ -64,7 +64,6 @@ jobs:
             }
             if (!(result.comparisons.p50MemoryReduction > 1)) throw new Error(`no memory reduction for ${result.name}`);
           }
-
           const guards = evidence.guards;
           const frozen = evidence.frozenAdspComparison;
           if (!guards || !frozen) throw new Error('missing frozen ADSP performance evidence');

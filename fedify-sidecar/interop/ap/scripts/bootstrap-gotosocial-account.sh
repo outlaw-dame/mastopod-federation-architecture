@@ -189,6 +189,8 @@ ensure_webfinger_ready() {
 
 require_command docker
 require_command sqlite3
+normalize_runtime_permissions
+docker compose -f "${COMPOSE_FILE}" up -d gotosocial-app >/dev/null
 wait_for_gotosocial
 normalize_runtime_permissions
 ensure_account_created

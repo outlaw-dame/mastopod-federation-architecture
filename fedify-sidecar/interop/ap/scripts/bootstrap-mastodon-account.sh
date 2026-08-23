@@ -5,7 +5,11 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COMPOSE_FILE="${SCRIPT_DIR}/../docker-compose.ap-interop.yml"
 ENV_FILE="${AP_INTEROP_MASTODON_ENV_FILE:-${SCRIPT_DIR}/../runtime/mastodon.env}"
 USERNAME="${AP_INTEROP_MASTODON_USERNAME:-interop}"
-EMAIL="${AP_INTEROP_MASTODON_EMAIL:-interop@mastodon}"
+# Mastodon validates MX reachability even for local, confirmed CLI accounts.
+# Reserved example domains deliberately publish a null MX record, so use an
+# existing public federation domain while keeping all mail delivery disabled in
+# this isolated fixture.
+EMAIL="${AP_INTEROP_MASTODON_EMAIL:-interop-ci@mastodon.social}"
 BOOTSTRAP_ATTEMPTS="${AP_INTEROP_MASTODON_BOOTSTRAP_ATTEMPTS:-8}"
 BOOTSTRAP_INITIAL_DELAY_SECONDS="${AP_INTEROP_MASTODON_BOOTSTRAP_INITIAL_DELAY_SECONDS:-2}"
 BOOTSTRAP_MAX_DELAY_SECONDS="${AP_INTEROP_MASTODON_BOOTSTRAP_MAX_DELAY_SECONDS:-10}"

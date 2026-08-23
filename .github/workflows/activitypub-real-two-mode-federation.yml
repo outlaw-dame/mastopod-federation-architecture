@@ -1,0 +1,508 @@
+name: ActivityPub Real Two-Mode Federation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/activitypub-real-two-mode-federation.yml'
+      - 'fedify-sidecar/interop/ap/**'
+      - 'fedify-sidecar/src/delivery/**'
+      - 'fedify-sidecar/src/queue/**'
+      - 'fedify-sidecar/src/signing/**'
+      - 'fedify-sidecar/src/federation/**'
+      - 'fedify-sidecar/scripts/assert-real-redis-stream-compression.ts'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: activitypub-real-two-mode-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  two-mode-federation:
+    name: native and sidecar federation against real Mastodon
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      ACTIVITYPODS_SHA: '5dbc74e66ae05dd9a78843b8d9c9f73bc4ee84d7'
+      COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
+      REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
+      MASTODON_USERNAME: interop
+      MASTODON_ACTOR_URI: https://mastodon/users/interop
+      EVIDENCE_DIR: measurements/ap-real-two-mode
+
+    steps:
+      - name: Checkout federation architecture
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FEDERATION_SHA }}
+          persist-credentials: false
+
+      - name: Checkout exact ActivityPods signing candidate
+        uses: actions/checkout@v4
+        with:
+          repository: outlaw-dame/activity-pods
+          ref: ${{ env.ACTIVITYPODS_SHA }}
+          path: activitypods
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Prepare ephemeral credentials and evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${EVIDENCE_DIR}"
+          printf '{"schema":"activitypods.activitypub.real-two-mode-run.v1","started":true,"activityPodsSha":"%s","federationSha":"%s"}\n' \
+            "${ACTIVITYPODS_SHA}" "${FEDERATION_SHA}" > "${EVIDENCE_DIR}/run-started.json"
+          activitypods_token="$(openssl rand -hex 32)"
+          sidecar_token="$(openssl rand -hex 32)"
+          password_verify_token="$(openssl rand -hex 32)"
+          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}"; do
+            echo "::add-mask::${value}"
+          done
+          {
+            echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
+            echo "SIDECAR_TOKEN=${sidecar_token}"
+            echo "ATPROTO_PASSWORD_VERIFY_TOKEN=${password_verify_token}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install federation sidecar dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Install exact ActivityPods backend dependencies
+        working-directory: activitypods/pod-provider/backend
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          sed -i 's#ssh://git@github.com/#https://github.com/#g; s#git+ssh://git@github.com/#git+https://github.com/#g; s#git@github.com:#https://github.com/#g' yarn.lock
+          yarn install --frozen-lockfile
+
+      - name: Generate local TLS authority and Mastodon environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          fedify-sidecar/interop/ap/scripts/generate-certs.sh
+          fedify-sidecar/interop/ap/scripts/prepare-mastodon-env.sh
+          echo "NODE_EXTRA_CA_CERTS=${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/runtime/certs/rootCA.crt" >> "$GITHUB_ENV"
+
+      - name: Start real ActivityPods data services
+        working-directory: activitypods/pod-provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose-test.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
+          mkdir -p data/fuseki_test data/redis_test
+          docker compose -f docker-compose-test.yml up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
+          docker compose -f docker-compose-test.yml exec -T redis redis-cli PING
+
+      - name: Start pinned Mastodon and independent TLS router
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          . fedify-sidecar/interop/ap/runtime/mastodon.env
+          set +a
+          docker compose -f "${COMPOSE_FILE}" --profile mastodon up -d mastodon-db mastodon-redis
+          AP_INTEROP_MASTODON_ENV_FILE="${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/runtime/mastodon.env" \
+          AP_INTEROP_MASTODON_USERNAME="${MASTODON_USERNAME}" \
+            fedify-sidecar/interop/ap/scripts/bootstrap-mastodon-account.sh
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods up -d ap-proof-router
+          AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
+            fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh mastodon activitypods \
+            | tee "${EVIDENCE_DIR}/proof-router-hosts.json"
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS \
+              -H 'Accept: application/activity+json' "${MASTODON_ACTOR_URI}" >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "${ready}" != true ]]; then
+            docker compose -f "${COMPOSE_FILE}" --profile mastodon logs --no-color mastodon-web-app mastodon-sidekiq
+            docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods logs --no-color ap-proof-router
+            exit 1
+          fi
+
+      - name: Start ActivityPods in native SemApps federation mode
+        working-directory: activitypods/pod-provider/backend
+        shell: bash
+        env:
+          SEMAPPS_HOME_URL: https://activitypods/
+          SEMAPPS_PORT: '3000'
+          SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
+          SEMAPPS_QUEUE_SERVICE_URL: redis://127.0.0.1:6379/1
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
+          SEMAPPS_REDIS_OIDC_PROVIDER_URL: redis://127.0.0.1:6379/13
+          SEMAPPS_SMTP_HOST: 127.0.0.1
+          SEMAPPS_SMTP_PORT: '1025'
+          SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native
+          SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: 'false'
+          SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: 'false'
+          APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
+          APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
+        run: |
+          set -euo pipefail
+          if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+            echo 'Sidecar must not be running during native control lane' >&2
+            exit 1
+          fi
+          log="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-native.log"
+          "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
+          echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-native.pid"
+          pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-native.pid")"
+          ready=false
+          for attempt in $(seq 1 120); do
+            if ! kill -0 "${pid}" 2>/dev/null; then tail -n 500 "${log}"; exit 1; fi
+            if grep -Eq 'ServiceBroker with [0-9]+ service\(s\) started successfully' "${log}" && \
+               curl -sS --max-time 2 -o /dev/null http://127.0.0.1:3000/; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${ready}" != true ]]; then tail -n 500 "${log}"; exit 1; fi
+
+      - name: Prove native ActivityPods to Mastodon federation
+        working-directory: activitypods/pod-provider/backend
+        shell: bash
+        env:
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
+        run: |
+          set -euo pipefail
+          AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-native" \
+            node scripts/activitypub-federation-follow-proof.js native "${MASTODON_ACTOR_URI}" \
+            | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.log"
+          tail -n 1 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.log" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json"
+          node - <<'NODE'
+          const fs = require('fs');
+          const v = JSON.parse(fs.readFileSync(process.env.GITHUB_WORKSPACE + '/' + process.env.EVIDENCE_DIR + '/native-origin.json', 'utf8'));
+          if (v.ok !== true || v.mode !== 'native' || v.durableHandoffQueued !== false || v.proofSummaryBytes !== 0) process.exit(1);
+          NODE
+
+      - name: Assert Mastodon accepted native signed Follow
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          sender="$(node -p "JSON.parse(require('fs').readFileSync('${EVIDENCE_DIR}/native-origin.json','utf8')).senderUsername")"
+          accepted=false
+          for attempt in $(seq 1 60); do
+            count="$(docker compose -f "${COMPOSE_FILE}" exec -T mastodon-db /bin/sh -lc \
+              "PGPASSWORD=postgres psql -U postgres -d mastodon_production -tAc \"select count(*) from follows f join accounts follower on follower.id=f.account_id join accounts target on target.id=f.target_account_id where follower.username='${sender}' and follower.domain='activitypods' and target.username='${MASTODON_USERNAME}' and target.domain is null;\"" | tr -d '[:space:]')"
+            if [[ "${count}" == "1" ]]; then accepted=true; break; fi
+            sleep 2
+          done
+          if [[ "${accepted}" != true ]]; then
+            echo "Mastodon did not persist the native ActivityPods Follow" >&2
+            exit 1
+          fi
+          printf '{"ok":true,"mode":"native","senderUsername":"%s","mastodonFollowCount":1,"sidecarRunning":false}\n' "${sender}" \
+            > "${EVIDENCE_DIR}/native-mastodon-acceptance.json"
+
+      - name: Stop native ActivityPods before authority cutover
+        shell: bash
+        run: |
+          set -euo pipefail
+          kill "$(cat "${EVIDENCE_DIR}/activitypods-native.pid")" 2>/dev/null || true
+          for attempt in $(seq 1 30); do
+            if ! curl -sS --max-time 1 -o /dev/null http://127.0.0.1:3000/ 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo 'Native ActivityPods process did not stop cleanly' >&2
+          exit 1
+
+      - name: Reset ActivityPods state between authority modes
+        working-directory: activitypods/pod-provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose-test.yml down
+          sudo rm -rf data/fuseki_test data/redis_test
+          mkdir -p data/fuseki_test data/redis_test
+          docker compose -f docker-compose-test.yml up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
+          docker compose -f docker-compose-test.yml exec -T redis redis-cli PING
+
+      - name: Start recording proxy for the real ActivityPods signing API
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > "${EVIDENCE_DIR}/signing-api.jsonl"
+          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -aq ap-proof-router)"
+          if [[ -z "${router_container}" ]]; then
+            echo "ActivityPub proof router container is unavailable" >&2
+            exit 1
+          fi
+          signing_proxy_host="$(docker inspect "${router_container}" --format '{{range .NetworkSettings.Networks}}{{println .Gateway}}{{end}}' | head -n 1)"
+          node - "${signing_proxy_host}" <<'NODE'
+          const { isIP } = require('node:net');
+          const value = process.argv[2];
+          const octets = value.split('.').map(part => Number.parseInt(part, 10));
+          const privateIpv4 = isIP(value) === 4 && (
+            octets[0] === 10 ||
+            (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+            (octets[0] === 192 && octets[1] === 168)
+          );
+          if (!privateIpv4) throw new Error(`Signing proxy must bind only to the private Docker gateway, got ${value}`);
+          NODE
+          echo "AP_SIGNING_PROXY_DOCKER_HOST=${signing_proxy_host}" >> "${GITHUB_ENV}"
+          AP_SIGNING_PROXY_HOST="${signing_proxy_host}" \
+          AP_SIGNING_PROXY_PORT=3001 \
+          AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 \
+          AP_SIGNING_PROXY_TARGET_PORT=3000 \
+          AP_SIGNING_PROXY_EVIDENCE_PATH="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" \
+            node fedify-sidecar/interop/ap/scripts/activitypods-signing-recording-proxy.mjs \
+            > "${EVIDENCE_DIR}/signing-proxy.log" 2>&1 &
+          echo "$!" > "${EVIDENCE_DIR}/signing-proxy.pid"
+
+      - name: Start isolated sidecar with Brotli Redis storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            up -d redis redpanda mock-activitypods
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            run --rm --no-deps fedify-sidecar npm run topics:bootstrap
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            up -d fedify-sidecar
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${ready}" != true ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+              logs --no-color redis redpanda mock-activitypods fedify-sidecar
+            exit 1
+          fi
+
+      - name: Start ActivityPods in external sidecar mode
+        working-directory: activitypods/pod-provider/backend
+        shell: bash
+        env:
+          SEMAPPS_HOME_URL: https://activitypods/
+          SEMAPPS_PORT: '3000'
+          SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
+          SEMAPPS_QUEUE_SERVICE_URL: redis://127.0.0.1:6379/1
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
+          SEMAPPS_REDIS_OIDC_PROVIDER_URL: redis://127.0.0.1:6379/13
+          SEMAPPS_SMTP_HOST: 127.0.0.1
+          SEMAPPS_SMTP_PORT: '1025'
+          SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: external
+          SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: 'true'
+          SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: 'false'
+          SIDECAR_DELIVERY_HANDOFF_URL: http://127.0.0.1:8080/webhook/outbox
+          APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
+          APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
+        run: |
+          set -euo pipefail
+          log="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.log"
+          "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
+          echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.pid"
+          pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.pid")"
+          ready=false
+          for attempt in $(seq 1 120); do
+            if ! kill -0 "${pid}" 2>/dev/null; then tail -n 500 "${log}"; exit 1; fi
+            if grep -Eq 'ServiceBroker with [0-9]+ service\(s\) started successfully' "${log}" && \
+               curl -sS --max-time 2 -o /dev/null http://127.0.0.1:3000/; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${ready}" != true ]]; then tail -n 500 "${log}"; exit 1; fi
+
+      - name: Prove sidecar-enabled ActivityPods to Mastodon federation
+        working-directory: activitypods/pod-provider/backend
+        shell: bash
+        env:
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
+          AP_FEDERATION_PROOF_SUMMARY_BYTES: '8192'
+        run: |
+          set -euo pipefail
+          AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-external" \
+            node scripts/activitypub-federation-follow-proof.js external "${MASTODON_ACTOR_URI}" \
+            | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.log"
+          tail -n 1 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.log" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json"
+          node - <<'NODE'
+          const fs = require('fs');
+          const v = JSON.parse(fs.readFileSync(process.env.GITHUB_WORKSPACE + '/' + process.env.EVIDENCE_DIR + '/external-origin.json', 'utf8'));
+          if (v.ok !== true || v.mode !== 'external' || v.durableHandoffQueued !== true || v.nativeRemotePostSuppressed !== true || v.proofSummaryBytes !== 8192) process.exit(1);
+          NODE
+
+      - name: Assert real external Activity used compressed sidecar Redis Stream storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          activity_id="$(node -p "JSON.parse(require('fs').readFileSync('${EVIDENCE_DIR}/external-origin.json','utf8')).activityId")"
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            exec -T fedify-sidecar npx tsx scripts/assert-real-redis-stream-compression.ts "${activity_id}" \
+            > "${EVIDENCE_DIR}/external-redis-compression.json"
+          cat "${EVIDENCE_DIR}/external-redis-compression.json"
+
+      - name: Assert Mastodon accepted sidecar delivery and real signer was used
+        shell: bash
+        run: |
+          set -euo pipefail
+          sender="$(node -p "JSON.parse(require('fs').readFileSync('${EVIDENCE_DIR}/external-origin.json','utf8')).senderUsername")"
+          actor_uri="$(node -p "JSON.parse(require('fs').readFileSync('${EVIDENCE_DIR}/external-origin.json','utf8')).actorUri")"
+          accepted=false
+          for attempt in $(seq 1 60); do
+            count="$(docker compose -f "${COMPOSE_FILE}" exec -T mastodon-db /bin/sh -lc \
+              "PGPASSWORD=postgres psql -U postgres -d mastodon_production -tAc \"select count(*) from follows f join accounts follower on follower.id=f.account_id join accounts target on target.id=f.target_account_id where follower.username='${sender}' and follower.domain='activitypods' and target.username='${MASTODON_USERNAME}' and target.domain is null;\"" | tr -d '[:space:]')"
+            if [[ "${count}" == "1" ]]; then accepted=true; break; fi
+            sleep 2
+          done
+          if [[ "${accepted}" != true ]]; then
+            echo 'Mastodon did not persist the sidecar-delivered ActivityPods Follow' >&2
+            exit 1
+          fi
+
+          signing_ok=false
+          for attempt in $(seq 1 30); do
+            if node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs" \
+              "${EVIDENCE_DIR}/signing-api.jsonl" "${EVIDENCE_DIR}/external-origin.json" mastodon \
+              "${EVIDENCE_DIR}/external-signing.json"
+            then signing_ok=true; break; fi
+            sleep 1
+          done
+          if [[ "${signing_ok}" != true ]]; then
+            echo 'No exact successful ActivityPods signing result was recorded for the delivered actor' >&2
+            cat "${EVIDENCE_DIR}/signing-api.jsonl" || true
+            exit 1
+          fi
+
+          ACTOR_URI="${actor_uri}" SENDER="${sender}" node - <<'NODE' > "${EVIDENCE_DIR}/external-mastodon-acceptance.json"
+          const fs = require('fs');
+          const signing = JSON.parse(fs.readFileSync(process.env.EVIDENCE_DIR + '/external-signing.json', 'utf8'));
+          if (signing.ok !== true || signing.actorUri !== process.env.ACTOR_URI || signing.targetHost !== 'mastodon') {
+            throw new Error('exact POST signer result disappeared while building evidence');
+          }
+          process.stdout.write(JSON.stringify({
+            ok: true,
+            mode: 'external',
+            senderUsername: process.env.SENDER,
+            actorUri: process.env.ACTOR_URI,
+            activityId: signing.activityId,
+            mastodonFollowCount: 1,
+            successfulActivityPodsSigningCalls: signing.successfulSigningCalls,
+            signerKeyIds: signing.signerKeyIds,
+            deliveredInboxPaths: signing.deliveredInboxPaths,
+            bodySha256Base64: signing.bodySha256Base64
+          }, null, 2) + '\n');
+          NODE
+
+      - name: Build exact two-mode evidence summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('fs');
+          const root = process.env.EVIDENCE_DIR;
+          const nativeOrigin = JSON.parse(fs.readFileSync(`${root}/native-origin.json`, 'utf8'));
+          const nativeAcceptance = JSON.parse(fs.readFileSync(`${root}/native-mastodon-acceptance.json`, 'utf8'));
+          const externalOrigin = JSON.parse(fs.readFileSync(`${root}/external-origin.json`, 'utf8'));
+          const externalAcceptance = JSON.parse(fs.readFileSync(`${root}/external-mastodon-acceptance.json`, 'utf8'));
+          const externalCompression = JSON.parse(fs.readFileSync(`${root}/external-redis-compression.json`, 'utf8'));
+          if (!nativeOrigin.ok || !nativeAcceptance.ok || !externalAcceptance.ok || !externalCompression.ok ||
+              externalOrigin.ok !== true || externalOrigin.mode !== 'external' ||
+              externalOrigin.durableHandoffQueued !== true || externalOrigin.nativeRemotePostSuppressed !== true ||
+              externalAcceptance.activityId !== externalOrigin.activityId) {
+            throw new Error('two-mode evidence is incomplete or violates external-delivery invariants');
+          }
+          const summary = {
+            schema: 'activitypods.activitypub.real-two-mode-federation.v1',
+            complete: true,
+            activityPodsSha: process.env.ACTIVITYPODS_SHA,
+            federationSha: process.env.FEDERATION_SHA,
+            remoteImplementation: 'Mastodon v4.5.8',
+            native: {
+              actorUri: nativeOrigin.actorUri,
+              activityId: nativeOrigin.activityId,
+              mastodonFollowCount: nativeAcceptance.mastodonFollowCount,
+              sidecarRunning: nativeAcceptance.sidecarRunning
+            },
+            external: {
+              actorUri: externalOrigin.actorUri,
+              activityId: externalOrigin.activityId,
+              proofSummaryBytes: externalOrigin.proofSummaryBytes,
+              durableHandoffQueued: externalOrigin.durableHandoffQueued,
+              nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed,
+              mastodonFollowCount: externalAcceptance.mastodonFollowCount,
+              successfulActivityPodsSigningCalls: externalAcceptance.successfulActivityPodsSigningCalls,
+              signerKeyIds: externalAcceptance.signerKeyIds,
+              deliveredInboxPaths: externalAcceptance.deliveredInboxPaths,
+              bodySha256Base64: externalAcceptance.bodySha256Base64,
+              redisStreamCompression: {
+                codecEnvelope: externalCompression.codecEnvelope,
+                matches: externalCompression.matches
+              }
+            }
+          };
+          fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
+          console.log(JSON.stringify(summary, null, 2));
+          NODE
+
+      - name: Upload real two-mode federation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: activitypub-real-two-mode-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/ap-real-two-mode/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Show service logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          echo '--- ActivityPods native ---'
+          tail -n 500 "${EVIDENCE_DIR}/activitypods-native.log" 2>/dev/null || true
+          echo '--- ActivityPods external ---'
+          tail -n 500 "${EVIDENCE_DIR}/activitypods-external.log" 2>/dev/null || true
+          echo '--- Sidecar / interop infrastructure ---'
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            logs --no-color fedify-sidecar redis redpanda mock-activitypods 2>/dev/null || true
+          echo '--- Signing proxy ---'
+          cat "${EVIDENCE_DIR}/signing-proxy.log" 2>/dev/null || true
+          echo '--- Mastodon ---'
+          docker compose -f "${COMPOSE_FILE}" --profile mastodon logs --no-color mastodon-web-app mastodon-sidekiq 2>/dev/null || true
+          echo '--- TLS router ---'
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods logs --no-color ap-proof-router 2>/dev/null || true
+
+      - name: Stop isolated real federation fixture
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          for file in activitypods-external.pid activitypods-native.pid signing-proxy.pid; do
+            if [[ -f "${EVIDENCE_DIR}/${file}" ]]; then kill "$(cat "${EVIDENCE_DIR}/${file}")" 2>/dev/null || true; fi
+          done
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods down -v || true
+          docker compose -f "${COMPOSE_FILE}" --profile mastodon down -v || true
+          cd activitypods/pod-provider
+          docker compose -f docker-compose-test.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test

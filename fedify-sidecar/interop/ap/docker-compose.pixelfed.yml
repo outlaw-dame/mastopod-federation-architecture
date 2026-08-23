@@ -1,0 +1,92 @@
+services:
+  pixelfed-db:
+    # Pixelfed v0.12.7's Pulse migration uses MD5 in a generated column,
+    # which current MySQL 9 rejects. Pin the compatible 8.4 LTS line instead
+    # of inheriting the upstream compose file's mutable mysql:9 tag.
+    image: mysql:8.4@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+    environment:
+      MYSQL_DATABASE: pixelfed
+      MYSQL_USER: pixelfed
+      MYSQL_PASSWORD: ${PIXELFED_DB_PASSWORD:?PIXELFED_DB_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${PIXELFED_DB_ROOT_PASSWORD:?PIXELFED_DB_ROOT_PASSWORD is required}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    volumes:
+      - ap_interop_pixelfed_db:/var/lib/mysql
+    networks:
+      - ap-interop
+
+  pixelfed-redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - ap_interop_pixelfed_redis:/data
+    networks:
+      - ap-interop
+
+  pixelfed-app:
+    image: ${PIXELFED_IMAGE:?PIXELFED_IMAGE is required}
+    env_file:
+      - ./runtime/pixelfed.env
+    environment:
+      SSL_MODE: "off"
+      SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
+      AUTORUN_ENABLED: "true"
+      AUTORUN_LARAVEL_MIGRATION: "true"
+      AUTORUN_LARAVEL_MIGRATION_ISOLATION: "true"
+      AUTORUN_LARAVEL_STORAGE_LINK: "true"
+      AUTORUN_LARAVEL_CONFIG_CACHE: "true"
+    depends_on:
+      pixelfed-db:
+        condition: service_healthy
+      pixelfed-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/instance >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 60s
+    volumes:
+      - ap_interop_pixelfed_storage:/var/www/html/storage
+      - ap_interop_pixelfed_cache:/var/www/html/bootstrap/cache
+      - ./runtime:/interop/runtime:ro
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+    networks:
+      - ap-interop
+
+  pixelfed-horizon:
+    image: ${PIXELFED_IMAGE:?PIXELFED_IMAGE is required}
+    command: ["php", "artisan", "horizon"]
+    env_file:
+      - ./runtime/pixelfed.env
+    environment:
+      SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
+      AUTORUN_ENABLED: "false"
+      AUTORUN_LARAVEL_MIGRATION: "false"
+      AUTORUN_LARAVEL_STORAGE_LINK: "true"
+      AUTORUN_LARAVEL_CONFIG_CACHE: "true"
+    depends_on:
+      pixelfed-app:
+        condition: service_healthy
+    volumes:
+      - ap_interop_pixelfed_storage:/var/www/html/storage
+      - ap_interop_pixelfed_cache:/var/www/html/bootstrap/cache
+      - ./runtime:/interop/runtime:ro
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+    networks:
+      - ap-interop
+
+volumes:
+  ap_interop_pixelfed_db:
+  ap_interop_pixelfed_redis:
+  ap_interop_pixelfed_storage:
+  ap_interop_pixelfed_cache:

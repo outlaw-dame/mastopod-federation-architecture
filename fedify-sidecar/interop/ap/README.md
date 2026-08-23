@@ -212,6 +212,8 @@ The repo now uses two CI lanes for the sidecar:
 - `Fedify Sidecar Fast Checks`: required on ordinary sidecar PRs; runs typecheck plus a focused Vitest slice
 - `AP Interop Smoke`: dockerized federation proof lane; automatically skips irrelevant PRs, runs GoToSocial plus Mastodon for normal federation/runtime changes, and expands to Akkoma when Akkoma-specific harness changes are present or when manually requested with workflow dispatch inputs
 
+The separate `ActivityPub Real Multi-Implementation Federation` workflow runs the exact ActivityPods candidate in both native and external-sidecar modes and requires remote persisted-follow evidence. Its executable targets, immutable fixture authorities, and the explicit Bandwagon blocker are recorded in [EXTERNAL-IMPLEMENTATION-COVERAGE.md](./EXTERNAL-IMPLEMENTATION-COVERAGE.md).
+
 For manual workflow dispatches, `AP Interop Smoke` accepts a space-delimited `targets` input. The default manual value is:
 
 ```text

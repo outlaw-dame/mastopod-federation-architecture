@@ -1,0 +1,65 @@
+services:
+  castopod-db:
+    image: mariadb:11.4@sha256:4f1d8d202fcf7bcb3902f63af09f9c1a050c2922a89652f22abaec0d4f015e83
+    environment:
+      MARIADB_DATABASE: castopod
+      MARIADB_USER: castopod
+      MARIADB_PASSWORD: ${CASTOPOD_DB_PASSWORD:?CASTOPOD_DB_PASSWORD is required}
+      MARIADB_ROOT_PASSWORD: ${CASTOPOD_DB_ROOT_PASSWORD:?CASTOPOD_DB_ROOT_PASSWORD is required}
+    healthcheck:
+      test: ["CMD-SHELL", "healthcheck.sh --connect --innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ap_interop_castopod_db:/var/lib/mysql
+    networks:
+      - ap-interop
+
+  castopod-redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - ap_interop_castopod_redis:/data
+    networks:
+      - ap-interop
+
+  castopod-app:
+    image: castopod/castopod:1.9.0@sha256:3ad8970f1decc9c9009502be3efedcf2f5d9fda5c7c9fd85a4408edc84a0bbb9
+    depends_on:
+      castopod-db:
+        condition: service_healthy
+      castopod-redis:
+        condition: service_healthy
+    environment:
+      MYSQL_DATABASE: castopod
+      MYSQL_USER: castopod
+      MYSQL_PASSWORD: ${CASTOPOD_DB_PASSWORD:?CASTOPOD_DB_PASSWORD is required}
+      CP_BASEURL: https://castopod.test/
+      CP_ANALYTICS_SALT: ${CASTOPOD_ANALYTICS_SALT:?CASTOPOD_ANALYTICS_SALT is required}
+      CP_DATABASE_HOSTNAME: castopod-db
+      CP_REDIS_HOST: castopod-redis
+      AP_INTEROP_CASTOPOD_BOOTSTRAP: "1"
+      SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
+      CURL_CA_BUNDLE: /interop/runtime/certs/rootCA.crt
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'Accept: application/activity+json' http://127.0.0.1:8000/@interop >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    volumes:
+      - ap_interop_castopod_media:/var/www/castopod/public/media
+      - ./castopod/InteropCreatePodcast.php:/var/www/castopod/app/Commands/InteropCreatePodcast.php:ro
+      - ./runtime/certs:/interop/runtime/certs:ro
+    networks:
+      - ap-interop
+
+volumes:
+  ap_interop_castopod_db:
+  ap_interop_castopod_redis:
+  ap_interop_castopod_media:
