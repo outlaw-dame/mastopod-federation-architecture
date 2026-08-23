@@ -1,5 +1,5 @@
-import { createHash, createPrivateKey, generateKeyPairSync, sign } from 'node:crypto';
 import Fastify from 'fastify';
+import { signRequest } from '@fedify/fedify';
 
 const host = process.env.OS4B_REMOTE_HOST ?? '127.0.0.1';
 const port = Number(process.env.OS4B_REMOTE_PORT ?? 18181);
@@ -13,9 +13,19 @@ const marker = process.env.OS4B_FEDERATION_MARKER ?? `os4b-live-${Date.now()}`;
 const invalidMarker = `${marker}-invalid-signature`;
 const actorUri = `http://${publicHost}:${publicPort}/users/remote`;
 const keyId = `${actorUri}#main-key`;
-const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
-const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+
+const keyPair = await crypto.subtle.generateKey(
+  {
+    name: 'RSASSA-PKCS1-v1_5',
+    modulusLength: 2048,
+    publicExponent: new Uint8Array([1, 0, 1]),
+    hash: 'SHA-256',
+  },
+  true,
+  ['sign', 'verify'],
+);
+const spki = Buffer.from(await crypto.subtle.exportKey('spki', keyPair.publicKey));
+const publicKeyPem = `-----BEGIN PUBLIC KEY-----\n${spki.toString('base64').match(/.{1,64}/g)!.join('\n')}\n-----END PUBLIC KEY-----\n`;
 const app = Fastify({ logger: false });
 
 app.get('/health', async () => ({ ok: true }));
@@ -53,35 +63,36 @@ function buildActivity(i: number, contentMarker = marker) {
   };
 }
 
-/**
- * Match the repository's proven ActivityPods/Mastodon/GoToSocial draft-Cavage
- * POST profile exactly: (request-target), host, date and digest. Content-Type
- * is sent on the wire but is intentionally not part of the signature coverage.
- */
-function signedHeaders(body: string) {
-  const target = new URL(sidecarInbox);
-  const date = new Date().toUTCString();
-  const digest = `SHA-256=${createHash('sha256').update(body).digest('base64')}`;
-  const signingString = [
-    `(request-target): post ${target.pathname}${target.search}`,
-    `host: ${sidecarHostHeader}`,
-    `date: ${date}`,
-    `digest: ${digest}`,
-  ].join('\n');
-  const signature = sign('RSA-SHA256', Buffer.from(signingString), createPrivateKey(privateKeyPem)).toString('base64');
-  return {
-    host: sidecarHostHeader,
-    date,
-    digest,
-    'content-type': 'application/activity+json',
-    signature: `keyId="${keyId}",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="${signature}"`,
-  };
+async function createSignedHeaders(body: string): Promise<Record<string, string>> {
+  // Sign against the externally visible Host value that Fastify/Fedify sees,
+  // then send those exact headers to the loopback transport endpoint.
+  const visibleUrl = new URL(sidecarInbox);
+  visibleUrl.hostname = sidecarHostHeader;
+  visibleUrl.port = '';
+  const unsigned = new Request(visibleUrl, {
+    method: 'POST',
+    headers: {
+      host: sidecarHostHeader,
+      'content-type': 'application/activity+json',
+      accept: 'application/activity+json',
+    },
+    body,
+  });
+  const signed = await signRequest(unsigned, keyPair.privateKey, new URL(keyId), {
+    spec: 'draft-cavage-http-signatures-12',
+  });
+  const headers: Record<string, string> = {};
+  signed.headers.forEach((value, name) => { headers[name] = value; });
+  headers.host = sidecarHostHeader;
+  return headers;
 }
 
 async function sendInvalidSignatureControl() {
   const body = JSON.stringify(buildActivity(-1, invalidMarker));
-  const headers = signedHeaders(body);
-  headers.signature = `${headers.signature.slice(0, -8)}INVALID!`;
+  const headers = await createSignedHeaders(body);
+  const signatureName = Object.keys(headers).find((name) => name.toLowerCase() === 'signature');
+  if (!signatureName) throw new Error('Fedify signRequest did not emit Signature header for Cavage request');
+  headers[signatureName] = `${headers[signatureName]!.slice(0, -8)}INVALID!`;
   const response = await fetch(sidecarInbox, { method: 'POST', headers, body });
   const responseBody = await response.text();
   if (response.status >= 200 && response.status < 300) {
@@ -104,7 +115,11 @@ try {
       const activity = buildActivity(i);
       const body = JSON.stringify(activity);
       const requestStartedAt = Date.now();
-      const response = await fetch(sidecarInbox, { method: 'POST', headers: signedHeaders(body), body });
+      const response = await fetch(sidecarInbox, {
+        method: 'POST',
+        headers: await createSignedHeaders(body),
+        body,
+      });
       latencies.push(Date.now() - requestStartedAt);
       if (response.status !== 202) {
         throw new Error(`federation POST ${i} returned ${response.status}: ${await response.text()}`);
