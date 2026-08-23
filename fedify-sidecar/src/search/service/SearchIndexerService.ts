@@ -258,18 +258,21 @@ export class SearchIndexerService {
 
         if (outboxIntentId && await this.outboxIntentDeduper.has(outboxIntentId)) {
           plans.push({ message, raw, retryKey, outboxIntentId, alreadyCompleted: true });
+          if ((i + 1) % 10 === 0) await payload.heartbeat();
           continue;
         }
 
         const consent = normalizePublicSearchConsent((event['meta'] as any)?.searchConsent);
         if (consent?.isPublic === false) {
           plans.push({ message, raw, retryKey, outboxIntentId });
+          if ((i + 1) % 10 === 0) await payload.heartbeat();
           continue;
         }
 
         const projected = await collectApFirehoseEvents(this.identityResolver, event);
         if (projected.length === 0) {
           plans.push({ message, raw, retryKey, outboxIntentId });
+          if ((i + 1) % 10 === 0) await payload.heartbeat();
           continue;
         }
         if (projected.length !== 1 || projected[0]!.topic !== 'search.public.upsert.v1') {
@@ -282,6 +285,7 @@ export class SearchIndexerService {
           outboxIntentId,
           upsert: projected[0]!.event as SearchPublicUpsertV1,
         });
+        if ((i + 1) % 10 === 0) await payload.heartbeat();
       } catch (error) {
         planningFailure = { index: i, raw, retryKey, error };
         break;
@@ -302,7 +306,12 @@ export class SearchIndexerService {
     let batchError: unknown;
     if (upserts.length > 0) {
       try {
-        await this.writer.onUpsertBatch(upserts);
+        await this.runWithHeartbeat(() => this.writer.onUpsertBatch(upserts), payload);
+        logger.info('[SearchIndexerService] Applied OpenSearch content batch', {
+          contentBatchSize: upserts.length,
+          topic: payload.batch.topic,
+          partition: payload.batch.partition,
+        });
       } catch (error) {
         batchError = error;
         const failedUpsertIndex = error instanceof PublicContentBatchError ? error.failedIndex : 0;
@@ -345,6 +354,22 @@ export class SearchIndexerService {
     }
 
     return { processed: plannedCount, halted: false };
+  }
+
+  private async runWithHeartbeat<T>(work: () => Promise<T>, payload: EachBatchPayload): Promise<T> {
+    let finished = false;
+    const heartbeatLoop = (async () => {
+      while (!finished) {
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+        if (!finished) await payload.heartbeat();
+      }
+    })();
+    try {
+      return await work();
+    } finally {
+      finished = true;
+      await heartbeatLoop.catch(() => undefined);
+    }
   }
 
   private async finalizePlan(plan: ContentPlan, payload: EachBatchPayload): Promise<void> {
@@ -493,6 +518,12 @@ export class SearchIndexerService {
   }
 }
 
+function parseBoundedInteger(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
 export function createSearchIndexerService(
   overrides?: Partial<SearchIndexerServiceConfig>,
   identityResolver?: IdentityAliasResolver,
@@ -512,15 +543,17 @@ export function createSearchIndexerService(
     qdrantUrl: process.env['QDRANT_URL'] ?? 'http://localhost:6333',
     qdrantApiKey: process.env['QDRANT_API_KEY'],
     qdrantCollectionName: process.env['QDRANT_COLLECTION_NAME'] ?? 'public-content-v1',
-    qdrantVectorSize: parseInt(process.env['QDRANT_VECTOR_SIZE'] ?? '1024', 10),
-    qdrantRequestTimeoutMs: parseInt(process.env['QDRANT_REQUEST_TIMEOUT_MS'] ?? '5000', 10),
+    qdrantVectorSize: parseBoundedInteger(process.env['QDRANT_VECTOR_SIZE'], 1024, 1, 65_536),
+    qdrantRequestTimeoutMs: parseBoundedInteger(process.env['QDRANT_REQUEST_TIMEOUT_MS'], 5_000, 1, 600_000),
     redis: null,
-    backpressureRetryDelayMs: parseInt(process.env['SEARCH_INDEXER_BACKPRESSURE_RETRY_MS'] ?? '10000', 10),
-    maxProcessingAttempts: Math.max(1, parseInt(process.env['SEARCH_INDEXER_MAX_PROCESSING_ATTEMPTS'] ?? '5', 10)),
-    maxBatchSize: Math.max(1, Math.min(100, parseInt(process.env['SEARCH_INDEXER_MAX_BATCH_SIZE'] ?? '100', 10))),
-    outboxIntentDedupTtlSec: parseInt(
-      process.env['SEARCH_INDEXER_OUTBOX_INTENT_DEDUP_TTL_SEC'] ?? `${60 * 60 * 24 * 7}`,
-      10,
+    backpressureRetryDelayMs: parseBoundedInteger(process.env['SEARCH_INDEXER_BACKPRESSURE_RETRY_MS'], 10_000, 1, 600_000),
+    maxProcessingAttempts: parseBoundedInteger(process.env['SEARCH_INDEXER_MAX_PROCESSING_ATTEMPTS'], 5, 1, 100),
+    maxBatchSize: parseBoundedInteger(process.env['SEARCH_INDEXER_MAX_BATCH_SIZE'], 100, 1, 100),
+    outboxIntentDedupTtlSec: parseBoundedInteger(
+      process.env['SEARCH_INDEXER_OUTBOX_INTENT_DEDUP_TTL_SEC'],
+      60 * 60 * 24 * 7,
+      1,
+      60 * 60 * 24 * 365,
     ),
     ...overrides,
   };
