@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { fetchKeyDetailed, signRequest, verifyRequestDetailed } from '@fedify/fedify';
-import { CryptographicKey } from '@fedify/fedify/vocab';
+import { CryptographicKey, Person } from '@fedify/fedify/vocab';
 import { request as undiciRequest } from 'undici';
 
 const host = process.env.OS4B_REMOTE_HOST ?? '127.0.0.1';
@@ -27,20 +27,23 @@ const keyPair = await crypto.subtle.generateKey(
   true,
   ['sign', 'verify'],
 );
-const spki = Buffer.from(await crypto.subtle.exportKey('spki', keyPair.publicKey));
-const publicKeyPem = `-----BEGIN PUBLIC KEY-----\n${spki.toString('base64').match(/.{1,64}/g)!.join('\n')}\n-----END PUBLIC KEY-----\n`;
-const actorDocument = {
-  '@context': [
-    'https://www.w3.org/ns/activitystreams',
-    'https://w3id.org/security/v1',
-  ],
-  id: actorUri,
-  type: 'Person',
+
+// Serialize the actor/key with Fedify itself so the document fetched over HTTP
+// has exactly the vocabulary/context representation Fedify expects to parse.
+const remotePublicKey = new CryptographicKey({
+  id: new URL(keyId),
+  owner: new URL(actorUri),
+  publicKey: keyPair.publicKey,
+});
+const remoteActor = new Person({
+  id: new URL(actorUri),
   preferredUsername: 'remote',
-  url: actorUri,
-  inbox: `http://${publicHost}:${publicPort}/users/remote/inbox`,
-  publicKey: { id: keyId, owner: actorUri, publicKeyPem },
-};
+  url: new URL(actorUri),
+  inbox: new URL(`http://${publicHost}:${publicPort}/users/remote/inbox`),
+  publicKey: remotePublicKey,
+});
+const actorDocument = await remoteActor.toJsonLd();
+
 const app = Fastify({ logger: false });
 let actorDocumentFetches = 0;
 
@@ -230,6 +233,7 @@ try {
     actorUri,
     sidecarInbox,
     actorDocumentFetches,
+    actorDocumentImplementation: '@fedify/fedify Person + CryptographicKey toJsonLd',
     signatureImplementation: '@fedify/fedify signRequest draft-cavage-http-signatures-12 minimal signed headers',
     wireTransport: 'undici.request exact Host/body with forwarded logical origin',
     elapsedMs,
