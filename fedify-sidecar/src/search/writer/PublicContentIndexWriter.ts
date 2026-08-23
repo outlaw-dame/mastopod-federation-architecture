@@ -68,7 +68,11 @@ export class PublicContentIndexWriter {
     if (existingDoc && existingDoc.sourceKind === 'remote' && event.sourceKind === 'remote') {
       const shouldMerge = await this.dedupService.shouldMergeRemoteDuplicate(existingDoc, event);
       if (!shouldMerge) {
-        console.warn(`Skipping merge for remote duplicate: ${targetDocId}`);
+        // A prior non-transactional bulk request may have persisted the document
+        // while alias publication failed. Replay must heal those aliases even
+        // when the duplicate itself does not require a document merge.
+        await this.publishAliases(event, targetDocId);
+        console.warn(`Skipping merge for remote duplicate after alias reconciliation: ${targetDocId}`);
         return;
       }
     }
@@ -85,9 +89,9 @@ export class PublicContentIndexWriter {
    * duplicate IDs stay sequential so merge/dedup semantics do not change.
    * OpenSearch bulk requests are non-transactional: when an item fails, later
    * items may still succeed. We therefore publish aliases for every successful
-   * item before throwing the earliest source-index failure. This makes replay
-   * of the failed item/suffix safe even when OpenSearch committed a successful
-   * suffix in the original request.
+   * item before throwing the earliest source-index failure. Successful items
+   * whose alias publication fails are healed by the sequential replay path,
+   * including suffixes hidden behind an earlier source-index failure.
    */
   async onUpsertBatch(events: SearchPublicUpsertV1[]): Promise<void> {
     if (events.length <= 1 || !this.osClient.getMany || !this.osClient.upsertMany) {
