@@ -212,6 +212,14 @@ function canonicalizeActorAuthorityHostExactPath(actorUri: string): string {
   if (authorityUrl.username || authorityUrl.password) {
     throw new Error("actorUri must not contain credentials, query, or fragment");
   }
+  if (
+    !authorityUrl.host ||
+    authorityUrl.pathname !== "/" ||
+    authorityUrl.search ||
+    authorityUrl.hash
+  ) {
+    throw new Error("actorUri contains an ambiguous or invalid authority");
+  }
 
   return `${authorityUrl.protocol}//${authorityUrl.host}${rawPath}`;
 }
