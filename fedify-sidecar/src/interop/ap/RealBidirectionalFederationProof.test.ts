@@ -22,6 +22,24 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(workflow).toContain("activitypods.activitypub.real-multi-implementation.v2");
   });
 
+  it("does not confuse the remote fixture username with the local ActivityPods dataset", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+    const helper = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-return-accept.mjs"),
+      "utf8",
+    );
+
+    expect(workflow).toContain('"${TARGET_USERNAME}" "${persisted_count}"');
+    expect(helper).toContain("<remote-username> <persisted-follow-count>");
+    expect(helper).toContain("localUsername: origin.senderUsername");
+    expect(helper).toContain("remoteUsername,");
+    expect(helper).not.toContain("origin.senderUsername !== localUsername");
+    expect(helper).toContain("encodeURIComponent(origin.senderUsername)");
+  });
+
   it("runs the real external return leg through the existing sidecar inbound worker", () => {
     const workflow = readFileSync(
       resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
