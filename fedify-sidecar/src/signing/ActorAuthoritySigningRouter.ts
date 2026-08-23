@@ -202,6 +202,10 @@ function canonicalizeActorAuthorityHostExactPath(actorUri: string): string {
   }
 
   const [, rawScheme, rawAuthority, rawPath = ""] = rawMatch;
+  if (rawAuthority.includes("\\")) {
+    throw new Error("actorUri contains an ambiguous or invalid authority");
+  }
+
   let authorityUrl: URL;
   try {
     authorityUrl = new URL(`${rawScheme}://${rawAuthority}`);
