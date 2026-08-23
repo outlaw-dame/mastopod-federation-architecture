@@ -36,7 +36,7 @@ https://bonfire.test {
 }
 
 https://misskey.test {
-  tls /certs/misskey.test.crt /certs/misskey.key
+  tls /certs/misskey.test.crt /certs/misskey.test.key
   reverse_proxy misskey-app:3000
 }
 
