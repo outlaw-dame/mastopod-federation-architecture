@@ -629,7 +629,16 @@ export function resolveSidecarRelayActorUri(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const domain = env["DOMAIN"]?.trim() || "localhost";
-  return env["AP_RELAY_LOCAL_ACTOR_URI"]?.trim() || `https://${domain}/users/relay`;
+  const expectedActorUri = `https://${domain}/users/relay`;
+  const configuredActorUri = env["AP_RELAY_LOCAL_ACTOR_URI"]?.trim();
+
+  if (configuredActorUri && configuredActorUri !== expectedActorUri) {
+    throw new Error(
+      `AP_RELAY_LOCAL_ACTOR_URI must exactly match the Fedify-served relay actor URI: ${expectedActorUri}`,
+    );
+  }
+
+  return expectedActorUri;
 }
 
 export function createSigningClient(
@@ -661,6 +670,7 @@ export function createSigningClient(
       localSigningService,
       {
         sidecarServiceActors: [{ actorUri: relayActorUri, identifier: "relay" }],
+        sidecarPublicDomain: process.env["DOMAIN"]?.trim() || "localhost",
       },
     );
 
