@@ -121,12 +121,21 @@ describe("ActorAuthoritySigningRouter", () => {
     })).toThrow(/must match DOMAIN/u);
   });
 
-  it("does not collapse dot-segment spellings into configured actor identity", () => {
+  it("rejects dot-segment spellings before they can collapse into configured actor identity", () => {
     const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
       sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
     });
 
-    expect(router.classifyActor("https://example.com/users/a/../relay")).toBe("activitypods_pod_actor");
+    expect(() => router.classifyActor("https://example.com/users/a/../relay")).toThrow(/canonical URL serialization/u);
+  });
+
+  it("rejects URL spellings that the parser would silently canonicalize", () => {
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
+    });
+
+    expect(() => router.classifyActor("https://EXAMPLE.com/users/alice")).toThrow(/canonical URL serialization/u);
+    expect(() => router.classifyActor("https://example.com:443/users/alice")).toThrow(/canonical URL serialization/u);
   });
 
   it("rejects authority-ambiguous actor URI shapes", () => {
