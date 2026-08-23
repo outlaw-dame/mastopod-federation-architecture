@@ -88,37 +88,30 @@ export class HttpAtPasswordVerifier implements AtPasswordVerifier {
  * federation signing credential to become an auth-verification credential.
  *
  * The production session construction historically passed ACTIVITYPODS_TOKEN
- * as an override. The dedicated environment capability therefore has priority,
- * and an override equal to ACTIVITYPODS_TOKEN is discarded when the dedicated
- * token is absent. Distinct explicit overrides remain available to hermetic
- * tests/embedders. Equal dedicated/federation environment tokens fail closed so
- * an accidental one-token deployment cannot silently defeat capability split.
+ * as an override. A non-empty dedicated environment capability therefore has
+ * priority, and an override equal to ACTIVITYPODS_TOKEN is discarded when the
+ * dedicated token is absent. Empty environment values are treated as unset so
+ * hermetic embedders can still provide a distinct explicit verifier token.
+ * Equal non-empty dedicated/federation environment tokens fail closed so an
+ * accidental one-token deployment cannot silently defeat capability split.
  */
 export function resolveHttpAtPasswordVerifierConfig(
   overrides?: Partial<HttpAtPasswordVerifierConfig>,
   env: NodeJS.ProcessEnv = process.env,
 ): HttpAtPasswordVerifierConfig {
-  const dedicatedToken = env["ATPROTO_PASSWORD_VERIFY_TOKEN"];
-  const federationToken = env["ACTIVITYPODS_TOKEN"];
-  const overrideToken = overrides?.token;
+  const dedicatedToken = nonEmptyToken(env["ATPROTO_PASSWORD_VERIFY_TOKEN"]);
+  const federationToken = nonEmptyToken(env["ACTIVITYPODS_TOKEN"]);
+  const overrideToken = nonEmptyToken(overrides?.token);
 
-  if (
-    dedicatedToken !== undefined &&
-    dedicatedToken.length > 0 &&
-    federationToken !== undefined &&
-    federationToken.length > 0 &&
-    dedicatedToken === federationToken
-  ) {
+  if (dedicatedToken && federationToken && dedicatedToken === federationToken) {
     throw new Error(
       "ATPROTO_PASSWORD_VERIFY_TOKEN must be distinct from ACTIVITYPODS_TOKEN",
     );
   }
 
-  const token = dedicatedToken !== undefined
-    ? dedicatedToken
-    : overrideToken !== undefined && overrideToken !== federationToken
-      ? overrideToken
-      : '';
+  const token = dedicatedToken
+    ?? (overrideToken && overrideToken !== federationToken ? overrideToken : undefined)
+    ?? '';
 
   return {
     baseUrl: overrides?.baseUrl ?? env["ACTIVITYPODS_URL"] ?? 'http://localhost:3000',
@@ -131,4 +124,8 @@ export function createHttpAtPasswordVerifier(
   overrides?: Partial<HttpAtPasswordVerifierConfig>
 ): HttpAtPasswordVerifier {
   return new HttpAtPasswordVerifier(resolveHttpAtPasswordVerifierConfig(overrides));
+}
+
+function nonEmptyToken(value: string | undefined): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
