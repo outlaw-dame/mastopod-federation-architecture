@@ -54,16 +54,40 @@ https://castopod.test {
   reverse_proxy castopod-app:8000
 }
 
+# In native mode port 8080 is deliberately absent, so Caddy marks that first
+# upstream unavailable and retries the exact ActivityPods backend. In external
+# mode the sidecar is already healthy on 8080; every actor-inbox POST therefore
+# enters the production sidecar ingress first. The external proof separately
+# requires the exact returning Accept in ap:queue:inbound:v1, so an unexpected
+# fallback to the backend cannot produce a false green result.
+(activitypods_return_path) {
+  @actorInbox {
+    method POST
+    path_regexp actor_inbox ^/(?:users/)?[^/]+/inbox/?$
+  }
+  handle @actorInbox {
+    reverse_proxy host.docker.internal:8080 host.docker.internal:3000 {
+      lb_policy first
+      fail_duration 30s
+      lb_try_duration 3s
+      lb_try_interval 100ms
+    }
+  }
+  handle {
+    reverse_proxy host.docker.internal:3000
+  }
+}
+
 # Canonical public ActivityPods actor/key surface for the live federation proof.
-# The backend remains a host process so the exact PR checkout is exercised;
-# Caddy supplies the local trusted TLS name that remote implementations can
-# dereference from inside the interop Docker network.
+# Actor/key/discovery GETs always remain authoritative on ActivityPods itself;
+# only remote POSTs to a concrete actor inbox participate in the return-path
+# routing above.
 https://activitypods {
   tls /certs/activitypods.crt /certs/activitypods.key
-  reverse_proxy host.docker.internal:3000
+  import activitypods_return_path
 }
 
 https://activitypods.test {
   tls /certs/activitypods.test.crt /certs/activitypods.test.key
-  reverse_proxy host.docker.internal:3000
+  import activitypods_return_path
 }
