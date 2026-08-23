@@ -430,6 +430,7 @@ jobs:
           set -euo pipefail
           router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
           sidecar_host="$(node interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
+          echo "AP_PROOF_SIDECAR_HOST=${sidecar_host}" >> "${GITHUB_ENV}"
           : > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl"
           AP_SIGNING_PROXY_HOST=127.0.0.1 AP_SIGNING_PROXY_PORT=3001 AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
           AP_SIGNING_PROXY_EVIDENCE_PATH="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" \
@@ -485,7 +486,6 @@ jobs:
           SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: external
           SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: 'true'
           SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: 'false'
-          SIDECAR_DELIVERY_HANDOFF_URL: http://127.0.0.1:8080/webhook/outbox
           APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
           APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
           APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
@@ -493,7 +493,8 @@ jobs:
         run: |
           set -euo pipefail
           log="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.log"
-          "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
+          SIDECAR_DELIVERY_HANDOFF_URL="http://${AP_PROOF_SIDECAR_HOST}:8080/webhook/outbox" \
+            "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
           echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.pid"
           pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.pid")"
           ready=false
