@@ -79,6 +79,14 @@ describe("ActivityPub interop target registry", () => {
     expect(pixelfed?.notes?.join(" ")).toContain("CI run 32648934561");
   });
 
+  it("records Misskey as exact pinned coverage only after durable two-mode proof", () => {
+    const misskey = getInteropTarget("misskey");
+    expect(misskey?.status).toBe("existing");
+    expect(misskey?.versionPolicy).toBe("existing_pin");
+    expect(misskey?.capabilities).toContain("target_persistence");
+    expect(misskey?.notes?.join(" ")).toContain("CI run 32650757788");
+  });
+
   it("does not mislabel WriteFreely as exact Write.as conformance", () => {
     const writeFreely = getInteropTarget("writefreely");
     const writeAs = getInteropTarget("write-as-hosted");

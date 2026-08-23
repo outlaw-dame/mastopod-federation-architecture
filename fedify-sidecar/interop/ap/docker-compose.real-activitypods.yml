@@ -33,6 +33,10 @@ services:
       - "127.0.0.1:443:443"
     networks:
       ap-interop:
+        # Keep the proof router address deterministic so the Friendica-only
+        # authoritative DNS fixture can publish a real A record. This remains
+        # inside the test network's dedicated RFC1918 subnet.
+        ipv4_address: 172.31.240.254
         aliases:
           - sidecar
           - activitypods

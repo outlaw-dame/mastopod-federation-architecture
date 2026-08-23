@@ -7,7 +7,7 @@ interface ComposeService {
   environment?: Record<string, string>;
   extra_hosts?: string[];
   depends_on?: Record<string, unknown>;
-  networks?: Record<string, { aliases?: string[] }> | string[];
+  networks?: Record<string, { aliases?: string[]; ipv4_address?: string }> | string[];
 }
 
 interface ComposeOverlay {
@@ -49,6 +49,7 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(router?.depends_on?.["mastodon-wire-recorder"]).toBeDefined();
     expect(router?.networks).not.toBeInstanceOf(Array);
     if (router?.networks && !Array.isArray(router.networks)) {
+      expect(router.networks["ap-interop"]?.ipv4_address).toBe("172.31.240.254");
       expect(router.networks["ap-interop"]?.aliases).toContain("sidecar");
       expect(router.networks["ap-interop"]?.aliases).toContain("mastodon");
       expect(router.networks["ap-interop"]?.aliases).toContain("activitypods");

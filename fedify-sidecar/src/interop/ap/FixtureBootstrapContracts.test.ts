@@ -111,6 +111,10 @@ describe("real federation fixture bootstrap contracts", () => {
       resolve(process.cwd(), "interop/ap/docker-compose.friendica.yml"),
       "utf8",
     );
+    const corefile = readFileSync(
+      resolve(process.cwd(), "interop/ap/fixtures/friendica/Corefile"),
+      "utf8",
+    );
 
     expect(compose).toContain("friendica:2026.05@sha256:e496eeb3");
     expect(compose).toContain("entrypoint: /cron.sh");
@@ -120,6 +124,12 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(compose).toContain("FRIENDICA_LOGFILE: /var/log/friendica/friendica.log");
     expect(compose).toContain("FRIENDICA_LOGLEVEL: info");
     expect(compose).toContain("FRIENDICA_LOGGER: stream");
+    expect(compose).toContain("coredns/coredns:1.11.3@sha256:9caabbf6");
+    expect(compose.match(/dns:\n\s+- 172\.31\.240\.253/g)).toHaveLength(2);
+    expect(compose).toContain("ipv4_address: 172.31.240.253");
+    expect(corefile).toContain("172.31.240.254 activitypods.test");
+    expect(corefile).toContain("forward . 127.0.0.11");
+    expect(corefile).not.toContain("tls://");
     expect(compose).toContain("friendica-log-init:");
     expect(compose.match(/ap_interop_friendica_log:\/var\/log\/friendica/g)).toHaveLength(3);
     expect(compose).toContain("condition: service_completed_successfully");

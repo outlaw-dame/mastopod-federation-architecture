@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 120
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: 'fecb87f99da0765fc667d631878b52a910678590'
+      ACTIVITYPODS_SHA: '2dedd50304cbe07a0dcfa5c9b74d4c2cd199080c'
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       MASTODON_USERNAME: interop

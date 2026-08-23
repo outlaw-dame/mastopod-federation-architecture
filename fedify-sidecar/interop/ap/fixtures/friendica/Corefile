@@ -1,0 +1,11 @@
+activitypods.test:53 {
+  hosts {
+    172.31.240.254 activitypods.test
+  }
+  cache 30
+}
+
+.:53 {
+  forward . 127.0.0.11
+  cache 30
+}
