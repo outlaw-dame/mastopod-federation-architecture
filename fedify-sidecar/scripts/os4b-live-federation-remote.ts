@@ -27,14 +27,20 @@ const keyPair = await crypto.subtle.generateKey(
 const spki = Buffer.from(await crypto.subtle.exportKey('spki', keyPair.publicKey));
 const publicKeyPem = `-----BEGIN PUBLIC KEY-----\n${spki.toString('base64').match(/.{1,64}/g)!.join('\n')}\n-----END PUBLIC KEY-----\n`;
 const app = Fastify({ logger: false });
+let actorDocumentFetches = 0;
 
 app.get('/health', async () => ({ ok: true }));
 app.get('/users/remote', async (_request, reply) => {
+  actorDocumentFetches += 1;
   reply.type('application/activity+json').send({
-    '@context': 'https://www.w3.org/ns/activitystreams',
+    '@context': [
+      'https://www.w3.org/ns/activitystreams',
+      'https://w3id.org/security/v1',
+    ],
     id: actorUri,
     type: 'Person',
     preferredUsername: 'remote',
+    url: actorUri,
     inbox: `http://${publicHost}:${publicPort}/users/remote/inbox`,
     publicKey: { id: keyId, owner: actorUri, publicKeyPem },
   });
@@ -80,6 +86,7 @@ async function createSignedHeaders(body: string): Promise<Record<string, string>
   });
   const signed = await signRequest(unsigned, keyPair.privateKey, new URL(keyId), {
     spec: 'draft-cavage-http-signatures-12',
+    body: Buffer.from(body, 'utf8'),
   });
   const headers: Record<string, string> = {};
   signed.headers.forEach((value, name) => { headers[name] = value; });
@@ -122,7 +129,10 @@ try {
       });
       latencies.push(Date.now() - requestStartedAt);
       if (response.status !== 202) {
-        throw new Error(`federation POST ${i} returned ${response.status}: ${await response.text()}`);
+        throw new Error(
+          `federation POST ${i} returned ${response.status}: ${await response.text()} `
+          + `(remote actor document fetches=${actorDocumentFetches})`,
+        );
       }
     }
   });
@@ -137,6 +147,8 @@ try {
     count,
     actorUri,
     sidecarInbox,
+    actorDocumentFetches,
+    signatureImplementation: '@fedify/fedify signRequest draft-cavage-http-signatures-12',
     elapsedMs,
     acceptedPerSec: count / (elapsedMs / 1000),
     maxPostLatencyMs: Math.max(...latencies),
