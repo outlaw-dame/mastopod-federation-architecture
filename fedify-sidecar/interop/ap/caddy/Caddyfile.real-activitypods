@@ -63,7 +63,7 @@ https://castopod.test {
 (activitypods_return_path) {
   @actorInbox {
     method POST
-    path_regexp actor_inbox ^/(?:users/)?[^/]+/inbox/?$
+    path_regexp actor_inbox ^/(users/)?[^/]+/inbox/?$
   }
   handle @actorInbox {
     reverse_proxy host.docker.internal:8080 host.docker.internal:3000 {
