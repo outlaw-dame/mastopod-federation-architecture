@@ -12,6 +12,7 @@ const expected = Number(process.env.OS4B_FEDERATION_COUNT ?? 240);
 const timeoutMs = Number(process.env.OS4B_FEDERATION_TIMEOUT_MS ?? 120000);
 const sidecarLogPath = process.env.OS4B_SIDECAR_LOG_PATH ?? '../artifacts/os4b-live/sidecar.log';
 if (!marker) throw new Error('OS4B_FEDERATION_MARKER is required');
+const warmupMarker = `${marker}-valid-warmup`;
 const invalidMarker = `${marker}-invalid-signature`;
 
 const os = new Client({ node: opensearchUrl });
@@ -23,12 +24,17 @@ const consumer = kafka.consumer({ groupId: `os4b-live-verify-${Date.now()}` });
 await consumer.connect();
 await consumer.subscribe({ topic: 'ap.stream2.remote-public.v1', fromBeginning: true });
 let stream2Matched = 0;
+let stream2Warmup = 0;
 let stream2Invalid = 0;
 const observed = new Set<string>();
 await consumer.run({ eachMessage: async ({ message }) => {
   const raw = message.value?.toString() ?? '';
   if (raw.includes(invalidMarker)) {
     stream2Invalid++;
+    return;
+  }
+  if (raw.includes(warmupMarker)) {
+    stream2Warmup++;
     return;
   }
   if (!raw.includes(marker)) return;
@@ -47,11 +53,16 @@ await firehoseConsumer.connect();
 await firehoseConsumer.subscribe({ topic: 'ap.firehose.v1', fromBeginning: true });
 const firehoseIds = new Set<string>();
 let firehoseMatched = 0;
+let firehoseWarmup = 0;
 let firehoseInvalid = 0;
 await firehoseConsumer.run({ eachMessage: async ({ message }) => {
   const raw = message.value?.toString() ?? '';
   if (raw.includes(invalidMarker)) {
     firehoseInvalid++;
+    return;
+  }
+  if (raw.includes(warmupMarker)) {
+    firehoseWarmup++;
     return;
   }
   if (!raw.includes(marker)) return;
@@ -65,11 +76,19 @@ await firehoseConsumer.run({ eachMessage: async ({ message }) => {
   } catch {}
 } });
 
-async function searchCount(text: string): Promise<number> {
+async function searchCount(text: string, excludeText?: string): Promise<number> {
   await os.indices.refresh({ index: 'public-content-v1' }).catch(() => undefined);
+  const query = excludeText
+    ? {
+        bool: {
+          must: [{ match_phrase: { text } }],
+          must_not: [{ match_phrase: { text: excludeText } }],
+        },
+      }
+    : { match_phrase: { text } };
   const response: any = await os.search({
     index: 'public-content-v1',
-    body: { size: 0, query: { match_phrase: { text } } },
+    body: { size: 0, query },
   }).catch(() => null);
   return Number(response?.body?.hits?.total?.value ?? 0);
 }
@@ -77,13 +96,15 @@ async function searchCount(text: string): Promise<number> {
 async function inboundEvidence() {
   const rows = await redis.xRange('ap:queue:inbound:v1', '-', '+').catch(() => [] as any[]);
   let valid = 0;
+  let warmup = 0;
   let invalid = 0;
   for (const row of rows as any[]) {
     const raw = JSON.stringify(row?.message ?? {});
     if (raw.includes(invalidMarker)) invalid++;
+    else if (raw.includes(warmupMarker)) warmup++;
     else if (raw.includes(marker)) valid++;
   }
-  return { valid, invalid, totalEntries: rows.length };
+  return { valid, warmup, invalid, totalEntries: rows.length };
 }
 
 async function batchingEvidence() {
@@ -108,19 +129,23 @@ async function batchingEvidence() {
 
 const startedAt = Date.now();
 let searchHits = 0;
+let warmupSearchHits = Number.POSITIVE_INFINITY;
 let invalidSearchHits = Number.POSITIVE_INFINITY;
 let inboundPending = Number.POSITIVE_INFINITY;
 let inboundObserved = 0;
+let inboundWarmup = 0;
 let inboundInvalid = Number.POSITIVE_INFINITY;
 let inboundTotalEntries = 0;
 let batching = { observedBatchCalls: 0, maxObservedBatchSize: 0, totalBatchedDocuments: 0 };
 while (Date.now() - startedAt < timeoutMs) {
-  searchHits = await searchCount(marker);
+  searchHits = await searchCount(marker, warmupMarker);
+  warmupSearchHits = await searchCount(warmupMarker);
   invalidSearchHits = await searchCount(invalidMarker);
   const pendingRows = await redis.xPending('ap:queue:inbound:v1', 'sidecar-workers').catch(() => null as any);
   inboundPending = typeof pendingRows?.pending === 'number' ? pendingRows.pending : Number.POSITIVE_INFINITY;
   const inbound = await inboundEvidence();
   inboundObserved = inbound.valid;
+  inboundWarmup = inbound.warmup;
   inboundInvalid = inbound.invalid;
   inboundTotalEntries = inbound.totalEntries;
   batching = await batchingEvidence();
@@ -131,6 +156,10 @@ while (Date.now() - startedAt < timeoutMs) {
     && firehoseMatched === expected
     && inboundObserved === expected
     && inboundPending === 0
+    && warmupSearchHits === 1
+    && inboundWarmup === 1
+    && stream2Warmup === 1
+    && firehoseWarmup === 1
     && invalidSearchHits === 0
     && inboundInvalid === 0
     && stream2Invalid === 0
@@ -153,6 +182,10 @@ const result = {
     && firehoseMatched === expected
     && inboundObserved === expected
     && inboundPending === 0
+    && warmupSearchHits === 1
+    && inboundWarmup === 1
+    && stream2Warmup === 1
+    && firehoseWarmup === 1
     && invalidSearchHits === 0
     && inboundInvalid === 0
     && stream2Invalid === 0
@@ -160,6 +193,7 @@ const result = {
     && batching.observedBatchCalls > 0
     && batching.maxObservedBatchSize >= 2,
   marker,
+  warmupMarker,
   invalidMarker,
   expected,
   searchHits,
@@ -169,6 +203,12 @@ const result = {
   inboundTotalEntries,
   inboundPending,
   batching,
+  warmupControl: {
+    inboundWarmup,
+    stream2Warmup,
+    firehoseWarmup,
+    warmupSearchHits,
+  },
   negativeControl: {
     inboundInvalid,
     stream2Invalid,
