@@ -357,18 +357,19 @@ export class SearchIndexerService {
   }
 
   private async runWithHeartbeat<T>(work: () => Promise<T>, payload: EachBatchPayload): Promise<T> {
-    let finished = false;
-    const heartbeatLoop = (async () => {
-      while (!finished) {
-        await new Promise((resolve) => setTimeout(resolve, 3_000));
-        if (!finished) await payload.heartbeat();
-      }
-    })();
+    let heartbeatError: unknown;
+    const timer = setInterval(() => {
+      void payload.heartbeat().catch((error) => {
+        heartbeatError ??= error;
+      });
+    }, 3_000);
     try {
-      return await work();
+      const result = await work();
+      if (heartbeatError) throw heartbeatError;
+      await payload.heartbeat();
+      return result;
     } finally {
-      finished = true;
-      await heartbeatLoop.catch(() => undefined);
+      clearInterval(timer);
     }
   }
 
