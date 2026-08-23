@@ -24,7 +24,10 @@ export interface ActorAuthoritySigningRouterOptions {
  * - all other actors are delegated to ActivityPods, whose signing API performs
  *   the exact local account/actor/key authority checks for pod/user actors;
  * - a local service-signer failure never falls back to ActivityPods, because
- *   that would silently move a service identity across a private-key boundary.
+ *   that would silently move a service identity across a private-key boundary;
+ * - a sidecar service actor binding must map to the exact `/users/{identifier}`
+ *   route that the Fedify actor dispatcher publishes, and when DOMAIN is set it
+ *   must use that public authority host.
  *
  * Actor IRIs are compared exactly after URL-shape validation. We intentionally
  * do not normalize trailing slashes, dot segments, host spelling, or other URI
@@ -48,6 +51,10 @@ export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
       if (!identifier) {
         throw new Error(`sidecar service actor identifier is empty: ${actorUri}`);
       }
+      if (!/^[A-Za-z0-9._~-]+$/u.test(identifier)) {
+        throw new Error(`sidecar service actor identifier is not route-safe: ${identifier}`);
+      }
+      validatePublishedSidecarActorRoute(actorUri, identifier);
       this.serviceActorIdentifiers.set(actorUri, identifier);
     }
   }
@@ -127,4 +134,21 @@ function validateActorUriExact(actorUri: string): string {
   }
 
   return actorUri;
+}
+
+function validatePublishedSidecarActorRoute(actorUri: string, identifier: string): void {
+  const parsed = new URL(actorUri);
+  const expectedPath = `/users/${encodeURIComponent(identifier)}`;
+  if (parsed.pathname !== expectedPath) {
+    throw new Error(
+      `sidecar service actor must use the published Fedify actor route ${expectedPath}: ${actorUri}`,
+    );
+  }
+
+  const configuredDomain = process.env["DOMAIN"]?.trim();
+  if (configuredDomain && parsed.host !== configuredDomain) {
+    throw new Error(
+      `sidecar service actor host must match DOMAIN (${configuredDomain}): ${actorUri}`,
+    );
+  }
 }
