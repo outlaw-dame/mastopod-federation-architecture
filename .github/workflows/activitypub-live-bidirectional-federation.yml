@@ -153,6 +153,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
+          sidecar_host="$(node fedify-sidecar/interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
           : > "${EVIDENCE_DIR}/signing-api.jsonl"
           AP_SIGNING_PROXY_HOST=127.0.0.1 AP_SIGNING_PROXY_PORT=3001 \
           AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
@@ -160,7 +162,7 @@ jobs:
             node fedify-sidecar/interop/ap/scripts/activitypods-signing-recording-proxy.mjs \
             > "${EVIDENCE_DIR}/signing-proxy.log" 2>&1 &
           echo "$!" > "${EVIDENCE_DIR}/signing-proxy.pid"
-          NODE_ENV=development PORT=8080 HOST=127.0.0.1 DOMAIN=activitypods SIDECAR_STARTUP_MODE=blocking \
+          NODE_ENV=development PORT=8080 HOST="${sidecar_host}" DOMAIN=activitypods SIDECAR_STARTUP_MODE=blocking \
           AP_INTEROP_ENABLE_MEDIA_FIXTURES=true APDM_INTEROP_PRIVATE_HOSTS=mastodon \
           REDIS_URL=redis://127.0.0.1:6379 APDM_COMPLETION_MARKER_V2_CUTOVER=fresh REDPANDA_BROKERS=127.0.0.1:19092 \
           REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development \
@@ -177,7 +179,7 @@ jobs:
           echo "$!" > "${EVIDENCE_DIR}/sidecar.pid"
           ready=false
           for attempt in $(seq 1 120); do
-            if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null; then ready=true; break; fi
+            if curl -fsS --max-time 2 "http://${sidecar_host}:8080/health" >/dev/null; then ready=true; break; fi
             sleep 1
           done
           [[ "${ready}" == true ]]

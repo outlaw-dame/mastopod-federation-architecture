@@ -5,6 +5,26 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("real federation fixture bootstrap contracts", () => {
+  it("binds host proof services only to a validated private Docker gateway", () => {
+    const resolver = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/resolve-private-docker-gateway.mjs"),
+      "utf8",
+    );
+    const workflows = [
+      "activitypub-live-bidirectional-federation.yml",
+      "activitypub-real-multi-implementation-federation.yml",
+      "activitypub-real-two-mode-federation.yml",
+    ].map((name) => readFileSync(resolve(process.cwd(), `../.github/workflows/${name}`), "utf8"));
+
+    expect(resolver).toContain("execFileSync(");
+    expect(resolver).toContain("isIP(gateway) === 4");
+    expect(resolver).toContain("Proof service must bind only to a private Docker gateway");
+    expect(resolver).toContain("process.platform === 'darwin' ? '127.0.0.1' : gateway");
+    expect(workflows.every((workflow) => workflow.includes("resolve-private-docker-gateway.mjs"))).toBe(true);
+    expect(workflows.slice(0, 2).every((workflow) => workflow.includes('HOST="${sidecar_host}"'))).toBe(true);
+    expect(workflows.slice(0, 2).every((workflow) => !workflow.includes("PORT=8080 HOST=127.0.0.1"))).toBe(true);
+  });
+
   it("gives only Misskey a longer bounded post-setup actor readiness window", () => {
     const workflow = readFileSync(
       resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),

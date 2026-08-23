@@ -72,7 +72,7 @@ describe("real ActivityPods sidecar compose authority", () => {
       "utf8",
     );
 
-    expect(workflow).toContain("Signing proxy must bind only to the private Docker gateway");
+    expect(workflow).toContain("resolve-private-docker-gateway.mjs");
     expect(workflow).toContain("ps -aq ap-proof-router");
     expect(workflow).toContain("ActivityPub proof router container is unavailable");
     expect(workflow).toContain(
