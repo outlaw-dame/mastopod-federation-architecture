@@ -30,9 +30,9 @@ export interface ActorAuthoritySigningRouterOptions {
  *   must use that public authority host.
  *
  * Actor IRIs are compared exactly after URL-shape validation. We intentionally
- * do not normalize trailing slashes, dot segments, host spelling, or other URI
- * syntax at this authority boundary because distinct ActivityPub IRIs identify
- * distinct resources and must never collapse into the same key domain.
+ * reject spellings that the WHATWG URL parser would canonicalize (dot segments,
+ * default ports, host case, etc.) rather than letting URL parsing collapse two
+ * textual ActivityPub identities into one key-authority decision.
  */
 export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
   private readonly serviceActorIdentifiers = new Map<string, string>();
@@ -131,6 +131,9 @@ function validateActorUriExact(actorUri: string): string {
   }
   if (parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new Error("actorUri must not contain credentials, query, or fragment");
+  }
+  if (parsed.href !== actorUri) {
+    throw new Error("actorUri must already be in its exact canonical URL serialization");
   }
 
   return actorUri;
