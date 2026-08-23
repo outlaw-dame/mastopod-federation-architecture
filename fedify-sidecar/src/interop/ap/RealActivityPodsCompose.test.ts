@@ -63,6 +63,17 @@ describe("real ActivityPods sidecar compose authority", () => {
     );
   });
 
+  it("routes only supported actor-inbox shapes through the return-path ingress", () => {
+    const caddy = readFileSync(
+      resolve("interop/ap/caddy/Caddyfile.real-activitypods"),
+      "utf8",
+    );
+
+    expect(caddy).toContain("path_regexp actor_inbox ^/(?:users/|data/)?[^/]+/inbox/?$");
+    expect(caddy).toContain("reverse_proxy host.docker.internal:8080 host.docker.internal:3000");
+    expect(caddy).not.toContain("path_regexp actor_inbox ^/.+");
+  });
+
   it("keeps the recorder on the validated private bridge and bootstraps governed topics", () => {
     const workflow = readFileSync(
       resolve("../.github/workflows/activitypub-real-two-mode-federation.yml"),
