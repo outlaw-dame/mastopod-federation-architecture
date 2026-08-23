@@ -1,0 +1,374 @@
+name: ActivityPub Live Bidirectional Federation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/activitypub-live-bidirectional-federation.yml'
+      - 'fedify-sidecar/interop/ap/**'
+      - 'fedify-sidecar/src/delivery/**'
+      - 'fedify-sidecar/src/queue/**'
+      - 'fedify-sidecar/src/signing/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: activitypub-live-bidirectional-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bidirectional:
+    name: ${{ matrix.mode }} ActivityPods ↔ Mastodon handshake
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [native, external]
+    env:
+      FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      ACTIVITYPODS_SHA: 'fee9037c382bafc181fad0023d0f27cce3ffa992'
+      COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
+      REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
+      MASTODON_ACTOR_URI: https://mastodon/users/interop
+      EVIDENCE_DIR: measurements/ap-live-bidirectional/${{ matrix.mode }}
+      WIRE_EVIDENCE_PATH: fedify-sidecar/interop/ap/runtime/wire/mastodon.jsonl
+
+    steps:
+      - name: Checkout exact federation candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FEDERATION_SHA }}
+          persist-credentials: false
+
+      - name: Checkout exact ActivityPods candidate
+        uses: actions/checkout@v4
+        with:
+          repository: outlaw-dame/activity-pods
+          ref: ${{ env.ACTIVITYPODS_SHA }}
+          path: activitypods
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Prepare credentials and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${EVIDENCE_DIR}" fedify-sidecar/interop/ap/runtime/wire
+          : > "${WIRE_EVIDENCE_PATH}"
+          activitypods_token="$(openssl rand -hex 32)"
+          sidecar_token="$(openssl rand -hex 32)"
+          password_verify_token="$(openssl rand -hex 32)"
+          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}"; do echo "::add-mask::${value}"; done
+          {
+            echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
+            echo "SIDECAR_TOKEN=${sidecar_token}"
+            echo "ATPROTO_PASSWORD_VERIFY_TOKEN=${password_verify_token}"
+          } >> "$GITHUB_ENV"
+          printf '{"schema":"activitypods.activitypub.live-bidirectional-run.v1","mode":"%s","activityPodsSha":"%s","federationSha":"%s"}\n' \
+            "${{ matrix.mode }}" "${ACTIVITYPODS_SHA}" "${FEDERATION_SHA}" > "${EVIDENCE_DIR}/run-started.json"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix fedify-sidecar
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          sed -i 's#ssh://git@github.com/#https://github.com/#g; s#git+ssh://git@github.com/#git+https://github.com/#g; s#git@github.com:#https://github.com/#g' activitypods/pod-provider/backend/yarn.lock
+          yarn --cwd activitypods/pod-provider/backend install --frozen-lockfile
+
+      - name: Generate TLS and prepare Mastodon
+        shell: bash
+        run: |
+          set -euo pipefail
+          fedify-sidecar/interop/ap/scripts/generate-certs.sh
+          fedify-sidecar/interop/ap/scripts/prepare-mastodon-env.sh
+          echo "NODE_EXTRA_CA_CERTS=${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/runtime/certs/rootCA.crt" >> "$GITHUB_ENV"
+
+      - name: Start ActivityPods data services
+        working-directory: activitypods/pod-provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose-test.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
+          mkdir -p data/fuseki_test data/redis_test
+          docker compose -f docker-compose-test.yml up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
+          docker compose -f docker-compose-test.yml exec -T redis redis-cli PING
+
+      - name: Start real Mastodon and proof router
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; . fedify-sidecar/interop/ap/runtime/mastodon.env; set +a
+          docker compose -f "${COMPOSE_FILE}" --profile mastodon up -d mastodon-db mastodon-redis
+          AP_INTEROP_MASTODON_ENV_FILE="${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/runtime/mastodon.env" \
+          AP_INTEROP_MASTODON_USERNAME=interop \
+            fedify-sidecar/interop/ap/scripts/bootstrap-mastodon-account.sh
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods up -d ap-proof-router
+          AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
+            fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh mastodon activitypods sidecar \
+            | tee "${EVIDENCE_DIR}/proof-router-hosts.json"
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS \
+              -H 'Accept: application/activity+json' "${MASTODON_ACTOR_URI}" >/dev/null; then ready=true; break; fi
+            sleep 2
+          done
+          [[ "${ready}" == true ]]
+
+      - name: Start Redpanda for external authority
+        if: matrix.mode == 'external'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker rm -f ap-live-bidirectional-redpanda >/dev/null 2>&1 || true
+          docker run -d --name ap-live-bidirectional-redpanda -p 19092:19092 redpandadata/redpanda:v24.1.3 \
+            redpanda start --overprovisioned --smp 1 --memory 768M --reserve-memory 0M --node-id 0 --check=false \
+            --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \
+            --advertise-kafka-addr internal://127.0.0.1:9092,external://127.0.0.1:19092
+          ready=false
+          for attempt in $(seq 1 60); do
+            if docker exec ap-live-bidirectional-redpanda rpk cluster health --exit-when-healthy >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          [[ "${ready}" == true ]]
+          REDPANDA_BROKERS=127.0.0.1:19092 REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development \
+            npm run --prefix fedify-sidecar topics:bootstrap
+
+      - name: Start ActivityPods signing recorder and sidecar
+        if: matrix.mode == 'external'
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > "${EVIDENCE_DIR}/signing-api.jsonl"
+          AP_SIGNING_PROXY_HOST=127.0.0.1 AP_SIGNING_PROXY_PORT=3001 \
+          AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
+          AP_SIGNING_PROXY_EVIDENCE_PATH="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" \
+            node fedify-sidecar/interop/ap/scripts/activitypods-signing-recording-proxy.mjs \
+            > "${EVIDENCE_DIR}/signing-proxy.log" 2>&1 &
+          echo "$!" > "${EVIDENCE_DIR}/signing-proxy.pid"
+          NODE_ENV=development PORT=8080 HOST=127.0.0.1 DOMAIN=activitypods SIDECAR_STARTUP_MODE=blocking \
+          AP_INTEROP_ENABLE_MEDIA_FIXTURES=true APDM_INTEROP_PRIVATE_HOSTS=mastodon \
+          REDIS_URL=redis://127.0.0.1:6379 APDM_COMPLETION_MARKER_V2_CUTOVER=fresh REDPANDA_BROKERS=127.0.0.1:19092 \
+          REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development \
+          STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 FIREHOSE_TOPIC=ap.firehose.v1 TOMBSTONE_TOPIC=ap.tombstones.v1 \
+          ACTIVITYPODS_URL=http://127.0.0.1:3001 ACTIVITYPODS_TOKEN="${ACTIVITYPODS_TOKEN}" SIDECAR_TOKEN="${SIDECAR_TOKEN}" \
+          ENABLE_OUTBOUND_WORKER=true ENABLE_OUTBOX_INTENT_WORKER=true ENABLE_INBOUND_WORKER=false ENABLE_ORIGIN_RECONCILIATION=false \
+          ENABLE_FEDIFY_RUNTIME_INTEGRATION=false ENABLE_OPENSEARCH_INDEXER=false ENABLE_XRPC_SERVER=false ENABLE_MEDIA_ASSET_SYNC=false \
+          ENABLE_ACCOUNT_PROVISIONING=false ENABLE_ENTRYWAY=false ENABLE_FOLLOWERS_SYNC=false ENABLE_MRF_ADMIN_API=false ENABLE_MODERATION_BRIDGE_API=false \
+          ENABLE_CANONICAL_EVENT_LOG=false ENABLE_CANONICAL_NOTIFICATIONS=false ENABLE_AT_JETSTREAM=false ENABLE_AT_EXTERNAL_FIREHOSE=false \
+          CONSUMER_GROUP=sidecar-workers INBOUND_STREAM_KEY=ap:queue:inbound:v1 OUTBOUND_STREAM_KEY=ap:queue:outbound:v1 \
+          OUTBOX_INTENT_STREAM_KEY=ap:queue:outbox-intent:v1 ORIGIN_RECONCILE_STREAM_KEY=ap:queue:origin-reconcile:v1 \
+          DLQ_OUTBOUND_STREAM_KEY=ap:queue:dlq:outbound:v1 REQUEST_TIMEOUT_MS=10000 \
+            npm run --prefix fedify-sidecar server:dev > "${EVIDENCE_DIR}/sidecar.log" 2>&1 &
+          echo "$!" > "${EVIDENCE_DIR}/sidecar.pid"
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          [[ "${ready}" == true ]]
+
+      - name: Start ActivityPods native mode
+        if: matrix.mode == 'native'
+        working-directory: activitypods/pod-provider/backend
+        shell: bash
+        env:
+          SEMAPPS_HOME_URL: https://activitypods/
+          SEMAPPS_PORT: '3000'
+          SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
+          SEMAPPS_QUEUE_SERVICE_URL: redis://127.0.0.1:6379/1
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
+          SEMAPPS_REDIS_OIDC_PROVIDER_URL: redis://127.0.0.1:6379/13
+          SEMAPPS_SMTP_HOST: 127.0.0.1
+          SEMAPPS_SMTP_PORT: '1025'
+          SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native
+          SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: 'false'
+          SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: 'false'
+          APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
+          APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
+        run: |
+          set -euo pipefail
+          if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null 2>&1; then exit 1; fi
+          log="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods.log"
+          "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
+          echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods.pid"
+          pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods.pid")"
+          ready=false
+          for attempt in $(seq 1 120); do
+            if ! kill -0 "${pid}" 2>/dev/null; then tail -n 500 "${log}"; exit 1; fi
+            if grep -Eq 'ServiceBroker with [0-9]+ service\(s\) started successfully' "${log}" && curl -sS --max-time 2 -o /dev/null http://127.0.0.1:3000/; then ready=true; break; fi
+            sleep 1
+          done
+          [[ "${ready}" == true ]]
+
+      - name: Start ActivityPods external sidecar mode
+        if: matrix.mode == 'external'
+        working-directory: activitypods/pod-provider/backend
+        shell: bash
+        env:
+          SEMAPPS_HOME_URL: https://activitypods/
+          SEMAPPS_PORT: '3000'
+          SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
+          SEMAPPS_QUEUE_SERVICE_URL: redis://127.0.0.1:6379/1
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
+          SEMAPPS_REDIS_OIDC_PROVIDER_URL: redis://127.0.0.1:6379/13
+          SEMAPPS_SMTP_HOST: 127.0.0.1
+          SEMAPPS_SMTP_PORT: '1025'
+          SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: external
+          SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: 'true'
+          SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: 'false'
+          SIDECAR_DELIVERY_HANDOFF_URL: http://127.0.0.1:8080/webhook/outbox
+          APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
+          APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+          APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
+        run: |
+          set -euo pipefail
+          log="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods.log"
+          "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
+          echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods.pid"
+          pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods.pid")"
+          ready=false
+          for attempt in $(seq 1 120); do
+            if ! kill -0 "${pid}" 2>/dev/null; then tail -n 500 "${log}"; exit 1; fi
+            if grep -Eq 'ServiceBroker with [0-9]+ service\(s\) started successfully' "${log}" && curl -sS --max-time 2 -o /dev/null http://127.0.0.1:3000/; then ready=true; break; fi
+            sleep 1
+          done
+          [[ "${ready}" == true ]]
+
+      - name: Send real Follow through selected authority
+        working-directory: activitypods/pod-provider/backend
+        shell: bash
+        env:
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
+        run: |
+          set -euo pipefail
+          AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-${{ matrix.mode }}-bidirectional" \
+            node scripts/activitypub-federation-follow-proof.js "${{ matrix.mode }}" "${MASTODON_ACTOR_URI}" \
+            | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/origin.log"
+          tail -n 1 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/origin.log" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/origin.json"
+
+      - name: Assert Mastodon persisted the Follow
+        shell: bash
+        run: |
+          set -euo pipefail
+          actor_uri="$(node -p "JSON.parse(require('fs').readFileSync('${EVIDENCE_DIR}/origin.json','utf8')).actorUri")"
+          AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" \
+            sh fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh mastodon "${actor_uri}" interop \
+            | tee "${EVIDENCE_DIR}/remote-persistence.json"
+
+      - name: Assert outgoing wire signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          node fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs \
+            "${WIRE_EVIDENCE_PATH}" "${EVIDENCE_DIR}/origin.json" mastodon "${EVIDENCE_DIR}/wire-signature.json"
+
+      - name: Assert external ActivityPods signing boundary
+        if: matrix.mode == 'external'
+        shell: bash
+        run: |
+          set -euo pipefail
+          signing_ok=false
+          for attempt in $(seq 1 30); do
+            if node fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs \
+              "${EVIDENCE_DIR}/signing-api.jsonl" "${EVIDENCE_DIR}/origin.json" mastodon "${EVIDENCE_DIR}/external-signing.json"; then
+              signing_ok=true; break
+            fi
+            sleep 1
+          done
+          [[ "${signing_ok}" == true ]]
+
+      - name: Assert real Mastodon Accept returned through ActivityPods
+        shell: bash
+        run: |
+          set -euo pipefail
+          node fedify-sidecar/interop/ap/scripts/assert-real-inbound-accept.mjs \
+            "${EVIDENCE_DIR}/activitypods.log" "${EVIDENCE_DIR}/origin.json" mastodon "${EVIDENCE_DIR}/inbound-accept.json"
+
+      - name: Build bidirectional evidence summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODE="${{ matrix.mode }}" node - <<'NODE'
+          const fs = require('fs');
+          const root = process.env.EVIDENCE_DIR;
+          const read = name => JSON.parse(fs.readFileSync(`${root}/${name}`, 'utf8'));
+          const origin = read('origin.json');
+          const persistence = read('remote-persistence.json');
+          const wire = read('wire-signature.json');
+          const inbound = read('inbound-accept.json');
+          const signing = process.env.MODE === 'external' ? read('external-signing.json') : null;
+          if (!origin.ok || !persistence.ok || !wire.ok || !inbound.ok ||
+              inbound.actorUri !== origin.actorUri || inbound.followActivityId !== origin.activityId ||
+              (process.env.MODE === 'external' && (!signing?.ok || signing.actorUri !== origin.actorUri))) {
+            throw new Error('live bidirectional federation evidence is incomplete');
+          }
+          const summary = {
+            schema: 'activitypods.activitypub.live-bidirectional-federation.v1',
+            complete: true,
+            mode: process.env.MODE,
+            activityPodsSha: process.env.ACTIVITYPODS_SHA,
+            federationSha: process.env.FEDERATION_SHA,
+            actorUri: origin.actorUri,
+            followActivityId: origin.activityId,
+            remoteActorUri: origin.remoteActorUri,
+            remotePersisted: true,
+            outboundWireSignatureVerified: true,
+            activityPodsSigningApiVerified: process.env.MODE === 'external',
+            returnAcceptActivityId: inbound.acceptActivityId,
+            inboundSideEffectsProcessed: inbound.inboundSideEffectsProcessed,
+            trustEvaluationErrors: inbound.trustEvaluationErrors
+          };
+          fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
+          console.log(JSON.stringify(summary, null, 2));
+          NODE
+
+      - name: Upload bidirectional evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: activitypub-live-bidirectional-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/ap-live-bidirectional/${{ matrix.mode }}/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Show bounded diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          tail -n 700 "${EVIDENCE_DIR}/activitypods.log" 2>/dev/null || true
+          tail -n 500 "${EVIDENCE_DIR}/sidecar.log" 2>/dev/null || true
+          if [[ -f "${EVIDENCE_DIR}/signing-api.jsonl" ]]; then echo "signing_api_record_count=$(wc -l < "${EVIDENCE_DIR}/signing-api.jsonl")"; fi
+          docker compose -f "${COMPOSE_FILE}" --profile mastodon logs --no-color mastodon-web-app mastodon-sidekiq 2>/dev/null || true
+
+      - name: Stop isolated live fixture
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          for file in activitypods.pid sidecar.pid signing-proxy.pid; do
+            if [[ -f "${EVIDENCE_DIR}/${file}" ]]; then kill "$(cat "${EVIDENCE_DIR}/${file}")" 2>/dev/null || true; fi
+          done
+          docker rm -f ap-live-bidirectional-redpanda >/dev/null 2>&1 || true
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods down -v || true
+          docker compose -f "${COMPOSE_FILE}" --profile mastodon down -v || true
+          cd activitypods/pod-provider
+          docker compose -f docker-compose-test.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
