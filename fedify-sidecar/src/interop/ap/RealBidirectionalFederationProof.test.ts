@@ -65,8 +65,9 @@ describe("real bidirectional ActivityPub federation proof", () => {
   });
 
   it("matches the returning Accept to the exact remote actor and outgoing Follow", () => {
-    const helper = resolve(process.cwd(), "interop/ap/scripts/assert-real-return-accept.mjs");
+    const helper = "interop/ap/scripts/assert-real-return-accept.mjs";
     const result = spawnSync(process.execPath, [helper, "--self-test"], {
+      cwd: process.cwd(),
       encoding: "utf8",
       env: process.env,
     });
