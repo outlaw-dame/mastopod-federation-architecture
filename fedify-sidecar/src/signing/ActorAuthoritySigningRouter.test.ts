@@ -1,5 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ActorAuthoritySigningRouter } from "./ActorAuthoritySigningRouter.js";
+
+const originalDomain = process.env["DOMAIN"];
+
+afterEach(() => {
+  if (originalDomain === undefined) delete process.env["DOMAIN"];
+  else process.env["DOMAIN"] = originalDomain;
+});
 
 function activityPodsSigner() {
   return {
@@ -95,23 +102,23 @@ describe("ActorAuthoritySigningRouter", () => {
     expect(pods.signOne).not.toHaveBeenCalled();
   });
 
-  it("keeps trailing-slash-distinct actor IRIs in different authority domains", async () => {
-    const pods = activityPodsSigner();
-    const local = sidecarSigner();
-    const router = new ActorAuthoritySigningRouter(pods, local as any, {
+  it("rejects a trailing-slash service actor that the dispatcher does not publish", () => {
+    expect(() => new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
       sidecarServiceActors: [{ actorUri: "https://example.com/users/relay/", identifier: "relay" }],
-    });
+    })).toThrow(/published Fedify actor route/u);
+  });
 
-    expect(router.classifyActor("https://example.com/users/relay/")).toBe("sidecar_service_actor");
-    expect(router.classifyActor("https://example.com/users/relay")).toBe("activitypods_pod_actor");
+  it("rejects arbitrary custom service actor paths", () => {
+    expect(() => new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarServiceActors: [{ actorUri: "https://example.com/service/relay", identifier: "relay" }],
+    })).toThrow(/published Fedify actor route/u);
+  });
 
-    await router.signOne({
-      actorUri: "https://example.com/users/relay",
-      method: "GET",
-      targetUrl: "https://remote.example/objects/1",
-    });
-    expect(pods.signOne).toHaveBeenCalledOnce();
-    expect(local.signHttpRequest).not.toHaveBeenCalled();
+  it("rejects a service actor host that differs from the configured public DOMAIN", () => {
+    process.env["DOMAIN"] = "sidecar.example";
+    expect(() => new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarServiceActors: [{ actorUri: "https://other.example/users/relay", identifier: "relay" }],
+    })).toThrow(/must match DOMAIN/u);
   });
 
   it("does not collapse dot-segment spellings into configured actor identity", () => {
