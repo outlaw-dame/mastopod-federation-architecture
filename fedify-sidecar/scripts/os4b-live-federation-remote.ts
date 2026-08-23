@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { fetchKeyDetailed, signRequest, verifyRequestDetailed } from '@fedify/fedify';
 import { CryptographicKey } from '@fedify/fedify/vocab';
+import { request as undiciRequest } from 'undici';
 
 const host = process.env.OS4B_REMOTE_HOST ?? '127.0.0.1';
 const port = Number(process.env.OS4B_REMOTE_PORT ?? 18181);
@@ -73,10 +74,9 @@ function buildActivity(i: number, contentMarker = marker) {
 }
 
 async function createSignedRequest(body: string): Promise<Request> {
-  // Keep the Cavage signature surface minimal. Fedify's draft signer signs
-  // every header present on the Request, so only expose Host before signing;
-  // it then adds Date + Digest itself. Content-Type/Accept are transport
-  // metadata and are appended after signing, matching common Fediverse peers.
+  // Sign the logical public request authority, not the loopback socket used by
+  // this isolated CI fixture. The bridge receives matching forwarded metadata
+  // below and therefore reconstructs this same Request URL before verification.
   const visibleUrl = new URL(sidecarInbox);
   visibleUrl.hostname = sidecarHostHeader;
   visibleUrl.port = '';
@@ -99,6 +99,11 @@ async function createSignedHeaders(body: string): Promise<Record<string, string>
   headers.host = sidecarHostHeader;
   headers['content-type'] = 'application/activity+json';
   headers.accept = 'application/activity+json';
+  // These are deliberately appended after signing. They model the reverse
+  // proxy metadata the Fastify bridge already consumes and make its Web
+  // Request origin exactly match the logical request that Fedify signed.
+  headers['x-forwarded-proto'] = 'http';
+  headers['x-forwarded-host'] = sidecarHostHeader;
   return headers;
 }
 
@@ -138,6 +143,7 @@ async function runFedifySelfCheck() {
     signedHeaders: signed.headers.get('signature'),
     digest: signed.headers.get('digest'),
     host: signed.headers.get('host'),
+    url: signed.url,
   };
   if (!result.keyParsed || !result.verified) {
     throw new Error(`Fedify fixture self-check failed: ${JSON.stringify(result)}`);
@@ -145,17 +151,23 @@ async function runFedifySelfCheck() {
   return result;
 }
 
+async function postSigned(body: string, headers: Record<string, string>) {
+  // Use Undici's low-level request path so Host and the signed UTF-8 body bytes
+  // are transmitted verbatim while the TCP connection still targets loopback.
+  const response = await undiciRequest(sidecarInbox, {
+    method: 'POST',
+    headers,
+    body: Buffer.from(body, 'utf8'),
+  });
+  return { status: response.statusCode, body: await response.body.text() };
+}
+
 async function sendValidWarmup() {
   const body = JSON.stringify(buildActivity(-3, warmupMarker));
-  const response = await fetch(sidecarInbox, {
-    method: 'POST',
-    headers: await createSignedHeaders(body),
-    body,
-  });
-  const responseBody = await response.text();
+  const response = await postSigned(body, await createSignedHeaders(body));
   if (response.status !== 202) {
     throw new Error(
-      `valid warm-up returned ${response.status}: ${responseBody} `
+      `valid warm-up returned ${response.status}: ${response.body} `
       + `(remote actor document fetches=${actorDocumentFetches})`,
     );
   }
@@ -168,12 +180,11 @@ async function sendInvalidSignatureControl() {
   const signatureName = Object.keys(headers).find((name) => name.toLowerCase() === 'signature');
   if (!signatureName) throw new Error('Fedify signRequest did not emit Signature header for Cavage request');
   headers[signatureName] = `${headers[signatureName]!.slice(0, -8)}INVALID!`;
-  const response = await fetch(sidecarInbox, { method: 'POST', headers, body });
-  const responseBody = await response.text();
+  const response = await postSigned(body, headers);
   if (response.status >= 200 && response.status < 300) {
-    throw new Error(`invalid-signature control was accepted with ${response.status}: ${responseBody}`);
+    throw new Error(`invalid-signature control was accepted with ${response.status}: ${response.body}`);
   }
-  return { status: response.status, body: responseBody.slice(0, 512) };
+  return { status: response.status, body: response.body.slice(0, 512) };
 }
 
 const startedAt = Date.now();
@@ -182,9 +193,6 @@ const latencies: number[] = [];
 
 try {
   const fedifySelfCheck = await runFedifySelfCheck();
-  // Resolve and cache the remote actor key through the exact canonical inbox
-  // verifier before introducing concurrent ingress. This warm-up has a unique
-  // marker and is deliberately excluded from the 240-activity proof count.
   const validWarmup = await sendValidWarmup();
   const invalidSignature = await sendInvalidSignatureControl();
 
@@ -195,15 +203,11 @@ try {
       const activity = buildActivity(i);
       const body = JSON.stringify(activity);
       const requestStartedAt = Date.now();
-      const response = await fetch(sidecarInbox, {
-        method: 'POST',
-        headers: await createSignedHeaders(body),
-        body,
-      });
+      const response = await postSigned(body, await createSignedHeaders(body));
       latencies.push(Date.now() - requestStartedAt);
       if (response.status !== 202) {
         throw new Error(
-          `federation POST ${i} returned ${response.status}: ${await response.text()} `
+          `federation POST ${i} returned ${response.status}: ${response.body} `
           + `(remote actor document fetches=${actorDocumentFetches}; `
           + `selfCheck=${JSON.stringify(fedifySelfCheck)}; `
           + `validWarmup=${JSON.stringify(validWarmup)})`,
@@ -227,6 +231,7 @@ try {
     sidecarInbox,
     actorDocumentFetches,
     signatureImplementation: '@fedify/fedify signRequest draft-cavage-http-signatures-12 minimal signed headers',
+    wireTransport: 'undici.request exact Host/body with forwarded logical origin',
     elapsedMs,
     acceptedPerSec: count / (elapsedMs / 1000),
     maxPostLatencyMs: Math.max(...latencies),
