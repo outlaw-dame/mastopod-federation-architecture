@@ -201,7 +201,12 @@ function canonicalizeActorAuthorityHostExactPath(actorUri: string): string {
     throw new Error("actorUri must be an absolute HTTP(S) URL");
   }
 
-  const [, rawScheme, rawAuthority, rawPath = ""] = rawMatch;
+  const rawScheme = rawMatch[1];
+  const rawAuthority = rawMatch[2];
+  const rawPath = rawMatch[3] ?? "";
+  if (!rawScheme || !rawAuthority) {
+    throw new Error("actorUri must be an absolute HTTP(S) URL");
+  }
   if (rawAuthority.includes("\\")) {
     throw new Error("actorUri contains an ambiguous or invalid authority");
   }
