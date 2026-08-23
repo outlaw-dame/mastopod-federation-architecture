@@ -87,6 +87,14 @@ describe("ActivityPub interop target registry", () => {
     expect(misskey?.notes?.join(" ")).toContain("CI run 32650757788");
   });
 
+  it("records Castopod as exact pinned coverage only after durable two-mode proof", () => {
+    const castopod = getInteropTarget("castopod");
+    expect(castopod?.status).toBe("existing");
+    expect(castopod?.versionPolicy).toBe("existing_pin");
+    expect(castopod?.capabilities).toContain("target_persistence");
+    expect(castopod?.notes?.join(" ")).toContain("CI run 32651949364");
+  });
+
   it("does not mislabel WriteFreely as exact Write.as conformance", () => {
     const writeFreely = getInteropTarget("writefreely");
     const writeAs = getInteropTarget("write-as-hosted");

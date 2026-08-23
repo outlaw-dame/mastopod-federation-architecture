@@ -178,9 +178,10 @@ export const AP_INTEROP_TARGETS: readonly InteropTargetDefinition[] = [
     sourceRepository: "ad-aures/castopod",
     executionModes: ["local_container", "recorded_fixture"],
     ciTier: "extended",
-    status: "planned",
-    versionPolicy: "pin_before_enable",
-    capabilities: ["actor", "podcast", "audio", "article", "media", "follow"],
+    status: "existing",
+    versionPolicy: "existing_pin",
+    capabilities: ["actor", "podcast", "audio", "article", "media", "follow", "target_persistence"],
+    notes: ["Both delivery modes and exact remote persistence passed at architecture commit 22ff513af9dc78b9c0d11f140cadb58e610bf66a in CI run 32651949364."],
   },
   {
     id: "emissary-bandwagon",
