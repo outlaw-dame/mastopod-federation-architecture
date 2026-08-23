@@ -1,7 +1,29 @@
 services:
+  mastodon-wire-recorder:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.interop
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment:
+      NODE_ENV: test
+      AP_WIRE_RECORDER_HOST: 0.0.0.0
+      AP_WIRE_RECORDER_PORT: "8788"
+      AP_WIRE_RECORDER_UPSTREAM: http://mastodon-web-app:3000
+      AP_WIRE_RECORDER_EVIDENCE_PATH: /evidence/mastodon.jsonl
+      AP_WIRE_RECORDER_MAX_BODY_BYTES: "2097152"
+      AP_WIRE_RECORDER_MAX_RESPONSE_BYTES: "4194304"
+    volumes:
+      - ./runtime/wire:/evidence
+    networks:
+      - ap-interop
+
   ap-proof-router:
     image: caddy:2.8-alpine
     profiles: ["real-activitypods"]
+    depends_on:
+      mastodon-wire-recorder:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
