@@ -123,7 +123,7 @@ jobs:
             fedify-sidecar/interop/ap/scripts/bootstrap-mastodon-account.sh
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods up -d ap-proof-router
           AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
-            fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh mastodon activitypods \
+            fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh mastodon activitypods sidecar \
             | tee "${EVIDENCE_DIR}/proof-router-hosts.json"
           ready=false
           for attempt in $(seq 1 60); do
