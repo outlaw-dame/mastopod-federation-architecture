@@ -72,8 +72,8 @@ const signature = parseSignature(wireSignatureValue);
 if (signature.headers !== EXPECTED_SIGNED_HEADERS) {
   fail(`wire Signature headers must equal ${EXPECTED_SIGNED_HEADERS}`);
 }
-if (signature.algorithm && signature.algorithm !== 'rsa-sha256') {
-  fail(`wire Signature algorithm is not rsa-sha256: ${signature.algorithm}`);
+if (signature.algorithm !== 'rsa-sha256') {
+  fail(`wire Signature algorithm must explicitly equal rsa-sha256; got ${signature.algorithm || 'missing'}`);
 }
 if (!signature.signature) fail('wire Signature is missing cryptographic signature bytes');
 const wireDate = requiredString(match.date, 'wire.date');
@@ -128,7 +128,7 @@ const evidence = {
   bodySha256Base64,
   keyId: signature.keyId,
   signedHeaders: signature.headers,
-  algorithm: signature.algorithm || 'rsa-sha256',
+  algorithm: signature.algorithm,
   ...(signingCorrelation ? { signingCorrelation } : {}),
 };
 const json = `${JSON.stringify(evidence, null, 2)}\n`;

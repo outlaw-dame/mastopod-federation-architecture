@@ -18,6 +18,7 @@ function fixture(overrides: {
   signingSignatureMismatch?: boolean;
   signingDateMismatch?: boolean;
   signingDigestMismatch?: boolean;
+  omitAlgorithm?: boolean;
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "wire-signature-assertion-"));
   directories.push(directory);
@@ -43,6 +44,7 @@ function fixture(overrides: {
     durableHandoffQueued: mode === "external",
     nativeRemotePostSuppressed: mode === "external",
   }));
+  const algorithmPart = overrides.omitAlgorithm ? "" : "algorithm=\"rsa-sha256\",";
   const row = {
     schema: "ap.interop.wire-request.v1",
     method: "POST",
@@ -50,7 +52,7 @@ function fixture(overrides: {
     host: overrides.host ?? "mastodon",
     date: "Sun, 23 Aug 2026 12:00:00 GMT",
     digest: overrides.digest ?? `SHA-256=${bodySha}`,
-    signature: `keyId="${overrides.keyId ?? expectedKeyId}",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="proof"`,
+    signature: `keyId="${overrides.keyId ?? expectedKeyId}",${algorithmPart}headers="(request-target) host date digest",signature="proof"`,
     bodyBytes: 321,
     bodySha256Base64: bodySha,
     activityId,
@@ -101,6 +103,7 @@ describe("real wire signature assertion", () => {
       mode: "external",
       keyId: "https://activitypods/users/alice/keys/main",
       bodySha256Base64: "proof-body-sha",
+      algorithm: "rsa-sha256",
       signingCorrelation: {
         exactSignedHeadersMatched: true,
       },
@@ -128,6 +131,7 @@ describe("real wire signature assertion", () => {
     [{ signingSignatureMismatch: true }, "signing/wire Signature mismatch"],
     [{ signingDateMismatch: true }, "signing/wire Date mismatch"],
     [{ signingDigestMismatch: true }, "signing/wire Digest mismatch"],
+    [{ omitAlgorithm: true }, "missing literal wire algorithm"],
   ])("rejects %s (%s)", (overrides, _label) => {
     expect(run(fixture(overrides)).status).not.toBe(0);
   });
