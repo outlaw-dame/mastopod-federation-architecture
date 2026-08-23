@@ -11,6 +11,7 @@ const sidecarHostHeader = process.env.OS4B_SIDECAR_HOST_HEADER ?? 'local.test';
 const count = Number(process.env.OS4B_FEDERATION_COUNT ?? 240);
 const concurrency = Math.max(1, Number(process.env.OS4B_FEDERATION_CONCURRENCY ?? 24));
 const marker = process.env.OS4B_FEDERATION_MARKER ?? `os4b-live-${Date.now()}`;
+const warmupMarker = `${marker}-valid-warmup`;
 const invalidMarker = `${marker}-invalid-signature`;
 const actorUri = `http://${publicHost}:${publicPort}/users/remote`;
 const keyId = `${actorUri}#main-key`;
@@ -144,6 +145,23 @@ async function runFedifySelfCheck() {
   return result;
 }
 
+async function sendValidWarmup() {
+  const body = JSON.stringify(buildActivity(-3, warmupMarker));
+  const response = await fetch(sidecarInbox, {
+    method: 'POST',
+    headers: await createSignedHeaders(body),
+    body,
+  });
+  const responseBody = await response.text();
+  if (response.status !== 202) {
+    throw new Error(
+      `valid warm-up returned ${response.status}: ${responseBody} `
+      + `(remote actor document fetches=${actorDocumentFetches})`,
+    );
+  }
+  return { status: response.status, actorDocumentFetches };
+}
+
 async function sendInvalidSignatureControl() {
   const body = JSON.stringify(buildActivity(-1, invalidMarker));
   const headers = await createSignedHeaders(body);
@@ -164,6 +182,10 @@ const latencies: number[] = [];
 
 try {
   const fedifySelfCheck = await runFedifySelfCheck();
+  // Resolve and cache the remote actor key through the exact canonical inbox
+  // verifier before introducing concurrent ingress. This warm-up has a unique
+  // marker and is deliberately excluded from the 240-activity proof count.
+  const validWarmup = await sendValidWarmup();
   const invalidSignature = await sendInvalidSignatureControl();
 
   const workers = Array.from({ length: concurrency }, async () => {
@@ -183,7 +205,8 @@ try {
         throw new Error(
           `federation POST ${i} returned ${response.status}: ${await response.text()} `
           + `(remote actor document fetches=${actorDocumentFetches}; `
-          + `selfCheck=${JSON.stringify(fedifySelfCheck)})`,
+          + `selfCheck=${JSON.stringify(fedifySelfCheck)}; `
+          + `validWarmup=${JSON.stringify(validWarmup)})`,
         );
       }
     }
@@ -194,7 +217,9 @@ try {
   console.log(JSON.stringify({
     ok: true,
     marker,
+    warmupMarker,
     invalidMarker,
+    validWarmup,
     invalidSignature,
     fedifySelfCheck,
     count,
