@@ -70,27 +70,28 @@ function buildActivity(i: number, contentMarker = marker) {
 }
 
 async function createSignedHeaders(body: string): Promise<Record<string, string>> {
-  // Sign against the externally visible Host value that Fastify/Fedify sees,
-  // then send those exact headers to the loopback transport endpoint.
+  // Keep the Cavage signature surface minimal. Fedify's draft signer signs
+  // every header present on the Request, so only expose Host before signing;
+  // it then adds Date + Digest itself. Content-Type/Accept are transport
+  // metadata and are appended after signing, matching common Fediverse peers.
   const visibleUrl = new URL(sidecarInbox);
   visibleUrl.hostname = sidecarHostHeader;
   visibleUrl.port = '';
+  const bodyBytes = Buffer.from(body, 'utf8');
   const unsigned = new Request(visibleUrl, {
     method: 'POST',
-    headers: {
-      host: sidecarHostHeader,
-      'content-type': 'application/activity+json',
-      accept: 'application/activity+json',
-    },
-    body,
+    headers: { host: sidecarHostHeader },
+    body: bodyBytes,
   });
   const signed = await signRequest(unsigned, keyPair.privateKey, new URL(keyId), {
     spec: 'draft-cavage-http-signatures-12',
-    body: Buffer.from(body, 'utf8'),
+    body: bodyBytes,
   });
   const headers: Record<string, string> = {};
   signed.headers.forEach((value, name) => { headers[name] = value; });
   headers.host = sidecarHostHeader;
+  headers['content-type'] = 'application/activity+json';
+  headers.accept = 'application/activity+json';
   return headers;
 }
 
@@ -148,7 +149,7 @@ try {
     actorUri,
     sidecarInbox,
     actorDocumentFetches,
-    signatureImplementation: '@fedify/fedify signRequest draft-cavage-http-signatures-12',
+    signatureImplementation: '@fedify/fedify signRequest draft-cavage-http-signatures-12 minimal signed headers',
     elapsedMs,
     acceptedPerSec: count / (elapsedMs / 1000),
     maxPostLatencyMs: Math.max(...latencies),
