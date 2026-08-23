@@ -83,13 +83,52 @@ export class HttpAtPasswordVerifier implements AtPasswordVerifier {
   }
 }
 
+/**
+ * Resolve the password-verifier capability without permitting the broader
+ * federation signing credential to become an auth-verification credential.
+ *
+ * The production session construction historically passed ACTIVITYPODS_TOKEN
+ * as an override. The dedicated environment capability therefore has priority,
+ * and an override equal to ACTIVITYPODS_TOKEN is discarded when the dedicated
+ * token is absent. Distinct explicit overrides remain available to hermetic
+ * tests/embedders. Equal dedicated/federation environment tokens fail closed so
+ * an accidental one-token deployment cannot silently defeat capability split.
+ */
+export function resolveHttpAtPasswordVerifierConfig(
+  overrides?: Partial<HttpAtPasswordVerifierConfig>,
+  env: NodeJS.ProcessEnv = process.env,
+): HttpAtPasswordVerifierConfig {
+  const dedicatedToken = env["ATPROTO_PASSWORD_VERIFY_TOKEN"];
+  const federationToken = env["ACTIVITYPODS_TOKEN"];
+  const overrideToken = overrides?.token;
+
+  if (
+    dedicatedToken !== undefined &&
+    dedicatedToken.length > 0 &&
+    federationToken !== undefined &&
+    federationToken.length > 0 &&
+    dedicatedToken === federationToken
+  ) {
+    throw new Error(
+      "ATPROTO_PASSWORD_VERIFY_TOKEN must be distinct from ACTIVITYPODS_TOKEN",
+    );
+  }
+
+  const token = dedicatedToken !== undefined
+    ? dedicatedToken
+    : overrideToken !== undefined && overrideToken !== federationToken
+      ? overrideToken
+      : '';
+
+  return {
+    baseUrl: overrides?.baseUrl ?? env["ACTIVITYPODS_URL"] ?? 'http://localhost:3000',
+    token,
+    timeoutMs: overrides?.timeoutMs ?? 10_000,
+  };
+}
+
 export function createHttpAtPasswordVerifier(
   overrides?: Partial<HttpAtPasswordVerifierConfig>
 ): HttpAtPasswordVerifier {
-  return new HttpAtPasswordVerifier({
-    baseUrl: process.env["ACTIVITYPODS_URL"] ?? 'http://localhost:3000',
-    token: process.env["ATPROTO_PASSWORD_VERIFY_TOKEN"] ?? '',
-    timeoutMs: 10_000,
-    ...overrides,
-  });
+  return new HttpAtPasswordVerifier(resolveHttpAtPasswordVerifierConfig(overrides));
 }
