@@ -130,6 +130,7 @@ describe("ActorAuthoritySigningRouter", () => {
     expect(() => router.classifyActor("https://example.com/users/relay?as=alice")).toThrow(/query/u);
     expect(() => router.classifyActor("did:example:relay")).toThrow(/protocol/u);
     expect(() => router.classifyActor("https://example.com\\attacker.example/users/relay")).toThrow(/ambiguous|invalid authority/u);
+    expect(() => router.classifyActor("https://example.com\\/users/relay")).toThrow(/ambiguous|invalid authority/u);
   });
 
   it("rejects a sidecar service actor on an unsupported host", () => {
