@@ -23,13 +23,16 @@ function sidecarSigner() {
   };
 }
 
+const relayOptions = {
+  sidecarPublicDomain: "example.com",
+  sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
+} as const;
+
 describe("ActorAuthoritySigningRouter", () => {
-  it("routes the configured relay service actor only to the sidecar-local signer", async () => {
+  it("routes the exact Fedify-served relay service actor only to the sidecar-local signer", async () => {
     const pods = activityPodsSigner();
     const local = sidecarSigner();
-    const router = new ActorAuthoritySigningRouter(pods, local as any, {
-      sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
-    });
+    const router = new ActorAuthoritySigningRouter(pods, local as any, relayOptions);
 
     const result = await router.signOne({
       actorUri: "https://example.com/users/relay",
@@ -52,9 +55,7 @@ describe("ActorAuthoritySigningRouter", () => {
   it("routes non-service actors only to ActivityPods", async () => {
     const pods = activityPodsSigner();
     const local = sidecarSigner();
-    const router = new ActorAuthoritySigningRouter(pods, local as any, {
-      sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
-    });
+    const router = new ActorAuthoritySigningRouter(pods, local as any, relayOptions);
 
     const request = {
       actorUri: "https://example.com/alice",
@@ -76,9 +77,7 @@ describe("ActorAuthoritySigningRouter", () => {
         throw new Error("redis key store unavailable");
       }),
     };
-    const router = new ActorAuthoritySigningRouter(pods, local as any, {
-      sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
-    });
+    const router = new ActorAuthoritySigningRouter(pods, local as any, relayOptions);
 
     const result = await router.signOne({
       actorUri: "https://example.com/users/relay",
@@ -98,15 +97,13 @@ describe("ActorAuthoritySigningRouter", () => {
   it("keeps trailing-slash-distinct actor IRIs in different authority domains", async () => {
     const pods = activityPodsSigner();
     const local = sidecarSigner();
-    const router = new ActorAuthoritySigningRouter(pods, local as any, {
-      sidecarServiceActors: [{ actorUri: "https://example.com/users/relay/", identifier: "relay" }],
-    });
+    const router = new ActorAuthoritySigningRouter(pods, local as any, relayOptions);
 
-    expect(router.classifyActor("https://example.com/users/relay/")).toBe("sidecar_service_actor");
-    expect(router.classifyActor("https://example.com/users/relay")).toBe("activitypods_pod_actor");
+    expect(router.classifyActor("https://example.com/users/relay")).toBe("sidecar_service_actor");
+    expect(router.classifyActor("https://example.com/users/relay/")).toBe("activitypods_pod_actor");
 
     await router.signOne({
-      actorUri: "https://example.com/users/relay",
+      actorUri: "https://example.com/users/relay/",
       method: "GET",
       targetUrl: "https://remote.example/objects/1",
     });
@@ -115,20 +112,78 @@ describe("ActorAuthoritySigningRouter", () => {
   });
 
   it("does not collapse dot-segment spellings into configured actor identity", () => {
-    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
-      sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
-    });
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, relayOptions);
 
     expect(router.classifyActor("https://example.com/users/a/../relay")).toBe("activitypods_pod_actor");
   });
 
+  it("does not collapse percent-encoded path spellings into configured actor identity", () => {
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, relayOptions);
+
+    expect(router.classifyActor("https://example.com/users/%72elay")).toBe("activitypods_pod_actor");
+  });
+
   it("rejects authority-ambiguous actor URI shapes", () => {
-    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
-      sidecarServiceActors: [{ actorUri: "https://example.com/users/relay", identifier: "relay" }],
-    });
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, relayOptions);
 
     expect(() => router.classifyActor(" https://example.com/users/relay")).toThrow(/exact URI/u);
     expect(() => router.classifyActor("https://example.com/users/relay?as=alice")).toThrow(/query/u);
     expect(() => router.classifyActor("did:example:relay")).toThrow(/protocol/u);
+    expect(() => router.classifyActor("https://example.com\\attacker.example/users/relay")).toThrow(/ambiguous|invalid authority/u);
+    expect(() => router.classifyActor("https://example.com\\/users/relay")).toThrow(/ambiguous|invalid authority/u);
+  });
+
+  it("rejects a sidecar service actor on an unsupported host", () => {
+    expect(() => new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarPublicDomain: "example.com",
+      sidecarServiceActors: [{ actorUri: "https://attacker.example/users/relay", identifier: "relay" }],
+    })).toThrow(/must exactly match the Fedify-served actor URI/u);
+  });
+
+  it("rejects a sidecar service actor on an unsupported custom path", () => {
+    expect(() => new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarPublicDomain: "example.com",
+      sidecarServiceActors: [{ actorUri: "https://example.com/service/relay", identifier: "relay" }],
+    })).toThrow(/must exactly match the Fedify-served actor URI/u);
+  });
+
+  it("accepts the localhost fallback Fedify actor URI", () => {
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarPublicDomain: "localhost",
+      sidecarServiceActors: [{ actorUri: "https://localhost/users/relay", identifier: "relay" }],
+    });
+
+    expect(router.classifyActor("https://localhost/users/relay")).toBe("sidecar_service_actor");
+  });
+
+  it("canonicalizes valid DNS case before comparing the Fedify-served authority", async () => {
+    const pods = activityPodsSigner();
+    const local = sidecarSigner();
+    const router = new ActorAuthoritySigningRouter(pods, local as any, {
+      sidecarPublicDomain: "EXAMPLE.COM",
+      sidecarServiceActors: [{ actorUri: "https://EXAMPLE.COM/users/relay", identifier: "relay" }],
+    });
+
+    const result = await router.signOne({
+      actorUri: "https://EXAMPLE.COM/users/relay",
+      method: "GET",
+      targetUrl: "https://remote.example/objects/1",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(local.signHttpRequest).toHaveBeenCalledWith(expect.objectContaining({
+      actorUri: "https://example.com/users/relay",
+    }));
+    expect(pods.signOne).not.toHaveBeenCalled();
+  });
+
+  it("canonicalizes an explicit default HTTPS port to the Fedify-published authority", () => {
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarPublicDomain: "example.com:443",
+      sidecarServiceActors: [{ actorUri: "https://example.com:443/users/relay", identifier: "relay" }],
+    });
+
+    expect(router.classifyActor("https://example.com:443/users/relay")).toBe("sidecar_service_actor");
+    expect(router.classifyActor("https://example.com/users/relay")).toBe("sidecar_service_actor");
   });
 });
