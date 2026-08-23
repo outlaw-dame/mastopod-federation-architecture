@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { Client } from '@opensearch-project/opensearch';
 import { createClient } from 'redis';
 import { Kafka, logLevel } from 'kafkajs';
@@ -9,6 +10,7 @@ const brokers = (process.env.REDPANDA_BROKERS ?? '127.0.0.1:19092').split(',');
 const marker = process.env.OS4B_FEDERATION_MARKER;
 const expected = Number(process.env.OS4B_FEDERATION_COUNT ?? 240);
 const timeoutMs = Number(process.env.OS4B_FEDERATION_TIMEOUT_MS ?? 120000);
+const sidecarLogPath = process.env.OS4B_SIDECAR_LOG_PATH ?? '../artifacts/os4b-live/sidecar.log';
 if (!marker) throw new Error('OS4B_FEDERATION_MARKER is required');
 const invalidMarker = `${marker}-invalid-signature`;
 
@@ -84,6 +86,26 @@ async function inboundEvidence() {
   return { valid, invalid, totalEntries: rows.length };
 }
 
+async function batchingEvidence() {
+  const text = await readFile(sidecarLogPath, 'utf8').catch(() => '');
+  let observedBatchCalls = 0;
+  let maxObservedBatchSize = 0;
+  let totalBatchedDocuments = 0;
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      if (entry['msg'] !== '[SearchIndexerService] Applied OpenSearch content batch') continue;
+      const size = Number(entry['contentBatchSize']);
+      if (!Number.isSafeInteger(size) || size < 1) continue;
+      observedBatchCalls++;
+      totalBatchedDocuments += size;
+      maxObservedBatchSize = Math.max(maxObservedBatchSize, size);
+    } catch {}
+  }
+  return { observedBatchCalls, maxObservedBatchSize, totalBatchedDocuments };
+}
+
 const startedAt = Date.now();
 let searchHits = 0;
 let invalidSearchHits = Number.POSITIVE_INFINITY;
@@ -91,6 +113,7 @@ let inboundPending = Number.POSITIVE_INFINITY;
 let inboundObserved = 0;
 let inboundInvalid = Number.POSITIVE_INFINITY;
 let inboundTotalEntries = 0;
+let batching = { observedBatchCalls: 0, maxObservedBatchSize: 0, totalBatchedDocuments: 0 };
 while (Date.now() - startedAt < timeoutMs) {
   searchHits = await searchCount(marker);
   invalidSearchHits = await searchCount(invalidMarker);
@@ -100,6 +123,7 @@ while (Date.now() - startedAt < timeoutMs) {
   inboundObserved = inbound.valid;
   inboundInvalid = inbound.invalid;
   inboundTotalEntries = inbound.totalEntries;
+  batching = await batchingEvidence();
 
   if (
     searchHits === expected
@@ -111,6 +135,8 @@ while (Date.now() - startedAt < timeoutMs) {
     && inboundInvalid === 0
     && stream2Invalid === 0
     && firehoseInvalid === 0
+    && batching.observedBatchCalls > 0
+    && batching.maxObservedBatchSize >= 2
   ) break;
   await new Promise((resolve) => setTimeout(resolve, 500));
 }
@@ -130,7 +156,9 @@ const result = {
     && invalidSearchHits === 0
     && inboundInvalid === 0
     && stream2Invalid === 0
-    && firehoseInvalid === 0,
+    && firehoseInvalid === 0
+    && batching.observedBatchCalls > 0
+    && batching.maxObservedBatchSize >= 2,
   marker,
   invalidMarker,
   expected,
@@ -140,6 +168,7 @@ const result = {
   inboundObserved,
   inboundTotalEntries,
   inboundPending,
+  batching,
   negativeControl: {
     inboundInvalid,
     stream2Invalid,
