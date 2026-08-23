@@ -45,7 +45,11 @@ services:
       ENABLE_INBOUND_WORKER: "false"
       ENABLE_OUTBOUND_WORKER: "true"
       ENABLE_OUTBOX_INTENT_WORKER: "true"
-      ENABLE_FEDIFY_RUNTIME_INTEGRATION: "false"
+      # Required for the same runtime that performs outbound delivery to also
+      # publish /users/relay and its locally-managed public key. This is the
+      # production service-actor authority path under test, not a fixture-only
+      # actor document.
+      ENABLE_FEDIFY_RUNTIME_INTEGRATION: "true"
       ENABLE_FEP_3AB2_STREAMING: "false"
       ENABLE_OPENSEARCH_INDEXER: "false"
       ENABLE_XRPC_SERVER: "false"
