@@ -14,6 +14,15 @@ export interface SidecarServiceActorBinding {
 
 export interface ActorAuthoritySigningRouterOptions {
   sidecarServiceActors: readonly SidecarServiceActorBinding[];
+  /**
+   * Public hostname (optionally including a port) whose Fedify actor dispatcher
+   * serves `/users/{identifier}`. Defaults to DOMAIN, then localhost.
+   *
+   * This is an authority boundary, not a presentation setting: locally signed
+   * service actors must be exactly discoverable from the same public authority
+   * that publishes their verification key.
+   */
+  sidecarPublicDomain?: string;
 }
 
 /**
@@ -25,6 +34,12 @@ export interface ActorAuthoritySigningRouterOptions {
  *   the exact local account/actor/key authority checks for pod/user actors;
  * - a local service-signer failure never falls back to ActivityPods, because
  *   that would silently move a service identity across a private-key boundary.
+ *
+ * Sidecar-owned actor bindings are additionally constrained to the exact
+ * Fedify-served `/users/{identifier}` URI on the configured public domain.
+ * This prevents AP_RELAY_LOCAL_ACTOR_URI (or another future binding source)
+ * from selecting an arbitrary host/path whose key is not actually
+ * dereferenceable from the sidecar actor dispatcher.
  *
  * Actor IRIs are compared exactly after URL-shape validation. We intentionally
  * do not normalize trailing slashes, dot segments, host spelling, or other URI
@@ -39,14 +54,13 @@ export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
     private readonly sidecarSigner: Pick<SidecarLocalSigningService, "signHttpRequest">,
     options: ActorAuthoritySigningRouterOptions,
   ) {
+    const publicDomain = resolveSidecarPublicDomain(options.sidecarPublicDomain);
+
     for (const binding of options.sidecarServiceActors) {
-      const actorUri = validateActorUriExact(binding.actorUri);
+      const identifier = validateServiceActorIdentifier(binding.identifier);
+      const actorUri = validateSidecarServiceActorUri(binding.actorUri, identifier, publicDomain);
       if (this.serviceActorIdentifiers.has(actorUri)) {
         throw new Error(`duplicate sidecar service actor binding: ${actorUri}`);
-      }
-      const identifier = binding.identifier.trim();
-      if (!identifier) {
-        throw new Error(`sidecar service actor identifier is empty: ${actorUri}`);
       }
       this.serviceActorIdentifiers.set(actorUri, identifier);
     }
@@ -105,6 +119,59 @@ export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
       };
     }
   }
+}
+
+function resolveSidecarPublicDomain(explicitDomain: string | undefined): string {
+  const domain = explicitDomain?.trim() || process.env["DOMAIN"]?.trim() || "localhost";
+
+  let parsed: URL;
+  try {
+    parsed = new URL(`https://${domain}`);
+  } catch {
+    throw new Error(`sidecar public domain is invalid: ${domain}`);
+  }
+
+  if (
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash ||
+    parsed.host !== domain
+  ) {
+    throw new Error(`sidecar public domain must be an exact host[:port]: ${domain}`);
+  }
+
+  return domain;
+}
+
+function validateServiceActorIdentifier(identifierValue: string): string {
+  const identifier = identifierValue.trim();
+  if (!identifier) {
+    throw new Error("sidecar service actor identifier is empty");
+  }
+  if (identifier !== identifierValue) {
+    throw new Error(`sidecar service actor identifier must be exact: ${identifierValue}`);
+  }
+  if (!/^[a-zA-Z0-9._-]{1,128}$/u.test(identifier)) {
+    throw new Error(`sidecar service actor identifier is invalid: ${identifier}`);
+  }
+  return identifier;
+}
+
+function validateSidecarServiceActorUri(
+  actorUriValue: string,
+  identifier: string,
+  publicDomain: string,
+): string {
+  const actorUri = validateActorUriExact(actorUriValue);
+  const expectedActorUri = `https://${publicDomain}/users/${identifier}`;
+  if (actorUri !== expectedActorUri) {
+    throw new Error(
+      `sidecar service actor URI must exactly match the Fedify-served actor URI: ${expectedActorUri}`,
+    );
+  }
+  return actorUri;
 }
 
 function validateActorUriExact(actorUri: string): string {
