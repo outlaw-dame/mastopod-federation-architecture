@@ -15,7 +15,9 @@ https://gotosocial {
 
 https://mastodon {
   tls /certs/mastodon.crt /certs/mastodon.key
-  reverse_proxy mastodon-web-app:3000
+  # Transparent test-only recorder retains bounded signer/body-correlation
+  # metadata and forwards the request unchanged to the real Mastodon process.
+  reverse_proxy mastodon-wire-recorder:8788
 }
 
 https://akkoma {
@@ -34,7 +36,7 @@ https://bonfire.test {
 }
 
 https://misskey.test {
-  tls /certs/misskey.test.crt /certs/misskey.test.key
+  tls /certs/misskey.test.crt /certs/misskey.key
   reverse_proxy misskey-app:3000
 }
 
