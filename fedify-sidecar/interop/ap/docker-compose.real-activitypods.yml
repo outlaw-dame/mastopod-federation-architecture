@@ -26,6 +26,8 @@ services:
         condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      ACTIVITYPODS_RETURN_PORT: ${ACTIVITYPODS_RETURN_PORT:-3000}
     volumes:
       - ./caddy/Caddyfile.real-activitypods:/etc/caddy/Caddyfile:ro
       - ./runtime/certs:/certs:ro

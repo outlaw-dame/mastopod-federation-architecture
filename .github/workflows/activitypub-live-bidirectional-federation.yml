@@ -116,7 +116,8 @@ jobs:
           AP_INTEROP_MASTODON_ENV_FILE="${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/runtime/mastodon.env" \
           AP_INTEROP_MASTODON_USERNAME=interop \
             fedify-sidecar/interop/ap/scripts/bootstrap-mastodon-account.sh
-          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods up -d ap-proof-router
+          if [[ "${{ matrix.mode }}" == external ]]; then return_port=8080; else return_port=3000; fi
+          ACTIVITYPODS_RETURN_PORT="${return_port}" docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods up -d ap-proof-router
           AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
             fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh mastodon activitypods sidecar \
             | tee "${EVIDENCE_DIR}/proof-router-hosts.json"

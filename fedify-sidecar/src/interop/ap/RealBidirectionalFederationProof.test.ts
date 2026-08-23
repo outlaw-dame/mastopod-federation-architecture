@@ -58,7 +58,11 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(workflow).not.toContain("ENABLE_INBOUND_WORKER=false ENABLE_ORIGIN_RECONCILIATION=false");
     expect(caddy).toContain("method POST");
     expect(caddy).toContain("path_regexp actor_inbox ^/(users/)?[^/]+/inbox/?$");
-    expect(caddy).toContain("reverse_proxy host.docker.internal:8080 host.docker.internal:3000");
+    expect(caddy).toContain("reverse_proxy host.docker.internal:{$ACTIVITYPODS_RETURN_PORT:3000}");
+    expect(caddy).not.toContain("lb_policy first");
+    expect(workflow).toContain("ACTIVITYPODS_RETURN_PORT=3000");
+    expect(workflow).toContain("ACTIVITYPODS_RETURN_PORT=8080");
+    expect(workflow).toContain("--no-deps --force-recreate ap-proof-router");
     expect(proxy).toContain("return 'inbound'");
     expect(proxy).toContain("the sidecar Redis");
     expect(proxy).not.toContain("schema: 'ap.real-inbound-api-call.v1'");

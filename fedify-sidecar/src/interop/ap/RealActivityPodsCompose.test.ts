@@ -47,6 +47,9 @@ describe("real ActivityPods sidecar compose authority", () => {
     );
 
     expect(router?.depends_on?.["mastodon-wire-recorder"]).toBeDefined();
+    expect(router?.environment?.["ACTIVITYPODS_RETURN_PORT"]).toBe(
+      "${ACTIVITYPODS_RETURN_PORT:-3000}",
+    );
     expect(router?.networks).not.toBeInstanceOf(Array);
     if (router?.networks && !Array.isArray(router.networks)) {
       expect(router.networks["ap-interop"]?.ipv4_address).toBe("172.31.240.254");
