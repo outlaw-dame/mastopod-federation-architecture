@@ -84,48 +84,64 @@ export class HttpAtPasswordVerifier implements AtPasswordVerifier {
 }
 
 /**
- * Resolve the password-verifier capability without permitting the broader
- * federation signing credential to become an auth-verification credential.
+ * Resolve the production password-verifier configuration.
  *
- * The production session construction historically passed ACTIVITYPODS_TOKEN
- * as an override. A non-empty dedicated environment capability therefore has
- * priority, and an override equal to ACTIVITYPODS_TOKEN is discarded when the
- * dedicated token is absent. Empty environment values are treated as unset so
- * hermetic embedders can still provide a distinct explicit verifier token.
- * Equal non-empty dedicated/federation environment tokens fail closed so an
- * accidental one-token deployment cannot silently defeat capability split.
+ * The credential is intentionally NOT overrideable by callers. This keeps the
+ * password-verification capability isolated even if a runtime call site passes
+ * a broader ActivityPods credential in a Partial<HttpAtPasswordVerifierConfig>.
+ * Only ATPROTO_PASSWORD_VERIFY_TOKEN may authorize /api/internal/auth/verify.
  */
 export function resolveHttpAtPasswordVerifierConfig(
-  overrides?: Partial<HttpAtPasswordVerifierConfig>,
+  overrides: Partial<HttpAtPasswordVerifierConfig> = {},
   env: NodeJS.ProcessEnv = process.env,
 ): HttpAtPasswordVerifierConfig {
-  const dedicatedToken = nonEmptyToken(env["ATPROTO_PASSWORD_VERIFY_TOKEN"]);
-  const federationToken = nonEmptyToken(env["ACTIVITYPODS_TOKEN"]);
-  const overrideToken = nonEmptyToken(overrides?.token);
-
-  if (dedicatedToken && federationToken && dedicatedToken === federationToken) {
-    throw new Error(
-      "ATPROTO_PASSWORD_VERIFY_TOKEN must be distinct from ACTIVITYPODS_TOKEN",
-    );
-  }
-
-  const token = dedicatedToken
-    ?? (overrideToken && overrideToken !== federationToken ? overrideToken : undefined)
-    ?? '';
+  const safeOverrides = { ...overrides };
+  delete safeOverrides.token;
 
   return {
-    baseUrl: overrides?.baseUrl ?? env["ACTIVITYPODS_URL"] ?? 'http://localhost:3000',
-    token,
-    timeoutMs: overrides?.timeoutMs ?? 10_000,
+    baseUrl: env["ACTIVITYPODS_URL"] ?? 'http://localhost:3000',
+    timeoutMs: 10_000,
+    ...safeOverrides,
+    token: env["ATPROTO_PASSWORD_VERIFY_TOKEN"] ?? '',
   };
+}
+
+/**
+ * Fail closed before the sidecar entrypoint starts when managed XRPC password
+ * verification is enabled without its dedicated capability token.
+ *
+ * `src/index.ts` historically validated ACTIVITYPODS_TOKEN before starting
+ * XRPC. That token remains required for other ActivityPods internal APIs, but
+ * it must never stand in for the narrower password-verification capability.
+ * This preflight executes during entrypoint module loading, before `main()` can
+ * create listeners or enter its XRPC initialization catch boundary.
+ */
+export function assertAtPasswordVerifierRuntimePreflight(
+  env: NodeJS.ProcessEnv = process.env,
+  argv: readonly string[] = process.argv,
+): void {
+  const isSidecarEntrypoint = argv.some((argument) =>
+    /(?:^|\/)(?:src|dist)\/index\.(?:ts|js)$/u.test(argument),
+  );
+  if (!isSidecarEntrypoint) return;
+
+  const xrpcEnabled = env["ENABLE_XRPC_SERVER"] !== "false";
+  const localFixture = env["AT_LOCAL_FIXTURE"] === "true";
+  if (!xrpcEnabled || localFixture) return;
+
+  if (!env["ATPROTO_PASSWORD_VERIFY_TOKEN"]?.trim()) {
+    throw new Error(
+      "ENABLE_XRPC_SERVER requires ATPROTO_PASSWORD_VERIFY_TOKEN when AT_LOCAL_FIXTURE is false",
+    );
+  }
 }
 
 export function createHttpAtPasswordVerifier(
   overrides?: Partial<HttpAtPasswordVerifierConfig>
 ): HttpAtPasswordVerifier {
-  return new HttpAtPasswordVerifier(resolveHttpAtPasswordVerifierConfig(overrides));
+  return new HttpAtPasswordVerifier(
+    resolveHttpAtPasswordVerifierConfig(overrides),
+  );
 }
 
-function nonEmptyToken(value: string | undefined): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
+assertAtPasswordVerifierRuntimePreflight();
