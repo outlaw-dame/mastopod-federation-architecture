@@ -313,6 +313,8 @@ jobs:
                 fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
               ;;
             loops)
+              [[ -d loops/.git ]]
+              [[ "$(git -C loops rev-parse HEAD)" == "${LOOPS_SHA}" ]]
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_LOOPS_OVERLAY="${LOOPS_OVERLAY}" \
               AP_INTEROP_LOOPS_USERNAME="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-loops-account.sh

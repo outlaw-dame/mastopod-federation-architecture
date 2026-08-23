@@ -15,7 +15,22 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(workflow).toContain('if [[ "${TARGET}" == "misskey" ]]');
     expect(workflow).toContain("readiness_attempts=270");
     expect(workflow).toContain('seq 1 "${readiness_attempts}"');
-    expect(workflow).toContain("former seven-minute bound");
+    expect(workflow.match(/readiness_attempts=270/g)).toHaveLength(1);
+  });
+
+  it("builds Loops from the exact in-workspace source checkout", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+    const compose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.loops.yml"),
+      "utf8",
+    );
+
+    expect(compose).toContain("context: ${LOOPS_SOURCE_DIR:-../../../loops}");
+    expect(workflow).toContain('[[ -d loops/.git ]]');
+    expect(workflow).toContain('[[ "$(git -C loops rev-parse HEAD)" == "${LOOPS_SHA}" ]]');
   });
 
   it("bounds retries for transient Pixelfed image-build downloads", () => {

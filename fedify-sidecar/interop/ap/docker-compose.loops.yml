@@ -34,7 +34,7 @@ services:
   loops-app:
     image: ap-loops:b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     build:
-      context: ${LOOPS_SOURCE_DIR:-../../../../loops}
+      context: ${LOOPS_SOURCE_DIR:-../../../loops}
       dockerfile: Dockerfile
     depends_on:
       loops-db:
