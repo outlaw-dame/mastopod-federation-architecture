@@ -17,7 +17,11 @@ https://mastodon {
   tls /certs/mastodon.crt /certs/mastodon.key
   # Transparent test-only recorder retains bounded signer/body-correlation
   # metadata and forwards the request unchanged to the real Mastodon process.
-  reverse_proxy mastodon-wire-recorder:8788
+  # Preserve the public authority explicitly because Host is part of the
+  # Cavage signature base string verified by Mastodon.
+  reverse_proxy mastodon-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://akkoma {
