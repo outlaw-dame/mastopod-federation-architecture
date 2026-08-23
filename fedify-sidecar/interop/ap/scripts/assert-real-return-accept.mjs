@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { createClient } from 'redis';
 
 const AS_ACCEPT = 'Accept';
@@ -68,6 +69,13 @@ function validateOrigin(origin) {
     }
   }
   return origin;
+}
+
+function validateRemoteUsername(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_.@-]{1,256}$/.test(value)) {
+    throw new Error('remote username is invalid');
+  }
+  return value;
 }
 
 function sparqlIri(value) {
@@ -176,16 +184,16 @@ async function waitForBidirectionalProof(mode, origin) {
 
 async function run(argv = process.argv.slice(2)) {
   if (argv.length !== 6) {
-    throw new Error('Usage: assert-real-return-accept.mjs <native|external> <origin-json> <target> <actor-uri> <local-username> <persisted-follow-count>');
+    throw new Error('Usage: assert-real-return-accept.mjs <native|external> <origin-json> <target> <actor-uri> <remote-username> <persisted-follow-count>');
   }
-  const [mode, originPath, target, actorUri, localUsername, persistedCountRaw] = argv;
+  const [mode, originPath, target, actorUri, remoteUsernameRaw, persistedCountRaw] = argv;
   if (!['native', 'external'].includes(mode)) throw new Error(`unsupported proof mode ${mode}`);
+  const remoteUsername = validateRemoteUsername(remoteUsernameRaw);
   const persistedFollowCount = Number(persistedCountRaw);
   if (!Number.isSafeInteger(persistedFollowCount) || persistedFollowCount < 1) throw new Error('persisted follow count must be positive');
   const origin = validateOrigin(JSON.parse(await readFile(originPath, 'utf8')));
   if (origin.mode !== mode) throw new Error('origin proof mode mismatch');
   if (origin.actorUri !== actorUri) throw new Error('remote persistence actor does not match origin actor');
-  if (origin.senderUsername !== localUsername) throw new Error('remote persistence username does not match origin sender');
   const evidence = await waitForBidirectionalProof(mode, origin);
   process.stdout.write(`${JSON.stringify({
     schema: 'activitypods.activitypub.real-bidirectional-acceptance.v1',
@@ -193,7 +201,8 @@ async function run(argv = process.argv.slice(2)) {
     target,
     mode,
     actorUri,
-    localUsername,
+    localUsername: origin.senderUsername,
+    remoteUsername,
     remoteActorUri: origin.remoteActorUri,
     activityId: origin.activityId,
     persistedFollowCount,
@@ -218,10 +227,11 @@ function selfTest() {
   if (!isMatchingReturnAccept(matching, origin)) throw new Error('self-test matching Accept failed');
   if (isMatchingReturnAccept({ ...matching, actor: 'https://evil.test/users/bob' }, origin)) throw new Error('self-test actor mismatch failed closed');
   if (isMatchingReturnAccept({ ...matching, object: { ...matching.object, id: 'https://activitypods.test/alice/outbox/2' } }, origin)) throw new Error('self-test Follow id mismatch failed closed');
+  if (validateRemoteUsername('interop') !== 'interop') throw new Error('self-test remote username validation failed');
   process.stdout.write('ok\n');
 }
 
-if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (process.argv[2] === '--self-test') {
     selfTest();
   } else {
@@ -232,4 +242,4 @@ if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) {
   }
 }
 
-export { isMatchingReturnAccept, normalizeEntityId, validateOrigin };
+export { isMatchingReturnAccept, normalizeEntityId, validateOrigin, validateRemoteUsername };
