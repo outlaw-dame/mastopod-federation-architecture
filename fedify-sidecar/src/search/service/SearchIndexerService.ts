@@ -256,23 +256,30 @@ export class SearchIndexerService {
           message.headers as Record<string, Buffer | string | undefined> | undefined,
         );
 
-        if (outboxIntentId && await this.outboxIntentDeduper.has(outboxIntentId)) {
+        if (
+          outboxIntentId
+          && await this.runWithHeartbeat(
+            () => this.outboxIntentDeduper.has(outboxIntentId),
+            payload,
+          )
+        ) {
           plans.push({ message, raw, retryKey, outboxIntentId, alreadyCompleted: true });
-          if ((i + 1) % 10 === 0) await payload.heartbeat();
           continue;
         }
 
         const consent = normalizePublicSearchConsent((event['meta'] as any)?.searchConsent);
         if (consent?.isPublic === false) {
           plans.push({ message, raw, retryKey, outboxIntentId });
-          if ((i + 1) % 10 === 0) await payload.heartbeat();
+          await payload.heartbeat();
           continue;
         }
 
-        const projected = await collectApFirehoseEvents(this.identityResolver, event);
+        const projected = await this.runWithHeartbeat(
+          () => collectApFirehoseEvents(this.identityResolver, event),
+          payload,
+        );
         if (projected.length === 0) {
           plans.push({ message, raw, retryKey, outboxIntentId });
-          if ((i + 1) % 10 === 0) await payload.heartbeat();
           continue;
         }
         if (projected.length !== 1 || projected[0]!.topic !== 'search.public.upsert.v1') {
@@ -285,7 +292,6 @@ export class SearchIndexerService {
           outboxIntentId,
           upsert: projected[0]!.event as SearchPublicUpsertV1,
         });
-        if ((i + 1) % 10 === 0) await payload.heartbeat();
       } catch (error) {
         planningFailure = { index: i, raw, retryKey, error };
         break;
