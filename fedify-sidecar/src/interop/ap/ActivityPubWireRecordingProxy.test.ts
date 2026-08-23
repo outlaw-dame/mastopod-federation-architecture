@@ -75,8 +75,8 @@ describe("ActivityPub wire recording proxy", () => {
       req.on("end", () => {
         received = {
           host: req.headers.host,
-          signature: req.headers.signature as string | undefined,
-          digest: req.headers.digest as string | undefined,
+          signature: req.headers["signature"] as string | undefined,
+          digest: req.headers["digest"] as string | undefined,
           body: Buffer.concat(chunks).toString("utf8"),
         };
         res.writeHead(202, { "content-type": "application/json" });
