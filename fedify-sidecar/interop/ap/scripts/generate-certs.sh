@@ -15,7 +15,7 @@ if [ ! -f "${CA_KEY}" ] || [ ! -f "${CA_CERT}" ]; then
     -out "${CA_CERT}" >/dev/null 2>&1
 fi
 
-for host in sidecar gotosocial mastodon akkoma activitypods pixelfed.test bonfire.test misskey.test friendica.test castopod.test activitypods.test; do
+for host in sidecar gotosocial mastodon akkoma activitypods pixelfed.test bonfire.test misskey.test friendica.test castopod.test peertube.test loops.test activitypods.test; do
   key_path="${RUNTIME_DIR}/${host}.key"
   csr_path="${RUNTIME_DIR}/${host}.csr"
   crt_path="${RUNTIME_DIR}/${host}.crt"

@@ -44,12 +44,12 @@ if [ -n "${COMPOSE_OVERLAY}" ]; then
 fi
 
 if [ -z "${TARGET}" ] || [ -z "${ACTOR_URI}" ]; then
-  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod> <actor-uri> [local-username]" >&2
+  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod|peertube|loops> <actor-uri> [local-username]" >&2
   exit 2
 fi
 
 case "${TARGET}" in
-  mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod) ;;
+  mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod|peertube|loops) ;;
   *) fail "unsupported target '${TARGET}'" ;;
 esac
 case "${EXPECTED_COUNT}:${ATTEMPTS}:${DELAY_SECONDS}" in
@@ -123,6 +123,14 @@ query_count() {
     castopod)
       compose exec -T castopod-db /bin/sh -lc \
         "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u castopod castopod -e \"select count(*) from cp_fediverse_follows f join cp_fediverse_actors follower on follower.id=f.actor_id join cp_fediverse_actors target on target.id=f.target_actor_id where follower.uri='${actor_sql}' and target.username='${username_sql}' and target.domain='castopod.test';\""
+      ;;
+    peertube)
+      compose exec -T peertube-db /bin/sh -lc \
+        "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -v ON_ERROR_STOP=1 -tAc \"select count(*) from \\\"actorFollow\\\" f join actor follower on follower.id=f.\\\"actorId\\\" join actor target on target.id=f.\\\"targetActorId\\\" where follower.url='${actor_sql}' and target.\\\"preferredUsername\\\"='${username_sql}' and target.\\\"serverId\\\" is null and target.\\\"accountId\\\" is not null and f.state='accepted';\""
+      ;;
+    loops)
+      compose exec -T loops-db /bin/sh -lc \
+        "MYSQL_PWD=\"\$MYSQL_PASSWORD\" mysql --batch --skip-column-names -u loops loops -e \"select count(*) from followers f join profiles follower on follower.id=f.profile_id join profiles target on target.id=f.following_id where follower.uri='${actor_sql}' and target.username='${username_sql}' and follower.local=0 and target.local=1;\""
       ;;
   esac
 }
@@ -202,6 +210,27 @@ friendica_diagnostics() {
   ' >&2 || echo "Friendica log counters unavailable" >&2
 }
 
+loops_diagnostics() {
+  echo "Loops fail-closed persistence diagnostics:" >&2
+  compose exec -T loops-db /bin/sh -lc \
+    "MYSQL_PWD=\"\$MYSQL_PASSWORD\" mysql --batch --skip-column-names -u loops loops -e \"
+      select concat('remote_profile_count=', count(*), ',public_key_count=', coalesce(sum(public_key is not null and public_key <> ''),0), ',inbox_count=', coalesce(sum(inbox_url is not null and inbox_url <> ''),0)) from profiles where uri='${actor_sql}';
+      select concat('local_target_count=', count(*)) from profiles where username='${username_sql}' and local=1;
+      select concat('persisted_follow_count=', count(*)) from followers f join profiles follower on follower.id=f.profile_id join profiles target on target.id=f.following_id where follower.uri='${actor_sql}' and target.username='${username_sql}' and follower.local=0 and target.local=1;
+      select concat('failed_job_count=', count(*)) from failed_jobs;\"" >&2 || echo "Loops database diagnostics unavailable" >&2
+  compose exec -T loops-horizon php artisan horizon:status >&2 || echo "Loops Horizon status unavailable" >&2
+}
+
+peertube_diagnostics() {
+  echo "PeerTube fail-closed persistence diagnostics:" >&2
+  compose exec -T peertube-db /bin/sh -lc \
+    "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -v ON_ERROR_STOP=1 -tAc \"
+      select concat('remote_actor_count=', count(*), ',public_key_count=', coalesce(sum(case when \\\"publicKey\\\" is not null and \\\"publicKey\\\" <> '' then 1 else 0 end),0)) from actor where url='${actor_sql}';
+      select concat('local_target_count=', count(*)) from actor where \\\"preferredUsername\\\"='${username_sql}' and \\\"serverId\\\" is null and \\\"accountId\\\" is not null;
+      select concat('accepted_follow_count=', count(*)) from \\\"actorFollow\\\" f join actor follower on follower.id=f.\\\"actorId\\\" join actor target on target.id=f.\\\"targetActorId\\\" where follower.url='${actor_sql}' and target.\\\"preferredUsername\\\"='${username_sql}' and target.\\\"serverId\\\" is null and target.\\\"accountId\\\" is not null and f.state='accepted';\"" >&2 || echo "PeerTube database diagnostics unavailable" >&2
+  compose ps peertube-app peertube-db peertube-redis >&2 || true
+}
+
 query_error_file=$(mktemp "${TMPDIR:-/tmp}/ap-follow-query.XXXXXX")
 trap 'rm -f "${query_error_file}"' EXIT HUP INT TERM
 query_failures=0
@@ -264,6 +293,14 @@ case "${TARGET}" in
     ;;
   castopod)
     compose logs --no-color castopod-app >&2 || true
+    ;;
+  peertube)
+    peertube_diagnostics
+    ;;
+  loops)
+    # Application logs may contain signed request context. Emit only fixed
+    # database and worker-health counters on a failed proof.
+    loops_diagnostics
     ;;
 esac
 exit 1

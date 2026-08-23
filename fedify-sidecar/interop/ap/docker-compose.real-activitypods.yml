@@ -19,7 +19,7 @@ services:
       - ap-interop
 
   ap-proof-router:
-    image: caddy:2.8-alpine
+    image: caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
     profiles: ["real-activitypods"]
     depends_on:
       mastodon-wire-recorder:
@@ -48,6 +48,8 @@ services:
           - misskey.test
           - friendica.test
           - castopod.test
+          - peertube.test
+          - loops.test
           - activitypods.test
 
   # Containerized real-ActivityPods sidecar proof. Keeping this service on the

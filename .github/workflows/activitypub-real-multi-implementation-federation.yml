@@ -71,6 +71,13 @@ jobs:
             compose_overlay: fedify-sidecar/interop/ap/docker-compose.castopod.yml
             actor_uri: https://castopod.test/@interop
             remote_version: Castopod 1.9.0@sha256:3ad8970f1decc9c9009502be3efedcf2f5d9fda5c7c9fd85a4408edc84a0bbb9
+          - target: loops
+            target_host: loops.test
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.loops.yml
+            # Replaced with the bootstrapped snowflake profile URI before use.
+            actor_uri: https://loops.test/ap/users/pending
+            remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ACTIVITYPODS_SHA: 'fee9037c382bafc181fad0023d0f27cce3ffa992'
@@ -83,6 +90,8 @@ jobs:
       FRIENDICA_OVERLAY: fedify-sidecar/interop/ap/docker-compose.friendica.yml
       CASTOPOD_OVERLAY: fedify-sidecar/interop/ap/docker-compose.castopod.yml
       BONFIRE_OVERLAY: fedify-sidecar/interop/ap/docker-compose.bonfire.yml
+      LOOPS_OVERLAY: fedify-sidecar/interop/ap/docker-compose.loops.yml
+      LOOPS_SHA: 'b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3'
       TARGET: ${{ matrix.target }}
       TARGET_HOST: ${{ matrix.target_host }}
       ACTIVITYPODS_HOST: ${{ matrix.activitypods_host }}
@@ -113,6 +122,15 @@ jobs:
           repository: pixelfed/pixelfed
           ref: ${{ env.PIXELFED_SHA }}
           path: pixelfed
+          persist-credentials: false
+
+      - name: Checkout exact Loops fixture source
+        if: matrix.target == 'loops'
+        uses: actions/checkout@v4
+        with:
+          repository: joinloops/loops-server
+          ref: ${{ env.LOOPS_SHA }}
+          path: loops
           persist-credentials: false
 
       - name: Setup Node.js
@@ -148,6 +166,14 @@ jobs:
           bonfire_encryption_salt="$(openssl rand -hex 32)"
           bonfire_release_cookie="$(openssl rand -hex 32)"
           for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
+          if [[ "${TARGET}" == loops ]]; then
+            loops_db_password="$(openssl rand -hex 32)"
+            loops_db_root_password="$(openssl rand -hex 32)"
+            loops_redis_password="$(openssl rand -hex 32)"
+            loops_admin_password="$(openssl rand -hex 32)"
+            loops_app_key="base64:$(openssl rand -base64 32)"
+            for value in "${loops_db_password}" "${loops_db_root_password}" "${loops_redis_password}" "${loops_admin_password}" "${loops_app_key}"; do echo "::add-mask::${value}"; done
+          fi
           {
             echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
             echo "SIDECAR_TOKEN=${sidecar_token}"
@@ -170,6 +196,15 @@ jobs:
             echo "BONFIRE_ENCRYPTION_SALT=${bonfire_encryption_salt}"
             echo "BONFIRE_RELEASE_COOKIE=${bonfire_release_cookie}"
           } >> "$GITHUB_ENV"
+          if [[ "${TARGET}" == loops ]]; then
+            {
+              echo "LOOPS_DB_PASSWORD=${loops_db_password}"
+              echo "LOOPS_DB_ROOT_PASSWORD=${loops_db_root_password}"
+              echo "LOOPS_REDIS_PASSWORD=${loops_redis_password}"
+              echo "LOOPS_ADMIN_PASSWORD=${loops_admin_password}"
+              echo "LOOPS_APP_KEY=${loops_app_key}"
+            } >> "$GITHUB_ENV"
+          fi
           printf '{"schema":"activitypods.activitypub.real-multi-run.v1","target":"%s","activityPodsSha":"%s","federationSha":"%s"}\n' \
             "${TARGET}" "${ACTIVITYPODS_SHA}" "${FEDERATION_SHA}" > "${EVIDENCE_DIR}/run-started.json"
 
@@ -276,6 +311,12 @@ jobs:
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_BONFIRE_OVERLAY="${BONFIRE_OVERLAY}" \
               AP_INTEROP_BONFIRE_USERNAME="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
+              ;;
+            loops)
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_LOOPS_OVERLAY="${LOOPS_OVERLAY}" \
+              AP_INTEROP_LOOPS_USERNAME="${TARGET_USERNAME}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-loops-account.sh
+              . fedify-sidecar/interop/ap/runtime/loops-actor.env
               ;;
             *) exit 2 ;;
           esac
@@ -565,6 +606,9 @@ jobs:
             friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" ps friendica-app friendica-worker 2>/dev/null || true ;;
             castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
+            # Loops can log signed request context. The persistence assertion
+            # already emits privacy-safe counters and Horizon state.
+            loops) docker compose -f "${COMPOSE_FILE}" -f "${LOOPS_OVERLAY}" ps loops-app loops-horizon loops-db 2>/dev/null || true ;;
           esac
 
       - name: Stop isolated fixture
@@ -591,6 +635,9 @@ jobs:
           fi
           if [[ "${TARGET}" == bonfire ]]; then
             docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" down -v || true
+          fi
+          if [[ "${TARGET}" == loops ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${LOOPS_OVERLAY}" down -v || true
           fi
           docker compose -f "${COMPOSE_FILE}" --profile mastodon --profile akkoma down -v || true
           cd activitypods/pod-provider
