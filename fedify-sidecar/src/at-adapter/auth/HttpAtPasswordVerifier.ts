@@ -106,6 +106,36 @@ export function resolveHttpAtPasswordVerifierConfig(
   };
 }
 
+/**
+ * Fail closed before the sidecar entrypoint starts when managed XRPC password
+ * verification is enabled without its dedicated capability token.
+ *
+ * `src/index.ts` historically validated ACTIVITYPODS_TOKEN before starting
+ * XRPC. That token remains required for other ActivityPods internal APIs, but
+ * it must never stand in for the narrower password-verification capability.
+ * This preflight executes during entrypoint module loading, before `main()` can
+ * create listeners or enter its XRPC initialization catch boundary.
+ */
+export function assertAtPasswordVerifierRuntimePreflight(
+  env: NodeJS.ProcessEnv = process.env,
+  argv: readonly string[] = process.argv,
+): void {
+  const isSidecarEntrypoint = argv.some((argument) =>
+    /(?:^|\/)(?:src|dist)\/index\.(?:ts|js)$/u.test(argument),
+  );
+  if (!isSidecarEntrypoint) return;
+
+  const xrpcEnabled = env["ENABLE_XRPC_SERVER"] !== "false";
+  const localFixture = env["AT_LOCAL_FIXTURE"] === "true";
+  if (!xrpcEnabled || localFixture) return;
+
+  if (!env["ATPROTO_PASSWORD_VERIFY_TOKEN"]?.trim()) {
+    throw new Error(
+      "ENABLE_XRPC_SERVER requires ATPROTO_PASSWORD_VERIFY_TOKEN when AT_LOCAL_FIXTURE is false",
+    );
+  }
+}
+
 export function createHttpAtPasswordVerifier(
   overrides?: Partial<HttpAtPasswordVerifierConfig>
 ): HttpAtPasswordVerifier {
@@ -113,3 +143,5 @@ export function createHttpAtPasswordVerifier(
     resolveHttpAtPasswordVerifierConfig(overrides),
   );
 }
+
+assertAtPasswordVerifierRuntimePreflight();
