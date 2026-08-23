@@ -41,10 +41,10 @@ export interface ActorAuthoritySigningRouterOptions {
  * from selecting an arbitrary host/path whose key is not actually
  * dereferenceable from the sidecar actor dispatcher.
  *
- * Actor IRIs are compared exactly after URL-shape validation. We intentionally
- * do not normalize trailing slashes, dot segments, host spelling, or other URI
- * syntax at this authority boundary because distinct ActivityPub IRIs identify
- * distinct resources and must never collapse into the same key domain.
+ * The URL authority is canonicalized the same way Fedify's URL objects are
+ * (DNS case, IDN punycode, and default ports). The path spelling remains exact:
+ * trailing slashes and dot segments are never collapsed at this key-authority
+ * boundary, because they can identify distinct ActivityPub resources.
  */
 export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
   private readonly serviceActorIdentifiers = new Map<string, string>();
@@ -54,7 +54,7 @@ export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
     private readonly sidecarSigner: Pick<SidecarLocalSigningService, "signHttpRequest">,
     options: ActorAuthoritySigningRouterOptions,
   ) {
-    const publicDomain = resolveSidecarPublicDomain(options.sidecarPublicDomain);
+    const publicDomain = canonicalizeSidecarPublicDomain(options.sidecarPublicDomain);
 
     for (const binding of options.sidecarServiceActors) {
       const identifier = validateServiceActorIdentifier(binding.identifier);
@@ -67,15 +67,15 @@ export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
   }
 
   classifyActor(actorUri: string): ActorAuthorityClass {
-    const exactActorUri = validateActorUriExact(actorUri);
-    return this.serviceActorIdentifiers.has(exactActorUri)
+    const canonicalActorUri = canonicalizeActorAuthorityHostExactPath(actorUri);
+    return this.serviceActorIdentifiers.has(canonicalActorUri)
       ? "sidecar_service_actor"
       : "activitypods_pod_actor";
   }
 
   async signOne(req: Omit<SignRequest, "requestId">): Promise<SignResult> {
-    const exactActorUri = validateActorUriExact(req.actorUri);
-    const serviceIdentifier = this.serviceActorIdentifiers.get(exactActorUri);
+    const canonicalActorUri = canonicalizeActorAuthorityHostExactPath(req.actorUri);
+    const serviceIdentifier = this.serviceActorIdentifiers.get(canonicalActorUri);
 
     if (!serviceIdentifier) {
       return this.activityPodsSigner.signOne(req);
@@ -84,7 +84,7 @@ export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
     const requestId = `local-sig-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     try {
       const signed = await this.sidecarSigner.signHttpRequest({
-        actorUri: exactActorUri,
+        actorUri: canonicalActorUri,
         identifier: serviceIdentifier,
         method: req.method,
         targetUrl: req.targetUrl,
@@ -100,7 +100,7 @@ export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
           ...(signed.digest ? { digest: signed.digest } : {}),
         },
         meta: {
-          keyId: `${exactActorUri}#main-key`,
+          keyId: `${canonicalActorUri}#main-key`,
           algorithm: "rsa-sha256",
           signedHeaders: signed.digest
             ? "(request-target) host date digest"
@@ -121,7 +121,7 @@ export class ActorAuthoritySigningRouter implements HttpRequestSigningPort {
   }
 }
 
-function resolveSidecarPublicDomain(explicitDomain: string | undefined): string {
+export function canonicalizeSidecarPublicDomain(explicitDomain: string | undefined): string {
   const domain = explicitDomain?.trim() || process.env["DOMAIN"]?.trim() || "localhost";
 
   let parsed: URL;
@@ -136,13 +136,12 @@ function resolveSidecarPublicDomain(explicitDomain: string | undefined): string 
     parsed.password ||
     parsed.pathname !== "/" ||
     parsed.search ||
-    parsed.hash ||
-    parsed.host !== domain
+    parsed.hash
   ) {
-    throw new Error(`sidecar public domain must be an exact host[:port]: ${domain}`);
+    throw new Error(`sidecar public domain must be a host[:port] only: ${domain}`);
   }
 
-  return domain;
+  return parsed.host;
 }
 
 function validateServiceActorIdentifier(identifierValue: string): string {
@@ -164,7 +163,7 @@ function validateSidecarServiceActorUri(
   identifier: string,
   publicDomain: string,
 ): string {
-  const actorUri = validateActorUriExact(actorUriValue);
+  const actorUri = canonicalizeActorAuthorityHostExactPath(actorUriValue);
   const expectedActorUri = `https://${publicDomain}/users/${identifier}`;
   if (actorUri !== expectedActorUri) {
     throw new Error(
@@ -174,24 +173,45 @@ function validateSidecarServiceActorUri(
   return actorUri;
 }
 
-function validateActorUriExact(actorUri: string): string {
+/**
+ * Canonicalize only the URI authority component while preserving the literal
+ * path spelling. `new URL(actorUri).href` cannot be used here because it also
+ * removes dot segments, which would collapse distinct actor identifiers at the
+ * signing authority boundary.
+ */
+function canonicalizeActorAuthorityHostExactPath(actorUri: string): string {
   if (typeof actorUri !== "string" || actorUri.length === 0 || actorUri !== actorUri.trim()) {
     throw new Error("actorUri must be a non-empty exact URI without surrounding whitespace");
   }
 
-  let parsed: URL;
+  const rawMatch = /^(https?):\/\/([^/?#]+)(\/[^?#]*)?$/u.exec(actorUri);
+  if (!rawMatch) {
+    let parsedForError: URL | null = null;
+    try {
+      parsedForError = new URL(actorUri);
+    } catch {
+      // handled below
+    }
+    if (parsedForError && parsedForError.protocol !== "https:" && parsedForError.protocol !== "http:") {
+      throw new Error(`unsupported actor URI protocol: ${parsedForError.protocol}`);
+    }
+    if (parsedForError && (parsedForError.username || parsedForError.password || parsedForError.search || parsedForError.hash)) {
+      throw new Error("actorUri must not contain credentials, query, or fragment");
+    }
+    throw new Error("actorUri must be an absolute HTTP(S) URL");
+  }
+
+  const [, rawScheme, rawAuthority, rawPath = ""] = rawMatch;
+  let authorityUrl: URL;
   try {
-    parsed = new URL(actorUri);
+    authorityUrl = new URL(`${rawScheme}://${rawAuthority}`);
   } catch {
     throw new Error("actorUri must be an absolute HTTP(S) URL");
   }
 
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error(`unsupported actor URI protocol: ${parsed.protocol}`);
-  }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+  if (authorityUrl.username || authorityUrl.password) {
     throw new Error("actorUri must not contain credentials, query, or fragment");
   }
 
-  return actorUri;
+  return `${authorityUrl.protocol}//${authorityUrl.host}${rawPath}`;
 }
