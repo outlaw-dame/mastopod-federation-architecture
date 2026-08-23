@@ -102,6 +102,7 @@ jobs:
             SIDECAR_TOKEN=os4b-live-token \
             ACTIVITYPODS_URL=http://127.0.0.1:8793 ACTIVITYPODS_TOKEN=os4b-live-token \
             REDIS_URL=redis://127.0.0.1:16379 \
+            APDM_COMPLETION_MARKER_V2_CUTOVER=fresh \
             REDPANDA_BROKERS=127.0.0.1:19092 \
             REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false \
             REDPANDA_COMPRESSION=zstd REDPANDA_ZSTD_LEVEL=1 \
