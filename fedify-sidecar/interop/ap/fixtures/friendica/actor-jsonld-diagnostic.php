@@ -92,13 +92,34 @@ $types = $compacted['@type'] ?? [];
 $types = is_array($types) ? $types : [$types];
 $accountTypes = ['as:Application', 'as:Group', 'as:Organization', 'as:Person', 'as:Service'];
 $accountTypeCount = count(array_intersect($types, $accountTypes));
-$inbox = $compacted['ldp:inbox']['@id'] ?? null;
-$nickname = $compacted['as:preferredUsername']['@value'] ?? null;
-$name = $compacted['as:name']['@value'] ?? null;
+$fetchElement = static function (array $source, string $element, string $key): mixed {
+    if (!array_key_exists($element, $source)) {
+        return null;
+    }
+    $value = $source[$element];
+    if (!is_array($value)) {
+        return $value;
+    }
+    $entries = array_is_list($value) ? $value : [$value];
+    foreach ($entries as $entry) {
+        if (!is_array($entry)) {
+            return $entry;
+        }
+        if (array_key_exists($key, $entry)) {
+            return $entry[$key];
+        }
+    }
+    return null;
+};
+
+$inbox = $fetchElement($compacted, 'ldp:inbox', '@id');
+$nickname = $fetchElement($compacted, 'as:preferredUsername', '@value');
+$name = $fetchElement($compacted, 'as:name', '@value');
 $publicKey = $compacted['w3id:publicKey'] ?? null;
-$pem = is_array($publicKey) ? ($publicKey['w3id:publicKeyPem']['@value'] ?? null) : null;
-$owner = is_array($publicKey) ? ($publicKey['w3id:owner']['@id'] ?? null) : null;
-$controller = is_array($publicKey) ? ($publicKey['w3id:controller']['@id'] ?? null) : null;
+$publicKey = is_array($publicKey) && array_is_list($publicKey) ? ($publicKey[0] ?? null) : $publicKey;
+$pem = is_array($publicKey) ? $fetchElement($publicKey, 'w3id:publicKeyPem', '@value') : null;
+$owner = is_array($publicKey) ? $fetchElement($publicKey, 'w3id:owner', '@id') : null;
+$controller = is_array($publicKey) ? $fetchElement($publicKey, 'w3id:controller', '@id') : null;
 
 fwrite(STDERR, "actor_jsonld_compaction_ok=1\n");
 printf("actor_compact_id_exact=%d\n", hash_equals($actorUri, $id) ? 1 : 0);
