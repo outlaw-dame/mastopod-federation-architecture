@@ -40,4 +40,13 @@ describe("HTTP AT password verifier capability separation", () => {
     expect(config.token).toBe("explicit-verifier");
     expect(config.timeoutMs).toBe(1234);
   });
+
+  it("treats an explicitly empty dedicated environment value as unset", () => {
+    const config = resolveHttpAtPasswordVerifierConfig(
+      { token: "explicit-verifier" },
+      { ATPROTO_PASSWORD_VERIFY_TOKEN: "" },
+    );
+
+    expect(config.token).toBe("explicit-verifier");
+  });
 });
