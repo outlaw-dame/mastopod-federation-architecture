@@ -117,6 +117,12 @@ describe("ActorAuthoritySigningRouter", () => {
     expect(router.classifyActor("https://example.com/users/a/../relay")).toBe("activitypods_pod_actor");
   });
 
+  it("does not collapse percent-encoded path spellings into configured actor identity", () => {
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, relayOptions);
+
+    expect(router.classifyActor("https://example.com/users/%72elay")).toBe("activitypods_pod_actor");
+  });
+
   it("rejects authority-ambiguous actor URI shapes", () => {
     const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, relayOptions);
 
@@ -146,5 +152,36 @@ describe("ActorAuthoritySigningRouter", () => {
     });
 
     expect(router.classifyActor("https://localhost/users/relay")).toBe("sidecar_service_actor");
+  });
+
+  it("canonicalizes valid DNS case before comparing the Fedify-served authority", async () => {
+    const pods = activityPodsSigner();
+    const local = sidecarSigner();
+    const router = new ActorAuthoritySigningRouter(pods, local as any, {
+      sidecarPublicDomain: "EXAMPLE.COM",
+      sidecarServiceActors: [{ actorUri: "https://EXAMPLE.COM/users/relay", identifier: "relay" }],
+    });
+
+    const result = await router.signOne({
+      actorUri: "https://EXAMPLE.COM/users/relay",
+      method: "GET",
+      targetUrl: "https://remote.example/objects/1",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(local.signHttpRequest).toHaveBeenCalledWith(expect.objectContaining({
+      actorUri: "https://example.com/users/relay",
+    }));
+    expect(pods.signOne).not.toHaveBeenCalled();
+  });
+
+  it("canonicalizes an explicit default HTTPS port to the Fedify-published authority", () => {
+    const router = new ActorAuthoritySigningRouter(activityPodsSigner(), sidecarSigner() as any, {
+      sidecarPublicDomain: "example.com:443",
+      sidecarServiceActors: [{ actorUri: "https://example.com:443/users/relay", identifier: "relay" }],
+    });
+
+    expect(router.classifyActor("https://example.com:443/users/relay")).toBe("sidecar_service_actor");
+    expect(router.classifyActor("https://example.com/users/relay")).toBe("sidecar_service_actor");
   });
 });
