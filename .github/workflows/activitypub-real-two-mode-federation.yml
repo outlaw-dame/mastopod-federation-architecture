@@ -34,6 +34,7 @@ jobs:
       MASTODON_USERNAME: interop
       MASTODON_ACTOR_URI: https://mastodon/users/interop
       EVIDENCE_DIR: measurements/ap-real-two-mode
+      WIRE_EVIDENCE_PATH: fedify-sidecar/interop/ap/runtime/wire/mastodon.jsonl
 
     steps:
       - name: Checkout federation architecture
@@ -61,7 +62,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${EVIDENCE_DIR}"
+          mkdir -p "${EVIDENCE_DIR}" fedify-sidecar/interop/ap/runtime/wire
+          : > "${WIRE_EVIDENCE_PATH}"
           printf '{"schema":"activitypods.activitypub.real-two-mode-run.v1","started":true,"activityPodsSha":"%s","federationSha":"%s"}\n' \
             "${ACTIVITYPODS_SHA}" "${FEDERATION_SHA}" > "${EVIDENCE_DIR}/run-started.json"
           activitypods_token="$(openssl rand -hex 32)"
@@ -108,7 +110,7 @@ jobs:
           FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
           docker compose -f docker-compose-test.yml exec -T redis redis-cli PING
 
-      - name: Start pinned Mastodon and independent TLS router
+      - name: Start pinned Mastodon, wire recorder, and independent TLS router
         shell: bash
         run: |
           set -euo pipefail
@@ -134,7 +136,7 @@ jobs:
           done
           if [[ "${ready}" != true ]]; then
             docker compose -f "${COMPOSE_FILE}" --profile mastodon logs --no-color mastodon-web-app mastodon-sidekiq
-            docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods logs --no-color ap-proof-router
+            docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods logs --no-color ap-proof-router mastodon-wire-recorder
             exit 1
           fi
 
@@ -197,7 +199,6 @@ jobs:
           NODE
 
       - name: Assert Mastodon accepted native signed Follow
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -215,6 +216,14 @@ jobs:
           fi
           printf '{"ok":true,"mode":"native","senderUsername":"%s","mastodonFollowCount":1,"sidecarRunning":false}\n' "${sender}" \
             > "${EVIDENCE_DIR}/native-mastodon-acceptance.json"
+
+      - name: Assert native wire signature authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          node fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs \
+            "${WIRE_EVIDENCE_PATH}" "${EVIDENCE_DIR}/native-origin.json" mastodon \
+            "${EVIDENCE_DIR}/native-wire-signature.json"
 
       - name: Stop native ActivityPods before authority cutover
         shell: bash
@@ -296,6 +305,26 @@ jobs:
             exit 1
           fi
 
+          # The service actor must be genuinely published by the same Fedify
+          # runtime that owns its local signing key before that key can be used
+          # as federation evidence.
+          actor_doc="$(curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS \
+            -H 'Accept: application/activity+json' https://sidecar/users/relay)"
+          ACTOR_DOC="${actor_doc}" node - <<'NODE' > "${EVIDENCE_DIR}/sidecar-service-actor.json"
+          const actor = JSON.parse(process.env.ACTOR_DOC);
+          const expectedActor = 'https://sidecar/users/relay';
+          const key = actor.publicKey;
+          if (actor.id !== expectedActor || !key || key.id !== `${expectedActor}#main-key` || key.owner !== expectedActor) {
+            throw new Error('sidecar relay actor/key is not published at the configured signing authority');
+          }
+          process.stdout.write(JSON.stringify({
+            ok: true,
+            actorUri: actor.id,
+            keyId: key.id,
+            keyOwner: key.owner
+          }, null, 2) + '\n');
+          NODE
+
       - name: Start ActivityPods in external sidecar mode
         working-directory: activitypods/pod-provider/backend
         shell: bash
@@ -362,7 +391,7 @@ jobs:
             > "${EVIDENCE_DIR}/external-redis-compression.json"
           cat "${EVIDENCE_DIR}/external-redis-compression.json"
 
-      - name: Assert Mastodon accepted sidecar delivery and real signer was used
+      - name: Assert Mastodon accepted sidecar delivery and real ActivityPods signer was used
         shell: bash
         run: |
           set -euo pipefail
@@ -414,26 +443,89 @@ jobs:
           }, null, 2) + '\n');
           NODE
 
+      - name: Assert external wire signature matches the ActivityPods signing result
+        shell: bash
+        run: |
+          set -euo pipefail
+          node fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs \
+            "${WIRE_EVIDENCE_PATH}" "${EVIDENCE_DIR}/external-origin.json" mastodon \
+            "${EVIDENCE_DIR}/external-wire-signature.json" "${EVIDENCE_DIR}/external-signing.json"
+
+      - name: Prove sidecar-owned service actor federates with its local key
+        shell: bash
+        run: |
+          set -euo pipefail
+          SIDECAR_TOKEN="${SIDECAR_TOKEN}" \
+          AP_SERVICE_PROOF_SIDECAR_URL=http://127.0.0.1:8080 \
+          AP_SERVICE_PROOF_ACTOR_URI=https://sidecar/users/relay \
+          AP_SERVICE_PROOF_REMOTE_ACTOR_URI="${MASTODON_ACTOR_URI}" \
+          AP_SERVICE_PROOF_REMOTE_INBOX=https://mastodon/inbox \
+          AP_SERVICE_PROOF_OUTPUT_PATH="${EVIDENCE_DIR}/service-origin.json" \
+            node fedify-sidecar/interop/ap/scripts/prove-sidecar-service-actor.mjs
+
+          accepted=false
+          for attempt in $(seq 1 60); do
+            count="$(docker compose -f "${COMPOSE_FILE}" exec -T mastodon-db /bin/sh -lc \
+              "PGPASSWORD=postgres psql -U postgres -d mastodon_production -tAc \"select count(*) from follows f join accounts follower on follower.id=f.account_id join accounts target on target.id=f.target_account_id where follower.username='relay' and follower.domain='sidecar' and target.username='${MASTODON_USERNAME}' and target.domain is null;\"" | tr -d '[:space:]')"
+            if [[ "${count}" == "1" ]]; then accepted=true; break; fi
+            sleep 2
+          done
+          if [[ "${accepted}" != true ]]; then
+            echo 'Mastodon did not persist the sidecar service-actor Follow' >&2
+            exit 1
+          fi
+          printf '{"ok":true,"mode":"sidecar_service","actorUri":"https://sidecar/users/relay","mastodonFollowCount":1}\n' \
+            > "${EVIDENCE_DIR}/service-mastodon-acceptance.json"
+
+          node fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs \
+            "${WIRE_EVIDENCE_PATH}" "${EVIDENCE_DIR}/service-origin.json" mastodon \
+            "${EVIDENCE_DIR}/service-wire-signature.json"
+
+          # Sidecar-owned service activity must never cross into the ActivityPods
+          # signing API. Only pod/user actors are permitted there.
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = process.env.EVIDENCE_DIR + '/signing-api.jsonl';
+          const rows = fs.readFileSync(path, 'utf8').split(/\n/u).filter(Boolean).map(JSON.parse);
+          const leaked = rows.flatMap(row => Array.isArray(row.request?.requests) ? row.request.requests : [])
+            .filter(item => item?.actorUri === 'https://sidecar/users/relay');
+          if (leaked.length !== 0) throw new Error(`sidecar service actor crossed into ActivityPods signing API: ${leaked.length}`);
+          NODE
+
       - name: Build exact two-mode evidence summary
         shell: bash
         run: |
           set -euo pipefail
+          cp "${WIRE_EVIDENCE_PATH}" "${EVIDENCE_DIR}/mastodon-wire.jsonl"
           node - <<'NODE'
           const fs = require('fs');
           const root = process.env.EVIDENCE_DIR;
           const nativeOrigin = JSON.parse(fs.readFileSync(`${root}/native-origin.json`, 'utf8'));
           const nativeAcceptance = JSON.parse(fs.readFileSync(`${root}/native-mastodon-acceptance.json`, 'utf8'));
+          const nativeWire = JSON.parse(fs.readFileSync(`${root}/native-wire-signature.json`, 'utf8'));
           const externalOrigin = JSON.parse(fs.readFileSync(`${root}/external-origin.json`, 'utf8'));
           const externalAcceptance = JSON.parse(fs.readFileSync(`${root}/external-mastodon-acceptance.json`, 'utf8'));
           const externalCompression = JSON.parse(fs.readFileSync(`${root}/external-redis-compression.json`, 'utf8'));
-          if (!nativeOrigin.ok || !nativeAcceptance.ok || !externalAcceptance.ok || !externalCompression.ok ||
+          const externalWire = JSON.parse(fs.readFileSync(`${root}/external-wire-signature.json`, 'utf8'));
+          const serviceActor = JSON.parse(fs.readFileSync(`${root}/sidecar-service-actor.json`, 'utf8'));
+          const serviceOrigin = JSON.parse(fs.readFileSync(`${root}/service-origin.json`, 'utf8'));
+          const serviceAcceptance = JSON.parse(fs.readFileSync(`${root}/service-mastodon-acceptance.json`, 'utf8'));
+          const serviceWire = JSON.parse(fs.readFileSync(`${root}/service-wire-signature.json`, 'utf8'));
+          if (!nativeOrigin.ok || !nativeAcceptance.ok || !nativeWire.ok ||
+              !externalAcceptance.ok || !externalCompression.ok || !externalWire.ok ||
+              !serviceActor.ok || !serviceOrigin.ok || !serviceAcceptance.ok || !serviceWire.ok ||
               externalOrigin.ok !== true || externalOrigin.mode !== 'external' ||
               externalOrigin.durableHandoffQueued !== true || externalOrigin.nativeRemotePostSuppressed !== true ||
-              externalAcceptance.activityId !== externalOrigin.activityId) {
-            throw new Error('two-mode evidence is incomplete or violates external-delivery invariants');
+              externalAcceptance.activityId !== externalOrigin.activityId ||
+              nativeWire.activityId !== nativeOrigin.activityId ||
+              externalWire.activityId !== externalOrigin.activityId ||
+              externalWire.bodySha256Base64 !== externalAcceptance.bodySha256Base64[0] ||
+              serviceWire.activityId !== serviceOrigin.activityId ||
+              serviceWire.keyId !== serviceActor.keyId) {
+            throw new Error('two-mode evidence is incomplete or violates signer/authority invariants');
           }
           const summary = {
-            schema: 'activitypods.activitypub.real-two-mode-federation.v1',
+            schema: 'activitypods.activitypub.real-two-mode-federation.v2',
             complete: true,
             activityPodsSha: process.env.ACTIVITYPODS_SHA,
             federationSha: process.env.FEDERATION_SHA,
@@ -442,7 +534,8 @@ jobs:
               actorUri: nativeOrigin.actorUri,
               activityId: nativeOrigin.activityId,
               mastodonFollowCount: nativeAcceptance.mastodonFollowCount,
-              sidecarRunning: nativeAcceptance.sidecarRunning
+              sidecarRunning: nativeAcceptance.sidecarRunning,
+              wire: nativeWire
             },
             external: {
               actorUri: externalOrigin.actorUri,
@@ -455,10 +548,19 @@ jobs:
               signerKeyIds: externalAcceptance.signerKeyIds,
               deliveredInboxPaths: externalAcceptance.deliveredInboxPaths,
               bodySha256Base64: externalAcceptance.bodySha256Base64,
+              wire: externalWire,
               redisStreamCompression: {
                 codecEnvelope: externalCompression.codecEnvelope,
                 matches: externalCompression.matches
               }
+            },
+            sidecarServiceActor: {
+              actorUri: serviceOrigin.actorUri,
+              activityId: serviceOrigin.activityId,
+              publishedKeyId: serviceActor.keyId,
+              mastodonFollowCount: serviceAcceptance.mastodonFollowCount,
+              wire: serviceWire,
+              activityPodsSigningApiCalls: 0
             }
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
@@ -485,7 +587,9 @@ jobs:
           tail -n 500 "${EVIDENCE_DIR}/activitypods-external.log" 2>/dev/null || true
           echo '--- Sidecar / interop infrastructure ---'
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
-            logs --no-color fedify-sidecar redis redpanda mock-activitypods 2>/dev/null || true
+            logs --no-color fedify-sidecar redis redpanda mock-activitypods mastodon-wire-recorder 2>/dev/null || true
+          echo '--- Wire evidence ---'
+          cat "${WIRE_EVIDENCE_PATH}" 2>/dev/null || true
           echo '--- Signing proxy ---'
           cat "${EVIDENCE_DIR}/signing-proxy.log" 2>/dev/null || true
           echo '--- Mastodon ---'
