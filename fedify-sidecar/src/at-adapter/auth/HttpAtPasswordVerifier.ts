@@ -83,13 +83,33 @@ export class HttpAtPasswordVerifier implements AtPasswordVerifier {
   }
 }
 
+/**
+ * Resolve the production password-verifier configuration.
+ *
+ * The credential is intentionally NOT overrideable by callers. This keeps the
+ * password-verification capability isolated even if a runtime call site passes
+ * a broader ActivityPods credential in a Partial<HttpAtPasswordVerifierConfig>.
+ * Only ATPROTO_PASSWORD_VERIFY_TOKEN may authorize /api/internal/auth/verify.
+ */
+export function resolveHttpAtPasswordVerifierConfig(
+  overrides: Partial<HttpAtPasswordVerifierConfig> = {},
+  env: NodeJS.ProcessEnv = process.env,
+): HttpAtPasswordVerifierConfig {
+  const safeOverrides = { ...overrides };
+  delete safeOverrides.token;
+
+  return {
+    baseUrl: env["ACTIVITYPODS_URL"] ?? 'http://localhost:3000',
+    timeoutMs: 10_000,
+    ...safeOverrides,
+    token: env["ATPROTO_PASSWORD_VERIFY_TOKEN"] ?? '',
+  };
+}
+
 export function createHttpAtPasswordVerifier(
   overrides?: Partial<HttpAtPasswordVerifierConfig>
 ): HttpAtPasswordVerifier {
-  return new HttpAtPasswordVerifier({
-    baseUrl: process.env["ACTIVITYPODS_URL"] ?? 'http://localhost:3000',
-    token: process.env["ATPROTO_PASSWORD_VERIFY_TOKEN"] ?? '',
-    timeoutMs: 10_000,
-    ...overrides,
-  });
+  return new HttpAtPasswordVerifier(
+    resolveHttpAtPasswordVerifierConfig(overrides),
+  );
 }
