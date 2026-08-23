@@ -67,6 +67,7 @@ services:
       - ap_interop_friendica_html:/var/www/html
       - ./runtime/certs:/interop/runtime/certs:ro
       - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+      - ./fixtures/friendica/actor-jsonld-diagnostic.php:/interop/actor-jsonld-diagnostic.php:ro
       - ap_interop_friendica_log:/var/log/friendica
     networks:
       - ap-interop

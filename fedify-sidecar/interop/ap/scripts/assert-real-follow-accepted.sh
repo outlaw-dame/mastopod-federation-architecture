@@ -166,6 +166,10 @@ friendica_diagnostics() {
   } | compose exec -T friendica-db /bin/sh -lc \
     'MYSQL_PWD="$MARIADB_PASSWORD" mariadb --batch --skip-column-names -u friendica friendica' \
     >&2 || echo "Friendica database diagnostics unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" \
+    -e AP_INTEROP_EXPECTED_ACTOR_HOST="${ACTIVITYPODS_HOST:?ACTIVITYPODS_HOST is required}" friendica-app \
+    php /interop/actor-jsonld-diagnostic.php \
+    >&2 || echo "Friendica privacy-safe actor JSON-LD diagnostic failed" >&2
   # Friendica's invalid-signature notice includes the full request headers and
   # body. Count only fixed event messages so failure evidence cannot disclose
   # credentials, signatures, or queued ActivityPub payloads.

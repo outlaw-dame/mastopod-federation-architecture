@@ -543,7 +543,9 @@ jobs:
           tail -n 500 "${EVIDENCE_DIR}/activitypods-native.log" 2>/dev/null || true
           tail -n 500 "${EVIDENCE_DIR}/activitypods-external.log" 2>/dev/null || true
           tail -n 700 "${EVIDENCE_DIR}/sidecar.log" 2>/dev/null || true
-          cat "${EVIDENCE_DIR}/signing-api.jsonl" 2>/dev/null || true
+          if [[ -f "${EVIDENCE_DIR}/signing-api.jsonl" ]]; then
+            echo "signing_api_record_count=$(wc -l < "${EVIDENCE_DIR}/signing-api.jsonl")"
+          fi
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods logs --no-color ap-proof-router 2>/dev/null || true
           case "${TARGET}" in
             mastodon) docker compose -f "${COMPOSE_FILE}" --profile mastodon logs --no-color mastodon-web-app mastodon-sidekiq 2>/dev/null || true ;;

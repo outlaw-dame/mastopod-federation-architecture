@@ -132,6 +132,7 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(corefile).not.toContain("tls://");
     expect(compose).toContain("friendica-log-init:");
     expect(compose.match(/ap_interop_friendica_log:\/var\/log\/friendica/g)).toHaveLength(3);
+    expect(compose).toContain("./fixtures/friendica/actor-jsonld-diagnostic.php:/interop/actor-jsonld-diagnostic.php:ro");
     expect(compose).toContain("condition: service_completed_successfully");
     expect(compose).not.toContain("FRIENDICA_NO_VALIDATION");
     expect(bootstrap).toContain("php bin/console.php user add");
@@ -305,6 +306,14 @@ describe("real federation fixture bootstrap contracts", () => {
       resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
       "utf8",
     );
+    const twoModeWorkflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-two-mode-federation.yml"),
+      "utf8",
+    );
+    const actorDiagnostic = readFileSync(
+      resolve(process.cwd(), "interop/ap/fixtures/friendica/actor-jsonld-diagnostic.php"),
+      "utf8",
+    );
 
     expect(script).toContain("Friendica fail-closed persistence diagnostics:");
     expect(script).toContain("remote_contact_count=");
@@ -318,12 +327,20 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain("invalid_http_signature_count");
     expect(script).toContain("valid_http_signature_count");
     expect(script).toContain("friendica_log_line_count");
+    expect(script).toContain("php /interop/actor-jsonld-diagnostic.php");
+    expect(script).toContain('AP_INTEROP_EXPECTED_ACTOR_HOST="${ACTIVITYPODS_HOST:?ACTIVITYPODS_HOST is required}"');
     expect(script).toContain('fopen("/var/log/friendica/friendica.log", "rb")');
     expect(script).not.toContain("select parameter from workerqueue");
     expect(script).not.toContain("select activity from \\`inbox-entry\\`");
     expect(script).not.toContain("compose logs --no-color friendica-app friendica-worker");
     expect(workflow).not.toContain("logs --no-color friendica-app friendica-worker");
     expect(workflow).toContain("ps friendica-app friendica-worker");
+    expect(workflow).not.toContain('cat "${EVIDENCE_DIR}/signing-api.jsonl"');
+    expect(twoModeWorkflow).not.toContain('cat "${EVIDENCE_DIR}/signing-api.jsonl"');
+    expect(actorDiagnostic).toContain("AP_INTEROP_EXPECTED_ACTOR_HOST");
+    expect(actorDiagnostic).toContain("actor_compact_public_key_pem_present");
+    expect(actorDiagnostic).not.toContain("CURLOPT_HEADER");
+    expect(actorDiagnostic).not.toMatch(/(?:echo|print|fwrite|printf).*publicKeyPem/);
   });
 
   it("passes quoted Friendica table names to MariaDB as SQL, not shell substitutions", () => {
@@ -356,6 +373,7 @@ esac
           AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS: "1",
           AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS: "0",
           AP_INTEROP_SQL_CAPTURE: capturePath,
+          ACTIVITYPODS_HOST: "activitypods.example",
         },
       });
 

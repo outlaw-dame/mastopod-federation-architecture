@@ -419,7 +419,7 @@ jobs:
           done
           if [[ "${signing_ok}" != true ]]; then
             echo 'No exact successful ActivityPods signing result was recorded for the delivered actor' >&2
-            cat "${EVIDENCE_DIR}/signing-api.jsonl" || true
+            echo "signing_api_record_count=$(wc -l < "${EVIDENCE_DIR}/signing-api.jsonl")" >&2
             exit 1
           fi
 
