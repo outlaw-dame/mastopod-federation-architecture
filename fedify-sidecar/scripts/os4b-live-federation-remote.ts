@@ -53,6 +53,11 @@ function buildActivity(i: number, contentMarker = marker) {
   };
 }
 
+/**
+ * Match the repository's proven ActivityPods/Mastodon/GoToSocial draft-Cavage
+ * POST profile exactly: (request-target), host, date and digest. Content-Type
+ * is sent on the wire but is intentionally not part of the signature coverage.
+ */
 function signedHeaders(body: string) {
   const target = new URL(sidecarInbox);
   const date = new Date().toUTCString();
@@ -62,7 +67,6 @@ function signedHeaders(body: string) {
     `host: ${sidecarHostHeader}`,
     `date: ${date}`,
     `digest: ${digest}`,
-    'content-type: application/activity+json',
   ].join('\n');
   const signature = sign('RSA-SHA256', Buffer.from(signingString), createPrivateKey(privateKeyPem)).toString('base64');
   return {
@@ -70,7 +74,7 @@ function signedHeaders(body: string) {
     date,
     digest,
     'content-type': 'application/activity+json',
-    signature: `keyId="${keyId}",algorithm="rsa-sha256",headers="(request-target) host date digest content-type",signature="${signature}"`,
+    signature: `keyId="${keyId}",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="${signature}"`,
   };
 }
 
