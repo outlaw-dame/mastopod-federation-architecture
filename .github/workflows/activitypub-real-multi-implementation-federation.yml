@@ -286,18 +286,11 @@ jobs:
           readiness_uri="${TARGET_ACTOR_URI}"
           readiness_accept='application/activity+json'
           if [[ "${TARGET}" == gotosocial ]]; then
-            # GoToSocial deliberately requires an HTTP signature on actor GETs.
-            # Its WebFinger document is the unsigned discovery endpoint and
-            # confirms that the bootstrapped account is reachable through TLS.
             readiness_uri="https://${TARGET_HOST}/.well-known/webfinger?resource=acct:${TARGET_USERNAME}@${TARGET_HOST}"
             readiness_accept='application/jrd+json'
           fi
           ready=false
           readiness_attempts=90
-          # Misskey 2026.7.0's post-setup migration restart reached its actor
-          # endpoint two seconds after the former seven-minute bound on the
-          # hosted runner. Keep the common bound at three minutes and give only
-          # the pinned Misskey fixture a bounded nine-minute startup window.
           if [[ "${TARGET}" == "misskey" ]]; then
             readiness_attempts=270
           fi
@@ -342,7 +335,7 @@ jobs:
           done
           [[ "${ready}" == true ]]
 
-      - name: Prove native federation and remote persistence
+      - name: Prove native bidirectional federation and remote persistence
         id: native-proof
         continue-on-error: true
         working-directory: activitypods/pod-provider/backend
@@ -359,6 +352,10 @@ jobs:
           AP_INTEROP_COMPOSE_OVERLAY="${TARGET_COMPOSE_OVERLAY}" \
             sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-acceptance.json"
+          persisted_count="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-acceptance.json','utf8')).persistedFollowCount")"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-return-accept.mjs" \
+            native "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" "${persisted_count}" \
+            | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-bidirectional.json"
 
       - name: Stop native ActivityPods
         shell: bash
@@ -401,7 +398,7 @@ jobs:
           STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 \
           FIREHOSE_TOPIC=ap.firehose.v1 TOMBSTONE_TOPIC=ap.tombstones.v1 ACTIVITYPODS_URL=http://127.0.0.1:3001 \
           ACTIVITYPODS_TOKEN="${ACTIVITYPODS_TOKEN}" SIDECAR_TOKEN="${SIDECAR_TOKEN}" ENABLE_OUTBOUND_WORKER=true ENABLE_OUTBOX_INTENT_WORKER=true \
-          ENABLE_INBOUND_WORKER=false ENABLE_ORIGIN_RECONCILIATION=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=false ENABLE_OPENSEARCH_INDEXER=false \
+          ENABLE_INBOUND_WORKER=true ENABLE_ORIGIN_RECONCILIATION=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=false ENABLE_OPENSEARCH_INDEXER=false \
           ENABLE_XRPC_SERVER=false ENABLE_MEDIA_ASSET_SYNC=false ENABLE_ACCOUNT_PROVISIONING=false ENABLE_ENTRYWAY=false ENABLE_FOLLOWERS_SYNC=false \
           ENABLE_MRF_ADMIN_API=false ENABLE_MODERATION_BRIDGE_API=false ENABLE_CANONICAL_EVENT_LOG=false ENABLE_CANONICAL_NOTIFICATIONS=false \
           ENABLE_AT_JETSTREAM=false ENABLE_AT_EXTERNAL_FIREHOSE=false CONSUMER_GROUP=sidecar-workers INBOUND_STREAM_KEY=ap:queue:inbound:v1 \
@@ -452,7 +449,7 @@ jobs:
           done
           [[ "${ready}" == true ]]
 
-      - name: Prove sidecar federation, remote persistence, and real ActivityPods signer
+      - name: Prove sidecar bidirectional federation, remote persistence, and real ActivityPods signer
         id: external-proof
         continue-on-error: true
         working-directory: activitypods/pod-provider/backend
@@ -474,6 +471,10 @@ jobs:
           AP_INTEROP_COMPOSE_OVERLAY="${TARGET_COMPOSE_OVERLAY}" \
             sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-acceptance.json"
+          persisted_count="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-acceptance.json','utf8')).persistedFollowCount")"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-return-accept.mjs" \
+            external "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" "${persisted_count}" \
+            | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-bidirectional.json"
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${TARGET_HOST}" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-signing.json"
@@ -496,34 +497,42 @@ jobs:
           };
           const nativeOrigin = readJson('native-origin.json');
           const nativeAcceptance = readJson('native-acceptance.json');
+          const nativeBidirectional = readJson('native-bidirectional.json');
           const externalOrigin = readJson('external-origin.json');
           const externalAcceptance = readJson('external-acceptance.json');
+          const externalBidirectional = readJson('external-bidirectional.json');
           const signing = readJson('external-signing.json');
           const nativeComplete = process.env.NATIVE_PROOF_OUTCOME === 'success' &&
-            nativeOrigin?.ok === true && nativeOrigin?.mode === 'native' && nativeAcceptance?.ok === true;
+            nativeOrigin?.ok === true && nativeOrigin?.mode === 'native' && nativeAcceptance?.ok === true &&
+            nativeBidirectional?.ok === true && nativeBidirectional?.returnAcceptApplied === true &&
+            nativeBidirectional?.followingContainsRemote === true && nativeBidirectional?.sidecarInboundAcceptObserved === false &&
+            nativeBidirectional?.activityId === nativeOrigin?.activityId && nativeBidirectional?.actorUri === nativeOrigin?.actorUri;
           const externalComplete = process.env.EXTERNAL_PROOF_OUTCOME === 'success' &&
             externalOrigin?.ok === true && externalOrigin?.mode === 'external' &&
             externalOrigin?.durableHandoffQueued === true && externalOrigin?.nativeRemotePostSuppressed === true &&
-            externalAcceptance?.ok === true && signing?.ok === true &&
+            externalAcceptance?.ok === true && externalBidirectional?.ok === true &&
+            externalBidirectional?.returnAcceptApplied === true && externalBidirectional?.followingContainsRemote === true &&
+            externalBidirectional?.sidecarInboundAcceptObserved === true && signing?.ok === true &&
+            externalBidirectional?.activityId === externalOrigin?.activityId && externalBidirectional?.actorUri === externalOrigin?.actorUri &&
             signing?.activityId === externalOrigin?.activityId && signing?.actorUri === externalOrigin?.actorUri;
           const complete = nativeComplete && externalComplete;
           const summary = {
-            schema: 'activitypods.activitypub.real-multi-implementation.v1',
+            schema: 'activitypods.activitypub.real-multi-implementation.v2',
             complete,
             target: process.env.TARGET,
             remoteVersion: process.env.REMOTE_VERSION,
             activityPodsSha: process.env.ACTIVITYPODS_SHA,
             federationSha: process.env.FEDERATION_SHA,
             native: nativeComplete
-              ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, sidecarRunning: false }
+              ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, returnAcceptApplied: nativeBidirectional.returnAcceptApplied, followingContainsRemote: nativeBidirectional.followingContainsRemote, sidecarRunning: false }
               : { complete: false, stepOutcome: process.env.NATIVE_PROOF_OUTCOME },
             external: externalComplete
-              ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64 }
+              ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, returnAcceptApplied: externalBidirectional.returnAcceptApplied, followingContainsRemote: externalBidirectional.followingContainsRemote, sidecarInboundAcceptObserved: externalBidirectional.sidecarInboundAcceptObserved, sidecarInboundPath: externalBidirectional.sidecarInboundPath, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64 }
               : { complete: false, stepOutcome: process.env.EXTERNAL_PROOF_OUTCOME }
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
           console.log(JSON.stringify(summary, null, 2));
-          if (!complete) throw new Error('both federation modes require valid remote-persistence and signer evidence');
+          if (!complete) throw new Error('both federation modes require remote persistence, returning Accept application, and exact authority-path evidence');
           NODE
 
       - name: Upload implementation evidence
@@ -553,9 +562,6 @@ jobs:
             akkoma) docker compose -f "${COMPOSE_FILE}" --profile akkoma logs --no-color akkoma-app 2>/dev/null || true ;;
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
-            # Friendica's invalid-signature log context includes complete
-            # request headers and bodies. The persistence assertion emits only
-            # fixed-message counters, so never dump raw Friendica logs here.
             friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" ps friendica-app friendica-worker 2>/dev/null || true ;;
             castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
