@@ -57,13 +57,16 @@ https://castopod.test {
 # In native mode port 8080 is deliberately absent, so Caddy marks that first
 # upstream unavailable and retries the exact ActivityPods backend. In external
 # mode the sidecar is already healthy on 8080; every actor-inbox POST therefore
-# enters the production sidecar ingress first. The external proof separately
-# requires the exact returning Accept in ap:queue:inbound:v1, so an unexpected
-# fallback to the backend cannot produce a false green result.
+# enters the production sidecar ingress first. ActivityPods actors provisioned
+# by this proof use /data/<actor>/inbox; retain the historical root and
+# /users/<actor>/inbox shapes as explicit bounded alternatives rather than
+# routing arbitrary POST paths through the sidecar. The external proof
+# separately requires the exact returning Accept in ap:queue:inbound:v1, so an
+# unexpected fallback to the backend cannot produce a false green result.
 (activitypods_return_path) {
   @actorInbox {
     method POST
-    path_regexp actor_inbox ^/(users/)?[^/]+/inbox/?$
+    path_regexp actor_inbox ^/(?:users/|data/)?[^/]+/inbox/?$
   }
   handle @actorInbox {
     reverse_proxy host.docker.internal:8080 host.docker.internal:3000 {
