@@ -16,6 +16,7 @@ const warmupMarker = `${marker}-valid-warmup`;
 const invalidMarker = `${marker}-invalid-signature`;
 const actorUri = `http://${publicHost}:${publicPort}/users/remote`;
 const keyId = `${actorUri}#main-key`;
+const indexableIri = 'http://joinmastodon.org/ns#indexable';
 
 const keyPair = await crypto.subtle.generateKey(
   {
@@ -42,7 +43,12 @@ const remoteActor = new Person({
   inbox: new URL(`http://${publicHost}:${publicPort}/users/remote/inbox`),
   publicKey: remotePublicKey,
 });
-const actorDocument = await remoteActor.toJsonLd();
+const actorDocument = await remoteActor.toJsonLd() as Record<string, unknown>;
+// Public addressing and public searchability are distinct. The production
+// pipeline intentionally fails closed when no search-consent signal exists, so
+// the live fixture must explicitly model a remote actor that opts public posts
+// into search rather than bypassing or weakening the consent gate.
+actorDocument[indexableIri] = true;
 
 const app = Fastify({ logger: false });
 let actorDocumentFetches = 0;
@@ -147,8 +153,9 @@ async function runFedifySelfCheck() {
     digest: signed.headers.get('digest'),
     host: signed.headers.get('host'),
     url: signed.url,
+    actorPublicSearchOptIn: actorDocument[indexableIri] === true,
   };
-  if (!result.keyParsed || !result.verified) {
+  if (!result.keyParsed || !result.verified || !result.actorPublicSearchOptIn) {
     throw new Error(`Fedify fixture self-check failed: ${JSON.stringify(result)}`);
   }
   return result;
@@ -233,7 +240,7 @@ try {
     actorUri,
     sidecarInbox,
     actorDocumentFetches,
-    actorDocumentImplementation: '@fedify/fedify Person + CryptographicKey toJsonLd',
+    actorDocumentImplementation: '@fedify/fedify Person + CryptographicKey toJsonLd + explicit Mastodon indexable=true search consent',
     signatureImplementation: '@fedify/fedify signRequest draft-cavage-http-signatures-12 minimal signed headers',
     wireTransport: 'undici.request exact Host/body with forwarded logical origin',
     elapsedMs,
