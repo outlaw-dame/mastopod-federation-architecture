@@ -11,6 +11,8 @@ const targetPort = parseIntegerEnv('AP_SIGNING_PROXY_TARGET_PORT', 3000, 1, 6553
 const evidencePath = process.env.AP_SIGNING_PROXY_EVIDENCE_PATH || 'measurements/ap-federation/signing-api.jsonl';
 const maxBodyBytes = parseIntegerEnv('AP_SIGNING_PROXY_MAX_BODY_BYTES', 2 * 1024 * 1024, 1024, 10 * 1024 * 1024);
 const timeoutMs = parseIntegerEnv('AP_SIGNING_PROXY_TIMEOUT_MS', 15000, 1000, 60000);
+const signingPath = '/api/internal/signatures/batch';
+const actorInboxPath = /^\/(?:users\/)?[A-Za-z0-9._-]{1,128}\/inbox\/?$/u;
 
 if (!isPrivateBindHost(listenHost)) {
   throw new Error('AP_SIGNING_PROXY_HOST must be loopback or an explicit RFC1918 Docker bridge address');
@@ -56,15 +58,25 @@ function recordEvidence(record) {
   });
 }
 
+function classifyRequest(req) {
+  if (req.method === 'POST' && req.url === signingPath) return 'signing';
+  const path = typeof req.url === 'string' ? req.url.split('?', 1)[0] : '';
+  if (req.method === 'POST' && actorInboxPath.test(path)) return 'inbound';
+  return null;
+}
+
 const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS' && req.url === '/ready') {
     res.writeHead(204).end();
     return;
   }
-  if (req.method !== 'POST' || req.url !== '/api/internal/signatures/batch') {
+
+  const requestClass = classifyRequest(req);
+  if (!requestClass) {
     res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'not_found' }));
     return;
   }
+
   const chunks = [];
   let size = 0;
   let aborted = false;
@@ -109,39 +121,47 @@ const server = http.createServer((req, res) => {
         upstreamRes.on('end', async () => {
           if (responseTooLarge) {
             res.writeHead(502, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'proxy_upstream_response_too_large' }));
-            recordEvidence({
-              schema: 'ap.real-signing-api-proxy-error.v1',
-              observedAt: Date.now(),
-              method: req.method,
-              path: req.url,
-              errorCode: 'upstream_response_too_large'
-            });
+            if (requestClass === 'signing') {
+              recordEvidence({
+                schema: 'ap.real-signing-api-proxy-error.v1',
+                observedAt: Date.now(),
+                method: req.method,
+                path: req.url,
+                errorCode: 'upstream_response_too_large'
+              });
+            }
             return;
           }
+
           const responseBody = Buffer.concat(responseChunks);
-          let requestJson = null;
-          let responseJson = null;
-          try { requestJson = JSON.parse(body.toString('utf8')); } catch {}
-          try { responseJson = JSON.parse(responseBody.toString('utf8')); } catch {}
-          try {
-            await writeEvidence({
-              schema: 'ap.real-signing-api-call.v1',
-              observedAt: Date.now(),
-              durationMs: Date.now() - startedAt,
-              method: req.method,
-              path: req.url,
-              requestHeaders: redactHeaders(req.headers),
-              request: requestJson,
-              responseStatus: upstreamRes.statusCode,
-              response: responseJson
-            });
-          } catch {
-            res.writeHead(502, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'proxy_evidence_write_failure' }));
-            process.stderr.write('ActivityPods signing recording proxy could not persist evidence\n');
-            return;
+          if (requestClass === 'signing') {
+            let requestJson = null;
+            let responseJson = null;
+            try { requestJson = JSON.parse(body.toString('utf8')); } catch {}
+            try { responseJson = JSON.parse(responseBody.toString('utf8')); } catch {}
+            try {
+              await writeEvidence({
+                schema: 'ap.real-signing-api-call.v1',
+                observedAt: Date.now(),
+                durationMs: Date.now() - startedAt,
+                method: req.method,
+                path: req.url,
+                requestHeaders: redactHeaders(req.headers),
+                request: requestJson,
+                responseStatus: upstreamRes.statusCode,
+                response: responseJson
+              });
+            } catch {
+              res.writeHead(502, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'proxy_evidence_write_failure' }));
+              process.stderr.write('ActivityPods signing recording proxy could not persist evidence\n');
+              return;
+            }
           }
-          // The proof harness releases the exact upstream response only after
-          // its redacted evidence is durable, so delivery cannot outrun proof.
+
+          // Signing responses remain gated on durable redacted evidence. Inbox
+          // pass-through is deliberately not recorded here: the sidecar Redis
+          // stream is the authoritative return-path evidence and avoids writing
+          // raw ActivityPub bodies or signature headers to an extra artifact.
           res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
           res.end(responseBody);
         });
@@ -151,13 +171,15 @@ const server = http.createServer((req, res) => {
     upstream.on('error', error => {
       if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'proxy_upstream_failure' }));
-      recordEvidence({
-        schema: 'ap.real-signing-api-proxy-error.v1',
-        observedAt: Date.now(),
-        method: req.method,
-        path: req.url,
-        errorCode: error.message === 'upstream_timeout' ? 'upstream_timeout' : 'upstream_request_failed'
-      });
+      if (requestClass === 'signing') {
+        recordEvidence({
+          schema: 'ap.real-signing-api-proxy-error.v1',
+          observedAt: Date.now(),
+          method: req.method,
+          path: req.url,
+          errorCode: error.message === 'upstream_timeout' ? 'upstream_timeout' : 'upstream_request_failed'
+        });
+      }
     });
     upstream.end(body);
   });
