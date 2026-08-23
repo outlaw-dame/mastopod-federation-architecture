@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:http";
+import { createServer, request, type Server } from "node:http";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -58,6 +58,30 @@ async function startRecorder(upstreamPort: number, evidencePath: string): Promis
   return port;
 }
 
+async function postWithExactHost(port: number, body: string): Promise<number> {
+  return await new Promise((resolveStatus, reject) => {
+    const req = request({
+      host: "127.0.0.1",
+      port,
+      path: "/inbox",
+      method: "POST",
+      headers: {
+        host: "mastodon",
+        "content-type": "application/activity+json",
+        date: "Sun, 23 Aug 2026 12:00:00 GMT",
+        digest: "SHA-256=proof-digest",
+        signature: 'keyId="https://activitypods/users/alice/keys/main",headers="(request-target) host date digest",signature="wire-proof"',
+        "content-length": Buffer.byteLength(body),
+      },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolveStatus(response.statusCode ?? 0));
+    });
+    req.once("error", reject);
+    req.end(body);
+  });
+}
+
 afterEach(async () => {
   for (const child of processes.splice(0)) child.kill("SIGTERM");
   for (const server of servers.splice(0)) {
@@ -99,19 +123,9 @@ describe("ActivityPub wire recording proxy", () => {
       object: "https://mastodon/users/bob",
     };
     const body = JSON.stringify(activity);
-    const response = await fetch(`http://127.0.0.1:${proxyPort}/inbox`, {
-      method: "POST",
-      headers: {
-        host: "mastodon",
-        "content-type": "application/activity+json",
-        date: "Sun, 23 Aug 2026 12:00:00 GMT",
-        digest: "SHA-256=proof-digest",
-        signature: 'keyId="https://activitypods/users/alice/keys/main",headers="(request-target) host date digest",signature="wire-proof"',
-      },
-      body,
-    });
+    const status = await postWithExactHost(proxyPort, body);
 
-    expect(response.status).toBe(202);
+    expect(status).toBe(202);
     expect(received).toMatchObject({
       host: "mastodon",
       digest: "SHA-256=proof-digest",

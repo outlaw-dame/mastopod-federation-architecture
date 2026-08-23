@@ -44,6 +44,15 @@ function makeRedpanda() {
   } as any;
 }
 
+function makeDelayScheduler() {
+  return {
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+    persistReplacementAndAck: vi.fn().mockResolvedValue(undefined),
+    promoteDue: vi.fn().mockResolvedValue(0),
+  } as any;
+}
+
 function makeIntent(visibility: "public" | "unlisted" | "followers" | "direct", createdAt = 1_900_000_000_000): OutboxIntent {
   const isPublicActivity = visibility === "public" || visibility === "unlisted";
   return {
@@ -274,8 +283,22 @@ describe("Stream1 local observation authority", () => {
     const firstQueue = makeQueue();
     firstQueue.markOutboxIntentEventLogPublished.mockRejectedValueOnce(new Error("redis marker unavailable"));
     const firstRedpanda = makeRedpanda();
-    const firstWorker = new TestWorker(firstQueue, firstRedpanda, config);
+    const delayScheduler = makeDelayScheduler();
+    const firstWorker = new TestWorker(firstQueue, firstRedpanda, { ...config, delayScheduler });
     await firstWorker.run("msg-first", intent);
+
+    expect(delayScheduler.persistReplacementAndAck).toHaveBeenCalledTimes(1);
+    const [sourceMessageId, retryIntent] = delayScheduler.persistReplacementAndAck.mock.calls[0] as [string, OutboxIntent];
+    expect(sourceMessageId).toBe("msg-first");
+    expect(retryIntent).toEqual(expect.objectContaining({
+      intentId: intent.intentId,
+      activityId: intent.activityId,
+      createdAt,
+      attempt: 1,
+    }));
+    expect(retryIntent.notBeforeMs).toBeGreaterThan(Date.now());
+    expect(firstQueue.enqueueOutboxIntent).not.toHaveBeenCalled();
+    expect(firstQueue.ack).not.toHaveBeenCalled();
 
     const replayQueue = makeQueue();
     const replayRedpanda = makeRedpanda();
