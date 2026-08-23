@@ -85,9 +85,10 @@ export const AP_INTEROP_TARGETS: readonly InteropTargetDefinition[] = [
     sourceRepository: "pixelfed/pixelfed",
     executionModes: ["local_container", "recorded_fixture"],
     ciTier: "extended",
-    status: "planned",
-    versionPolicy: "pin_before_enable",
-    capabilities: ["actor", "note", "image", "media", "follow", "collection"],
+    status: "existing",
+    versionPolicy: "existing_pin",
+    capabilities: ["actor", "note", "image", "media", "follow", "collection", "target_persistence"],
+    notes: ["Both delivery modes and exact remote persistence passed at architecture commit 9a2fd328d779cef178e56af06c64f9717bd5e23a in CI run 32648934561."],
   },
   {
     id: "peertube",

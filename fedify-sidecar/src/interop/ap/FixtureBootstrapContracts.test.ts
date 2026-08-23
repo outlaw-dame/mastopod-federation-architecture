@@ -87,6 +87,9 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(prepare).toContain("172.31.240.0/24");
     expect(bootstrap).toContain('-e AP_INTEROP_SETUP_PASSWORD="${MISSKEY_SETUP_PASSWORD}"');
     expect(bootstrap).not.toContain("console.log");
+    expect(bootstrap).toContain('/api/admin/update-meta');
+    expect(bootstrap).toContain('authorization: `Bearer ${value.token}`');
+    expect(bootstrap).toContain('JSON.stringify({ federation: "all" })');
     expect(bootstrap).toContain("TARGET_ACTOR_URI=https://misskey.test/users/%s");
     expect(compose).toContain("misskey/misskey:2026.7.0@sha256:2fd5c68f");
     expect(compose).toContain("postgres:18-alpine@sha256:d3e1620b");
@@ -187,12 +190,12 @@ describe("real federation fixture bootstrap contracts", () => {
       "utf8",
     );
 
-    expect(coverage).toContain("Pixelfed's MySQL database | Executable lane, but federation persistence is not yet proven");
+    expect(coverage).toContain("Pixelfed's MySQL database | Covered at architecture `9a2fd328d779cef178e56af06c64f9717bd5e23a`");
     expect(coverage).toContain("Exact-head candidate lane; not covered until CI proves both modes");
     expect(coverage).toContain("Hosted Micro.blog blocker");
     expect(coverage).toContain("Hosted write.as blocker");
     expect(coverage).toContain("must not be reported as write.as coverage");
-    for (const target of ["Pixelfed", "Misskey", "Friendica", "Castopod", "Micro.blog", "write.as"]) {
+    for (const target of ["Misskey", "Friendica", "Castopod", "Micro.blog", "write.as"]) {
       const row = coverage.split("\n").find(line => line.startsWith(`| ${target} |`));
       expect(row).toBeDefined();
       expect(row).not.toMatch(/\| Covered\s*\|$/);
@@ -295,6 +298,8 @@ describe("real federation fixture bootstrap contracts", () => {
 
     expect(script).toContain("Friendica fail-closed persistence diagnostics:");
     expect(script).toContain("remote_contact_count=");
+    expect(script).toContain("apcontact_count=");
+    expect(script).toContain("actor_uri_cache_count=");
     expect(script).toContain("inbox_entry_count=");
     expect(script).toContain("inbox_receiver_count=");
     expect(script).toContain("introduction_count=");
@@ -302,6 +307,7 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain("actor_fetch_discard_count");
     expect(script).toContain("invalid_http_signature_count");
     expect(script).toContain("valid_http_signature_count");
+    expect(script).toContain("friendica_log_line_count");
     expect(script).toContain('fopen("/var/log/friendica/friendica.log", "rb")');
     expect(script).not.toContain("select parameter from workerqueue");
     expect(script).not.toContain("select activity from \\`inbox-entry\\`");

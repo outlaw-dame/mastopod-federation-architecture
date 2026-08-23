@@ -46,7 +46,16 @@ compose exec -T \
       method: "POST", headers: { "content-type": "application/json" }, body,
     }).then(async response => {
       const value = await response.json().catch(() => null);
-      if (!response.ok || value?.username !== process.env.AP_INTEROP_USERNAME || typeof value?.id !== "string") process.exit(1);
+      if (!response.ok || value?.username !== process.env.AP_INTEROP_USERNAME || typeof value?.id !== "string" || typeof value?.token !== "string") process.exit(1);
+      const update = await fetch("http://127.0.0.1:3000/api/admin/update-meta", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${value.token}`,
+        },
+        body: JSON.stringify({ federation: "all" }),
+      });
+      if (!update.ok) process.exit(1);
     }).catch(() => process.exit(1));
   '
 

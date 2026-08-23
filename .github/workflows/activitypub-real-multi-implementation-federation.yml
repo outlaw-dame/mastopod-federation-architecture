@@ -73,7 +73,7 @@ jobs:
             remote_version: Castopod 1.9.0@sha256:3ad8970f1decc9c9009502be3efedcf2f5d9fda5c7c9fd85a4408edc84a0bbb9
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '5dbc74e66ae05dd9a78843b8d9c9f73bc4ee84d7'
+      ACTIVITYPODS_SHA: 'fecb87f99da0765fc667d631878b52a910678590'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml

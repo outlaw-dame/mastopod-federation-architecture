@@ -71,6 +71,14 @@ describe("ActivityPub interop target registry", () => {
     }
   });
 
+  it("records Pixelfed as exact pinned coverage only after durable two-mode proof", () => {
+    const pixelfed = getInteropTarget("pixelfed");
+    expect(pixelfed?.status).toBe("existing");
+    expect(pixelfed?.versionPolicy).toBe("existing_pin");
+    expect(pixelfed?.capabilities).toContain("target_persistence");
+    expect(pixelfed?.notes?.join(" ")).toContain("CI run 32648934561");
+  });
+
   it("does not mislabel WriteFreely as exact Write.as conformance", () => {
     const writeFreely = getInteropTarget("writefreely");
     const writeAs = getInteropTarget("write-as-hosted");

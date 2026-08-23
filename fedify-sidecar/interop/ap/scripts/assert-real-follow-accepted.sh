@@ -157,6 +157,8 @@ friendica_diagnostics() {
   echo "Friendica fail-closed persistence diagnostics:" >&2
   {
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
+    printf '%s\n' "select concat('apcontact_count=', count(*), ',pubkey_count=', coalesce(sum(pubkey is not null and pubkey <> ''),0), ',inbox_count=', coalesce(sum(inbox is not null and inbox <> ''),0), ',account_type_count=', coalesce(sum(type in ('Person','Organization','Service','Group','Application')),0)) from apcontact where url='${actor_sql}';"
+    printf '%s\n' "select concat('actor_uri_cache_count=', count(*)) from \`item-uri\` where uri='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
     printf '%s\n' "select concat('inbox_receiver_count=', count(*)) from \`inbox-entry-receiver\` r join \`inbox-entry\` e on e.id=r.\`queue-id\` where e.signer='${actor_sql}';"
     printf '%s\n' "select concat('introduction_count=', count(*)) from intro i join contact c on c.id=i.\`contact-id\` where c.url='${actor_sql}';"
@@ -174,12 +176,14 @@ friendica_diagnostics() {
       "valid_http_signature_count" => "Valid HTTP signature",
     ];
     $counts = array_fill_keys(array_keys($patterns), 0);
+    $lineCount = 0;
     $handle = @fopen("/var/log/friendica/friendica.log", "rb");
     if ($handle === false) {
       fwrite(STDERR, "friendica_log_status=unavailable\n");
       exit(0);
     }
     while (($line = fgets($handle)) !== false) {
+      $lineCount++;
       foreach ($patterns as $label => $message) {
         if (str_contains($line, $message)) {
           $counts[$label]++;
@@ -187,6 +191,7 @@ friendica_diagnostics() {
       }
     }
     fclose($handle);
+    fwrite(STDERR, "friendica_log_line_count=" . $lineCount . "\n");
     foreach ($counts as $label => $count) {
       fwrite(STDERR, $label . "=" . $count . "\n");
     }
