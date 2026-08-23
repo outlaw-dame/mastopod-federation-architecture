@@ -2,15 +2,15 @@
  * OpenSearch client implementations for the canonical public read projection.
  *
  * OS3 deliberately relies on the index refresh interval rather than forcing a
- * refresh on every mutation. Per-write refresh made the projection much more
- * expensive and defeated efficient indexing/batching behavior.
+ * refresh on every mutation. OS4b adds bounded `_mget` + `_bulk` capabilities
+ * used only by the conservative fresh-document batch path.
  */
 
 import { PublicContentDocument } from '../models/PublicContentDocument.js';
 import { PublicAuthorDocument } from '../models/PublicAuthorDocument.js';
 import { PublicContentMapping } from '../mappings/PublicContentMapping.js';
 import { PublicAuthorMapping } from '../mappings/PublicAuthorMapping.js';
-import { OpenSearchClient as IOpenSearchClient } from './PublicContentIndexWriter.js';
+import { OpenSearchClient as IOpenSearchClient, type BulkUpsertResult } from './PublicContentIndexWriter.js';
 import { OpenSearchAuthorClient as IOpenSearchAuthorClient } from './PublicAuthorIndexWriter.js';
 
 export class DefaultOpenSearchClient implements IOpenSearchClient {
@@ -20,10 +20,7 @@ export class DefaultOpenSearchClient implements IOpenSearchClient {
 
   async get(id: string): Promise<PublicContentDocument | null> {
     try {
-      const response = await this.client.get({
-        index: this.indexName,
-        id,
-      });
+      const response = await this.client.get({ index: this.indexName, id });
       return response.body._source as PublicContentDocument;
     } catch (error: any) {
       if (error.meta?.statusCode === 404) return null;
@@ -31,14 +28,41 @@ export class DefaultOpenSearchClient implements IOpenSearchClient {
     }
   }
 
+  async getMany(ids: string[]): Promise<Map<string, PublicContentDocument | null>> {
+    const result = new Map<string, PublicContentDocument | null>();
+    if (ids.length === 0) return result;
+    const response = await this.client.mget({
+      index: this.indexName,
+      body: { ids },
+    });
+    for (const row of response.body?.docs ?? []) {
+      result.set(String(row._id), row.found ? row._source as PublicContentDocument : null);
+    }
+    for (const id of ids) if (!result.has(id)) result.set(id, null);
+    return result;
+  }
+
   async upsert(id: string, doc: Partial<PublicContentDocument>): Promise<void> {
     await this.client.update({
       index: this.indexName,
       id,
-      body: {
-        doc,
-        doc_as_upsert: true,
-      },
+      body: { doc, doc_as_upsert: true },
+    });
+  }
+
+  async upsertMany(entries: Array<{ id: string; doc: Partial<PublicContentDocument> }>): Promise<BulkUpsertResult[]> {
+    if (entries.length === 0) return [];
+    const body: any[] = [];
+    for (const entry of entries) {
+      body.push({ update: { _index: this.indexName, _id: entry.id } });
+      body.push({ doc: entry.doc, doc_as_upsert: true });
+    }
+    const response = await this.client.bulk({ body, refresh: false });
+    const items = response.body?.items ?? [];
+    return entries.map((_, index) => {
+      const item = items[index]?.update;
+      if (!item) return { ok: false, error: 'missing bulk update result' };
+      return item.error ? { ok: false, error: item.error } : { ok: true };
     });
   }
 
@@ -46,21 +70,13 @@ export class DefaultOpenSearchClient implements IOpenSearchClient {
     await this.client.update({
       index: this.indexName,
       id,
-      body: {
-        script: {
-          source: script,
-          params,
-        },
-      },
+      body: { script: { source: script, params } },
     });
   }
 
   async delete(id: string): Promise<void> {
     try {
-      await this.client.delete({
-        index: this.indexName,
-        id,
-      });
+      await this.client.delete({ index: this.indexName, id });
     } catch (error: any) {
       if (error.meta?.statusCode !== 404) throw error;
     }
@@ -78,19 +94,10 @@ export class DefaultOpenSearchClient implements IOpenSearchClient {
       author.did ? { term: { 'author.did': author.did } } : null,
       author.handle ? { term: { 'author.handle': author.handle } } : null,
     ].filter(Boolean);
-
     if (should.length === 0) return;
-
     await this.client.deleteByQuery({
       index: this.indexName,
-      body: {
-        query: {
-          bool: {
-            should,
-            minimum_should_match: 1,
-          },
-        },
-      },
+      body: { query: { bool: { should, minimum_should_match: 1 } } },
     });
   }
 
@@ -99,10 +106,7 @@ export class DefaultOpenSearchClient implements IOpenSearchClient {
     if (!exists.body) {
       await this.client.indices.create({
         index: this.indexName,
-        body: {
-          settings: PublicContentMapping.settings,
-          mappings: PublicContentMapping.mappings,
-        },
+        body: { settings: PublicContentMapping.settings, mappings: PublicContentMapping.mappings },
       });
     }
   }
@@ -115,30 +119,32 @@ export class InMemoryOpenSearchClient implements IOpenSearchClient {
     return this.docs.get(id) || null;
   }
 
+  async getMany(ids: string[]): Promise<Map<string, PublicContentDocument | null>> {
+    return new Map(ids.map((id) => [id, this.docs.get(id) ?? null]));
+  }
+
   async upsert(id: string, doc: Partial<PublicContentDocument>): Promise<void> {
     const existing = this.docs.get(id) || ({} as PublicContentDocument);
     this.docs.set(id, { ...existing, ...doc } as PublicContentDocument);
   }
 
+  async upsertMany(entries: Array<{ id: string; doc: Partial<PublicContentDocument> }>): Promise<BulkUpsertResult[]> {
+    for (const entry of entries) await this.upsert(entry.id, entry.doc);
+    return entries.map(() => ({ ok: true }));
+  }
+
   async updateScripted(id: string, _script: string, params: Record<string, any>): Promise<void> {
     const existing = this.docs.get(id);
     if (!existing) return;
-
-    if (!existing.engagement) {
-      existing.engagement = { likeCount: 0, repostCount: 0, replyCount: 0 };
-    }
-
+    if (!existing.engagement) existing.engagement = { likeCount: 0, repostCount: 0, replyCount: 0 };
     if (params['likeDelta']) existing.engagement.likeCount += params['likeDelta'];
     if (params['repostDelta']) existing.engagement.repostCount += params['repostDelta'];
     if (params['replyDelta']) existing.engagement.replyCount += params['replyDelta'];
     if (params['indexedAt']) existing.indexedAt = params['indexedAt'];
-
     this.docs.set(id, existing);
   }
 
-  async delete(id: string): Promise<void> {
-    this.docs.delete(id);
-  }
+  async delete(id: string): Promise<void> { this.docs.delete(id); }
 
   async deleteByAuthor(author: {
     canonicalId?: string;
@@ -152,28 +158,20 @@ export class InMemoryOpenSearchClient implements IOpenSearchClient {
         (author.apUri && doc.author?.apUri === author.apUri) ||
         (author.did && doc.author?.did === author.did) ||
         (author.handle && doc.author?.handle === author.handle)
-      ) {
-        this.docs.delete(id);
-      }
+      ) this.docs.delete(id);
     }
   }
 
-  getAll(): PublicContentDocument[] {
-    return Array.from(this.docs.values());
-  }
+  getAll(): PublicContentDocument[] { return Array.from(this.docs.values()); }
 }
 
 export class DefaultOpenSearchAuthorClient implements IOpenSearchAuthorClient {
   private readonly indexName = 'public-author-v1';
-
   constructor(private readonly client: any) {}
 
   async get(id: string): Promise<PublicAuthorDocument | null> {
     try {
-      const response = await this.client.get({
-        index: this.indexName,
-        id,
-      });
+      const response = await this.client.get({ index: this.indexName, id });
       return response.body._source as PublicAuthorDocument;
     } catch (error: any) {
       if (error.meta?.statusCode === 404) return null;
@@ -182,25 +180,12 @@ export class DefaultOpenSearchAuthorClient implements IOpenSearchAuthorClient {
   }
 
   async upsert(id: string, doc: Partial<PublicAuthorDocument>): Promise<void> {
-    await this.client.update({
-      index: this.indexName,
-      id,
-      body: {
-        doc,
-        doc_as_upsert: true,
-      },
-    });
+    await this.client.update({ index: this.indexName, id, body: { doc, doc_as_upsert: true } });
   }
 
   async delete(id: string): Promise<void> {
-    try {
-      await this.client.delete({
-        index: this.indexName,
-        id,
-      });
-    } catch (error: any) {
-      if (error.meta?.statusCode !== 404) throw error;
-    }
+    try { await this.client.delete({ index: this.indexName, id }); }
+    catch (error: any) { if (error.meta?.statusCode !== 404) throw error; }
   }
 
   async initializeIndex(): Promise<void> {
@@ -208,10 +193,7 @@ export class DefaultOpenSearchAuthorClient implements IOpenSearchAuthorClient {
     if (!exists.body) {
       await this.client.indices.create({
         index: this.indexName,
-        body: {
-          settings: PublicAuthorMapping.settings,
-          mappings: PublicAuthorMapping.mappings,
-        },
+        body: { settings: PublicAuthorMapping.settings, mappings: PublicAuthorMapping.mappings },
       });
     }
   }
@@ -219,21 +201,11 @@ export class DefaultOpenSearchAuthorClient implements IOpenSearchAuthorClient {
 
 export class InMemoryOpenSearchAuthorClient implements IOpenSearchAuthorClient {
   private docs = new Map<string, PublicAuthorDocument>();
-
-  async get(id: string): Promise<PublicAuthorDocument | null> {
-    return this.docs.get(id) || null;
-  }
-
+  async get(id: string): Promise<PublicAuthorDocument | null> { return this.docs.get(id) || null; }
   async upsert(id: string, doc: Partial<PublicAuthorDocument>): Promise<void> {
     const existing = this.docs.get(id) || ({} as PublicAuthorDocument);
     this.docs.set(id, { ...existing, ...doc } as PublicAuthorDocument);
   }
-
-  async delete(id: string): Promise<void> {
-    this.docs.delete(id);
-  }
-
-  getAll(): PublicAuthorDocument[] {
-    return Array.from(this.docs.values());
-  }
+  async delete(id: string): Promise<void> { this.docs.delete(id); }
+  getAll(): PublicAuthorDocument[] { return Array.from(this.docs.values()); }
 }

@@ -2,9 +2,10 @@
  * Dedicated public search projection consumer.
  *
  * OS4 designates this TypeScript projector as the canonical Redpanda -> public
- * search ingestion path. It preserves partition ordering, bounds poison-event
- * retries, routes exhausted events to a replayable DLQ, and resumes KafkaJS
- * backpressure explicitly after transient failures.
+ * search ingestion path. OS4b opportunistically batches only consecutive AP
+ * Create/Note projections already present in the same Kafka batch. No timer is
+ * introduced: low-volume events are processed immediately, while high-volume
+ * batches use the measured 100-document OpenSearch bulk knee.
  */
 
 import { Kafka, Consumer, Producer, EachBatchPayload, IHeaders, logLevel } from 'kafkajs';
@@ -12,7 +13,7 @@ import { Client as OpenSearchNativeClient } from '@opensearch-project/opensearch
 import { logger } from '../../utils/logger.js';
 import { resolveSearchBackend } from '../../config/v6-config.js';
 import { ApSearchProjector } from '../projectors/ApSearchProjector.js';
-import { PublicContentIndexWriter } from '../writer/PublicContentIndexWriter.js';
+import { PublicContentBatchError, PublicContentIndexWriter } from '../writer/PublicContentIndexWriter.js';
 import { PublicAuthorIndexWriter } from '../writer/PublicAuthorIndexWriter.js';
 import { DefaultOpenSearchClient, DefaultOpenSearchAuthorClient } from '../writer/OpenSearchClient.js';
 import { DefaultQdrantContentClient, NoopPublicAuthorStore } from '../writer/QdrantClient.js';
@@ -23,6 +24,7 @@ import {
   type SearchDocAliasCache,
 } from '../writer/SearchDocAliasCache.js';
 import { SearchEventBus } from './SearchEventBus.js';
+import { collectApFirehoseEvents } from './ApSearchProjectionCollector.js';
 import type { IdentityAliasResolver, ResolvedIdentity } from '../identity/IdentityAliasResolver.js';
 import type {
   SearchPublicUpsertV1,
@@ -58,6 +60,7 @@ export interface SearchIndexerServiceConfig {
   } | null;
   backpressureRetryDelayMs: number;
   maxProcessingAttempts: number;
+  maxBatchSize: number;
   outboxIntentDedupTtlSec: number;
 }
 
@@ -67,6 +70,17 @@ class PassThroughIdentityAliasResolver implements IdentityAliasResolver {
   async resolveByAtDid(did: string): Promise<ResolvedIdentity> { return { atDid: did }; }
 }
 
+type KafkaBatchMessage = EachBatchPayload['batch']['messages'][number];
+
+interface ContentPlan {
+  message: KafkaBatchMessage;
+  raw: string;
+  retryKey: string;
+  outboxIntentId?: string;
+  upsert?: SearchPublicUpsertV1;
+  alreadyCompleted?: boolean;
+}
+
 export class SearchIndexerService {
   private readonly config: SearchIndexerServiceConfig;
   private readonly kafka: Kafka;
@@ -74,6 +88,7 @@ export class SearchIndexerService {
   private readonly producer: Producer;
   private readonly bus: SearchEventBus;
   private readonly projector: ApSearchProjector;
+  private readonly identityResolver: IdentityAliasResolver;
   private readonly writer: PublicContentIndexWriter;
   private readonly authorWriter: PublicAuthorIndexWriter;
   private readonly contentStore: DefaultOpenSearchClient | DefaultQdrantContentClient;
@@ -85,6 +100,7 @@ export class SearchIndexerService {
 
   constructor(config: SearchIndexerServiceConfig, identityResolver?: IdentityAliasResolver) {
     this.config = config;
+    this.identityResolver = identityResolver ?? new PassThroughIdentityAliasResolver();
     ensureRedpandaCompressionCodec();
     this.kafka = new Kafka({ clientId: config.clientId, brokers: config.brokers, logLevel: logLevel.WARN });
     this.consumer = this.kafka.consumer({ groupId: config.groupId });
@@ -123,9 +139,6 @@ export class SearchIndexerService {
       : new InMemorySearchDocAliasCache();
     const dedupService = new DefaultSearchDedupService(aliasCache);
     this.outboxIntentDeduper = new OutboxIntentDeduper({
-      // Deliberately distinct from the pre-OS4 `search:outbox-intent` lease
-      // namespace. Old pre-side-effect claims must never be interpreted as
-      // evidence that an OS4 projection completed successfully.
       prefix: 'search:completed-outbox-intent:v1',
       ttlSeconds: config.outboxIntentDedupTtlSec,
       store: config.redis,
@@ -139,7 +152,7 @@ export class SearchIndexerService {
     this.bus.on('search.public.delete-by-author.v1', async (payload) => { await this.writer.onDeleteByAuthor(payload as SearchPublicDeleteByAuthorV1); });
     this.bus.on('search.author.upsert.v1', async (payload) => { await this.authorWriter.onUpsert(payload as SearchAuthorUpsertV1); });
     this.bus.on('search.author.delete.v1', async (payload) => { await this.authorWriter.onDelete(payload as SearchAuthorDeleteV1); });
-    this.projector = new ApSearchProjector(identityResolver ?? new PassThroughIdentityAliasResolver(), this.bus);
+    this.projector = new ApSearchProjector(this.identityResolver, this.bus);
   }
 
   async initialize(): Promise<void> {
@@ -165,6 +178,7 @@ export class SearchIndexerService {
       groupId: this.config.groupId,
       backend: this.config.searchBackend,
       maxProcessingAttempts: this.config.maxProcessingAttempts,
+      maxBatchSize: this.config.maxBatchSize,
     });
   }
 
@@ -182,85 +196,298 @@ export class SearchIndexerService {
   }
 
   private async processBatch(payload: EachBatchPayload): Promise<void> {
-    const { batch, resolveOffset, heartbeat, isRunning, isStale, pause } = payload;
-    for (const message of batch.messages) {
-      if (!isRunning() || isStale()) break;
-      if (this.backpressureActive) return;
+    const { batch, isRunning, isStale } = payload;
+    let cursor = 0;
 
-      const retryKey = `${batch.topic}:${batch.partition}:${message.offset}`;
-      let raw: string | undefined;
-      let outboxIntentId: string | undefined;
+    while (cursor < batch.messages.length) {
+      if (!isRunning() || isStale() || this.backpressureActive) return;
+      const message = batch.messages[cursor]!;
 
-      try {
-        raw = message.value?.toString();
-        if (!raw) {
-          resolveOffset(message.offset);
-          this.processingAttempts.delete(retryKey);
-          continue;
+      if (this.canUseContentBatch(batch.topic, message)) {
+        const group: KafkaBatchMessage[] = [];
+        while (
+          cursor + group.length < batch.messages.length &&
+          group.length < this.config.maxBatchSize &&
+          this.canUseContentBatch(batch.topic, batch.messages[cursor + group.length]!)
+        ) {
+          group.push(batch.messages[cursor + group.length]!);
         }
 
+        const result = await this.processContentGroup(group, payload);
+        cursor += Math.max(1, result.processed);
+        if (result.halted) return;
+        continue;
+      }
+
+      const halted = await this.processSingleMessage(message, payload);
+      cursor += 1;
+      if (halted) return;
+    }
+  }
+
+  private canUseContentBatch(topic: string, message: KafkaBatchMessage): boolean {
+    if (!(this.contentStore instanceof DefaultOpenSearchClient)) return false;
+    if (this.config.maxBatchSize < 2 || topic !== this.config.firehoseTopic) return false;
+    const raw = message.value?.toString();
+    if (!raw) return false;
+    try {
+      const source = JSON.parse(raw) as any;
+      return source?.activity?.type === 'Create' && source?.activity?.object?.type === 'Note';
+    } catch {
+      return false;
+    }
+  }
+
+  private async processContentGroup(
+    messages: KafkaBatchMessage[],
+    payload: EachBatchPayload,
+  ): Promise<{ processed: number; halted: boolean }> {
+    const plans: ContentPlan[] = [];
+    let planningFailure: { index: number; raw: string; retryKey: string; error: unknown } | null = null;
+
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i]!;
+      const raw = message.value?.toString() ?? '';
+      const retryKey = `${payload.batch.topic}:${payload.batch.partition}:${message.offset}`;
+      try {
         const event = JSON.parse(raw) as Record<string, unknown>;
-        outboxIntentId = extractOutboxIntentId(
+        const outboxIntentId = extractOutboxIntentId(
           event,
           message.headers as Record<string, Buffer | string | undefined> | undefined,
         );
 
-        if (outboxIntentId && await this.outboxIntentDeduper.has(outboxIntentId)) {
-          logger.debug('[SearchIndexerService] Skipping completed local outbox intent replay', {
-            outboxIntentId, topic: batch.topic, partition: batch.partition, offset: message.offset,
-          });
-          resolveOffset(message.offset);
-          this.processingAttempts.delete(retryKey);
-          await heartbeat();
+        if (
+          outboxIntentId
+          && await this.runWithHeartbeat(
+            () => this.outboxIntentDeduper.has(outboxIntentId),
+            payload,
+          )
+        ) {
+          plans.push({ message, raw, retryKey, outboxIntentId, alreadyCompleted: true });
           continue;
         }
 
-        if (batch.topic === this.config.tombstoneTopic) {
-          await this.projector.onApTombstoneEvent(event);
-        } else {
-          const consent = normalizePublicSearchConsent((event['meta'] as any)?.searchConsent);
-          if (consent?.isPublic === false) {
-            logger.debug('[SearchIndexerService] Skipping non-searchable activity (FEP-268d)', {
-              activityId: (event['activity'] as any)?.id, source: consent.source,
-            });
-            await this.markCompleted(outboxIntentId);
-            resolveOffset(message.offset);
-            this.processingAttempts.delete(retryKey);
-            await heartbeat();
-            continue;
-          }
-          await this.projector.onApFirehoseEvent(event);
+        const consent = normalizePublicSearchConsent((event['meta'] as any)?.searchConsent);
+        if (consent?.isPublic === false) {
+          plans.push({ message, raw, retryKey, outboxIntentId });
+          await payload.heartbeat();
+          continue;
         }
 
-        await this.markCompleted(outboxIntentId);
+        const projected = await this.runWithHeartbeat(
+          () => collectApFirehoseEvents(this.identityResolver, event),
+          payload,
+        );
+        if (projected.length === 0) {
+          plans.push({ message, raw, retryKey, outboxIntentId });
+          continue;
+        }
+        if (projected.length !== 1 || projected[0]!.topic !== 'search.public.upsert.v1') {
+          throw new Error('AP Create/Note produced a non-batchable search projection');
+        }
+        plans.push({
+          message,
+          raw,
+          retryKey,
+          outboxIntentId,
+          upsert: projected[0]!.event as SearchPublicUpsertV1,
+        });
+      } catch (error) {
+        planningFailure = { index: i, raw, retryKey, error };
+        break;
+      }
+    }
+
+    const plannedCount = planningFailure ? planningFailure.index : plans.length;
+    const upsertPlanIndexes: number[] = [];
+    const upserts: SearchPublicUpsertV1[] = [];
+    for (let i = 0; i < plannedCount; i++) {
+      if (plans[i]!.upsert) {
+        upsertPlanIndexes.push(i);
+        upserts.push(plans[i]!.upsert!);
+      }
+    }
+
+    let failedPlanIndex: number | null = null;
+    let batchError: unknown;
+    if (upserts.length > 0) {
+      try {
+        await this.runWithHeartbeat(() => this.writer.onUpsertBatch(upserts), payload);
+        logger.info('[SearchIndexerService] Applied OpenSearch content batch', {
+          contentBatchSize: upserts.length,
+          topic: payload.batch.topic,
+          partition: payload.batch.partition,
+        });
+      } catch (error) {
+        batchError = error;
+        const failedUpsertIndex = error instanceof PublicContentBatchError ? error.failedIndex : 0;
+        failedPlanIndex = upsertPlanIndexes[Math.max(0, Math.min(failedUpsertIndex, upsertPlanIndexes.length - 1))] ?? 0;
+      }
+    }
+
+    const successLimit = failedPlanIndex == null ? plannedCount : failedPlanIndex;
+    for (let i = 0; i < successLimit; i++) {
+      try {
+        await this.finalizePlan(plans[i]!, payload);
+      } catch (error) {
+        const halted = await this.handleFailure(plans[i]!.message, plans[i]!.raw, plans[i]!.retryKey, error, payload);
+        return { processed: i + (halted ? 0 : 1), halted };
+      }
+    }
+
+    if (failedPlanIndex != null) {
+      const failedPlan = plans[failedPlanIndex]!;
+      const halted = await this.handleFailure(
+        failedPlan.message,
+        failedPlan.raw,
+        failedPlan.retryKey,
+        batchError,
+        payload,
+      );
+      return { processed: failedPlanIndex + (halted ? 0 : 1), halted };
+    }
+
+    if (planningFailure) {
+      const failedMessage = messages[planningFailure.index]!;
+      const halted = await this.handleFailure(
+        failedMessage,
+        planningFailure.raw,
+        planningFailure.retryKey,
+        planningFailure.error,
+        payload,
+      );
+      return { processed: plannedCount + (halted ? 0 : 1), halted };
+    }
+
+    return { processed: plannedCount, halted: false };
+  }
+
+  private async runWithHeartbeat<T>(work: () => Promise<T>, payload: EachBatchPayload): Promise<T> {
+    let heartbeatError: unknown;
+    const timer = setInterval(() => {
+      void payload.heartbeat().catch((error) => {
+        heartbeatError ??= error;
+      });
+    }, 3_000);
+    try {
+      const result = await work();
+      if (heartbeatError) throw heartbeatError;
+      await payload.heartbeat();
+      return result;
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
+  private async finalizePlan(plan: ContentPlan, payload: EachBatchPayload): Promise<void> {
+    if (!plan.alreadyCompleted) await this.markCompleted(plan.outboxIntentId);
+    payload.resolveOffset(plan.message.offset);
+    this.processingAttempts.delete(plan.retryKey);
+    await payload.heartbeat();
+  }
+
+  private async processSingleMessage(message: KafkaBatchMessage, payload: EachBatchPayload): Promise<boolean> {
+    const { batch, resolveOffset, heartbeat } = payload;
+    const retryKey = `${batch.topic}:${batch.partition}:${message.offset}`;
+    let raw: string | undefined;
+    let outboxIntentId: string | undefined;
+
+    try {
+      raw = message.value?.toString();
+      if (!raw) {
+        resolveOffset(message.offset);
+        this.processingAttempts.delete(retryKey);
+        return false;
+      }
+
+      const event = JSON.parse(raw) as Record<string, unknown>;
+      outboxIntentId = extractOutboxIntentId(
+        event,
+        message.headers as Record<string, Buffer | string | undefined> | undefined,
+      );
+
+      if (outboxIntentId && await this.outboxIntentDeduper.has(outboxIntentId)) {
+        logger.debug('[SearchIndexerService] Skipping completed local outbox intent replay', {
+          outboxIntentId, topic: batch.topic, partition: batch.partition, offset: message.offset,
+        });
         resolveOffset(message.offset);
         this.processingAttempts.delete(retryKey);
         await heartbeat();
-      } catch (error: unknown) {
-        const attempts = (this.processingAttempts.get(retryKey) ?? 0) + 1;
-        this.processingAttempts.set(retryKey, attempts);
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        return false;
+      }
 
-        if (attempts >= this.config.maxProcessingAttempts && raw) {
-          await this.publishDlq(batch.topic, batch.partition, message.offset, raw, message.headers, errorMessage, attempts);
+      if (batch.topic === this.config.tombstoneTopic) {
+        await this.projector.onApTombstoneEvent(event);
+      } else {
+        const consent = normalizePublicSearchConsent((event['meta'] as any)?.searchConsent);
+        if (consent?.isPublic === false) {
+          logger.debug('[SearchIndexerService] Skipping non-searchable activity (FEP-268d)', {
+            activityId: (event['activity'] as any)?.id, source: consent.source,
+          });
+          await this.markCompleted(outboxIntentId);
           resolveOffset(message.offset);
           this.processingAttempts.delete(retryKey);
           await heartbeat();
-          logger.error('[SearchIndexerService] Poison search event moved to DLQ', {
-            topic: batch.topic, partition: batch.partition, offset: message.offset,
-            dlqTopic: this.config.dlqTopic, attempts, error: errorMessage,
-          });
-          continue;
+          return false;
         }
-
-        logger.warn('[SearchIndexerService] Message processing failed — pausing before replay', {
-          topic: batch.topic, partition: batch.partition, offset: message.offset,
-          attempts, maxAttempts: this.config.maxProcessingAttempts, error: errorMessage,
-        });
-        this.activateBackpressure(pause);
-        return;
+        await this.projector.onApFirehoseEvent(event);
       }
+
+      await this.markCompleted(outboxIntentId);
+      resolveOffset(message.offset);
+      this.processingAttempts.delete(retryKey);
+      await heartbeat();
+      return false;
+    } catch (error) {
+      return this.handleFailure(message, raw, retryKey, error, payload);
     }
+  }
+
+  private async handleFailure(
+    message: KafkaBatchMessage,
+    raw: string | undefined,
+    retryKey: string,
+    error: unknown,
+    payload: EachBatchPayload,
+  ): Promise<boolean> {
+    const attempts = (this.processingAttempts.get(retryKey) ?? 0) + 1;
+    this.processingAttempts.set(retryKey, attempts);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    if (attempts >= this.config.maxProcessingAttempts && raw) {
+      await this.publishDlq(
+        payload.batch.topic,
+        payload.batch.partition,
+        message.offset,
+        raw,
+        message.headers,
+        errorMessage,
+        attempts,
+      );
+      payload.resolveOffset(message.offset);
+      this.processingAttempts.delete(retryKey);
+      await payload.heartbeat();
+      logger.error('[SearchIndexerService] Poison search event moved to DLQ', {
+        topic: payload.batch.topic,
+        partition: payload.batch.partition,
+        offset: message.offset,
+        dlqTopic: this.config.dlqTopic,
+        attempts,
+        error: errorMessage,
+      });
+      return false;
+    }
+
+    logger.warn('[SearchIndexerService] Message processing failed — pausing before replay', {
+      topic: payload.batch.topic,
+      partition: payload.batch.partition,
+      offset: message.offset,
+      attempts,
+      maxAttempts: this.config.maxProcessingAttempts,
+      error: errorMessage,
+    });
+    this.activateBackpressure(payload.pause);
+    return true;
   }
 
   private async publishDlq(
@@ -298,6 +525,12 @@ export class SearchIndexerService {
   }
 }
 
+function parseBoundedInteger(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
 export function createSearchIndexerService(
   overrides?: Partial<SearchIndexerServiceConfig>,
   identityResolver?: IdentityAliasResolver,
@@ -317,14 +550,17 @@ export function createSearchIndexerService(
     qdrantUrl: process.env['QDRANT_URL'] ?? 'http://localhost:6333',
     qdrantApiKey: process.env['QDRANT_API_KEY'],
     qdrantCollectionName: process.env['QDRANT_COLLECTION_NAME'] ?? 'public-content-v1',
-    qdrantVectorSize: parseInt(process.env['QDRANT_VECTOR_SIZE'] ?? '1024', 10),
-    qdrantRequestTimeoutMs: parseInt(process.env['QDRANT_REQUEST_TIMEOUT_MS'] ?? '5000', 10),
+    qdrantVectorSize: parseBoundedInteger(process.env['QDRANT_VECTOR_SIZE'], 1024, 1, 65_536),
+    qdrantRequestTimeoutMs: parseBoundedInteger(process.env['QDRANT_REQUEST_TIMEOUT_MS'], 5_000, 1, 600_000),
     redis: null,
-    backpressureRetryDelayMs: parseInt(process.env['SEARCH_INDEXER_BACKPRESSURE_RETRY_MS'] ?? '10000', 10),
-    maxProcessingAttempts: Math.max(1, parseInt(process.env['SEARCH_INDEXER_MAX_PROCESSING_ATTEMPTS'] ?? '5', 10)),
-    outboxIntentDedupTtlSec: parseInt(
-      process.env['SEARCH_INDEXER_OUTBOX_INTENT_DEDUP_TTL_SEC'] ?? `${60 * 60 * 24 * 7}`,
-      10,
+    backpressureRetryDelayMs: parseBoundedInteger(process.env['SEARCH_INDEXER_BACKPRESSURE_RETRY_MS'], 10_000, 1, 600_000),
+    maxProcessingAttempts: parseBoundedInteger(process.env['SEARCH_INDEXER_MAX_PROCESSING_ATTEMPTS'], 5, 1, 100),
+    maxBatchSize: parseBoundedInteger(process.env['SEARCH_INDEXER_MAX_BATCH_SIZE'], 100, 1, 100),
+    outboxIntentDedupTtlSec: parseBoundedInteger(
+      process.env['SEARCH_INDEXER_OUTBOX_INTENT_DEDUP_TTL_SEC'],
+      60 * 60 * 24 * 7,
+      1,
+      60 * 60 * 24 * 365,
     ),
     ...overrides,
   };

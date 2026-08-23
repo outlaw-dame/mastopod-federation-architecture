@@ -37,6 +37,7 @@ type MockInboxReceipt = {
   verifiedActorUri?: unknown;
   receivedAt?: unknown;
   remoteIp?: unknown;
+  benchmark?: unknown;
 };
 
 async function main(): Promise<void> {
@@ -100,7 +101,7 @@ async function main(): Promise<void> {
     reply.send({ results });
   });
 
-  app.post("/api/internal/inbox/receive", async (request, reply) => {
+  const receiveInbox = async (request: any, reply: any) => {
     if (!authenticate(request.headers.authorization)) {
       reply.status(401).send({ error: "Unauthorized" });
       return;
@@ -124,8 +125,15 @@ async function main(): Promise<void> {
       accepted: true,
       targetInbox: body.targetInbox,
       verifiedActorUri: body.verifiedActorUri,
+      benchmark: body.benchmark === true,
     });
-  });
+  };
+
+  // Canonical ActivityPods bridge contract used by InboundWorker. Keep the
+  // historical shorter route as an interop-harness compatibility alias so
+  // existing AP smoke fixtures remain valid while OS4b exercises the real path.
+  app.post("/api/internal/activitypub-bridge/inbox/receive", receiveInbox);
+  app.post("/api/internal/inbox/receive", receiveInbox);
 
   await app.listen({ host: HOST, port: PORT });
   console.log(`[mock-activitypods-authority] listening on http://${HOST}:${PORT}`);
