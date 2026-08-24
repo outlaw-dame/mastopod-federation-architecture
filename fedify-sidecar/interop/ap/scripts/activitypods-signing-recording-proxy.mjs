@@ -218,9 +218,11 @@ const server = http.createServer((req, res) => {
                 activityId: entityId(activity),
                 activityType: normalizedType(activity?.type),
                 actorUri: entityId(activity?.actor),
+                actorEncoding: entityEncoding(activity?.actor),
                 objectId: entityId(activity?.object),
                 objectType: normalizedType(object?.type),
                 objectActorUri: entityId(object?.actor),
+                objectActorEncoding: entityEncoding(object?.actor),
                 objectTargetUri: entityId(object?.object)
               });
             } catch {
@@ -261,9 +263,21 @@ const server = http.createServer((req, res) => {
 function entityId(value) {
   if (typeof value === 'string' && value.length > 0) return value;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  return typeof value.id === 'string' && value.id.length > 0
-    ? value.id
-    : typeof value['@id'] === 'string' && value['@id'].length > 0 ? value['@id'] : null;
+  const id = typeof value.id === 'string' && value.id.length > 0 ? value.id : null;
+  const atId = typeof value['@id'] === 'string' && value['@id'].length > 0 ? value['@id'] : null;
+  if (id && atId && id !== atId) return null;
+  return id || atId;
+}
+
+function entityEncoding(value) {
+  if (typeof value === 'string' && value.length > 0) return 'iri';
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid';
+  const id = typeof value.id === 'string' && value.id.length > 0 ? value.id : null;
+  const atId = typeof value['@id'] === 'string' && value['@id'].length > 0 ? value['@id'] : null;
+  if (id && atId && id !== atId) return 'conflicting-identifiers';
+  if (id) return 'object-id';
+  if (atId) return 'object-at-id';
+  return 'invalid';
 }
 
 function normalizedType(value) {

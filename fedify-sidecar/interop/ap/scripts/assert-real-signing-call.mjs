@@ -76,7 +76,7 @@ if (!actorUrl || actorUrl.search) {
   console.error('external origin actorUri cannot own a signing key');
   process.exit(1);
 }
-actorUrl.pathname = `${actorUrl.pathname.replace(/\/$/u, '')}/keys/main`;
+actorUrl.hash = 'main-key';
 const expectedKeyId = actorUrl.toString();
 
 const rows = fs.existsSync(evidencePath)

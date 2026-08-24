@@ -109,7 +109,7 @@ describe("ActivityPods signing recording proxy", () => {
         body: JSON.stringify({
           id: "https://remote.test/accept/1",
           type: "Accept",
-          actor: "https://remote.test/users/bob",
+          actor: { id: "https://remote.test/users/bob" },
           object: {
             id: "https://activitypods.test/alice/follows/1",
             type: "Follow",
@@ -150,9 +150,11 @@ describe("ActivityPods signing recording proxy", () => {
         activityId: "https://remote.test/accept/1",
         activityType: "Accept",
         actorUri: "https://remote.test/users/bob",
+        actorEncoding: "object-id",
         objectId: "https://activitypods.test/alice/follows/1",
         objectType: "Follow",
         objectActorUri: "https://activitypods.test/alice",
+        objectActorEncoding: "iri",
         objectTargetUri: "https://remote.test/users/bob",
       });
       expect(records[0]).not.toHaveProperty("requestHeaders");

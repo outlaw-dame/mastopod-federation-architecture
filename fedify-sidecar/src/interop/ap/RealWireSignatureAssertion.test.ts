@@ -29,9 +29,7 @@ function fixture(overrides: {
   const activityId = overrides.activityId ?? `${actorUri}/activities/follow-1`;
   const remoteActorUri = "https://mastodon/users/bob";
   const bodySha = "proof-body-sha";
-  const expectedKeyId = mode === "sidecar_service"
-    ? `${actorUri}#main-key`
-    : `${actorUri}/keys/main`;
+  const expectedKeyId = `${actorUri}#main-key`;
   const descriptorPath = join(directory, "descriptor.json");
   const wirePath = join(directory, "wire.jsonl");
   const signingPath = join(directory, "signing.json");
@@ -101,7 +99,7 @@ describe("real wire signature assertion", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       ok: true,
       mode: "external",
-      keyId: "https://activitypods/users/alice/keys/main",
+      keyId: "https://activitypods/users/alice#main-key",
       bodySha256Base64: "proof-body-sha",
       algorithm: "rsa-sha256",
       signingCorrelation: {
@@ -123,7 +121,7 @@ describe("real wire signature assertion", () => {
   });
 
   it.each([
-    [{ keyId: "https://sidecar/users/relay#main-key" }, "wrong key authority"],
+    [{ keyId: "https://activitypods/users/alice/keys/main" }, "stored key document used as wire authority"],
     [{ host: "other.example" }, "wrong target host"],
     [{ digest: "SHA-256=wrong" }, "wrong body digest"],
     [{ duplicate: true }, "duplicate matching wire request"],

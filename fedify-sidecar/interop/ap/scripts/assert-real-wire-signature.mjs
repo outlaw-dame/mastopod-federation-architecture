@@ -81,9 +81,12 @@ if (!Number.isFinite(Date.parse(wireDate))) {
   fail('wire Date header is missing or invalid');
 }
 
-const expectedKeyId = mode === 'sidecar_service'
-  ? `${actorUri}#main-key`
-  : `${actorUri.replace(/\/$/u, '')}/keys/main`;
+const actorUrl = credentialFreeActorUrl(actorUri);
+if (!actorUrl) {
+  fail('descriptor.actorUri must be a credential-free HTTP(S) URL without query or fragment');
+}
+actorUrl.hash = 'main-key';
+const expectedKeyId = actorUrl.toString();
 if (signature.keyId !== expectedKeyId) {
   fail(`wire keyId authority mismatch: expected ${expectedKeyId}, got ${signature.keyId}`);
 }
@@ -148,6 +151,22 @@ function parseSignature(value) {
 function requiredString(value, label) {
   if (typeof value !== 'string' || value.length === 0) fail(`${label} must be a non-empty string`);
   return value;
+}
+
+function credentialFreeActorUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (
+      !['http:', 'https:'].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash
+    ) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 function fail(message) {
