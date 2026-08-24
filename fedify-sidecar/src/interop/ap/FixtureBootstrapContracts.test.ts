@@ -5,6 +5,15 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("real federation fixture bootstrap contracts", () => {
+  it("retries transient interop image dependency downloads with a strict bound", () => {
+    const dockerfile = readFileSync(resolve(process.cwd(), "Dockerfile.interop"), "utf8");
+
+    expect(dockerfile).toContain('while [ "$attempt" -le 4 ]');
+    expect(dockerfile).toContain("npm ci --legacy-peer-deps");
+    expect(dockerfile).toContain('delay=$((delay * 2))');
+    expect(dockerfile).toContain('if [ "$attempt" -eq 4 ]; then exit 1; fi');
+  });
+
   it("binds host proof services only to a validated private Docker gateway", () => {
     const resolver = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/resolve-private-docker-gateway.mjs"),
