@@ -282,13 +282,6 @@ jobs:
             sh fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh mastodon "${actor_uri}" interop \
             | tee "${EVIDENCE_DIR}/remote-persistence.json"
 
-      - name: Assert outgoing wire signature
-        shell: bash
-        run: |
-          set -euo pipefail
-          node fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs \
-            "${WIRE_EVIDENCE_PATH}" "${EVIDENCE_DIR}/origin.json" mastodon "${EVIDENCE_DIR}/wire-signature.json"
-
       - name: Assert external ActivityPods signing boundary
         if: matrix.mode == 'external'
         shell: bash
@@ -304,12 +297,29 @@ jobs:
           done
           [[ "${signing_ok}" == true ]]
 
+      - name: Assert outgoing wire signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          signing_evidence=()
+          if [[ "${{ matrix.mode }}" == external ]]; then
+            signing_evidence=("${EVIDENCE_DIR}/external-signing.json")
+          fi
+          node fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs \
+            "${WIRE_EVIDENCE_PATH}" "${EVIDENCE_DIR}/origin.json" mastodon "${EVIDENCE_DIR}/wire-signature.json" \
+            "${signing_evidence[@]}"
+
       - name: Assert real Mastodon Accept returned through ActivityPods
         shell: bash
         run: |
           set -euo pipefail
           node fedify-sidecar/interop/ap/scripts/assert-real-inbound-accept.mjs \
             "${EVIDENCE_DIR}/activitypods.log" "${EVIDENCE_DIR}/origin.json" mastodon "${EVIDENCE_DIR}/inbound-accept.json"
+          actor_uri="$(node -p "JSON.parse(require('fs').readFileSync('${EVIDENCE_DIR}/origin.json','utf8')).actorUri")"
+          persisted_count="$(node -p "JSON.parse(require('fs').readFileSync('${EVIDENCE_DIR}/remote-persistence.json','utf8')).persistedFollowCount")"
+          node fedify-sidecar/interop/ap/scripts/assert-real-return-accept.mjs \
+            "${{ matrix.mode }}" "${EVIDENCE_DIR}/origin.json" mastodon "${actor_uri}" interop "${persisted_count}" \
+              | tee "${EVIDENCE_DIR}/return-accept-state.json"
 
       - name: Build bidirectional evidence summary
         shell: bash
@@ -323,9 +333,13 @@ jobs:
           const persistence = read('remote-persistence.json');
           const wire = read('wire-signature.json');
           const inbound = read('inbound-accept.json');
+          const returnState = read('return-accept-state.json');
           const signing = process.env.MODE === 'external' ? read('external-signing.json') : null;
-          if (!origin.ok || !persistence.ok || !wire.ok || !inbound.ok ||
+          if (!origin.ok || !persistence.ok || !wire.ok || !inbound.ok || !returnState.ok ||
               inbound.actorUri !== origin.actorUri || inbound.followActivityId !== origin.activityId ||
+              returnState.activityId !== origin.activityId || returnState.returnAcceptApplied !== true ||
+              returnState.followingContainsRemote !== true ||
+              (process.env.MODE === 'external' && returnState.sidecarInboundAcceptObserved !== true) ||
               (process.env.MODE === 'external' && (!signing?.ok || signing.actorUri !== origin.actorUri))) {
             throw new Error('live bidirectional federation evidence is incomplete');
           }
@@ -342,7 +356,9 @@ jobs:
             outboundWireSignatureVerified: true,
             activityPodsSigningApiVerified: process.env.MODE === 'external',
             returnAcceptActivityId: inbound.acceptActivityId,
-            inboundSideEffectsProcessed: inbound.inboundSideEffectsProcessed,
+            inboundSideEffectsProcessed: returnState.returnAcceptApplied,
+            followingContainsRemote: returnState.followingContainsRemote,
+            sidecarInboundAcceptObserved: returnState.sidecarInboundAcceptObserved,
             trustEvaluationErrors: inbound.trustEvaluationErrors
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');

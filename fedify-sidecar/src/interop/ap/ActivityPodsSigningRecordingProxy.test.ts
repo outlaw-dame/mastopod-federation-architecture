@@ -44,6 +44,7 @@ afterEach(async () => {
 
 describe("ActivityPods signing recording proxy", () => {
   it("preserves the upstream status, headers, and body while recording a redacted signing call", async () => {
+    const observedPaths: string[] = [];
     const upstream = createServer((req, res) => {
       if (req.url === "/ready") {
         res.writeHead(204).end();
@@ -52,7 +53,13 @@ describe("ActivityPods signing recording proxy", () => {
       const chunks: Buffer[] = [];
       req.on("data", chunk => chunks.push(Buffer.from(chunk)));
       req.on("end", () => {
+        observedPaths.push(req.url ?? "");
         expect(req.headers.authorization).toBe("Bearer super-secret-token");
+        if (req.url === "/api/internal/activitypub-bridge/inbox/receive") {
+          expect(Buffer.concat(chunks).toString("utf8")).toContain('"type":"Accept"');
+          res.writeHead(202, { "x-inbox-upstream": "preserved" }).end();
+          return;
+        }
         expect(Buffer.concat(chunks).toString("utf8")).toContain("requests");
         const responseBody = JSON.stringify({ results: [{ requestId: "request-1", ok: true }] });
         res.writeHead(207, {
@@ -92,6 +99,16 @@ describe("ActivityPods signing recording proxy", () => {
         body: "{}"
       });
       expect(unrelatedResponse.status).toBe(404);
+      const inboundResponse = await fetch(`http://127.0.0.1:${proxyPort}/api/internal/activitypub-bridge/inbox/receive`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer super-secret-token",
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ type: "Accept" })
+      });
+      expect(inboundResponse.status).toBe(202);
+      expect(inboundResponse.headers.get("x-inbox-upstream")).toBe("preserved");
       const response = await fetch(`http://127.0.0.1:${proxyPort}/api/internal/signatures/batch`, {
         method: "POST",
         headers: {
@@ -122,6 +139,10 @@ describe("ActivityPods signing recording proxy", () => {
         requestHeaders: { authorization: "<redacted>", cookie: "<redacted>" },
         response: { results: [{ requestId: "request-1", ok: true }] }
       });
+      expect(observedPaths).toEqual([
+        "/api/internal/activitypub-bridge/inbox/receive",
+        "/api/internal/signatures/batch",
+      ]);
     } finally {
       await new Promise<void>(resolveClose => upstream.close(() => resolveClose()));
     }

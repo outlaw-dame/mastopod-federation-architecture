@@ -12,6 +12,7 @@ const evidencePath = process.env.AP_SIGNING_PROXY_EVIDENCE_PATH || 'measurements
 const maxBodyBytes = parseIntegerEnv('AP_SIGNING_PROXY_MAX_BODY_BYTES', 2 * 1024 * 1024, 1024, 10 * 1024 * 1024);
 const timeoutMs = parseIntegerEnv('AP_SIGNING_PROXY_TIMEOUT_MS', 15000, 1000, 60000);
 const signingPath = '/api/internal/signatures/batch';
+const inboundReceiverPath = '/api/internal/activitypub-bridge/inbox/receive';
 const actorInboxPath = /^\/(?:users\/)?[A-Za-z0-9._-]{1,128}\/inbox\/?$/u;
 
 if (!isPrivateBindHost(listenHost)) {
@@ -61,6 +62,7 @@ function recordEvidence(record) {
 function classifyRequest(req) {
   if (req.method === 'POST' && req.url === signingPath) return 'signing';
   const path = typeof req.url === 'string' ? req.url.split('?', 1)[0] : '';
+  if (req.method === 'POST' && path === inboundReceiverPath) return 'inbound';
   if (req.method === 'POST' && actorInboxPath.test(path)) return 'inbound';
   return null;
 }

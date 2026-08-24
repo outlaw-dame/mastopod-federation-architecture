@@ -58,14 +58,30 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(workflow).not.toContain("ENABLE_INBOUND_WORKER=false ENABLE_ORIGIN_RECONCILIATION=false");
     expect(caddy).toContain("method POST");
     expect(caddy).toContain("path_regexp actor_inbox ^/(users/)?[^/]+/inbox/?$");
-    expect(caddy).toContain("reverse_proxy host.docker.internal:{$ACTIVITYPODS_RETURN_PORT:3000}");
+    expect(caddy).toContain("reverse_proxy {$ACTIVITYPODS_RETURN_HOST:host.docker.internal}:{$ACTIVITYPODS_RETURN_PORT:3000}");
     expect(caddy).not.toContain("lb_policy first");
     expect(workflow).toContain("ACTIVITYPODS_RETURN_PORT=3000");
     expect(workflow).toContain("ACTIVITYPODS_RETURN_PORT=8080");
     expect(workflow).toContain("--no-deps --force-recreate ap-proof-router");
     expect(proxy).toContain("return 'inbound'");
+    expect(proxy).toContain("/api/internal/activitypub-bridge/inbox/receive");
     expect(proxy).toContain("the sidecar Redis");
     expect(proxy).not.toContain("schema: 'ap.real-inbound-api-call.v1'");
+  });
+
+  it("keeps the live proof state-based and correlates the external signer to the wire", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-live-bidirectional-federation.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toContain("assert-real-return-accept.mjs");
+    expect(workflow).toContain("return-accept-state.json");
+    expect(workflow).toContain("returnState.followingContainsRemote !== true");
+    expect(workflow).toContain("returnState.sidecarInboundAcceptObserved !== true");
+    expect(workflow).toContain('signing_evidence=("${EVIDENCE_DIR}/external-signing.json")');
+    expect(workflow.indexOf("Assert external ActivityPods signing boundary"))
+      .toBeLessThan(workflow.indexOf("Assert outgoing wire signature"));
   });
 
   it("matches the returning Accept to the exact remote actor and outgoing Follow", () => {
