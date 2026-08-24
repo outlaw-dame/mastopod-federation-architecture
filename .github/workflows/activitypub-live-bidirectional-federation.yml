@@ -343,6 +343,7 @@ jobs:
               returnState.followingContainsRemote !== true ||
               (process.env.MODE === 'external' && returnState.sidecarInboundAcceptObserved !== true) ||
               (process.env.MODE === 'external' && returnState.sidecarInboundProcessed !== true) ||
+              (process.env.MODE === 'external' && (typeof returnState.returnAcceptActivityId !== 'string' || returnState.returnAcceptActivityId !== inbound.acceptActivityId)) ||
               (process.env.MODE === 'external' && (!signing?.ok || signing.actorUri !== origin.actorUri))) {
             throw new Error('live bidirectional federation evidence is incomplete');
           }
@@ -358,7 +359,7 @@ jobs:
             remotePersisted: true,
             outboundWireSignatureVerified: true,
             activityPodsSigningApiVerified: process.env.MODE === 'external',
-            returnAcceptActivityId: inbound.acceptActivityId,
+            returnAcceptActivityId: process.env.MODE === 'external' ? returnState.returnAcceptActivityId : inbound.acceptActivityId,
             inboundSideEffectsProcessed: returnState.returnAcceptApplied,
             followingContainsRemote: returnState.followingContainsRemote,
             sidecarInboundAcceptObserved: returnState.sidecarInboundAcceptObserved,
