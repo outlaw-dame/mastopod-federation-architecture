@@ -19,6 +19,9 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(workflow).toContain("externalBidirectional?.returnAcceptApplied === true");
     expect(workflow).toContain("externalBidirectional?.followingContainsRemote === true");
     expect(workflow).toContain("externalBidirectional?.sidecarInboundAcceptObserved === true");
+    expect(workflow).toContain("typeof externalBidirectional?.returnAcceptActivityId === 'string'");
+    expect(workflow).toContain("externalBidirectional.returnAcceptActivityId.length > 0");
+    expect(workflow).toContain("returnAcceptActivityId: externalBidirectional.returnAcceptActivityId");
     expect(workflow).toContain("activitypods.activitypub.real-multi-implementation.v2");
   });
 
