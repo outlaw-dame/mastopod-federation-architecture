@@ -87,14 +87,30 @@ function validateRemoteUsername(value) {
 
 async function fetchJson(url, options = {}) {
   const requestedUrl = new URL(url);
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      accept: 'application/activity+json, application/ld+json, application/json',
-      ...(options.headers || {}),
-    },
-    signal: AbortSignal.timeout(10000),
-  });
+  let currentUrl = requestedUrl;
+  let response;
+  for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+    response = await fetch(currentUrl, {
+      ...options,
+      redirect: 'manual',
+      headers: {
+        accept: 'application/activity+json, application/ld+json, application/json',
+        ...(options.headers || {}),
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    if (redirectCount === 5) throw new Error('ActivityPub evidence fetch exceeded the redirect bound');
+    const location = response.headers.get('location');
+    if (!location) throw new Error('ActivityPub evidence redirect omitted its location');
+    const nextUrl = new URL(location, currentUrl);
+    if (nextUrl.protocol !== 'https:' || nextUrl.origin !== requestedUrl.origin
+      || nextUrl.username || nextUrl.password || nextUrl.hash) {
+      throw new Error('ActivityPub evidence redirect escaped its requested HTTPS authority');
+    }
+    currentUrl = nextUrl;
+  }
+  if (!response) throw new Error('ActivityPub evidence fetch did not produce a response');
   if (!response.ok) throw new Error(`HTTP ${response.status} from ${requestedUrl.origin}`);
   if (response.url) {
     const responseUrl = new URL(response.url);
@@ -107,18 +123,7 @@ async function fetchJson(url, options = {}) {
 
 async function resolveCanonicalRemoteActorUri(requestedActorUri) {
   const requestedUrl = new URL(requestedActorUri);
-  const response = await fetch(requestedUrl, {
-    headers: { accept: 'application/activity+json, application/ld+json, application/json' },
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status} from ${requestedUrl.origin}`);
-  if (response.url) {
-    const responseUrl = new URL(response.url);
-    if (responseUrl.origin !== requestedUrl.origin || responseUrl.username || responseUrl.password) {
-      throw new Error('remote actor document redirected outside its requested authority');
-    }
-  }
-  const actor = await response.json();
+  const actor = await fetchJson(requestedUrl);
   const actorTypes = arrayOf(actor?.type ?? actor?.['@type']).map(normalizeType).filter(Boolean);
   if (!actorTypes.some(type => ACTOR_TYPES.has(type))) {
     throw new Error('remote actor document does not declare a supported ActivityStreams actor type');
@@ -182,12 +187,29 @@ function arrayOf(value) {
   return Array.isArray(value) ? value : [value];
 }
 
-async function readMatchingSidecarAccept(origin) {
+function findProcessedSidecarAccept(candidates, log, origin) {
+  return candidates.find(candidate => hasProcessedSidecarAccept(
+    log,
+    origin,
+    candidate.envelopeId,
+    candidate.acceptActivityId,
+  )) ?? null;
+}
+
+async function readMatchingSidecarAccept(origin, logPath) {
+  let log;
+  try {
+    log = await readFile(logPath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
+    throw error;
+  }
   const client = createClient({ url: process.env.REDIS_URL || 'redis://127.0.0.1:6379' });
   client.on('error', () => {});
   await client.connect();
   try {
     const entries = await client.xRange(INBOUND_STREAM, '-', '+', { COUNT: 1000 });
+    const candidates = [];
     for (const entry of entries) {
       const message = entry.message ?? {};
       if (message.method !== 'POST' || typeof message.body !== 'string') continue;
@@ -198,30 +220,19 @@ async function readMatchingSidecarAccept(origin) {
       const actorPath = new URL(origin.actorUri).pathname.replace(/\/$/u, '');
       const allowedPaths = new Set([`${actorPath}/inbox`, `/users/${encodeURIComponent(origin.senderUsername)}/inbox`]);
       if (!allowedPaths.has(path)) continue;
-      return {
-        observed: true,
+      candidates.push({
         streamId: entry.id,
         envelopeId: message.envelopeId,
         acceptActivityId: normalizeEntityId(activity),
         path,
-      };
+      });
     }
+    const matched = findProcessedSidecarAccept(candidates, log, origin);
+    if (matched) return { observed: true, ...matched };
     return { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
   } finally {
     await client.quit();
   }
-}
-
-async function readProcessedSidecarAccept(logPath, origin, envelopeId, acceptActivityId) {
-  if (!logPath || !envelopeId || !acceptActivityId) return { observed: false };
-  let log;
-  try {
-    log = await readFile(logPath, 'utf8');
-  } catch (error) {
-    if (error?.code === 'ENOENT') return { observed: false };
-    throw error;
-  }
-  return { observed: hasProcessedSidecarAccept(log, origin, envelopeId, acceptActivityId) };
 }
 
 function hasProcessedSidecarAccept(log, origin, envelopeId, acceptActivityId) {
@@ -252,11 +263,8 @@ async function waitForBidirectionalProof(mode, origin, sidecarLogPath) {
       const identityBoundOrigin = { ...origin, canonicalRemoteActorUri };
       followingUri ??= await resolveFollowingUri(origin.actorUri);
       const followingContainsRemote = await queryFollowingMembership(identityBoundOrigin, followingUri);
-      const sidecar = mode === 'external' ? await readMatchingSidecarAccept(identityBoundOrigin) : { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
-      const processed = mode === 'external'
-        ? await readProcessedSidecarAccept(sidecarLogPath, identityBoundOrigin, sidecar.envelopeId, sidecar.acceptActivityId)
-        : { observed: false };
-      if (followingContainsRemote && (mode === 'native' || (sidecar.observed && processed.observed))) {
+      const sidecar = mode === 'external' ? await readMatchingSidecarAccept(identityBoundOrigin, sidecarLogPath) : { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
+      if (followingContainsRemote && (mode === 'native' || sidecar.observed)) {
         return {
           followingUri,
           canonicalRemoteActorUri,
@@ -264,13 +272,13 @@ async function waitForBidirectionalProof(mode, origin, sidecarLogPath) {
           returnAcceptApplied: true,
           returnAcceptActivityId: sidecar.acceptActivityId,
           sidecarInboundAcceptObserved: sidecar.observed,
-          sidecarInboundProcessed: processed.observed,
+          sidecarInboundProcessed: sidecar.observed,
           sidecarInboundStreamId: sidecar.streamId,
           sidecarInboundPath: sidecar.path,
         };
       }
       lastError = new Error(
-        mode === 'external' && (!sidecar.observed || !processed.observed)
+        mode === 'external' && !sidecar.observed
           ? 'matching returning Accept lacks a correlated post-verification sidecar forward receipt'
           : 'ActivityPods following collection has not applied the remote Accept yet',
       );
@@ -348,4 +356,4 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   }
 }
 
-export { hasProcessedSidecarAccept, isMatchingReturnAccept, normalizeEntityId, queryFollowingMembership, resolveCanonicalRemoteActorUri, validateOrigin, validateRemoteUsername };
+export { findProcessedSidecarAccept, hasProcessedSidecarAccept, isMatchingReturnAccept, normalizeEntityId, queryFollowingMembership, resolveCanonicalRemoteActorUri, validateOrigin, validateRemoteUsername };

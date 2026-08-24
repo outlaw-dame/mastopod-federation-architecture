@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 // @ts-expect-error The executable proof helper is intentionally plain ESM without a declaration file.
-import { hasProcessedSidecarAccept, queryFollowingMembership, resolveCanonicalRemoteActorUri } from "../../../interop/ap/scripts/assert-real-return-accept.mjs";
+import { findProcessedSidecarAccept, hasProcessedSidecarAccept, queryFollowingMembership, resolveCanonicalRemoteActorUri } from "../../../interop/ap/scripts/assert-real-return-accept.mjs";
 
 const origin = {
   remoteActorUri: "https://remote.example/users/bob",
@@ -45,15 +45,15 @@ describe("public following collection evidence", () => {
   });
 
   it("rejects a following response redirected outside its requested authority", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      url: "https://evil.example/collect",
-      json: async () => ({ items: [origin.canonicalRemoteActorUri] }),
-    } as Response)));
+    const fetchMock = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://evil.example/collect" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(queryFollowingMembership(origin, "https://activitypods.example/alice/following"))
-      .rejects.toThrow(/redirected outside its requested authority/u);
+      .rejects.toThrow(/redirect escaped its requested HTTPS authority/u);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("binds a requested actor alias to a same-authority canonical actor id", async () => {
@@ -102,5 +102,10 @@ describe("public following collection evidence", () => {
     expect(hasProcessedSidecarAccept(receipt, identity, "envelope-1", acceptActivityId)).toBe(true);
     expect(hasProcessedSidecarAccept(receipt, identity, "envelope-2", acceptActivityId)).toBe(false);
     expect(hasProcessedSidecarAccept(receipt, identity, "envelope-1", `${acceptActivityId}-other`)).toBe(false);
+
+    expect(findProcessedSidecarAccept([
+      { envelopeId: "rejected-envelope", acceptActivityId, streamId: "1-0", path: "/alice/inbox" },
+      { envelopeId: "envelope-1", acceptActivityId, streamId: "2-0", path: "/alice/inbox" },
+    ], receipt, identity)).toMatchObject({ envelopeId: "envelope-1", streamId: "2-0" });
   });
 });
