@@ -79,11 +79,6 @@ function validateRemoteUsername(value) {
   return value;
 }
 
-function sparqlIri(value) {
-  if (/[<>\\\u0000-\u0020]/u.test(value)) throw new Error('unsafe IRI for SPARQL evidence query');
-  return `<${value}>`;
-}
-
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, {
     ...options,
@@ -108,21 +103,41 @@ async function resolveFollowingUri(actorUri) {
 }
 
 async function queryFollowingMembership(origin, followingUri) {
-  const endpoint = `http://127.0.0.1:3040/${encodeURIComponent(origin.senderUsername)}/query`;
-  const query = `ASK WHERE { VALUES ?membership { <http://www.w3.org/ns/ldp#contains> <https://www.w3.org/ns/activitystreams#items> } ${sparqlIri(followingUri)} ?membership ${sparqlIri(origin.remoteActorUri)} . }`;
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      authorization: `Basic ${Buffer.from('admin:admin').toString('base64')}`,
-      'content-type': 'application/x-www-form-urlencoded',
-      accept: 'application/sparql-results+json, application/json',
-    },
-    body: new URLSearchParams({ query }),
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!response.ok) throw new Error(`Fuseki membership query returned HTTP ${response.status}`);
-  const payload = await response.json();
-  return payload?.boolean === true;
+  const authority = new URL(followingUri).origin;
+  let page = await fetchJson(followingUri);
+  const visited = new Set([followingUri]);
+
+  for (let depth = 0; depth < 10; depth += 1) {
+    const members = [...arrayOf(page?.items), ...arrayOf(page?.orderedItems)]
+      .map(normalizeEntityId)
+      .filter(Boolean);
+    if (members.includes(origin.remoteActorUri)) return true;
+
+    const embeddedFirst = depth === 0 && members.length === 0
+      && page?.first && typeof page.first === 'object' && !Array.isArray(page.first)
+      ? page.first
+      : null;
+    if (embeddedFirst) {
+      page = embeddedFirst;
+      continue;
+    }
+    const pageReference = depth === 0 && members.length === 0
+      ? normalizeEntityId(page?.first)
+      : normalizeEntityId(page?.next);
+    if (!pageReference) return false;
+    const pageUrl = new URL(pageReference, followingUri);
+    if (pageUrl.origin !== authority || pageUrl.username || pageUrl.password || visited.has(pageUrl.toString())) {
+      throw new Error('ActivityPods following pagination escaped its authority or formed a cycle');
+    }
+    visited.add(pageUrl.toString());
+    page = await fetchJson(pageUrl.toString());
+  }
+  throw new Error('ActivityPods following collection exceeded the bounded page traversal');
+}
+
+function arrayOf(value) {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
 }
 
 async function readMatchingSidecarAccept(origin) {
@@ -243,4 +258,4 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   }
 }
 
-export { isMatchingReturnAccept, normalizeEntityId, validateOrigin, validateRemoteUsername };
+export { isMatchingReturnAccept, normalizeEntityId, queryFollowingMembership, validateOrigin, validateRemoteUsername };
