@@ -134,12 +134,16 @@ const server = http.createServer((req, res) => {
     const startedAt = Date.now();
     const forwardedHeaders = filterHopByHopHeaders(req.headers);
     forwardedHeaders['content-length'] = String(body.length);
+    if (req.headers.host) {
+      forwardedHeaders.host = req.headers.host;
+    }
     const upstream = http.request(
       {
         hostname: targetHost,
         port: targetPort,
         path: req.url,
         method: req.method,
+        setHost: false,
         headers: forwardedHeaders
       },
       upstreamRes => {
