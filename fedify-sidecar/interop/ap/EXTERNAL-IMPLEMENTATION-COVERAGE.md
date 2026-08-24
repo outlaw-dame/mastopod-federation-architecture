@@ -12,7 +12,7 @@ This inventory distinguishes executable federation proof from deployment researc
 | Friendica | official `2026.05` image index digest `sha256:e496eeb34fc2c9eb24eae94d2835c39e9a715966f625db769b188427b61ece6d` | accepted `contact` row for the exact remote actor and local user | Exact-head candidate lane; not covered until CI proves both modes |
 | Castopod | official `1.9.0` image index digest `sha256:3ad8970f1decc9c9009502be3efedcf2f5d9fda5c7c9fd85a4408edc84a0bbb9` | `fediverse_follows` row joining the exact remote actor and production-created podcast actor | Covered at architecture `22ff513af9dc78b9c0d11f140cadb58e610bf66a` and ActivityPods `2dedd50304cbe07a0dcfa5c9b74d4c2cd199080c`: both modes persisted the exact follower and the external mode recorded one matching ActivityPods signing call ([run 32651949364, job 97224834065](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/32651949364/job/97224834065)) |
 | Loops | exact upstream source commit `b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3`; MySQL 8.4 and Redis 8 Alpine pinned by OCI index digest | `followers` row joining the exact remote actor and the bootstrapped local profile; Horizon must also be healthy | Exact-head candidate lane; not covered until CI proves both modes and the external ActivityPods signing call |
-| PeerTube | release `v8.2.4`, commit `30eb3cc4f8701198ec1c785aedd2fbb5db401a2f`; official image index digest `sha256:b4e49e7ca29ba79d8ae145d76d7a5cad612f096bfa0b9aea0138e86728a6ee50` | An accepted `actorFollow` query is implemented but cannot be safely exercised in this local-network proof topology | Externally blocked; the exact release exposes only a global SSRF switch, which this harness will not disable |
+| PeerTube | release `v8.2.4`, commit `30eb3cc4f8701198ec1c785aedd2fbb5db401a2f`; official image index digest `sha256:b4e49e7ca29ba79d8ae145d76d7a5cad612f096bfa0b9aea0138e86728a6ee50` | accepted `actorFollow` row for the exact ActivityPods actor and local root account | Exact-head candidate lane using a path-restricted public Quick Tunnel; not covered until CI proves both modes |
 | Micro.blog | hosted service | None available to this repository | Externally blocked; requires an isolated paid hosted microblog, ActivityPub identity, credentials, and a durable inbound-follower verification surface |
 | write.as | hosted service | None available to this repository | Externally blocked; requires an isolated federated blog and a durable inbound-follower verification surface |
 | Bonfire Social | release `v1.0.6`, commit `53f5c428d94a84c0d442f6c842edd47d87321d88`; image digest `sha256:55084069242e4e09619081ca4f05102a8805325371003f79a5bc50d2e91dae05` | None; the pinned release cannot complete a clean database bootstrap | Externally blocked; reproducible fixture retained, not reported as federation coverage |
@@ -55,11 +55,15 @@ accepted `actorFollow` row for the exact ActivityPods actor and local account.
 PeerTube's exact release has one relevant control:
 `federation.prevent_ssrf`. It can be enabled or disabled globally, but it does
 not provide a narrow hostname allowlist comparable to the Loops
-`LOOPS_LOCAL_DOMAINS` test exception. The proof router deliberately resolves to
-an isolated RFC1918 address. With SSRF prevention enabled, PeerTube rejects the
-ActivityPods actor fetch; disabling it would weaken a production security
-boundary for the entire process. The target is therefore not included in the
-executable matrix and no HTTP response is mislabeled as federation coverage.
+`LOOPS_LOCAL_DOMAINS` test exception. The proof therefore keeps SSRF prevention
+enabled and publishes only the temporary ActivityPods actor/key/WebFinger and
+actor-inbox surface through a credentialless Cloudflare Quick Tunnel. A
+fail-closed origin proxy rejects other paths, the wrong authority, redirects,
+unsupported media types, oversized request/response bodies, and non-private
+upstream targets. Native and external modes receive distinct ephemeral
+authorities, and the external proxy keeps document GETs on ActivityPods while
+routing inbox POSTs only to the sidecar. The lane remains a candidate until an
+exact-head run proves durable remote processing and both return Accept paths.
 
 Evidence:
 
@@ -67,6 +71,8 @@ Evidence:
 - SSRF-enforced request helper: <https://github.com/Chocobozzz/PeerTube/blob/30eb3cc4f8701198ec1c785aedd2fbb5db401a2f/server/core/helpers/requests.ts>
 - reproducible bootstrap: [`bootstrap-peertube-account.sh`](./scripts/bootstrap-peertube-account.sh)
 - pinned fixture: [`docker-compose.peertube.yml`](./docker-compose.peertube.yml)
+- restricted origin proxy: [`public-activitypub-tunnel-proxy.mjs`](./scripts/public-activitypub-tunnel-proxy.mjs)
+- fail-closed tunnel launcher: [`start-cloudflare-quick-tunnel.sh`](./scripts/start-cloudflare-quick-tunnel.sh)
 
 ## Bandwagon blocker
 

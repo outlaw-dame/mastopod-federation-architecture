@@ -1,0 +1,286 @@
+name: Sidecar Performance and Scalability
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/sidecar-performance-scalability.yml'
+      - 'fedify-sidecar/loadtest/**'
+      - 'fedify-sidecar/src/delivery/**'
+      - 'fedify-sidecar/src/queue/**'
+      - 'fedify-sidecar/src/streams/**'
+      - 'fedify-sidecar/src/search/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sidecar-performance-scalability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  end-to-end-load:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      REDIS_URL: redis://127.0.0.1:16382
+      REDPANDA_BROKERS: 127.0.0.1:19093
+      OPENSEARCH_URL: http://127.0.0.1:19201
+      SIDECAR_BASE_URL: http://127.0.0.1:18089
+      SCALE_INDEX: sidecar-scale-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+
+      - name: Install exact sidecar dependencies
+        run: npm ci --prefix fedify-sidecar
+
+      - name: Prepare isolated credentials and evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/sidecar-scale /tmp/sidecar-scale-authority
+          chmod 0777 artifacts/sidecar-scale
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::${token}"
+          echo "SCALE_TOKEN=${token}" >> "$GITHUB_ENV"
+          printf '{"schema":"apdm.sidecar-scale-run.v1","federationSha":"%s","runId":"%s","runAttempt":"%s"}\n' \
+            "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
+            > artifacts/sidecar-scale/run.json
+
+      - name: Start pinned Redis RedPanda and OpenSearch
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name sidecar-scale-redis -p 16382:6379 \
+            redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+          docker run -d --name sidecar-scale-redpanda -p 19093:19093 \
+            redpandadata/redpanda:v25.1.4@sha256:a138e257877c494fa6854502273ee8db07637395c0a6da076da5babb0735b181 \
+            redpanda start --overprovisioned --smp 1 --memory 768M --reserve-memory 0M --node-id 0 --check=false \
+              --kafka-addr external://0.0.0.0:19093 --advertise-kafka-addr external://127.0.0.1:19093
+          docker run -d --name sidecar-scale-opensearch -p 19201:9200 \
+            -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true \
+            -e 'OPENSEARCH_JAVA_OPTS=-Xms768m -Xmx768m' --memory=1536m --cpus=2 \
+            opensearchproject/opensearch:3.8.0@sha256:bcc1797519726ceb6d651d4a3e60b7c30da91793914a8dfe75fd441d4f641509
+
+          ready=false
+          for attempt in $(seq 1 90); do
+            redis_ok=false; redpanda_ok=false; opensearch_ok=false
+            docker exec sidecar-scale-redis redis-cli PING 2>/dev/null | grep -q PONG && redis_ok=true || true
+            docker exec sidecar-scale-redpanda rpk cluster info --brokers=127.0.0.1:19093 >/dev/null 2>&1 && redpanda_ok=true || true
+            curl -fsS "${OPENSEARCH_URL}/_cluster/health" 2>/dev/null | grep -qv '"status":"red"' && opensearch_ok=true || true
+            if $redis_ok && $redpanda_ok && $opensearch_ok; then ready=true; break; fi
+            sleep 2
+          done
+          if [[ "$ready" != true ]]; then
+            printf 'redis=%s redpanda=%s opensearch=%s\n' "$redis_ok" "$redpanda_ok" "$opensearch_ok" \
+              | tee artifacts/sidecar-scale/dependency-readiness.txt
+            exit 1
+          fi
+          printf 'redis=true redpanda=true opensearch=true\n' > artifacts/sidecar-scale/dependency-readiness.txt
+
+          for topic in ap.stream1.local-public.v1 ap.stream2.remote-public.v1 ap.firehose.v1 ap.tombstones.v1 ap.firehose.dlq.v1; do
+            docker exec sidecar-scale-redpanda rpk topic create "$topic" --brokers=127.0.0.1:19093 >/dev/null
+          done
+
+      - name: Start mock ActivityPods authority and production queue pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd fedify-sidecar
+            MOCK_ACTIVITYPODS_HOST=127.0.0.1 MOCK_ACTIVITYPODS_PORT=8794 \
+            MOCK_ACTIVITYPODS_TOKEN="${SCALE_TOKEN}" MOCK_ACTIVITYPODS_LOCAL_DOMAIN=scale.test \
+            MOCK_ACTIVITYPODS_KEY_DIR=/tmp/sidecar-scale-authority \
+              npm exec -- tsx src/interop/ap/MockActivityPodsAuthority.ts \
+              > ../artifacts/sidecar-scale/activitypods.log 2>&1
+          ) & echo $! > artifacts/sidecar-scale/activitypods.pid
+
+          for attempt in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8794/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8794/health >/dev/null
+
+          (
+            cd fedify-sidecar
+            NODE_ENV=development PORT=18089 HOST=127.0.0.1 DOMAIN=scale.test SIDECAR_STARTUP_MODE=blocking \
+            SIDECAR_TOKEN="${SCALE_TOKEN}" ACTIVITYPODS_URL=http://127.0.0.1:8794 ACTIVITYPODS_TOKEN="${SCALE_TOKEN}" \
+            REDIS_URL="${REDIS_URL}" APDM_COMPLETION_MARKER_V2_CUTOVER=fresh \
+            REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED=true REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES=1024 \
+            REDIS_STREAM_PAYLOAD_BROTLI_QUALITY=0 REDPANDA_BROKERS="${REDPANDA_BROKERS}" \
+            REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false REDPANDA_COMPRESSION=zstd REDPANDA_ZSTD_LEVEL=1 \
+            STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 \
+            FIREHOSE_TOPIC=ap.firehose.v1 TOMBSTONE_TOPIC=ap.tombstones.v1 \
+            SEARCH_BACKEND=opensearch OPENSEARCH_URL="${OPENSEARCH_URL}" OPENSEARCH_SSL_VERIFY=false \
+            OPENSEARCH_INDEX="${SCALE_INDEX}" SEARCH_INDEXER_MAX_BATCH_SIZE=100 \
+            ENABLE_INBOUND_WORKER=true ENABLE_OUTBOX_INTENT_WORKER=true ENABLE_OPENSEARCH_INDEXER=true \
+            ENABLE_OUTBOUND_WORKER=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=false ENABLE_XRPC_SERVER=false \
+            ENABLE_MEDIA_ASSET_SYNC=false ENABLE_ACCOUNT_PROVISIONING=false ENABLE_ENTRYWAY=false \
+            ENABLE_FOLLOWERS_SYNC=false ENABLE_MRF_ADMIN_API=false ENABLE_MODERATION_BRIDGE_API=false \
+            ENABLE_CANONICAL_EVENT_LOG=false ENABLE_CANONICAL_NOTIFICATIONS=false ENABLE_AT_JETSTREAM=false \
+            ENABLE_AT_EXTERNAL_FIREHOSE=false APDM_ALLOW_LOOPBACK_HTTP=true REQUEST_TIMEOUT_MS=10000 CLAIM_IDLE_TIME_MS=60000 \
+              npm run server:dev > ../artifacts/sidecar-scale/sidecar.log 2>&1
+          ) & echo $! > artifacts/sidecar-scale/sidecar.pid
+
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl -fsS "${SIDECAR_BASE_URL}/ready" >/dev/null 2>&1; then ready=true; break; fi
+            if ! kill -0 "$(cat artifacts/sidecar-scale/sidecar.pid)" 2>/dev/null; then
+              tail -n 500 artifacts/sidecar-scale/sidecar.log
+              exit 1
+            fi
+            sleep 1
+          done
+          [[ "$ready" == true ]]
+          curl -fsS "${SIDECAR_BASE_URL}/ready" > artifacts/sidecar-scale/ready-before.json
+
+      - name: Run staged k6 inbound and handoff load
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='grafana/k6:1.3.0@sha256:3ddc8b1a33a2c3d8edc6e99b6a762ae36cba08788463458f5e6a7703e14eb77d'
+          : > artifacts/sidecar-scale/stage-status.txt
+
+          run_stage() {
+            local name="$1" scenario="$2" vus="$3" duration="$4"
+            set +e
+            docker run --rm --network host \
+              -v "${GITHUB_WORKSPACE}:/work" -w /work/fedify-sidecar \
+              "$image" run \
+              --summary-export="/work/artifacts/sidecar-scale/${name}.json" \
+              -e "SCENARIO=${scenario}" -e "TARGET_BASE_URL=${SIDECAR_BASE_URL}" \
+              -e "SIDECAR_TOKEN=${SCALE_TOKEN}" -e "DURATION=${duration}" \
+              -e RAMP_UP_DURATION=2s -e RAMP_DOWN_DURATION=2s \
+              -e "VUS=${vus}" -e "RAMP_TARGET=${vus}" loadtest/relay-loadtest.js \
+              > "artifacts/sidecar-scale/${name}.log" 2>&1
+            status=$?
+            set -e
+            printf '%s=%s\n' "$name" "$status" >> artifacts/sidecar-scale/stage-status.txt
+          }
+
+          run_stage inbound-low relay_inbound 10 10s
+          run_stage inbound-medium relay_inbound 40 15s
+          run_stage inbound-high relay_inbound 100 20s
+          run_stage handoff-high relay_subscribe 80 15s
+
+      - name: Verify scale response and end-to-end drain
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const dir = 'artifacts/sidecar-scale';
+          const names = ['inbound-low', 'inbound-medium', 'inbound-high', 'handoff-high'];
+          const statuses = Object.fromEntries(fs.readFileSync(`${dir}/stage-status.txt`, 'utf8').trim().split('\n').map(line => {
+            const at = line.lastIndexOf('=');
+            return [line.slice(0, at), Number(line.slice(at + 1))];
+          }));
+          const metric = (summary, name, field) => {
+            const value = summary.metrics?.[name]?.[field];
+            if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`missing ${name}.${field}`);
+            return value;
+          };
+          const stages = {};
+          for (const name of names) {
+            const summary = JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
+            stages[name] = {
+              status: statuses[name],
+              requests: metric(summary, 'http_reqs', 'count'),
+              requestRate: metric(summary, 'http_reqs', 'rate'),
+              accepted: metric(summary, 'relay_loadtest_accepted_total', 'count'),
+              acceptedRate: metric(summary, 'relay_loadtest_accepted_total', 'rate'),
+              failureRate: metric(summary, 'http_req_failed', 'value'),
+              expectedStatusRate: metric(summary, 'relay_loadtest_expected_status_rate', 'value'),
+              p95Ms: metric(summary, 'http_req_duration', 'p(95)'),
+              p99Ms: metric(summary, 'http_req_duration', 'p(99)'),
+            };
+            if (stages[name].status !== 0) throw new Error(`${name} failed k6 thresholds with exit ${stages[name].status}`);
+            if (stages[name].failureRate >= 0.02 || stages[name].expectedStatusRate <= 0.98) {
+              throw new Error(`${name} failed response integrity gates`);
+            }
+          }
+          const low = stages['inbound-low'];
+          const high = stages['inbound-high'];
+          const throughputGain = high.acceptedRate / low.acceptedRate;
+          if (!(throughputGain >= 2)) throw new Error(`inbound throughput scaled only ${throughputGain.toFixed(3)}x from 10 to 100 VUs`);
+          const report = {
+            schema: 'apdm.sidecar-performance-scalability.v1',
+            federationSha: process.env.GITHUB_SHA,
+            stages,
+            scale: { lowVus: 10, highVus: 100, acceptedThroughputGain: throughputGain },
+            scope: 'Staged protected ingress, Redis Streams compression, inbound ActivityPods forwarding, RedPanda Stream2/firehose, OpenSearch indexing, and external handoff fanout. Public HTTP-signature verification remains covered by the separate live federation lane.',
+          };
+          fs.writeFileSync(`${dir}/performance-summary.json`, `${JSON.stringify(report, null, 2)}\n`);
+          NODE
+
+          inbound_expected="$(node -e "const fs=require('fs');let n=0;for(const f of ['inbound-low','inbound-medium','inbound-high'])n+=JSON.parse(fs.readFileSync('artifacts/sidecar-scale/'+f+'.json')).metrics.relay_loadtest_accepted_total.count+1;process.stdout.write(String(n))")"
+          indexed=0
+          for attempt in $(seq 1 120); do
+            if curl -fsS -X POST "${OPENSEARCH_URL}/${SCALE_INDEX}/_refresh" >/dev/null 2>&1; then
+              indexed="$(curl -fsS "${OPENSEARCH_URL}/${SCALE_INDEX}/_count" | jq -r '.count')"
+            else
+              indexed=0
+            fi
+            pending="$(docker exec sidecar-scale-redis redis-cli XPENDING ap:queue:inbound:v1 sidecar-workers | head -n 1 | tr -d '[:space:]')"
+            if [[ "$indexed" -eq "$inbound_expected" && "${pending:-0}" -eq 0 ]]; then break; fi
+            sleep 1
+          done
+          [[ "$indexed" -eq "$inbound_expected" ]]
+
+          handoff_expected="$(node -e "const s=JSON.parse(require('fs').readFileSync('artifacts/sidecar-scale/handoff-high.json'));process.stdout.write(String(s.metrics.relay_loadtest_accepted_total.count+1))")"
+          for attempt in $(seq 1 60); do
+            outbox_pending="$(docker exec sidecar-scale-redis redis-cli XPENDING ap:queue:outbox-intent:v1 sidecar-workers | head -n 1 | tr -d '[:space:]')"
+            outbound_count="$(docker exec sidecar-scale-redis redis-cli XLEN ap:queue:outbound:v1 | tr -d '[:space:]')"
+            if [[ "${outbox_pending:-0}" -eq 0 && "$outbound_count" -eq "$handoff_expected" ]]; then break; fi
+            sleep 1
+          done
+          [[ "${outbox_pending:-0}" -eq 0 ]]
+          [[ "$outbound_count" -eq "$handoff_expected" ]]
+
+          used_memory="$(docker exec sidecar-scale-redis redis-cli INFO memory | sed -n 's/^used_memory:\([0-9][0-9]*\).*/\1/p')"
+          [[ "$used_memory" -gt 0 && "$used_memory" -lt 536870912 ]]
+          curl -fsS "${SIDECAR_BASE_URL}/ready" > artifacts/sidecar-scale/ready-after.json
+          jq -n \
+            --argjson expected "$inbound_expected" --argjson indexed "$indexed" \
+            --argjson handoffExpected "$handoff_expected" --argjson outbound "$outbound_count" \
+            --argjson redisBytes "$used_memory" \
+            '{schema:"apdm.sidecar-scale-drain.v1",inbound:{expected:$expected,indexed:$indexed,pending:0},handoff:{expected:$handoffExpected,outboundQueued:$outbound,pending:0},redis:{usedMemoryBytes:$redisBytes}}' \
+            > artifacts/sidecar-scale/drain-summary.json
+
+      - name: Upload performance and scalability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidecar-performance-scalability-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/sidecar-scale/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          cat artifacts/sidecar-scale/stage-status.txt 2>/dev/null || true
+          cat artifacts/sidecar-scale/performance-summary.json 2>/dev/null || true
+          tail -n 500 artifacts/sidecar-scale/sidecar.log 2>/dev/null || true
+          docker logs --tail 200 sidecar-scale-redpanda 2>/dev/null || true
+          docker logs --tail 200 sidecar-scale-opensearch 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          kill "$(cat artifacts/sidecar-scale/sidecar.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat artifacts/sidecar-scale/activitypods.pid 2>/dev/null)" 2>/dev/null || true
+          docker rm -f sidecar-scale-redis sidecar-scale-redpanda sidecar-scale-opensearch >/dev/null 2>&1 || true

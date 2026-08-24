@@ -68,8 +68,24 @@ jobs:
           if (JSON.stringify(summary.medians.map((x) => x.arm)) !== JSON.stringify(expected)) throw new Error('RF3 arm drift');
           const z1 = decision.comparisons.find((x) => x.arm === 'zstd-1');
           if (!z1 || !z1.eligible) throw new Error(`Zstd-1 is not RF3-eligible: ${JSON.stringify(z1?.reasons)}`);
-          if (decision.selectedArm !== 'zstd-1') throw new Error(`RF3 analyzer selected ${decision.selectedArm}, expected zstd-1 for current production config`);
-          console.log(JSON.stringify({ selectedArm: decision.selectedArm, zstd1: z1 }, null, 2));
+          const selected = decision.comparisons.find((x) => x.arm === decision.selectedArm);
+          if (!selected || !selected.eligible) {
+            throw new Error(`RF3 analyzer selected an ineligible or missing arm: ${decision.selectedArm}`);
+          }
+          const validation = {
+            schema: 'apdm.redpanda.rf3-production-validation.v1',
+            productionArm: 'zstd-1',
+            productionArmEligible: true,
+            selectedCandidateArm: decision.selectedArm,
+            candidateDiffersFromProduction: decision.selectedArm !== 'zstd-1',
+            promotionPolicy: 'A different candidate is evidence for a repeated benchmark campaign, not an automatic production configuration change.',
+            zstd1: z1,
+          };
+          fs.writeFileSync('measurements/redpanda-compression-rf3/production-validation.json', `${JSON.stringify(validation, null, 2)}\n`);
+          if (validation.candidateDiffersFromProduction) {
+            console.warn(`RF3 candidate ${decision.selectedArm} differs from production zstd-1; preserving the eligible production arm pending repeated evidence.`);
+          }
+          console.log(JSON.stringify(validation, null, 2));
           NODE
 
       - name: Capture runner context

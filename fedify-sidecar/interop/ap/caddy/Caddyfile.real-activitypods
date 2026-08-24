@@ -68,7 +68,9 @@ https://castopod.test {
 
 https://peertube.test {
   tls /certs/peertube.test.crt /certs/peertube.test.key
-  reverse_proxy peertube-app:9000
+  reverse_proxy peertube-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://loops.test {

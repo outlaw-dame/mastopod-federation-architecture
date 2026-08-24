@@ -1730,7 +1730,11 @@ export class InboundWorker {
 
       metrics.inboundActivityPubActivities.inc({ stage: "processed", activity_type: activityType });
 
-      logger.info("Inbound activity processed", { 
+      // Durable ACK/state plus the processed counter are the production success
+      // signal. Avoid emitting actor/activity identifiers at info level for
+      // every successful delivery; under federation load that creates
+      // high-cardinality I/O and unnecessary retention/privacy cost.
+      logger.debug("Inbound activity processed", {
         envelopeId: envelope.envelopeId,
         activityId: activity.id,
         type: activity.type,

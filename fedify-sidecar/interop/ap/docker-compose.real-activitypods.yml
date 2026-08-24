@@ -66,6 +66,14 @@ services:
     volumes: ["./runtime/wire:/evidence"]
     networks: [ap-interop]
 
+  peertube-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://peertube-app:9000", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/peertube.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
   loops-wire-recorder:
     build: { context: ../.., dockerfile: Dockerfile.interop }
     working_dir: /app
