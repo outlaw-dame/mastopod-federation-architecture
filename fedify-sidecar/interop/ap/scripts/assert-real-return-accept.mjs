@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { createClient } from 'redis';
 
 const AS_ACCEPT = 'Accept';
+const ACTOR_TYPES = new Set(
+  ['Person', 'Service', 'Application', 'Group', 'Organization']
+    .flatMap(type => [type, `https://www.w3.org/ns/activitystreams#${type}`]),
+);
 const INBOUND_STREAM = process.env.INBOUND_STREAM_KEY || 'ap:queue:inbound:v1';
 const DEFAULT_ATTEMPTS = 90;
 const DEFAULT_DELAY_MS = 2000;
@@ -30,7 +34,8 @@ function isAcceptType(value) {
 function isMatchingReturnAccept(activity, origin) {
   if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return false;
   if (!isAcceptType(activity.type ?? activity['@type'])) return false;
-  if (normalizeEntityId(activity.actor) !== origin.remoteActorUri) return false;
+  const canonicalRemoteActorUri = origin.canonicalRemoteActorUri ?? origin.remoteActorUri;
+  if (normalizeEntityId(activity.actor) !== canonicalRemoteActorUri) return false;
   const object = activity.object;
   const objectId = normalizeEntityId(object);
   if (objectId !== origin.activityId) return false;
@@ -43,7 +48,8 @@ function isMatchingReturnAccept(activity, origin) {
     const objectActor = normalizeEntityId(object.actor);
     if (objectActor !== null && objectActor !== origin.actorUri) return false;
     const objectTarget = normalizeEntityId(object.object);
-    if (objectTarget !== null && objectTarget !== origin.remoteActorUri) return false;
+    const identityBoundTargets = new Set([origin.remoteActorUri, canonicalRemoteActorUri]);
+    if (objectTarget !== null && !identityBoundTargets.has(objectTarget)) return false;
   }
   return true;
 }
@@ -92,6 +98,34 @@ async function fetchJson(url, options = {}) {
   return await response.json();
 }
 
+async function resolveCanonicalRemoteActorUri(requestedActorUri) {
+  const requestedUrl = new URL(requestedActorUri);
+  const response = await fetch(requestedUrl, {
+    headers: { accept: 'application/activity+json, application/ld+json, application/json' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status} from ${requestedUrl.origin}`);
+  if (response.url) {
+    const responseUrl = new URL(response.url);
+    if (responseUrl.origin !== requestedUrl.origin || responseUrl.username || responseUrl.password) {
+      throw new Error('remote actor document redirected outside its requested authority');
+    }
+  }
+  const actor = await response.json();
+  const actorTypes = arrayOf(actor?.type ?? actor?.['@type']).map(normalizeType).filter(Boolean);
+  if (!actorTypes.some(type => ACTOR_TYPES.has(type))) {
+    throw new Error('remote actor document does not declare a supported ActivityStreams actor type');
+  }
+  const canonicalActorUri = normalizeEntityId(actor);
+  if (!canonicalActorUri) throw new Error('remote actor document does not expose an id');
+  const canonicalUrl = new URL(canonicalActorUri);
+  if (canonicalUrl.protocol !== 'https:' || canonicalUrl.origin !== requestedUrl.origin
+    || canonicalUrl.username || canonicalUrl.password || canonicalUrl.hash) {
+    throw new Error('remote actor canonical id escaped its requested HTTPS authority');
+  }
+  return canonicalUrl.toString();
+}
+
 async function resolveFollowingUri(actorUri) {
   const actor = await fetchJson(actorUri);
   const following = normalizeEntityId(actor.following);
@@ -111,7 +145,8 @@ async function queryFollowingMembership(origin, followingUri) {
     const members = [...arrayOf(page?.items), ...arrayOf(page?.orderedItems)]
       .map(normalizeEntityId)
       .filter(Boolean);
-    if (members.includes(origin.remoteActorUri)) return true;
+    const canonicalRemoteActorUri = origin.canonicalRemoteActorUri ?? origin.remoteActorUri;
+    if (members.includes(canonicalRemoteActorUri)) return true;
 
     const embeddedFirst = depth === 0 && members.length === 0
       && page?.first && typeof page.first === 'object' && !Array.isArray(page.first)
@@ -168,16 +203,20 @@ async function waitForBidirectionalProof(mode, origin) {
   const attempts = parsePositiveInteger(process.env.AP_INTEROP_RETURN_ASSERT_ATTEMPTS, DEFAULT_ATTEMPTS, 'return assertion attempts', 300);
   const delayMs = parsePositiveInteger(process.env.AP_INTEROP_RETURN_ASSERT_DELAY_MS, DEFAULT_DELAY_MS, 'return assertion delay', 30000);
   let followingUri = null;
+  let canonicalRemoteActorUri = null;
   let lastError = null;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
+      canonicalRemoteActorUri ??= await resolveCanonicalRemoteActorUri(origin.remoteActorUri);
+      const identityBoundOrigin = { ...origin, canonicalRemoteActorUri };
       followingUri ??= await resolveFollowingUri(origin.actorUri);
-      const followingContainsRemote = await queryFollowingMembership(origin, followingUri);
-      const sidecar = mode === 'external' ? await readMatchingSidecarAccept(origin) : { observed: false, streamId: null, path: null };
+      const followingContainsRemote = await queryFollowingMembership(identityBoundOrigin, followingUri);
+      const sidecar = mode === 'external' ? await readMatchingSidecarAccept(identityBoundOrigin) : { observed: false, streamId: null, path: null };
       if (followingContainsRemote && (mode === 'native' || sidecar.observed)) {
         return {
           followingUri,
+          canonicalRemoteActorUri,
           followingContainsRemote,
           returnAcceptApplied: true,
           sidecarInboundAcceptObserved: sidecar.observed,
@@ -219,7 +258,8 @@ async function run(argv = process.argv.slice(2)) {
     actorUri,
     localUsername: origin.senderUsername,
     remoteUsername,
-    remoteActorUri: origin.remoteActorUri,
+    requestedRemoteActorUri: origin.remoteActorUri,
+    remoteActorUri: evidence.canonicalRemoteActorUri,
     activityId: origin.activityId,
     persistedFollowCount,
     returnAcceptApplied: evidence.returnAcceptApplied,
@@ -234,13 +274,15 @@ function selfTest() {
     activityId: 'https://activitypods.test/alice/outbox/1',
     actorUri: 'https://activitypods.test/alice',
     remoteActorUri: 'https://remote.test/users/bob',
+    canonicalRemoteActorUri: 'https://remote.test/ap/users/123',
   };
   const matching = {
     type: 'Accept',
-    actor: origin.remoteActorUri,
+    actor: origin.canonicalRemoteActorUri,
     object: { type: 'Follow', id: origin.activityId, actor: origin.actorUri, object: origin.remoteActorUri },
   };
   if (!isMatchingReturnAccept(matching, origin)) throw new Error('self-test matching Accept failed');
+  if (isMatchingReturnAccept({ ...matching, actor: origin.remoteActorUri }, origin)) throw new Error('self-test non-canonical actor failed closed');
   if (isMatchingReturnAccept({ ...matching, actor: 'https://evil.test/users/bob' }, origin)) throw new Error('self-test actor mismatch failed closed');
   if (isMatchingReturnAccept({ ...matching, object: { ...matching.object, id: 'https://activitypods.test/alice/outbox/2' } }, origin)) throw new Error('self-test Follow id mismatch failed closed');
   if (validateRemoteUsername('interop') !== 'interop') throw new Error('self-test remote username validation failed');
@@ -258,4 +300,4 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   }
 }
 
-export { isMatchingReturnAccept, normalizeEntityId, queryFollowingMembership, validateOrigin, validateRemoteUsername };
+export { isMatchingReturnAccept, normalizeEntityId, queryFollowingMembership, resolveCanonicalRemoteActorUri, validateOrigin, validateRemoteUsername };

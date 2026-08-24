@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 // @ts-expect-error The executable proof helper is intentionally plain ESM without a declaration file.
-import { queryFollowingMembership } from "../../../interop/ap/scripts/assert-real-return-accept.mjs";
+import { queryFollowingMembership, resolveCanonicalRemoteActorUri } from "../../../interop/ap/scripts/assert-real-return-accept.mjs";
 
 const origin = {
   remoteActorUri: "https://remote.example/users/bob",
+  canonicalRemoteActorUri: "https://remote.example/ap/users/123",
 };
 
 afterEach(() => vi.unstubAllGlobals());
@@ -18,7 +19,7 @@ describe("public following collection evidence", () => {
       }],
       ["https://activitypods.example/alice/following?page=1", {
         type: "CollectionPage",
-        items: [origin.remoteActorUri],
+        items: [origin.canonicalRemoteActorUri],
       }],
     ]);
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
@@ -41,5 +42,35 @@ describe("public following collection evidence", () => {
 
     await expect(queryFollowingMembership(origin, "https://activitypods.example/alice/following"))
       .rejects.toThrow(/escaped its authority/u);
+  });
+
+  it("binds a requested actor alias to a same-authority canonical actor id", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: origin.canonicalRemoteActorUri,
+      type: "Person",
+    }), { status: 200 })));
+
+    await expect(resolveCanonicalRemoteActorUri(origin.remoteActorUri))
+      .resolves.toBe(origin.canonicalRemoteActorUri);
+  });
+
+  it("rejects a canonical actor id that escapes the requested authority", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: "https://evil.example/ap/users/123",
+      type: "Person",
+    }), { status: 200 })));
+
+    await expect(resolveCanonicalRemoteActorUri(origin.remoteActorUri))
+      .rejects.toThrow(/escaped its requested HTTPS authority/u);
+  });
+
+  it("rejects a non-actor document even when its id stays on the requested authority", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: origin.canonicalRemoteActorUri,
+      type: "Note",
+    }), { status: 200 })));
+
+    await expect(resolveCanonicalRemoteActorUri(origin.remoteActorUri))
+      .rejects.toThrow(/supported ActivityStreams actor type/u);
   });
 });
