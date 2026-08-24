@@ -43,7 +43,9 @@ jobs:
           REDPANDA_RF3_IMAGE: redpandadata/redpanda:v24.1.3
           REDPANDA_RF3_REPEATS: '3'
           REDPANDA_RF3_MESSAGES: '4000'
-          REDPANDA_RF3_LATENCY_MESSAGES: '300'
+          # p99 over 300 observations depends on only a handful of tail samples
+          # and has produced contradictory codec decisions on identical heads.
+          REDPANDA_RF3_LATENCY_MESSAGES: '2000'
           REDPANDA_RF3_BATCH: '100'
           REDPANDA_RF3_OUTPUT: ../measurements/redpanda-compression-rf3/summary.json
         run: npm exec -- tsx scripts/benchmark-redpanda-compression-rf3.ts

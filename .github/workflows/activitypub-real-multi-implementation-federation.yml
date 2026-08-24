@@ -88,7 +88,7 @@ jobs:
             remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '5a43aa67d8535ed410c34f455791adffa3ad4f41'
+      ACTIVITYPODS_SHA: '7cabeab99704d27dcd13eaf4b02f3a87238c8804'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -371,6 +371,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
+          recorder_host="$(node fedify-sidecar/interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
           tunnel_host="$(
             AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-native" \
             AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
@@ -379,7 +381,8 @@ jobs:
           )"
           AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
           AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
-          AP_PUBLIC_PROXY_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_TARGET_PORT=3001 \
+          AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
+          AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${recorder_host}" AP_PUBLIC_PROXY_INBOX_TARGET_PORT=3001 \
             node fedify-sidecar/interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
             > "${EVIDENCE_DIR}/native-public-proxy.jsonl" 2> "${EVIDENCE_DIR}/native-public-proxy.log" &
           echo "$!" > "${EVIDENCE_DIR}/native-public-proxy.pid"
@@ -536,7 +539,7 @@ jobs:
             )"
             AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
             AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
-            AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3001 \
+            AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
             AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_INBOX_TARGET_PORT=8080 \
               node interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
               > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.jsonl" \
