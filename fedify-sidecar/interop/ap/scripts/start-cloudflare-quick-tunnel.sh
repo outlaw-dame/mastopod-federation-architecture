@@ -27,7 +27,7 @@ fi
 
 docker rm -f "${AP_INTEROP_TUNNEL_CONTAINER}" >/dev/null 2>&1 || true
 docker run -d --name "${AP_INTEROP_TUNNEL_CONTAINER}" --network host \
-  "${AP_INTEROP_CLOUDFLARED_IMAGE}" tunnel --no-autoupdate \
+  "${AP_INTEROP_CLOUDFLARED_IMAGE}" tunnel --protocol http2 --no-autoupdate \
   --url "${AP_INTEROP_TUNNEL_ORIGIN}" --loglevel info >/dev/null
 
 hostname=''

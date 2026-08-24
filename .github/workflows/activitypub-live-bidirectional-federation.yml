@@ -30,7 +30,7 @@ jobs:
         mode: [native, external]
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '8a71c07e3ef04659ebf6eaf7e781836b43397011'
+      ACTIVITYPODS_SHA: '5a43aa67d8535ed410c34f455791adffa3ad4f41'
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       MASTODON_ACTOR_URI: https://mastodon/users/interop
