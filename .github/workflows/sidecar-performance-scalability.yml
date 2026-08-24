@@ -224,6 +224,12 @@ jobs:
               expectedStatusRate: metric(summary, 'relay_loadtest_expected_status_rate', 'value'),
               p95Ms: metric(summary, 'http_req_duration', 'p(95)'),
               p99Ms: metric(summary, 'http_req_duration', 'p(99)'),
+              ...(name.startsWith('inbound-') ? {
+                remoteSigningP95Ms: metric(summary, 'relay_loadtest_remote_signing_latency_ms', 'p(95)'),
+                remoteSigningP99Ms: metric(summary, 'relay_loadtest_remote_signing_latency_ms', 'p(99)'),
+                sidecarP95Ms: metric(summary, 'relay_loadtest_app_latency_ms', 'p(95)'),
+                sidecarP99Ms: metric(summary, 'relay_loadtest_app_latency_ms', 'p(99)'),
+              } : {}),
             };
             if (stages[name].status !== 0) throw new Error(`${name} failed k6 thresholds with exit ${stages[name].status}`);
             if (stages[name].failureRate >= 0.02 || stages[name].expectedStatusRate <= 0.98) {

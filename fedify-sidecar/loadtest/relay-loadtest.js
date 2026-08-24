@@ -110,6 +110,7 @@ const runNonce = __ENV.APDM_LOADTEST_RUN_NONCE
 const acceptedCounter = new Counter('relay_loadtest_accepted_total');
 const expectedStatusRate = new Rate('relay_loadtest_expected_status_rate');
 const appLatency = new Trend('relay_loadtest_app_latency_ms', true);
+const remoteSigningLatency = new Trend('relay_loadtest_remote_signing_latency_ms', true);
 
 // ---------------------------------------------------------------------------
 // Cached relay domain — derived once from RELAY_ACTOR_URL.
@@ -362,6 +363,9 @@ function relayInboundSignedRequest() {
       tags: { endpoint: 'remote_signature_fixture' },
     },
   );
+  remoteSigningLatency.add(signed.timings.duration, {
+    endpoint: 'remote_signature_fixture',
+  });
 
   let outHeaders = null;
   try {
@@ -392,7 +396,9 @@ function relayInboundSignedRequest() {
     },
   );
 
-  appLatency.add(signed.timings.duration + res.timings.duration, {
+  // Keep sidecar service latency separate from the isolated remote fixture's
+  // synchronous RSA latency. Both are reported and gated independently.
+  appLatency.add(res.timings.duration, {
     endpoint: 'relay_inbound_signed',
   });
   const ok = check(res, {
@@ -511,6 +517,7 @@ const thresholdsByScenario = {
     relay_loadtest_expected_status_rate: ['rate>0.99'],
     http_req_duration:                ['p(95)<500', 'p(99)<1000'],
     relay_loadtest_app_latency_ms:    ['p(95)<750', 'p(99)<1500'],
+    relay_loadtest_remote_signing_latency_ms: ['p(95)<750', 'p(99)<3000'],
   },
   relay_mixed: {
     http_req_failed:                  ['rate<0.02'],
@@ -676,6 +683,8 @@ export function handleSummary(data) {
         data.metrics.relay_loadtest_expected_status_rate,
       relay_loadtest_app_latency_ms:
         data.metrics.relay_loadtest_app_latency_ms,
+      relay_loadtest_remote_signing_latency_ms:
+        data.metrics.relay_loadtest_remote_signing_latency_ms,
       relay_loadtest_accepted_total:
         data.metrics.relay_loadtest_accepted_total,
     },
