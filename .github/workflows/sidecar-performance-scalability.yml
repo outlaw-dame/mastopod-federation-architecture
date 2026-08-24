@@ -220,13 +220,22 @@ jobs:
           NODE
 
           expected="$(node -e "const fs=require('fs');let n=0;for(const f of ['handoff-low','handoff-medium','handoff-high'])n+=JSON.parse(fs.readFileSync('artifacts/sidecar-scale/'+f+'.json')).metrics.relay_loadtest_accepted_total.count+1;process.stdout.write(String(n))")"
+          pending=-1
+          lag=-1
+          dlq=-1
+          outbound=-1
           for attempt in $(seq 1 120); do
-            pending="$(docker exec sidecar-scale-redis redis-cli XPENDING ap:queue:outbox-intent:v1 sidecar-workers | head -n 1 | tr -d '[:space:]')"
+            group_info="$(docker exec sidecar-scale-redis redis-cli --raw XINFO GROUPS ap:queue:outbox-intent:v1)"
+            pending="$(printf '%s\n' "$group_info" | awk '$0 == "pending" { getline; print; exit }')"
+            lag="$(printf '%s\n' "$group_info" | awk '$0 == "lag" { getline; print; exit }')"
+            dlq="$(docker exec sidecar-scale-redis redis-cli XLEN ap:queue:dlq:outbox-intent:v1 | tr -d '[:space:]')"
             outbound="$(docker exec sidecar-scale-redis redis-cli XLEN ap:queue:outbound:v1 | tr -d '[:space:]')"
-            if [[ "${pending:-0}" -eq 0 && "$outbound" -eq "$expected" ]]; then break; fi
+            if [[ "${pending:-1}" -eq 0 && "${lag:-1}" -eq 0 && "${dlq:-1}" -eq 0 && "$outbound" -eq "$expected" ]]; then break; fi
             sleep 1
           done
-          [[ "${pending:-0}" -eq 0 ]]
+          [[ "${pending:-1}" -eq 0 ]]
+          [[ "${lag:-1}" -eq 0 ]]
+          [[ "${dlq:-1}" -eq 0 ]]
           [[ "$outbound" -eq "$expected" ]]
 
           REDIS_URL="${REDIS_URL}" node --input-type=module <<'NODE'
@@ -248,8 +257,10 @@ jobs:
           [[ "$used_memory" -gt 0 && "$used_memory" -lt 536870912 ]]
           curl -fsS "${SIDECAR_BASE_URL}/ready" > artifacts/sidecar-scale/ready-after.json
           jq -n \
-            --argjson expected "$expected" --argjson outbound "$outbound" --argjson redisBytes "$used_memory" \
-            '{schema:"apdm.sidecar-scale-drain.v2",expectedHandoffs:$expected,outboundQueued:$outbound,redisUsedBytes:$redisBytes}' \
+            --argjson expected "$expected" --argjson outbound "$outbound" \
+            --argjson pending "$pending" --argjson lag "$lag" --argjson dlq "$dlq" \
+            --argjson redisBytes "$used_memory" \
+            '{schema:"apdm.sidecar-scale-drain.v3",expectedHandoffs:$expected,outboundQueued:$outbound,pending:$pending,consumerLag:$lag,outboxIntentDlq:$dlq,redisUsedBytes:$redisBytes}' \
             > artifacts/sidecar-scale/drain-summary.json
 
       - name: Upload performance and scalability evidence
