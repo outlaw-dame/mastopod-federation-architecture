@@ -5,6 +5,20 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("real federation fixture bootstrap contracts", () => {
+  it("enables verified Fedify ingress whenever the multi-lane inbound worker is active", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toContain(
+      "ENABLE_INBOUND_WORKER=true ENABLE_ORIGIN_RECONCILIATION=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=true",
+    );
+    expect(workflow).not.toContain(
+      "ENABLE_INBOUND_WORKER=true ENABLE_ORIGIN_RECONCILIATION=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=false",
+    );
+  });
+
   it("retries transient interop image dependency downloads with a strict bound", () => {
     const dockerfile = readFileSync(resolve(process.cwd(), "Dockerfile.interop"), "utf8");
 
