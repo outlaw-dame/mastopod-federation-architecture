@@ -59,6 +59,10 @@ services:
       - ./runtime/certs:/interop/runtime/certs:ro
       - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
       - ./fixtures/castopod/interop-boot.ini:/usr/local/etc/php/conf.d/zz-interop-boot.ini:ro
+      - ./fixtures/castopod/zz-interop-fpm.conf:/usr/local/etc/php-fpm.d/zz-interop-fpm.conf:ro
+      - ./fixtures/castopod/zz-interop-fpm.conf:/etc/php-fpm.d/zz-interop-fpm.conf:ro
+      - ./fixtures/castopod/zz-interop-fpm.conf:/etc/php8/php-fpm.d/zz-interop-fpm.conf:ro
+      - ./fixtures/castopod/zz-interop-apache.conf:/etc/apache2/conf-enabled/zz-interop-apache.conf:ro
     networks:
       - ap-interop
 
