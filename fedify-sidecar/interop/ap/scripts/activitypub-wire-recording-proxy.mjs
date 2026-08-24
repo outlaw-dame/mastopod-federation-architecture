@@ -42,8 +42,8 @@ const server = http.createServer(async (req, res) => {
       method: req.method,
       headers: forwardedHeaders,
       body: body.length > 0 ? body : undefined,
-      bodyTimeout: 30_000,
-      headersTimeout: 30_000,
+      bodyTimeout: 120_000,
+      headersTimeout: 120_000,
       maxRedirections: 0,
     });
     const responseBody = await readBoundedUndiciBody(upstream.body, MAX_RESPONSE_BYTES);
