@@ -76,13 +76,17 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(proxy).toContain("No raw inbound");
   });
 
-  it("keeps the live proof state-based and correlates the external signer to the wire", () => {
+  it("keeps the live proof state-based and correlates successful external forwarding to durable queue evidence", () => {
     const workflow = readFileSync(
       resolve(process.cwd(), "../.github/workflows/activitypub-live-bidirectional-federation.yml"),
       "utf8",
     );
     const helper = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/assert-real-return-accept.mjs"),
+      "utf8",
+    );
+    const realCompose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.real-activitypods.yml"),
       "utf8",
     );
 
@@ -94,6 +98,11 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(workflow).toContain("returnState.returnAcceptActivityId !== inbound.acceptActivityId");
     expect(workflow).toContain("returnAcceptActivityId: process.env.MODE === 'external' ? returnState.returnAcceptActivityId : inbound.acceptActivityId");
     expect(helper).toContain("returnAcceptActivityId: evidence.returnAcceptActivityId");
+    expect(helper).toContain("external proof requires the sidecar processing log");
+    expect(helper).toContain("hasProcessedSidecarAccept(log, origin, candidate.envelopeId, candidate.acceptActivityId)");
+    expect(helper).toContain("hasDurablyProcessedSidecarAccept(client, candidate)");
+    expect(helper).toContain("matching returning Accept lacks a correlated post-forward processing receipt and durable sidecar ACK");
+    expect(realCompose).toContain("LOG_LEVEL: debug");
     expect(workflow).toContain('signing_evidence=("${EVIDENCE_DIR}/external-signing.json")');
     expect(workflow.indexOf("Assert external ActivityPods signing boundary"))
       .toBeLessThan(workflow.indexOf("Assert outgoing wire signature"));

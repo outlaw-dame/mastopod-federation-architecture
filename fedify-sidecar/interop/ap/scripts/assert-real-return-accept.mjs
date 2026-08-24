@@ -265,7 +265,36 @@ async function hasDurablyProcessedSidecarAccept(client, candidate) {
   return true;
 }
 
-async function readMatchingSidecarAccept(origin) {
+function hasProcessedSidecarAccept(log, origin, envelopeId, acceptActivityId) {
+  if (typeof log !== 'string' || typeof envelopeId !== 'string' || envelopeId.length === 0
+    || typeof acceptActivityId !== 'string' || acceptActivityId.length === 0) return false;
+  for (const line of log.split('\n')) {
+    if (!line.trim().startsWith('{')) continue;
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event.msg !== 'Inbound activity processed' || event.envelopeId !== envelopeId) continue;
+    if (event.activityId !== acceptActivityId || event.actor !== origin.canonicalRemoteActorUri) continue;
+    if (!isAcceptType(event.type)) continue;
+    return true;
+  }
+  return false;
+}
+
+function findProcessedSidecarAccept(candidates, log, origin) {
+  return candidates.find(candidate => hasProcessedSidecarAccept(
+    log, origin, candidate.envelopeId, candidate.acceptActivityId,
+  )) ?? null;
+}
+
+async function readMatchingSidecarAccept(origin, logPath) {
+  let log;
+  try {
+    log = await readFile(logPath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
+    throw error;
+  }
+
   const client = createClient({ url: process.env.REDIS_URL || 'redis://127.0.0.1:6379' });
   client.on('error', () => {});
   await client.connect();
@@ -289,6 +318,7 @@ async function readMatchingSidecarAccept(origin) {
       };
       if (typeof candidate.envelopeId !== 'string' || candidate.envelopeId.length === 0
         || typeof candidate.acceptActivityId !== 'string' || candidate.acceptActivityId.length === 0) continue;
+      if (!hasProcessedSidecarAccept(log, origin, candidate.envelopeId, candidate.acceptActivityId)) continue;
       if (await hasDurablyProcessedSidecarAccept(client, candidate)) return { observed: true, ...candidate };
     }
     return { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
@@ -297,29 +327,7 @@ async function readMatchingSidecarAccept(origin) {
   }
 }
 
-// Kept for compatibility with focused unit imports; live proof no longer relies on info-level logs.
-function hasProcessedSidecarAccept(log, origin, envelopeId, acceptActivityId) {
-  if (typeof log !== 'string' || typeof envelopeId !== 'string' || envelopeId.length === 0
-    || typeof acceptActivityId !== 'string' || acceptActivityId.length === 0) return false;
-  for (const line of log.split('\n')) {
-    if (!line.trim().startsWith('{')) continue;
-    let event;
-    try { event = JSON.parse(line); } catch { continue; }
-    if (event.msg !== 'Inbound activity processed' || event.envelopeId !== envelopeId) continue;
-    if (event.activityId !== acceptActivityId || event.actor !== origin.canonicalRemoteActorUri) continue;
-    if (!isAcceptType(event.type)) continue;
-    return true;
-  }
-  return false;
-}
-
-function findProcessedSidecarAccept(candidates, log, origin) {
-  return candidates.find(candidate => hasProcessedSidecarAccept(
-    log, origin, candidate.envelopeId, candidate.acceptActivityId,
-  )) ?? null;
-}
-
-async function waitForBidirectionalProof(mode, origin) {
+async function waitForBidirectionalProof(mode, origin, sidecarLogPath) {
   const attempts = parsePositiveInteger(process.env.AP_INTEROP_RETURN_ASSERT_ATTEMPTS, DEFAULT_ATTEMPTS, 'return assertion attempts', 300);
   const delayMs = parsePositiveInteger(process.env.AP_INTEROP_RETURN_ASSERT_DELAY_MS, DEFAULT_DELAY_MS, 'return assertion delay', 30000);
   let followingUri = null;
@@ -332,7 +340,7 @@ async function waitForBidirectionalProof(mode, origin) {
       followingUri ??= await resolveFollowingUri(origin.actorUri);
       const followingContainsRemote = await queryFollowingMembership(identityBoundOrigin, followingUri);
       const sidecar = mode === 'external'
-        ? await readMatchingSidecarAccept(identityBoundOrigin)
+        ? await readMatchingSidecarAccept(identityBoundOrigin, sidecarLogPath)
         : { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
       if (followingContainsRemote && (mode === 'native' || sidecar.observed)) {
         return {
@@ -349,7 +357,7 @@ async function waitForBidirectionalProof(mode, origin) {
       }
       lastError = new Error(
         mode === 'external' && !sidecar.observed
-          ? 'matching returning Accept lacks a correlated durable sidecar delivery-and-ACK receipt'
+          ? 'matching returning Accept lacks a correlated post-forward processing receipt and durable sidecar ACK'
           : 'ActivityPods following collection has not applied the remote Accept yet',
       );
     } catch (error) {
@@ -364,15 +372,18 @@ async function run(argv = process.argv.slice(2)) {
   if (argv.length < 6 || argv.length > 7) {
     throw new Error('Usage: assert-real-return-accept.mjs <native|external> <origin-json> <target> <actor-uri> <remote-username> <persisted-follow-count> [sidecar-log]');
   }
-  const [mode, originPath, target, actorUri, remoteUsernameRaw, persistedCountRaw] = argv;
+  const [mode, originPath, target, actorUri, remoteUsernameRaw, persistedCountRaw, sidecarLogPath] = argv;
   if (!['native', 'external'].includes(mode)) throw new Error(`unsupported proof mode ${mode}`);
+  if (mode === 'external' && (!sidecarLogPath || sidecarLogPath.length === 0)) {
+    throw new Error('external proof requires the sidecar processing log');
+  }
   const remoteUsername = validateRemoteUsername(remoteUsernameRaw);
   const persistedFollowCount = Number(persistedCountRaw);
   if (!Number.isSafeInteger(persistedFollowCount) || persistedFollowCount < 1) throw new Error('persisted follow count must be positive');
   const origin = validateOrigin(JSON.parse(await readFile(originPath, 'utf8')));
   if (origin.mode !== mode) throw new Error('origin proof mode mismatch');
   if (origin.actorUri !== actorUri) throw new Error('remote persistence actor does not match origin actor');
-  const evidence = await waitForBidirectionalProof(mode, origin);
+  const evidence = await waitForBidirectionalProof(mode, origin, sidecarLogPath);
   process.stdout.write(`${JSON.stringify({
     schema: 'activitypods.activitypub.real-bidirectional-acceptance.v1',
     ok: true,
@@ -413,6 +424,19 @@ function selfTest() {
   if (validateRemoteUsername('interop') !== 'interop') throw new Error('self-test remote username validation failed');
   if (compareStreamIds('10-2', '10-2') !== 0 || compareStreamIds('10-1', '10-2') >= 0 || compareStreamIds('11-0', '10-99') <= 0) {
     throw new Error('self-test Redis stream id comparison failed');
+  }
+  const processedLog = JSON.stringify({
+    msg: 'Inbound activity processed',
+    envelopeId: 'env-1',
+    activityId: 'https://remote.test/accepts/1',
+    actor: origin.canonicalRemoteActorUri,
+    type: 'Accept',
+  });
+  if (!hasProcessedSidecarAccept(processedLog, origin, 'env-1', 'https://remote.test/accepts/1')) {
+    throw new Error('self-test post-forward receipt correlation failed');
+  }
+  if (hasProcessedSidecarAccept(processedLog, origin, 'env-2', 'https://remote.test/accepts/1')) {
+    throw new Error('self-test mismatched post-forward receipt failed closed');
   }
   process.stdout.write('ok\n');
 }

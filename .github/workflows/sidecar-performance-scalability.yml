@@ -21,10 +21,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  end-to-end-load:
+  architecture-scale:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 25
     env:
+      FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       REDIS_URL: redis://127.0.0.1:16382
       REDPANDA_BROKERS: 127.0.0.1:19093
       OPENSEARCH_URL: http://127.0.0.1:19201
@@ -32,11 +33,14 @@ jobs:
       SCALE_INDEX: sidecar-scale-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout exact federation candidate
+        uses: actions/checkout@v4
         with:
+          ref: ${{ env.FEDERATION_SHA }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
@@ -54,8 +58,8 @@ jobs:
           token="$(openssl rand -hex 32)"
           echo "::add-mask::${token}"
           echo "SCALE_TOKEN=${token}" >> "$GITHUB_ENV"
-          printf '{"schema":"apdm.sidecar-scale-run.v1","federationSha":"%s","runId":"%s","runAttempt":"%s"}\n' \
-            "${GITHUB_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
+          printf '{"schema":"apdm.sidecar-scale-run.v2","federationSha":"%s","runId":"%s","runAttempt":"%s","promotionEvidence":false}\n' \
+            "${FEDERATION_SHA}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
             > artifacts/sidecar-scale/run.json
 
       - name: Start pinned Redis RedPanda and OpenSearch
@@ -74,7 +78,7 @@ jobs:
             opensearchproject/opensearch:3.8.0@sha256:bcc1797519726ceb6d651d4a3e60b7c30da91793914a8dfe75fd441d4f641509
 
           ready=false
-          for attempt in $(seq 1 90); do
+          for attempt in $(seq 1 60); do
             redis_ok=false; redpanda_ok=false; opensearch_ok=false
             docker exec sidecar-scale-redis redis-cli PING 2>/dev/null | grep -q PONG && redis_ok=true || true
             docker exec sidecar-scale-redpanda rpk cluster info --brokers=127.0.0.1:19093 >/dev/null 2>&1 && redpanda_ok=true || true
@@ -93,7 +97,7 @@ jobs:
             docker exec sidecar-scale-redpanda rpk topic create "$topic" --brokers=127.0.0.1:19093 >/dev/null
           done
 
-      - name: Start mock ActivityPods authority and production queue pipeline
+      - name: Start isolated remote signer and production queue pipeline
         shell: bash
         run: |
           set -euo pipefail
@@ -121,7 +125,7 @@ jobs:
             NODE_ENV=development PORT=18089 HOST=127.0.0.1 DOMAIN=scale.test SIDECAR_STARTUP_MODE=blocking \
             SIDECAR_TOKEN="${SCALE_TOKEN}" ACTIVITYPODS_URL=http://127.0.0.1:8794 ACTIVITYPODS_TOKEN="${SCALE_TOKEN}" \
             REDIS_URL="${REDIS_URL}" APDM_COMPLETION_MARKER_V2_CUTOVER=fresh \
-            REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED=true REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES=1024 \
+            REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED=true REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES=1 \
             REDIS_STREAM_PAYLOAD_BROTLI_QUALITY=0 REDPANDA_BROKERS="${REDPANDA_BROKERS}" \
             REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false REDPANDA_COMPRESSION=zstd REDPANDA_ZSTD_LEVEL=1 \
             STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 \
@@ -149,7 +153,7 @@ jobs:
           [[ "$ready" == true ]]
           curl -fsS "${SIDECAR_BASE_URL}/ready" > artifacts/sidecar-scale/ready-before.json
 
-      - name: Run staged k6 inbound and handoff load
+      - name: Run staged k6 authenticated handoff load
         shell: bash
         run: |
           set -euo pipefail
@@ -168,7 +172,8 @@ jobs:
               -e ACTIVITYPODS_URL=http://127.0.0.1:8794 -e "ACTIVITYPODS_TOKEN=${SCALE_TOKEN}" \
               -e LOCAL_RELAY_ACTOR_URI=https://remote.scale.test/users/relay \
               -e SIDECAR_PUBLIC_HOST=scale.test \
-              -e RAMP_UP_DURATION=2s -e RAMP_DOWN_DURATION=2s \
+              -e RELAY_INBOUND_ACTIVITY_TYPE=create \
+              -e RAMP_UP_DURATION=1s -e RAMP_DOWN_DURATION=1s \
               -e "VUS=${vus}" -e "RAMP_TARGET=${vus}" loadtest/relay-loadtest.js \
               > "artifacts/sidecar-scale/${name}.log" 2>&1
             status=$?
@@ -176,19 +181,27 @@ jobs:
             printf '%s=%s\n' "$name" "$status" >> artifacts/sidecar-scale/stage-status.txt
           }
 
-          run_stage inbound-low relay_inbound_signed 10 10s
-          run_stage inbound-medium relay_inbound_signed 40 15s
-          run_stage inbound-high relay_inbound_signed 100 20s
-          run_stage handoff-high relay_subscribe 80 15s
+          # Keep the ingress population large enough for percentile/scale evidence
+          # but bounded so the production workers can drain
+          # the complete accepted population inside the CI proof window.
+          run_stage inbound-low relay_inbound_signed 10 2s
+          run_stage inbound-medium relay_inbound_signed 40 2s
+          run_stage inbound-high relay_inbound_signed 100 2s
+          run_stage handoff-low relay_subscribe 10 2s
+          run_stage handoff-medium relay_subscribe 40 2s
+          run_stage handoff-high relay_subscribe 100 2s
 
-      - name: Verify scale response and end-to-end drain
+      - name: Verify scale response durable drain and compression
         shell: bash
         run: |
           set -euo pipefail
           node <<'NODE'
           const fs = require('node:fs');
           const dir = 'artifacts/sidecar-scale';
-          const names = ['inbound-low', 'inbound-medium', 'inbound-high', 'handoff-high'];
+          const names = [
+            'inbound-low', 'inbound-medium', 'inbound-high',
+            'handoff-low', 'handoff-medium', 'handoff-high',
+          ];
           const statuses = Object.fromEntries(fs.readFileSync(`${dir}/stage-status.txt`, 'utf8').trim().split('\n').map(line => {
             const at = line.lastIndexOf('=');
             return [line.slice(0, at), Number(line.slice(at + 1))];
@@ -217,52 +230,84 @@ jobs:
               throw new Error(`${name} failed response integrity gates`);
             }
           }
-          const low = stages['inbound-low'];
-          const high = stages['inbound-high'];
-          const throughputGain = high.acceptedRate / low.acceptedRate;
-          if (!(throughputGain >= 2)) throw new Error(`inbound throughput scaled only ${throughputGain.toFixed(3)}x from 10 to 100 VUs`);
+          const inboundThroughputGain = stages['inbound-high'].acceptedRate / stages['inbound-low'].acceptedRate;
+          const handoffThroughputGain = stages['handoff-high'].acceptedRate / stages['handoff-low'].acceptedRate;
+          if (!(inboundThroughputGain >= 2)) throw new Error(`signed inbound throughput scaled only ${inboundThroughputGain.toFixed(3)}x from 10 to 100 VUs`);
+          if (!(handoffThroughputGain >= 2)) throw new Error(`handoff throughput scaled only ${handoffThroughputGain.toFixed(3)}x from 10 to 100 VUs`);
           const report = {
-            schema: 'apdm.sidecar-performance-scalability.v1',
-            federationSha: process.env.GITHUB_SHA,
+            schema: 'apdm.sidecar-performance-scalability.v2',
+            federationSha: process.env.FEDERATION_SHA,
+            promotionEvidence: false,
             stages,
-            scale: { lowVus: 10, highVus: 100, acceptedThroughputGain: throughputGain },
-            scope: 'Staged protected ingress, Redis Streams compression, inbound ActivityPods forwarding, RedPanda Stream2/firehose, OpenSearch indexing, and external handoff fanout. Public HTTP-signature verification remains covered by the separate live federation lane.',
+            scale: { lowVus: 10, highVus: 100, inboundThroughputGain, handoffThroughputGain },
+            scope: 'Freshly signed public inbox ingress, fail-closed verification, ActivityPods forwarding, Redis Streams compression, RedPanda Stream2/firehose, OpenSearch indexing, authenticated outbox handoff, and durable outbox-intent fanout under bounded staged load. Remote network delivery remains covered by dedicated live federation lanes.',
           };
           fs.writeFileSync(`${dir}/performance-summary.json`, `${JSON.stringify(report, null, 2)}\n`);
           NODE
 
-          inbound_expected="$(node -e "const fs=require('fs');let n=0;for(const f of ['inbound-low','inbound-medium','inbound-high'])n+=JSON.parse(fs.readFileSync('artifacts/sidecar-scale/'+f+'.json')).metrics.relay_loadtest_accepted_total.count+1;process.stdout.write(String(n))")"
-          indexed=0
+          inbound_expected="$(node -e "const fs=require('fs');let n=0;for(const f of ['inbound-low','inbound-medium','inbound-high'])n+=JSON.parse(fs.readFileSync('artifacts/sidecar-scale/'+f+'.json')).metrics.relay_loadtest_accepted_total.count;process.stdout.write(String(n))")"
+          expected="$(node -e "const fs=require('fs');let n=0;for(const f of ['handoff-low','handoff-medium','handoff-high'])n+=JSON.parse(fs.readFileSync('artifacts/sidecar-scale/'+f+'.json')).metrics.relay_loadtest_accepted_total.count+1;process.stdout.write(String(n))")"
+          inbound_pending=-1
+          inbound_lag=-1
+          inbound_dlq=-1
+          indexed=-1
+          pending=-1
+          lag=-1
+          dlq=-1
+          outbound=-1
           for attempt in $(seq 1 120); do
+            inbound_group_info="$(docker exec sidecar-scale-redis redis-cli --raw XINFO GROUPS ap:queue:inbound:v1)"
+            inbound_pending="$(printf '%s\n' "$inbound_group_info" | awk '$0 == "pending" { getline; print; exit }')"
+            inbound_lag="$(printf '%s\n' "$inbound_group_info" | awk '$0 == "lag" { getline; print; exit }')"
+            inbound_dlq="$(docker exec sidecar-scale-redis redis-cli XLEN ap:queue:dlq:inbound:v1 | tr -d '[:space:]')"
             if curl -fsS -X POST "${OPENSEARCH_URL}/${SCALE_INDEX}/_refresh" >/dev/null 2>&1; then
               indexed="$(curl -fsS "${OPENSEARCH_URL}/${SCALE_INDEX}/_count" | jq -r '.count')"
             else
               indexed=0
             fi
-            pending="$(docker exec sidecar-scale-redis redis-cli XPENDING ap:queue:inbound:v1 sidecar-workers | head -n 1 | tr -d '[:space:]')"
-            if [[ "$indexed" -eq "$inbound_expected" && "${pending:-0}" -eq 0 ]]; then break; fi
+            group_info="$(docker exec sidecar-scale-redis redis-cli --raw XINFO GROUPS ap:queue:outbox-intent:v1)"
+            pending="$(printf '%s\n' "$group_info" | awk '$0 == "pending" { getline; print; exit }')"
+            lag="$(printf '%s\n' "$group_info" | awk '$0 == "lag" { getline; print; exit }')"
+            dlq="$(docker exec sidecar-scale-redis redis-cli XLEN ap:queue:dlq:outbox-intent:v1 | tr -d '[:space:]')"
+            outbound="$(docker exec sidecar-scale-redis redis-cli XLEN ap:queue:outbound:v1 | tr -d '[:space:]')"
+            if [[ "${inbound_pending:-1}" -eq 0 && "${inbound_lag:-1}" -eq 0 && "${inbound_dlq:-1}" -eq 0 && "$indexed" -eq "$inbound_expected" \
+              && "${pending:-1}" -eq 0 && "${lag:-1}" -eq 0 && "${dlq:-1}" -eq 0 && "$outbound" -eq "$expected" ]]; then break; fi
             sleep 1
           done
+          [[ "${inbound_pending:-1}" -eq 0 ]]
+          [[ "${inbound_lag:-1}" -eq 0 ]]
+          [[ "${inbound_dlq:-1}" -eq 0 ]]
           [[ "$indexed" -eq "$inbound_expected" ]]
+          [[ "${pending:-1}" -eq 0 ]]
+          [[ "${lag:-1}" -eq 0 ]]
+          [[ "${dlq:-1}" -eq 0 ]]
+          [[ "$outbound" -eq "$expected" ]]
 
-          handoff_expected="$(node -e "const s=JSON.parse(require('fs').readFileSync('artifacts/sidecar-scale/handoff-high.json'));process.stdout.write(String(s.metrics.relay_loadtest_accepted_total.count+1))")"
-          for attempt in $(seq 1 60); do
-            outbox_pending="$(docker exec sidecar-scale-redis redis-cli XPENDING ap:queue:outbox-intent:v1 sidecar-workers | head -n 1 | tr -d '[:space:]')"
-            outbound_count="$(docker exec sidecar-scale-redis redis-cli XLEN ap:queue:outbound:v1 | tr -d '[:space:]')"
-            if [[ "${outbox_pending:-0}" -eq 0 && "$outbound_count" -eq "$handoff_expected" ]]; then break; fi
-            sleep 1
-          done
-          [[ "${outbox_pending:-0}" -eq 0 ]]
-          [[ "$outbound_count" -eq "$handoff_expected" ]]
+          REDIS_URL="${REDIS_URL}" node --input-type=module <<'NODE'
+          import { createClient } from './fedify-sidecar/node_modules/redis/dist/index.js';
+          const client = createClient({ url: process.env.REDIS_URL });
+          await client.connect();
+          try {
+            const entries = await client.xRange('ap:queue:outbound:v1', '-', '+', { COUNT: 1000 });
+            if (entries.length === 0) throw new Error('outbound queue is empty after accepted handoffs');
+            const compressed = entries.filter(entry => entry.message?.activity?.startsWith('apq1:br:')).length;
+            if (compressed === 0) throw new Error('no Brotli-compressed outbound activity payload was observed');
+            process.stdout.write(`${JSON.stringify({ schema: 'apdm.sidecar-scale-compression.v1', sampled: entries.length, compressed })}\n`);
+          } finally {
+            await client.quit();
+          }
+          NODE
 
           used_memory="$(docker exec sidecar-scale-redis redis-cli INFO memory | sed -n 's/^used_memory:\([0-9][0-9]*\).*/\1/p')"
           [[ "$used_memory" -gt 0 && "$used_memory" -lt 536870912 ]]
           curl -fsS "${SIDECAR_BASE_URL}/ready" > artifacts/sidecar-scale/ready-after.json
           jq -n \
-            --argjson expected "$inbound_expected" --argjson indexed "$indexed" \
-            --argjson handoffExpected "$handoff_expected" --argjson outbound "$outbound_count" \
+            --argjson inboundExpected "$inbound_expected" --argjson indexed "$indexed" \
+            --argjson inboundPending "$inbound_pending" --argjson inboundLag "$inbound_lag" --argjson inboundDlq "$inbound_dlq" \
+            --argjson expected "$expected" --argjson outbound "$outbound" \
+            --argjson pending "$pending" --argjson lag "$lag" --argjson dlq "$dlq" \
             --argjson redisBytes "$used_memory" \
-            '{schema:"apdm.sidecar-scale-drain.v1",inbound:{expected:$expected,indexed:$indexed,pending:0},handoff:{expected:$handoffExpected,outboundQueued:$outbound,pending:0},redis:{usedMemoryBytes:$redisBytes}}' \
+            '{schema:"apdm.sidecar-scale-drain.v4",inbound:{expected:$inboundExpected,opensearchIndexed:$indexed,pending:$inboundPending,consumerLag:$inboundLag,dlq:$inboundDlq},handoff:{expected:$expected,outboundQueued:$outbound,pending:$pending,consumerLag:$lag,dlq:$dlq},redisUsedBytes:$redisBytes}' \
             > artifacts/sidecar-scale/drain-summary.json
 
       - name: Upload performance and scalability evidence
@@ -278,16 +323,26 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          cat artifacts/sidecar-scale/stage-status.txt 2>/dev/null || true
-          cat artifacts/sidecar-scale/performance-summary.json 2>/dev/null || true
-          tail -n 500 artifacts/sidecar-scale/sidecar.log 2>/dev/null || true
-          docker logs --tail 200 sidecar-scale-redpanda 2>/dev/null || true
-          docker logs --tail 200 sidecar-scale-opensearch 2>/dev/null || true
+          set +e
+          tail -n 300 artifacts/sidecar-scale/sidecar.log 2>/dev/null || true
+          for file in artifacts/sidecar-scale/*.log; do
+            echo "--- ${file} ---"
+            tail -n 120 "$file" 2>/dev/null || true
+          done
+          docker exec sidecar-scale-redis redis-cli XLEN ap:queue:outbox-intent:v1 2>/dev/null || true
+          docker exec sidecar-scale-redis redis-cli XINFO GROUPS ap:queue:outbox-intent:v1 2>/dev/null || true
+          docker exec sidecar-scale-redis redis-cli XLEN ap:queue:outbound:v1 2>/dev/null || true
+          docker exec sidecar-scale-redis redis-cli XLEN ap:queue:dlq:outbox-intent:v1 2>/dev/null || true
+          docker exec sidecar-scale-redis redis-cli XINFO GROUPS ap:queue:inbound:v1 2>/dev/null || true
+          curl -fsS "${OPENSEARCH_URL}/${SCALE_INDEX}/_count" 2>/dev/null || true
+          docker exec sidecar-scale-redpanda rpk topic describe ap.stream2.remote-public.v1 -c 2>/dev/null || true
+          docker exec sidecar-scale-redpanda rpk topic describe ap.firehose.v1 -c 2>/dev/null || true
 
       - name: Cleanup
         if: always()
         shell: bash
         run: |
-          kill "$(cat artifacts/sidecar-scale/sidecar.pid 2>/dev/null)" 2>/dev/null || true
-          kill "$(cat artifacts/sidecar-scale/activitypods.pid 2>/dev/null)" 2>/dev/null || true
+          set +e
+          if [[ -f artifacts/sidecar-scale/sidecar.pid ]]; then kill "$(cat artifacts/sidecar-scale/sidecar.pid)" 2>/dev/null || true; fi
+          if [[ -f artifacts/sidecar-scale/activitypods.pid ]]; then kill "$(cat artifacts/sidecar-scale/activitypods.pid)" 2>/dev/null || true; fi
           docker rm -f sidecar-scale-redis sidecar-scale-redpanda sidecar-scale-opensearch >/dev/null 2>&1 || true

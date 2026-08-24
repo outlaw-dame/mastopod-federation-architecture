@@ -93,6 +93,7 @@ const localRelayActorUri = __ENV.LOCAL_RELAY_ACTOR_URI || __ENV.AP_RELAY_LOCAL_A
 // /users/<segment>/inbox bypasses Fedify HTTP-signature verification.
 const relayInboxRecipient = __ENV.RELAY_INBOX_RECIPIENT || 'relaybot';
 const sidecarPublicHost = __ENV.SIDECAR_PUBLIC_HOST || 'localhost';
+const relayInboundActivityType = (__ENV.RELAY_INBOUND_ACTIVITY_TYPE || 'announce').toLowerCase();
 
 const duration = __ENV.DURATION || '4m';
 const rampUpDuration = __ENV.RAMP_UP_DURATION || '20s';
@@ -192,6 +193,25 @@ function relayInboundPayload() {
   const announceId =
     `https://${RELAY_DOMAIN}/activities/announce-${runNonce}-${__VU}-${__ITER}`;
   const ts = new Date().toISOString();
+
+  if (relayInboundActivityType === 'create') {
+    return JSON.stringify({
+      '@context': 'https://www.w3.org/ns/activitystreams',
+      id: `https://${RELAY_DOMAIN}/activities/create-${runNonce}-${__VU}-${__ITER}`,
+      type: 'Create',
+      actor: localRelayActorUri,
+      published: ts,
+      to: ['https://www.w3.org/ns/activitystreams#Public'],
+      object: {
+        id: objectNoteId,
+        type: 'Note',
+        attributedTo: localRelayActorUri,
+        content: `signed architecture loadtest note ${__ITER}`,
+        published: ts,
+        to: ['https://www.w3.org/ns/activitystreams#Public'],
+      },
+    });
+  }
 
   return JSON.stringify({
     '@context': 'https://www.w3.org/ns/activitystreams',
