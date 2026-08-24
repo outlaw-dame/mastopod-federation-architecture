@@ -1,0 +1,7 @@
+{
+  "@context": "https://www.w3.org/ns/activitystreams",
+  "id": "https://mastodon.example/activities/follow-missing-object-1",
+  "type": "Follow",
+  "actor": "https://mastodon.example/users/alice",
+  "published": "2026-08-24T12:20:00Z"
+}
