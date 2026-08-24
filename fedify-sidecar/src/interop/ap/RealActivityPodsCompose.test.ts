@@ -146,6 +146,9 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(workflow).toContain("AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000");
     expect(workflow).toContain('AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${recorder_host}"');
     expect(workflow).toContain("AP_PUBLIC_PROXY_INBOX_TARGET_PORT=8080");
+    expect(workflow).toContain('tunnel_host="${ACTIVITYPODS_HOST:-}"');
+    expect(workflow).toContain('authorityContinuity":"same-bounded-tunnel"');
+    expect(workflow).not.toContain('AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external"');
     expect(workflow).not.toContain("PEERTUBE_FEDERATION_PREVENT_SSRF=false");
     expect(workflow).not.toMatch(/AP_INTEROP_TUNNEL_ORIGIN=http:\/\/[^\s]*:(?:3000|3001|8080)/u);
   });

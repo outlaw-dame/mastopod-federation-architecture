@@ -88,7 +88,7 @@ jobs:
             remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '7cabeab99704d27dcd13eaf4b02f3a87238c8804'
+      ACTIVITYPODS_SHA: '0cf793e245abda97c9cf6d32c99f3283bd5b7c99'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -529,14 +529,21 @@ jobs:
           sidecar_host="$(node interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
           echo "AP_PROOF_SIDECAR_HOST=${sidecar_host}" >> "${GITHUB_ENV}"
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
-            kill "$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")" 2>/dev/null || true
-            docker rm -f "ap-${TARGET}-tunnel-native" >/dev/null 2>&1 || true
-            tunnel_host="$(
-              AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external" \
-              AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
-              AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
-                interop/ap/scripts/start-cloudflare-quick-tunnel.sh
-            )"
+            native_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")"
+            kill "${native_proxy_pid}" 2>/dev/null || true
+            for attempt in $(seq 1 30); do
+              if ! kill -0 "${native_proxy_pid}" 2>/dev/null; then break; fi
+              sleep 1
+            done
+            if kill -0 "${native_proxy_pid}" 2>/dev/null; then
+              echo "Native public proxy did not terminate before the authority-mode cutover." >&2
+              exit 1
+            fi
+            tunnel_host="${ACTIVITYPODS_HOST:-}"
+            if [[ -z "${tunnel_host}" || ! "${tunnel_host}" =~ ^[a-z0-9.-]+$ ]]; then
+              echo "The validated native public tunnel authority is unavailable or malformed." >&2
+              exit 1
+            fi
             AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
             AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
             AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
@@ -557,9 +564,7 @@ jobs:
               sleep 2
             done
             [[ "${tunnel_ready}" == true ]]
-            export ACTIVITYPODS_HOST="${tunnel_host}"
-            echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "${GITHUB_ENV}"
-            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"security":"remote SSRF prevention remains enabled"}\n' \
+            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"authorityContinuity":"same-bounded-tunnel","security":"remote SSRF prevention remains enabled"}\n' \
               "${TARGET}" "${tunnel_host}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
           fi
           : > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl"
