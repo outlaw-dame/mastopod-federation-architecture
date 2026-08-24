@@ -54,6 +54,8 @@ import {
 export interface InboundWorkerConfig {
   concurrency: number;
   activityPodsUrl: string;
+  /** Public ActivityPods authority used only to identify the local target inbox. */
+  activityPodsPublicUrl?: string;
   activityPodsToken: string;
   requestTimeoutMs: number;
   userAgent: string;
@@ -216,6 +218,26 @@ export interface InboundWorkerConfig {
    * ActivityPods forwarding path.
    */
   providerInboxEventClient?: ActivityPodsProviderInboxEventClient;
+}
+
+export function resolveActivityPodsTargetInbox(publicBaseUrl: string, envelopePath: string): string {
+  const authority = new URL(publicBaseUrl);
+  if (
+    !["http:", "https:"].includes(authority.protocol)
+    || authority.username
+    || authority.password
+    || authority.pathname !== "/"
+    || authority.search
+    || authority.hash
+  ) {
+    throw new Error("Invalid ActivityPods public inbox authority");
+  }
+  if (!/^\/(?:inbox|(?:users\/)?[A-Za-z0-9._-]{1,128}\/inbox)\/?$/u.test(envelopePath)) {
+    throw new Error("Invalid ActivityPods target inbox path");
+  }
+  const target = new URL(envelopePath, authority);
+  if (target.origin !== authority.origin) throw new Error("ActivityPods target inbox escaped its public authority");
+  return target.toString();
 }
 
 export interface VerificationResult {
@@ -2117,7 +2139,17 @@ export class InboundWorker {
     try {
       // Determine target inbox from path
       // Path format: /users/{username}/inbox or /{username}/inbox
-      const targetInbox = `${this.config.activityPodsUrl}${envelope.path}`;
+      const targetInboxBase = this.config.activityPodsPublicUrl ?? this.config.activityPodsUrl;
+      let targetInbox: string;
+      try {
+        targetInbox = resolveActivityPodsTargetInbox(targetInboxBase, envelope.path);
+      } catch (error) {
+        return {
+          success: false,
+          permanent: true,
+          error: error instanceof Error ? error.message : "Invalid ActivityPods target inbox",
+        };
+      }
       const isBenchmark = envelope.headers?.["x-sidecar-benchmark"] === "1";
 
       const response = await request(
@@ -2190,6 +2222,7 @@ export function createInboundWorker(
   const config: InboundWorkerConfig = {
     concurrency: parseInt(process.env["INBOUND_CONCURRENCY"] || "32", 10),
     activityPodsUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
+    activityPodsPublicUrl: process.env["ACTIVITYPODS_PUBLIC_URL"],
     activityPodsToken: process.env["ACTIVITYPODS_TOKEN"] || "",
     requestTimeoutMs: parseInt(process.env["REQUEST_TIMEOUT_MS"] || "30000", 10),
     userAgent: process.env["USER_AGENT"] || "Fedify-Sidecar/1.0 (ActivityPods)",

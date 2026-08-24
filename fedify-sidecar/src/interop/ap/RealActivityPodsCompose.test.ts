@@ -23,6 +23,7 @@ describe("real ActivityPods sidecar compose authority", () => {
     const sidecar = overlay.services?.["fedify-sidecar"];
 
     expect(sidecar?.environment?.["ACTIVITYPODS_URL"]).toBe("http://activitypods-internal:3001");
+    expect(sidecar?.environment?.["ACTIVITYPODS_PUBLIC_URL"]).toBe("https://activitypods");
     expect(sidecar?.environment?.["SIDECAR_STARTUP_MODE"]).toBe("blocking");
     expect(sidecar?.environment?.["ENABLE_FEP_3AB2_STREAMING"]).toBe("false");
     expect(sidecar?.extra_hosts).toEqual([

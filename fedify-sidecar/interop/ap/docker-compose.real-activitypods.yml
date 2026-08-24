@@ -65,6 +65,7 @@ services:
       # ap-proof-router, while sidecar-owned service actors are published on the
       # independently routed https://sidecar authority.
       ACTIVITYPODS_URL: http://activitypods-internal:3001
+      ACTIVITYPODS_PUBLIC_URL: https://activitypods
       ACTIVITYPODS_TOKEN: ${ACTIVITYPODS_TOKEN:?ACTIVITYPODS_TOKEN is required}
       ATPROTO_PASSWORD_VERIFY_TOKEN: ${ATPROTO_PASSWORD_VERIFY_TOKEN:-}
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:?SIDECAR_TOKEN is required}

@@ -76,12 +76,19 @@ describe("real bidirectional ActivityPub federation proof", () => {
     );
 
     expect(workflow).toContain("assert-real-return-accept.mjs");
+    expect(workflow).toContain("ACTIVITYPODS_PUBLIC_URL=https://activitypods");
     expect(workflow).toContain("return-accept-state.json");
     expect(workflow).toContain("returnState.followingContainsRemote !== true");
     expect(workflow).toContain("returnState.sidecarInboundAcceptObserved !== true");
     expect(workflow).toContain('signing_evidence=("${EVIDENCE_DIR}/external-signing.json")');
     expect(workflow.indexOf("Assert external ActivityPods signing boundary"))
       .toBeLessThan(workflow.indexOf("Assert outgoing wire signature"));
+
+    const matrixWorkflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+    expect(matrixWorkflow).toContain('ACTIVITYPODS_PUBLIC_URL="https://${ACTIVITYPODS_HOST}"');
   });
 
   it("matches the returning Accept to the exact remote actor and outgoing Follow", () => {
