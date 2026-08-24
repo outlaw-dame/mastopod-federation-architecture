@@ -429,10 +429,8 @@ jobs:
           set -euo pipefail
           router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
           recorder_host="$(node fedify-sidecar/interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
-          recorder_bind="${recorder_host}"
-          if [[ "${TARGET}" == peertube ]]; then recorder_bind=0.0.0.0; fi
           : > "${EVIDENCE_DIR}/native-inbound.jsonl"
-          AP_SIGNING_PROXY_HOST="${recorder_bind}" AP_SIGNING_PROXY_PORT=3001 \
+          AP_SIGNING_PROXY_HOST="${recorder_host}" AP_SIGNING_PROXY_PORT=3001 \
           AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
           AP_SIGNING_PROXY_RECORD_INBOUND=true \
           AP_SIGNING_PROXY_EVIDENCE_PATH="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-inbound.jsonl" \

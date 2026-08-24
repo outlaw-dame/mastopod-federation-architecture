@@ -27,6 +27,8 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(workflow).toContain("returnAcceptActivityId: externalBidirectional.returnAcceptActivityId");
     expect(workflow).toContain("externalWire?.signingCorrelation?.exactSignedHeadersMatched === true");
     expect(workflow).toContain("activitypods.activitypub.real-multi-implementation.v2");
+    expect(workflow).toContain('AP_SIGNING_PROXY_HOST="${recorder_host}"');
+    expect(workflow).not.toContain("recorder_bind=0.0.0.0");
   });
 
   it("does not confuse the remote fixture username with the local ActivityPods dataset", () => {
