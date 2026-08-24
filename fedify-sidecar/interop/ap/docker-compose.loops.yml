@@ -64,7 +64,6 @@ services:
       MAIL_MAILER: log
       MAIL_FROM_ADDRESS: interop@loops.invalid
       MAIL_FROM_NAME: Loops Interop
-      LOOPS_LOCAL_DOMAINS: activitypods.test
       LOOPS_CAPTCHA: "false"
       LOG_CHANNEL: stderr
       LOG_LEVEL: info
