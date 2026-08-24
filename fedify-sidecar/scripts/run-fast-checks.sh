@@ -37,6 +37,8 @@ npm exec -- vitest run \
   src/security/tests/ActivityPubEgressPolicy.test.ts \
   src/security/tests/ActivityPubEgressPolicyPhase5Regression.test.ts \
   src/security/tests/ActivityPubPinnedDns.test.ts \
+  src/utils/tests/searchConsent.test.ts \
+  src/search/tests/SearchIndexerService.test.ts \
   src/at-adapter/external/ExternalAtSessionStore.test.ts \
   src/at-adapter/oauth/OAuthRefreshTokenStore.scalability.test.ts \
   src/atproto/repo/AtprotoRepoRegistry.scalability.test.ts \

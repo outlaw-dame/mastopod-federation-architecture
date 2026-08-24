@@ -93,7 +93,7 @@ jobs:
           fi
           printf 'redis=true redpanda=true opensearch=true\n' > artifacts/sidecar-scale/dependency-readiness.txt
 
-          for topic in ap.stream1.local-public.v1 ap.stream2.remote-public.v1 ap.firehose.v1 ap.tombstones.v1 ap.firehose.dlq.v1; do
+          for topic in ap.stream1.local-public.v1 ap.stream2.remote-public.v1 ap.firehose.v1 ap.tombstones.v1 ap.firehose.dlq.v1 canonical.v1; do
             docker exec sidecar-scale-redpanda rpk topic create "$topic" --brokers=127.0.0.1:19093 >/dev/null
           done
 
