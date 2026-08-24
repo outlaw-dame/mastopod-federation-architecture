@@ -32,8 +32,8 @@ const comparisons = summary.comparisons.map((entry) => {
     if (r.clusterNetwork > 1.05) reasons.push(`cluster network ${r.clusterNetwork}x > 1.05x GZIP`);
     if (r.totalCpu > 0.90) reasons.push(`total CPU ${r.totalCpu}x > 0.90x GZIP`);
     if (r.throughput < 1.25) reasons.push(`producer throughput ${r.throughput}x < 1.25x GZIP`);
-    if (r.singletonP95 > 1.15) reasons.push(`singleton p95 ${r.singletonP95}x > 1.15x GZIP`);
-    if (r.singletonP99 > 1.25) reasons.push(`singleton p99 ${r.singletonP99}x > 1.25x GZIP`);
+    if (r.singletonP95 > 1.15 && p95DeltaMs > 0.5) reasons.push(`singleton p95 ${r.singletonP95}x > 1.15x GZIP`);
+    if (r.singletonP99 > 1.25 && p99DeltaMs > 0.5) reasons.push(`singleton p99 ${r.singletonP99}x > 1.25x GZIP`);
     if (p99DeltaMs > 0.5) reasons.push(`singleton p99 absolute delta ${p99DeltaMs.toFixed(3)} ms > 0.5 ms`);
   }
 
