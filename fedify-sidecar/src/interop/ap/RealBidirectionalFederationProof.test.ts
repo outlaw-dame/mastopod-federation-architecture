@@ -74,12 +74,19 @@ describe("real bidirectional ActivityPub federation proof", () => {
       resolve(process.cwd(), "../.github/workflows/activitypub-live-bidirectional-federation.yml"),
       "utf8",
     );
+    const helper = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-return-accept.mjs"),
+      "utf8",
+    );
 
     expect(workflow).toContain("assert-real-return-accept.mjs");
     expect(workflow).toContain("ACTIVITYPODS_PUBLIC_URL=https://activitypods");
     expect(workflow).toContain("return-accept-state.json");
     expect(workflow).toContain("returnState.followingContainsRemote !== true");
     expect(workflow).toContain("returnState.sidecarInboundAcceptObserved !== true");
+    expect(workflow).toContain("returnState.returnAcceptActivityId !== inbound.acceptActivityId");
+    expect(workflow).toContain("returnAcceptActivityId: process.env.MODE === 'external' ? returnState.returnAcceptActivityId : inbound.acceptActivityId");
+    expect(helper).toContain("returnAcceptActivityId: evidence.returnAcceptActivityId");
     expect(workflow).toContain('signing_evidence=("${EVIDENCE_DIR}/external-signing.json")');
     expect(workflow.indexOf("Assert external ActivityPods signing boundary"))
       .toBeLessThan(workflow.indexOf("Assert outgoing wire signature"));
