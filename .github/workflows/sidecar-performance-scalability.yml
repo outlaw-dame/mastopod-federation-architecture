@@ -329,20 +329,14 @@ jobs:
           [[ "${dlq:-1}" -eq 0 ]]
           [[ "$outbound" -eq "$expected" ]]
 
-          REDIS_URL="${REDIS_URL}" node --input-type=module <<'NODE'
-          import { createClient } from './fedify-sidecar/node_modules/redis/dist/index.js';
-          const client = createClient({ url: process.env.REDIS_URL });
-          await client.connect();
-          try {
-            const entries = await client.xRange('ap:queue:outbound:v1', '-', '+', { COUNT: 1000 });
-            if (entries.length === 0) throw new Error('outbound queue is empty after accepted handoffs');
-            const compressed = entries.filter(entry => entry.message?.activity?.startsWith('apq1:br:')).length;
-            if (compressed === 0) throw new Error('no beneficial Brotli-compressed outbound activity payload was observed');
-            process.stdout.write(`${JSON.stringify({ schema: 'apdm.sidecar-scale-compression.v1', sampled: entries.length, compressed })}\n`);
-          } finally {
-            await client.quit();
-          }
-          NODE
+          compression_activity_id="https://remote.scale.test/activities/apdm-scale-compression-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          (
+            cd fedify-sidecar
+            REDIS_URL="${REDIS_URL}" OUTBOX_INTENT_STREAM_KEY=ap:queue:outbox-intent:v1 OUTBOUND_STREAM_KEY=ap:queue:outbound:v1 \
+              npm exec -- tsx scripts/assert-real-redis-stream-compression.ts \
+                "${compression_activity_id}" \
+                "${GITHUB_WORKSPACE}/artifacts/sidecar-scale/compression-evidence.json"
+          )
 
           used_memory="$(docker exec sidecar-scale-redis redis-cli INFO memory | sed -n 's/^used_memory:\([0-9][0-9]*\).*/\1/p')"
           [[ "$used_memory" -gt 0 && "$used_memory" -lt 536870912 ]]

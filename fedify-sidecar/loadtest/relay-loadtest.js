@@ -515,7 +515,10 @@ const thresholdsByScenario = {
   relay_inbound_signed: {
     http_req_failed:                  ['rate<0.01'],
     relay_loadtest_expected_status_rate: ['rate>0.99'],
-    http_req_duration:                ['p(95)<500', 'p(99)<1000'],
+    // This scenario makes two sequential requests per iteration. Do not gate
+    // their combined http_req_duration distribution: it mixes remote signing
+    // and sidecar ingress into a percentile with no service-level meaning.
+    // Both components remain independently fail-closed below.
     relay_loadtest_app_latency_ms:    ['p(95)<750', 'p(99)<1500'],
     relay_loadtest_remote_signing_latency_ms: ['p(95)<750', 'p(99)<3000'],
   },

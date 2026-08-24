@@ -163,7 +163,7 @@ jobs:
             node fedify-sidecar/interop/ap/scripts/activitypods-signing-recording-proxy.mjs \
             > "${EVIDENCE_DIR}/signing-proxy.log" 2>&1 &
           echo "$!" > "${EVIDENCE_DIR}/signing-proxy.pid"
-          NODE_ENV=development PORT=8080 HOST="${sidecar_host}" DOMAIN=activitypods SIDECAR_STARTUP_MODE=blocking \
+          NODE_ENV=development LOG_LEVEL=debug PORT=8080 HOST="${sidecar_host}" DOMAIN=activitypods SIDECAR_STARTUP_MODE=blocking \
           AP_INTEROP_ENABLE_MEDIA_FIXTURES=true APDM_INTEROP_PRIVATE_HOSTS=mastodon \
           REDIS_URL=redis://127.0.0.1:6379 APDM_COMPLETION_MARKER_V2_CUTOVER=fresh REDPANDA_BROKERS=127.0.0.1:19092 \
           REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development \
