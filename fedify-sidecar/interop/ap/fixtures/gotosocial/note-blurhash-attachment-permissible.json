@@ -1,0 +1,30 @@
+{
+  "@context": [
+    "https://www.w3.org/ns/activitystreams",
+    {
+      "blurhash": "toot:blurhash",
+      "toot": "http://joinmastodon.org/ns#"
+    }
+  ],
+  "id": "https://gotosocial.example/activities/create-note-media-1",
+  "type": "Create",
+  "actor": "https://gotosocial.example/users/dee",
+  "published": "2026-08-24T12:25:00Z",
+  "to": ["https://www.w3.org/ns/activitystreams#Public"],
+  "object": {
+    "id": "https://gotosocial.example/notes/note-media-1",
+    "type": "Note",
+    "attributedTo": "https://gotosocial.example/users/dee",
+    "content": "<p>Photo with a blurhash placeholder extension.</p>",
+    "to": ["https://www.w3.org/ns/activitystreams#Public"],
+    "attachment": [
+      {
+        "type": "Document",
+        "mediaType": "image/jpeg",
+        "url": "https://gotosocial.example/media/photo-1.jpg",
+        "name": "A synthetic placeholder photo",
+        "blurhash": "LEHV6nWB2yk8pyo0adR*.7kCMdnj"
+      }
+    ]
+  }
+}

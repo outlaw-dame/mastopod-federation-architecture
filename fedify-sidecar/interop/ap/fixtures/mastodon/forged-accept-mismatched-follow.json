@@ -1,0 +1,14 @@
+{
+  "@context": "https://www.w3.org/ns/activitystreams",
+  "id": "https://mastodon.example/activities/accept-forged-1",
+  "type": "Accept",
+  "actor": "https://mastodon.example/users/carol",
+  "published": "2026-08-24T12:10:00Z",
+  "to": ["https://mastodon.example/users/alice"],
+  "object": {
+    "id": "https://mastodon.example/activities/follow-real-1",
+    "type": "Follow",
+    "actor": "https://mastodon.example/users/alice",
+    "object": "https://mastodon.example/users/bob"
+  }
+}
