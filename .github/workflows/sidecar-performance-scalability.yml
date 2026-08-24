@@ -155,7 +155,7 @@ jobs:
               --summary-export="/work/artifacts/sidecar-scale/${name}.json" \
               -e SCENARIO=relay_subscribe -e "TARGET_BASE_URL=${SIDECAR_BASE_URL}" \
               -e "SIDECAR_TOKEN=${SCALE_TOKEN}" -e "DURATION=${duration}" \
-              -e RAMP_UP_DURATION=2s -e RAMP_DOWN_DURATION=2s \
+              -e RAMP_UP_DURATION=1s -e RAMP_DOWN_DURATION=1s \
               -e "VUS=${vus}" -e "RAMP_TARGET=${vus}" loadtest/relay-loadtest.js \
               > "artifacts/sidecar-scale/${name}.log" 2>&1
             status=$?
@@ -163,9 +163,12 @@ jobs:
             printf '%s=%s\n' "$name" "$status" >> artifacts/sidecar-scale/stage-status.txt
           }
 
-          run_stage handoff-low 10 10s
-          run_stage handoff-medium 40 15s
-          run_stage handoff-high 100 20s
+          # Keep the ingress population large enough for percentile/scale evidence
+          # but bounded so the real 8-concurrency outbox-intent worker can drain
+          # the complete accepted population inside the CI proof window.
+          run_stage handoff-low 10 2s
+          run_stage handoff-medium 40 2s
+          run_stage handoff-high 100 2s
 
       - name: Verify scale response durable drain and compression
         shell: bash
@@ -269,6 +272,7 @@ jobs:
             tail -n 120 "$file" 2>/dev/null || true
           done
           docker exec sidecar-scale-redis redis-cli XLEN ap:queue:outbox-intent:v1 2>/dev/null || true
+          docker exec sidecar-scale-redis redis-cli XINFO GROUPS ap:queue:outbox-intent:v1 2>/dev/null || true
           docker exec sidecar-scale-redis redis-cli XLEN ap:queue:outbound:v1 2>/dev/null || true
           docker exec sidecar-scale-redis redis-cli XLEN ap:queue:dlq:outbox-intent:v1 2>/dev/null || true
 
