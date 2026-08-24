@@ -27,6 +27,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      ACTIVITYPODS_RETURN_HOST: ${ACTIVITYPODS_RETURN_HOST:-host.docker.internal}
       ACTIVITYPODS_RETURN_PORT: ${ACTIVITYPODS_RETURN_PORT:-3000}
     volumes:
       - ./caddy/Caddyfile.real-activitypods:/etc/caddy/Caddyfile:ro

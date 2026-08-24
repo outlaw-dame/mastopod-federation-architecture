@@ -73,7 +73,7 @@ https://loops.test {
     path_regexp actor_inbox ^/(users/)?[^/]+/inbox/?$
   }
   handle @actorInbox {
-    reverse_proxy host.docker.internal:{$ACTIVITYPODS_RETURN_PORT:3000}
+    reverse_proxy {$ACTIVITYPODS_RETURN_HOST:host.docker.internal}:{$ACTIVITYPODS_RETURN_PORT:3000}
   }
   handle {
     reverse_proxy host.docker.internal:3000

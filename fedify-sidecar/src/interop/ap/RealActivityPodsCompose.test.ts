@@ -47,6 +47,9 @@ describe("real ActivityPods sidecar compose authority", () => {
     );
 
     expect(router?.depends_on?.["mastodon-wire-recorder"]).toBeDefined();
+    expect(router?.environment?.["ACTIVITYPODS_RETURN_HOST"]).toBe(
+      "${ACTIVITYPODS_RETURN_HOST:-host.docker.internal}",
+    );
     expect(router?.environment?.["ACTIVITYPODS_RETURN_PORT"]).toBe(
       "${ACTIVITYPODS_RETURN_PORT:-3000}",
     );
@@ -110,5 +113,6 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(workflow).toContain("REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true");
     expect(workflow).not.toContain("REDPANDA_ENFORCE_TOPIC_GOVERNANCE=false");
     expect(workflow).toContain("Reset ActivityPods state between authority modes");
+    expect(workflow).toContain('ACTIVITYPODS_RETURN_HOST="${AP_PROOF_SIDECAR_HOST}"');
   });
 });

@@ -24,6 +24,7 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(workflows.slice(0, 2).every((workflow) => workflow.includes('HOST="${sidecar_host}"'))).toBe(true);
     expect(workflows.slice(0, 2).every((workflow) => workflow.includes('AP_PROOF_SIDECAR_HOST=${sidecar_host}'))).toBe(true);
     expect(workflows.slice(0, 2).every((workflow) => workflow.includes('SIDECAR_DELIVERY_HANDOFF_URL="http://${AP_PROOF_SIDECAR_HOST}:8080/webhook/outbox"'))).toBe(true);
+    expect(workflows.slice(0, 2).every((workflow) => workflow.includes("ACTIVITYPODS_RETURN_HOST="))).toBe(true);
     expect(workflows.slice(0, 2).every((workflow) => !workflow.includes("PORT=8080 HOST=127.0.0.1"))).toBe(true);
   });
 
