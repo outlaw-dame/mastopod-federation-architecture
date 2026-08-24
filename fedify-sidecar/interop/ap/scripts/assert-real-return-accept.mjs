@@ -10,6 +10,8 @@ const ACTOR_TYPES = new Set(
     .flatMap(type => [type, `https://www.w3.org/ns/activitystreams#${type}`]),
 );
 const INBOUND_STREAM = process.env.INBOUND_STREAM_KEY || 'ap:queue:inbound:v1';
+const INBOUND_DLQ_STREAM = process.env.INBOUND_DLQ_STREAM_KEY || 'ap:queue:dlq:inbound:v1';
+const INBOUND_GROUP = process.env.INBOUND_CONSUMER_GROUP || 'sidecar-workers';
 const DEFAULT_ATTEMPTS = 90;
 const DEFAULT_DELAY_MS = 2000;
 
@@ -121,6 +123,11 @@ async function fetchJson(url, options = {}) {
   return await response.json();
 }
 
+function arrayOf(value) {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
 async function resolveCanonicalRemoteActorUri(requestedActorUri) {
   const requestedUrl = new URL(requestedActorUri);
   const actor = await fetchJson(requestedUrl);
@@ -152,14 +159,12 @@ async function queryFollowingMembership(origin, followingUri) {
   const authority = new URL(followingUri).origin;
   let page = await fetchJson(followingUri);
   const visited = new Set([followingUri]);
-
   for (let depth = 0; depth < 10; depth += 1) {
     const members = [...arrayOf(page?.items), ...arrayOf(page?.orderedItems)]
       .map(normalizeEntityId)
       .filter(Boolean);
     const canonicalRemoteActorUri = origin.canonicalRemoteActorUri ?? origin.remoteActorUri;
     if (members.includes(canonicalRemoteActorUri)) return true;
-
     const embeddedFirst = depth === 0 && members.length === 0
       && page?.first && typeof page.first === 'object' && !Array.isArray(page.first)
       ? page.first
@@ -182,34 +187,90 @@ async function queryFollowingMembership(origin, followingUri) {
   throw new Error('ActivityPods following collection exceeded the bounded page traversal');
 }
 
-function arrayOf(value) {
-  if (value === undefined || value === null) return [];
-  return Array.isArray(value) ? value : [value];
+function parseStreamId(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d+)-(\d+)$/u.exec(value);
+  if (!match) return null;
+  return [BigInt(match[1]), BigInt(match[2])];
 }
 
-function findProcessedSidecarAccept(candidates, log, origin) {
-  return candidates.find(candidate => hasProcessedSidecarAccept(
-    log,
-    origin,
-    candidate.envelopeId,
-    candidate.acceptActivityId,
-  )) ?? null;
+function compareStreamIds(left, right) {
+  const a = parseStreamId(left);
+  const b = parseStreamId(right);
+  if (!a || !b) throw new Error('Redis stream evidence contains a malformed stream id');
+  if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
+  if (a[1] !== b[1]) return a[1] < b[1] ? -1 : 1;
+  return 0;
 }
 
-async function readMatchingSidecarAccept(origin, logPath) {
-  let log;
+function rawPairsToObject(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = {};
+  for (let index = 0; index + 1 < raw.length; index += 2) {
+    out[String(raw[index])] = raw[index + 1];
+  }
+  return out;
+}
+
+async function readInboundGroupState(client) {
+  let groups;
   try {
-    log = await readFile(logPath, 'utf8');
+    groups = await client.sendCommand(['XINFO', 'GROUPS', INBOUND_STREAM]);
   } catch (error) {
-    if (error?.code === 'ENOENT') return { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
+    if (String(error?.message ?? error).includes('no such key')) return null;
     throw error;
   }
+  for (const raw of Array.isArray(groups) ? groups : []) {
+    const group = rawPairsToObject(raw);
+    if (group?.name === INBOUND_GROUP) return group;
+  }
+  return null;
+}
+
+async function isEnvelopeInInboundDlq(client, envelopeId) {
+  let entries;
+  try {
+    entries = await client.xRange(INBOUND_DLQ_STREAM, '-', '+', { COUNT: 10000 });
+  } catch (error) {
+    if (String(error?.message ?? error).includes('no such key')) return false;
+    throw error;
+  }
+  for (const entry of entries ?? []) {
+    const message = entry.message ?? {};
+    if (message.type !== 'inbound' || typeof message.data !== 'string') continue;
+    try {
+      const data = JSON.parse(message.data);
+      if (data?.envelopeId === envelopeId) return true;
+    } catch {
+      // Malformed unrelated DLQ entries are not evidence for this envelope.
+    }
+  }
+  return false;
+}
+
+async function hasDurablyProcessedSidecarAccept(client, candidate) {
+  const group = await readInboundGroupState(client);
+  const lastDeliveredId = typeof group?.['last-delivered-id'] === 'string'
+    ? group['last-delivered-id']
+    : typeof group?.lastDeliveredId === 'string'
+      ? group.lastDeliveredId
+      : null;
+  if (!lastDeliveredId || compareStreamIds(lastDeliveredId, candidate.streamId) < 0) return false;
+
+  const pending = await client.sendCommand([
+    'XPENDING', INBOUND_STREAM, INBOUND_GROUP, candidate.streamId, candidate.streamId, '1',
+  ]);
+  if (Array.isArray(pending) && pending.length > 0) return false;
+  if (await isEnvelopeInInboundDlq(client, candidate.envelopeId)) return false;
+  return true;
+}
+
+async function readMatchingSidecarAccept(origin) {
   const client = createClient({ url: process.env.REDIS_URL || 'redis://127.0.0.1:6379' });
   client.on('error', () => {});
   await client.connect();
   try {
     const entries = await client.xRange(INBOUND_STREAM, '-', '+', { COUNT: 1000 });
-    const candidates = [];
     for (const entry of entries) {
       const message = entry.message ?? {};
       if (message.method !== 'POST' || typeof message.body !== 'string') continue;
@@ -220,21 +281,23 @@ async function readMatchingSidecarAccept(origin, logPath) {
       const actorPath = new URL(origin.actorUri).pathname.replace(/\/$/u, '');
       const allowedPaths = new Set([`${actorPath}/inbox`, `/users/${encodeURIComponent(origin.senderUsername)}/inbox`]);
       if (!allowedPaths.has(path)) continue;
-      candidates.push({
+      const candidate = {
         streamId: entry.id,
         envelopeId: message.envelopeId,
         acceptActivityId: normalizeEntityId(activity),
         path,
-      });
+      };
+      if (typeof candidate.envelopeId !== 'string' || candidate.envelopeId.length === 0
+        || typeof candidate.acceptActivityId !== 'string' || candidate.acceptActivityId.length === 0) continue;
+      if (await hasDurablyProcessedSidecarAccept(client, candidate)) return { observed: true, ...candidate };
     }
-    const matched = findProcessedSidecarAccept(candidates, log, origin);
-    if (matched) return { observed: true, ...matched };
     return { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
   } finally {
     await client.quit();
   }
 }
 
+// Kept for compatibility with focused unit imports; live proof no longer relies on info-level logs.
 function hasProcessedSidecarAccept(log, origin, envelopeId, acceptActivityId) {
   if (typeof log !== 'string' || typeof envelopeId !== 'string' || envelopeId.length === 0
     || typeof acceptActivityId !== 'string' || acceptActivityId.length === 0) return false;
@@ -250,20 +313,27 @@ function hasProcessedSidecarAccept(log, origin, envelopeId, acceptActivityId) {
   return false;
 }
 
-async function waitForBidirectionalProof(mode, origin, sidecarLogPath) {
+function findProcessedSidecarAccept(candidates, log, origin) {
+  return candidates.find(candidate => hasProcessedSidecarAccept(
+    log, origin, candidate.envelopeId, candidate.acceptActivityId,
+  )) ?? null;
+}
+
+async function waitForBidirectionalProof(mode, origin) {
   const attempts = parsePositiveInteger(process.env.AP_INTEROP_RETURN_ASSERT_ATTEMPTS, DEFAULT_ATTEMPTS, 'return assertion attempts', 300);
   const delayMs = parsePositiveInteger(process.env.AP_INTEROP_RETURN_ASSERT_DELAY_MS, DEFAULT_DELAY_MS, 'return assertion delay', 30000);
   let followingUri = null;
   let canonicalRemoteActorUri = null;
   let lastError = null;
-
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       canonicalRemoteActorUri ??= await resolveCanonicalRemoteActorUri(origin.remoteActorUri);
       const identityBoundOrigin = { ...origin, canonicalRemoteActorUri };
       followingUri ??= await resolveFollowingUri(origin.actorUri);
       const followingContainsRemote = await queryFollowingMembership(identityBoundOrigin, followingUri);
-      const sidecar = mode === 'external' ? await readMatchingSidecarAccept(identityBoundOrigin, sidecarLogPath) : { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
+      const sidecar = mode === 'external'
+        ? await readMatchingSidecarAccept(identityBoundOrigin)
+        : { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
       if (followingContainsRemote && (mode === 'native' || sidecar.observed)) {
         return {
           followingUri,
@@ -279,13 +349,13 @@ async function waitForBidirectionalProof(mode, origin, sidecarLogPath) {
       }
       lastError = new Error(
         mode === 'external' && !sidecar.observed
-          ? 'matching returning Accept lacks a correlated post-verification sidecar forward receipt'
+          ? 'matching returning Accept lacks a correlated durable sidecar delivery-and-ACK receipt'
           : 'ActivityPods following collection has not applied the remote Accept yet',
       );
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
     }
-    if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, delayMs));
+    if (attempt < attempts) await new Promise(resolveDelay => setTimeout(resolveDelay, delayMs));
   }
   throw lastError ?? new Error('bidirectional federation proof timed out');
 }
@@ -294,16 +364,15 @@ async function run(argv = process.argv.slice(2)) {
   if (argv.length < 6 || argv.length > 7) {
     throw new Error('Usage: assert-real-return-accept.mjs <native|external> <origin-json> <target> <actor-uri> <remote-username> <persisted-follow-count> [sidecar-log]');
   }
-  const [mode, originPath, target, actorUri, remoteUsernameRaw, persistedCountRaw, sidecarLogPath] = argv;
+  const [mode, originPath, target, actorUri, remoteUsernameRaw, persistedCountRaw] = argv;
   if (!['native', 'external'].includes(mode)) throw new Error(`unsupported proof mode ${mode}`);
-  if (mode === 'external' && !sidecarLogPath) throw new Error('external proof requires the sidecar processing log');
   const remoteUsername = validateRemoteUsername(remoteUsernameRaw);
   const persistedFollowCount = Number(persistedCountRaw);
   if (!Number.isSafeInteger(persistedFollowCount) || persistedFollowCount < 1) throw new Error('persisted follow count must be positive');
   const origin = validateOrigin(JSON.parse(await readFile(originPath, 'utf8')));
   if (origin.mode !== mode) throw new Error('origin proof mode mismatch');
   if (origin.actorUri !== actorUri) throw new Error('remote persistence actor does not match origin actor');
-  const evidence = await waitForBidirectionalProof(mode, origin, sidecarLogPath);
+  const evidence = await waitForBidirectionalProof(mode, origin);
   process.stdout.write(`${JSON.stringify({
     schema: 'activitypods.activitypub.real-bidirectional-acceptance.v1',
     ok: true,
@@ -342,6 +411,9 @@ function selfTest() {
   if (isMatchingReturnAccept({ ...matching, actor: 'https://evil.test/users/bob' }, origin)) throw new Error('self-test actor mismatch failed closed');
   if (isMatchingReturnAccept({ ...matching, object: { ...matching.object, id: 'https://activitypods.test/alice/outbox/2' } }, origin)) throw new Error('self-test Follow id mismatch failed closed');
   if (validateRemoteUsername('interop') !== 'interop') throw new Error('self-test remote username validation failed');
+  if (compareStreamIds('10-2', '10-2') !== 0 || compareStreamIds('10-1', '10-2') >= 0 || compareStreamIds('11-0', '10-99') <= 0) {
+    throw new Error('self-test Redis stream id comparison failed');
+  }
   process.stdout.write('ok\n');
 }
 
@@ -356,4 +428,15 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   }
 }
 
-export { findProcessedSidecarAccept, hasProcessedSidecarAccept, isMatchingReturnAccept, normalizeEntityId, queryFollowingMembership, resolveCanonicalRemoteActorUri, validateOrigin, validateRemoteUsername };
+export {
+  compareStreamIds,
+  findProcessedSidecarAccept,
+  hasDurablyProcessedSidecarAccept,
+  hasProcessedSidecarAccept,
+  isMatchingReturnAccept,
+  normalizeEntityId,
+  queryFollowingMembership,
+  resolveCanonicalRemoteActorUri,
+  validateOrigin,
+  validateRemoteUsername,
+};
