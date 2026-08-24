@@ -88,20 +88,19 @@ describe("public following collection evidence", () => {
 
   it("correlates the queued envelope with its post-verification processed receipt", () => {
     const identity = {
-      activityId: "https://activitypods.example/alice/outbox/follow-1",
       canonicalRemoteActorUri: origin.canonicalRemoteActorUri,
     };
+    const acceptActivityId = "https://remote.example/ap/users/123#accepts/follows/1";
     const receipt = JSON.stringify({
       msg: "Inbound activity processed",
       envelopeId: "envelope-1",
-      activityId: identity.activityId,
+      activityId: acceptActivityId,
       actor: identity.canonicalRemoteActorUri,
       type: "Accept",
     });
 
-    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-1")).toBe(true);
-    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-2")).toBe(false);
-    expect(hasProcessedSidecarAccept(receipt, { ...identity, activityId: `${identity.activityId}-other` }, "envelope-1"))
-      .toBe(false);
+    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-1", acceptActivityId)).toBe(true);
+    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-2", acceptActivityId)).toBe(false);
+    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-1", `${acceptActivityId}-other`)).toBe(false);
   });
 });

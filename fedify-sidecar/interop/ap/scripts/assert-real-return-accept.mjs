@@ -198,16 +198,22 @@ async function readMatchingSidecarAccept(origin) {
       const actorPath = new URL(origin.actorUri).pathname.replace(/\/$/u, '');
       const allowedPaths = new Set([`${actorPath}/inbox`, `/users/${encodeURIComponent(origin.senderUsername)}/inbox`]);
       if (!allowedPaths.has(path)) continue;
-      return { observed: true, streamId: entry.id, envelopeId: message.envelopeId, path };
+      return {
+        observed: true,
+        streamId: entry.id,
+        envelopeId: message.envelopeId,
+        acceptActivityId: normalizeEntityId(activity),
+        path,
+      };
     }
-    return { observed: false, streamId: null, envelopeId: null, path: null };
+    return { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
   } finally {
     await client.quit();
   }
 }
 
-async function readProcessedSidecarAccept(logPath, origin, envelopeId) {
-  if (!logPath || !envelopeId) return { observed: false };
+async function readProcessedSidecarAccept(logPath, origin, envelopeId, acceptActivityId) {
+  if (!logPath || !envelopeId || !acceptActivityId) return { observed: false };
   let log;
   try {
     log = await readFile(logPath, 'utf8');
@@ -215,17 +221,18 @@ async function readProcessedSidecarAccept(logPath, origin, envelopeId) {
     if (error?.code === 'ENOENT') return { observed: false };
     throw error;
   }
-  return { observed: hasProcessedSidecarAccept(log, origin, envelopeId) };
+  return { observed: hasProcessedSidecarAccept(log, origin, envelopeId, acceptActivityId) };
 }
 
-function hasProcessedSidecarAccept(log, origin, envelopeId) {
-  if (typeof log !== 'string' || typeof envelopeId !== 'string' || envelopeId.length === 0) return false;
+function hasProcessedSidecarAccept(log, origin, envelopeId, acceptActivityId) {
+  if (typeof log !== 'string' || typeof envelopeId !== 'string' || envelopeId.length === 0
+    || typeof acceptActivityId !== 'string' || acceptActivityId.length === 0) return false;
   for (const line of log.split('\n')) {
     if (!line.trim().startsWith('{')) continue;
     let event;
     try { event = JSON.parse(line); } catch { continue; }
     if (event.msg !== 'Inbound activity processed' || event.envelopeId !== envelopeId) continue;
-    if (event.activityId !== origin.activityId || event.actor !== origin.canonicalRemoteActorUri) continue;
+    if (event.activityId !== acceptActivityId || event.actor !== origin.canonicalRemoteActorUri) continue;
     if (!isAcceptType(event.type)) continue;
     return true;
   }
@@ -245,9 +252,9 @@ async function waitForBidirectionalProof(mode, origin, sidecarLogPath) {
       const identityBoundOrigin = { ...origin, canonicalRemoteActorUri };
       followingUri ??= await resolveFollowingUri(origin.actorUri);
       const followingContainsRemote = await queryFollowingMembership(identityBoundOrigin, followingUri);
-      const sidecar = mode === 'external' ? await readMatchingSidecarAccept(identityBoundOrigin) : { observed: false, streamId: null, envelopeId: null, path: null };
+      const sidecar = mode === 'external' ? await readMatchingSidecarAccept(identityBoundOrigin) : { observed: false, streamId: null, envelopeId: null, acceptActivityId: null, path: null };
       const processed = mode === 'external'
-        ? await readProcessedSidecarAccept(sidecarLogPath, identityBoundOrigin, sidecar.envelopeId)
+        ? await readProcessedSidecarAccept(sidecarLogPath, identityBoundOrigin, sidecar.envelopeId, sidecar.acceptActivityId)
         : { observed: false };
       if (followingContainsRemote && (mode === 'native' || (sidecar.observed && processed.observed))) {
         return {
