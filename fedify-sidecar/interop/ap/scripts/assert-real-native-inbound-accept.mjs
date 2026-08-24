@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveCanonicalRemoteActorUri } from './assert-real-return-accept.mjs';
 
-const [evidencePath, originPath, targetHost, outputPath] = process.argv.slice(2);
+async function run(argv = process.argv.slice(2)) {
+const [evidencePath, originPath, targetHost, outputPath] = argv;
 if (!evidencePath || !originPath || !targetHost || !outputPath) {
   console.error('usage: assert-real-native-inbound-accept.mjs <inbound.jsonl> <origin.json> <target-host> <output.json>');
   process.exit(2);
@@ -14,19 +18,13 @@ if (origin?.ok !== true || origin.mode !== 'native') fail('origin is not a succe
 for (const key of ['activityId', 'actorUri', 'remoteActorUri']) {
   if (typeof origin[key] !== 'string' || origin[key].length === 0) fail(`origin is missing ${key}`);
 }
+const canonicalRemoteActorUri = await resolveCanonicalRemoteActorUri(origin.remoteActorUri);
 
 const rows = fs.readFileSync(evidencePath, 'utf8').split(/\n/u).filter(Boolean).map((line, index) => {
   try { return JSON.parse(line); }
   catch { fail(`native inbound evidence line ${index + 1} is not valid JSON`); }
 });
-const matches = rows.filter(row => {
-  if (row?.schema !== 'ap.real-inbound-api-call.v1' || row.method !== 'POST') return false;
-  if (!Number.isInteger(row.responseStatus) || row.responseStatus < 200 || row.responseStatus > 299) return false;
-  if (!['Accept', 'https://www.w3.org/ns/activitystreams#Accept'].includes(row.activityType)) return false;
-  if (!['Follow', 'https://www.w3.org/ns/activitystreams#Follow'].includes(row.objectType)) return false;
-  if (row.objectId !== origin.activityId || row.objectActorUri !== origin.actorUri || row.objectTargetUri !== origin.remoteActorUri) return false;
-  try { return new URL(row.actorUri).hostname === targetHost; } catch { return false; }
-});
+const matches = rows.filter(row => isMatchingNativeInboundAccept(row, origin, canonicalRemoteActorUri, targetHost));
 if (matches.length < 1) fail(`no successful native ActivityPods receipt correlated the exact Follow ${origin.activityId}`);
 const semanticKeys = new Set(matches.map(row => JSON.stringify([
   row.activityId, row.actorUri, row.objectId, row.objectActorUri, row.objectTargetUri, row.bodySha256Base64,
@@ -51,8 +49,25 @@ const result = {
 };
 fs.writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`);
 process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+function isMatchingNativeInboundAccept(row, origin, canonicalRemoteActorUri, targetHost) {
+  if (row?.schema !== 'ap.real-inbound-api-call.v1' || row.method !== 'POST') return false;
+  if (!Number.isInteger(row.responseStatus) || row.responseStatus < 200 || row.responseStatus > 299) return false;
+  if (!['Accept', 'https://www.w3.org/ns/activitystreams#Accept'].includes(row.activityType)) return false;
+  if (!['Follow', 'https://www.w3.org/ns/activitystreams#Follow'].includes(row.objectType)) return false;
+  if (row.objectId !== origin.activityId || row.objectActorUri !== origin.actorUri) return false;
+  if (row.actorUri !== canonicalRemoteActorUri || row.objectTargetUri !== canonicalRemoteActorUri) return false;
+  try { return new URL(canonicalRemoteActorUri).hostname === targetHost; } catch { return false; }
+}
 
 function fail(message) {
   console.error(message);
   process.exit(1);
 }
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  run().catch(error => fail(error instanceof Error ? error.message : String(error)));
+}
+
+export { isMatchingNativeInboundAccept };
