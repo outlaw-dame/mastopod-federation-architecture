@@ -124,6 +124,10 @@ services:
   # exercise HTTPS federation without weakening the production SSRF policy.
   fedify-sidecar:
     environment:
+      # The real proof needs the debug-only post-forward receipt so evidence can
+      # bind a raw Redis envelope to successful ActivityPods forwarding without
+      # restoring high-cardinality success logs to normal production info level.
+      LOG_LEVEL: debug
       # Directional, Docker-network-only alias for the host signing recorder.
       # The public ActivityPods actor/key surface remains HTTPS through
       # ap-proof-router, while sidecar-owned service actors are published on the
