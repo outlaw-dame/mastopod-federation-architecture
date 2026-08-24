@@ -11,7 +11,7 @@ const targetHost = process.env.AP_SIGNING_PROXY_TARGET_HOST || '127.0.0.1';
 const targetPort = parseIntegerEnv('AP_SIGNING_PROXY_TARGET_PORT', 3000, 1, 65535);
 const evidencePath = process.env.AP_SIGNING_PROXY_EVIDENCE_PATH || 'measurements/ap-federation/signing-api.jsonl';
 const maxBodyBytes = parseIntegerEnv('AP_SIGNING_PROXY_MAX_BODY_BYTES', 2 * 1024 * 1024, 1024, 10 * 1024 * 1024);
-const timeoutMs = parseIntegerEnv('AP_SIGNING_PROXY_TIMEOUT_MS', 15000, 1000, 60000);
+const timeoutMs = parseIntegerEnv('AP_SIGNING_PROXY_TIMEOUT_MS', 60000, 1000, 300000);
 const recordInbound = process.env.AP_SIGNING_PROXY_RECORD_INBOUND === 'true';
 const signingPath = '/api/internal/signatures/batch';
 const inboundReceiverPath = '/api/internal/activitypub-bridge/inbox/receive';
