@@ -42,6 +42,37 @@ function isPrivateBindHost(value) {
     || (octets[0] === 192 && octets[1] === 168);
 }
 
+function singleHeader(value) {
+  if (Array.isArray(value)) return value.length === 1 ? value[0] : value.join(', ');
+  return typeof value === 'string' ? value : null;
+}
+
+function filterHopByHopHeaders(headers) {
+  const connectionTokens = new Set(
+    String(singleHeader(headers.connection) || '')
+      .split(',')
+      .map(value => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const blocked = new Set([
+    'connection',
+    'keep-alive',
+    'proxy-authenticate',
+    'proxy-authorization',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+    ...connectionTokens,
+  ]);
+  const result = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (blocked.has(name.toLowerCase()) || value === undefined) continue;
+    result[name] = Array.isArray(value) ? value.join(', ') : String(value);
+  }
+  return result;
+}
+
 function redactHeaders(headers) {
   const out = { ...headers };
   for (const name of ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key']) {
@@ -101,13 +132,15 @@ const server = http.createServer((req, res) => {
     if (aborted) return;
     const body = Buffer.concat(chunks);
     const startedAt = Date.now();
+    const forwardedHeaders = filterHopByHopHeaders(req.headers);
+    forwardedHeaders['content-length'] = String(body.length);
     const upstream = http.request(
       {
         hostname: targetHost,
         port: targetPort,
         path: req.url,
         method: req.method,
-        headers: req.headers
+        headers: forwardedHeaders
       },
       upstreamRes => {
         const responseChunks = [];
@@ -196,7 +229,9 @@ const server = http.createServer((req, res) => {
           // Signing responses and explicitly enabled native inbox receipts are
           // gated on durable, bounded, semantic-only evidence. No raw inbound
           // body, authentication material, or signature header is persisted.
-          res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+          const responseHeaders = filterHopByHopHeaders(upstreamRes.headers);
+          responseHeaders['content-length'] = String(responseBody.length);
+          res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
           res.end(responseBody);
         });
       }
