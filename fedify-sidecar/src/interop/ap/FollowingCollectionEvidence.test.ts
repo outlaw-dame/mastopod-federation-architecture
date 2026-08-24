@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 // @ts-expect-error The executable proof helper is intentionally plain ESM without a declaration file.
-import { queryFollowingMembership, resolveCanonicalRemoteActorUri } from "../../../interop/ap/scripts/assert-real-return-accept.mjs";
+import { hasProcessedSidecarAccept, queryFollowingMembership, resolveCanonicalRemoteActorUri } from "../../../interop/ap/scripts/assert-real-return-accept.mjs";
 
 const origin = {
   remoteActorUri: "https://remote.example/users/bob",
@@ -44,6 +44,18 @@ describe("public following collection evidence", () => {
       .rejects.toThrow(/escaped its authority/u);
   });
 
+  it("rejects a following response redirected outside its requested authority", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      url: "https://evil.example/collect",
+      json: async () => ({ items: [origin.canonicalRemoteActorUri] }),
+    } as Response)));
+
+    await expect(queryFollowingMembership(origin, "https://activitypods.example/alice/following"))
+      .rejects.toThrow(/redirected outside its requested authority/u);
+  });
+
   it("binds a requested actor alias to a same-authority canonical actor id", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       id: origin.canonicalRemoteActorUri,
@@ -72,5 +84,24 @@ describe("public following collection evidence", () => {
 
     await expect(resolveCanonicalRemoteActorUri(origin.remoteActorUri))
       .rejects.toThrow(/supported ActivityStreams actor type/u);
+  });
+
+  it("correlates the queued envelope with its post-verification processed receipt", () => {
+    const identity = {
+      activityId: "https://activitypods.example/alice/outbox/follow-1",
+      canonicalRemoteActorUri: origin.canonicalRemoteActorUri,
+    };
+    const receipt = JSON.stringify({
+      msg: "Inbound activity processed",
+      envelopeId: "envelope-1",
+      activityId: identity.activityId,
+      actor: identity.canonicalRemoteActorUri,
+      type: "Accept",
+    });
+
+    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-1")).toBe(true);
+    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-2")).toBe(false);
+    expect(hasProcessedSidecarAccept(receipt, { ...identity, activityId: `${identity.activityId}-other` }, "envelope-1"))
+      .toBe(false);
   });
 });

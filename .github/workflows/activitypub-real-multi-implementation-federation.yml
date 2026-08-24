@@ -532,6 +532,7 @@ jobs:
           persisted_count="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-acceptance.json','utf8')).persistedFollowCount")"
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-return-accept.mjs" \
             external "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" "${persisted_count}" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/sidecar.log" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-bidirectional.json"
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${TARGET_HOST}" \

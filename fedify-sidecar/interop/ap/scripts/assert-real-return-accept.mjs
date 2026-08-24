@@ -86,6 +86,7 @@ function validateRemoteUsername(value) {
 }
 
 async function fetchJson(url, options = {}) {
+  const requestedUrl = new URL(url);
   const response = await fetch(url, {
     ...options,
     headers: {
@@ -94,7 +95,13 @@ async function fetchJson(url, options = {}) {
     },
     signal: AbortSignal.timeout(10000),
   });
-  if (!response.ok) throw new Error(`HTTP ${response.status} from ${new URL(url).origin}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status} from ${requestedUrl.origin}`);
+  if (response.url) {
+    const responseUrl = new URL(response.url);
+    if (responseUrl.origin !== requestedUrl.origin || responseUrl.username || responseUrl.password) {
+      throw new Error('ActivityPub evidence fetch redirected outside its requested authority');
+    }
+  }
   return await response.json();
 }
 
@@ -191,15 +198,41 @@ async function readMatchingSidecarAccept(origin) {
       const actorPath = new URL(origin.actorUri).pathname.replace(/\/$/u, '');
       const allowedPaths = new Set([`${actorPath}/inbox`, `/users/${encodeURIComponent(origin.senderUsername)}/inbox`]);
       if (!allowedPaths.has(path)) continue;
-      return { observed: true, streamId: entry.id, path };
+      return { observed: true, streamId: entry.id, envelopeId: message.envelopeId, path };
     }
-    return { observed: false, streamId: null, path: null };
+    return { observed: false, streamId: null, envelopeId: null, path: null };
   } finally {
     await client.quit();
   }
 }
 
-async function waitForBidirectionalProof(mode, origin) {
+async function readProcessedSidecarAccept(logPath, origin, envelopeId) {
+  if (!logPath || !envelopeId) return { observed: false };
+  let log;
+  try {
+    log = await readFile(logPath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { observed: false };
+    throw error;
+  }
+  return { observed: hasProcessedSidecarAccept(log, origin, envelopeId) };
+}
+
+function hasProcessedSidecarAccept(log, origin, envelopeId) {
+  if (typeof log !== 'string' || typeof envelopeId !== 'string' || envelopeId.length === 0) return false;
+  for (const line of log.split('\n')) {
+    if (!line.trim().startsWith('{')) continue;
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event.msg !== 'Inbound activity processed' || event.envelopeId !== envelopeId) continue;
+    if (event.activityId !== origin.activityId || event.actor !== origin.canonicalRemoteActorUri) continue;
+    if (!isAcceptType(event.type)) continue;
+    return true;
+  }
+  return false;
+}
+
+async function waitForBidirectionalProof(mode, origin, sidecarLogPath) {
   const attempts = parsePositiveInteger(process.env.AP_INTEROP_RETURN_ASSERT_ATTEMPTS, DEFAULT_ATTEMPTS, 'return assertion attempts', 300);
   const delayMs = parsePositiveInteger(process.env.AP_INTEROP_RETURN_ASSERT_DELAY_MS, DEFAULT_DELAY_MS, 'return assertion delay', 30000);
   let followingUri = null;
@@ -212,21 +245,25 @@ async function waitForBidirectionalProof(mode, origin) {
       const identityBoundOrigin = { ...origin, canonicalRemoteActorUri };
       followingUri ??= await resolveFollowingUri(origin.actorUri);
       const followingContainsRemote = await queryFollowingMembership(identityBoundOrigin, followingUri);
-      const sidecar = mode === 'external' ? await readMatchingSidecarAccept(identityBoundOrigin) : { observed: false, streamId: null, path: null };
-      if (followingContainsRemote && (mode === 'native' || sidecar.observed)) {
+      const sidecar = mode === 'external' ? await readMatchingSidecarAccept(identityBoundOrigin) : { observed: false, streamId: null, envelopeId: null, path: null };
+      const processed = mode === 'external'
+        ? await readProcessedSidecarAccept(sidecarLogPath, identityBoundOrigin, sidecar.envelopeId)
+        : { observed: false };
+      if (followingContainsRemote && (mode === 'native' || (sidecar.observed && processed.observed))) {
         return {
           followingUri,
           canonicalRemoteActorUri,
           followingContainsRemote,
           returnAcceptApplied: true,
           sidecarInboundAcceptObserved: sidecar.observed,
+          sidecarInboundProcessed: processed.observed,
           sidecarInboundStreamId: sidecar.streamId,
           sidecarInboundPath: sidecar.path,
         };
       }
       lastError = new Error(
-        mode === 'external' && !sidecar.observed
-          ? 'matching returning Accept has not traversed the sidecar inbound stream yet'
+        mode === 'external' && (!sidecar.observed || !processed.observed)
+          ? 'matching returning Accept lacks a correlated post-verification sidecar forward receipt'
           : 'ActivityPods following collection has not applied the remote Accept yet',
       );
     } catch (error) {
@@ -238,18 +275,19 @@ async function waitForBidirectionalProof(mode, origin) {
 }
 
 async function run(argv = process.argv.slice(2)) {
-  if (argv.length !== 6) {
-    throw new Error('Usage: assert-real-return-accept.mjs <native|external> <origin-json> <target> <actor-uri> <remote-username> <persisted-follow-count>');
+  if (argv.length < 6 || argv.length > 7) {
+    throw new Error('Usage: assert-real-return-accept.mjs <native|external> <origin-json> <target> <actor-uri> <remote-username> <persisted-follow-count> [sidecar-log]');
   }
-  const [mode, originPath, target, actorUri, remoteUsernameRaw, persistedCountRaw] = argv;
+  const [mode, originPath, target, actorUri, remoteUsernameRaw, persistedCountRaw, sidecarLogPath] = argv;
   if (!['native', 'external'].includes(mode)) throw new Error(`unsupported proof mode ${mode}`);
+  if (mode === 'external' && !sidecarLogPath) throw new Error('external proof requires the sidecar processing log');
   const remoteUsername = validateRemoteUsername(remoteUsernameRaw);
   const persistedFollowCount = Number(persistedCountRaw);
   if (!Number.isSafeInteger(persistedFollowCount) || persistedFollowCount < 1) throw new Error('persisted follow count must be positive');
   const origin = validateOrigin(JSON.parse(await readFile(originPath, 'utf8')));
   if (origin.mode !== mode) throw new Error('origin proof mode mismatch');
   if (origin.actorUri !== actorUri) throw new Error('remote persistence actor does not match origin actor');
-  const evidence = await waitForBidirectionalProof(mode, origin);
+  const evidence = await waitForBidirectionalProof(mode, origin, sidecarLogPath);
   process.stdout.write(`${JSON.stringify({
     schema: 'activitypods.activitypub.real-bidirectional-acceptance.v1',
     ok: true,
@@ -265,6 +303,7 @@ async function run(argv = process.argv.slice(2)) {
     returnAcceptApplied: evidence.returnAcceptApplied,
     followingContainsRemote: evidence.followingContainsRemote,
     sidecarInboundAcceptObserved: evidence.sidecarInboundAcceptObserved,
+    sidecarInboundProcessed: evidence.sidecarInboundProcessed,
     sidecarInboundPath: evidence.sidecarInboundPath,
   })}\n`);
 }
@@ -300,4 +339,4 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   }
 }
 
-export { isMatchingReturnAccept, normalizeEntityId, queryFollowingMembership, resolveCanonicalRemoteActorUri, validateOrigin, validateRemoteUsername };
+export { hasProcessedSidecarAccept, isMatchingReturnAccept, normalizeEntityId, queryFollowingMembership, resolveCanonicalRemoteActorUri, validateOrigin, validateRemoteUsername };

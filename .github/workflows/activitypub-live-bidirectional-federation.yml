@@ -320,6 +320,7 @@ jobs:
           persisted_count="$(node -p "JSON.parse(require('fs').readFileSync('${EVIDENCE_DIR}/remote-persistence.json','utf8')).persistedFollowCount")"
           node fedify-sidecar/interop/ap/scripts/assert-real-return-accept.mjs \
             "${{ matrix.mode }}" "${EVIDENCE_DIR}/origin.json" mastodon "${actor_uri}" interop "${persisted_count}" \
+              "${EVIDENCE_DIR}/sidecar.log" \
               | tee "${EVIDENCE_DIR}/return-accept-state.json"
 
       - name: Build bidirectional evidence summary
@@ -341,6 +342,7 @@ jobs:
               returnState.activityId !== origin.activityId || returnState.returnAcceptApplied !== true ||
               returnState.followingContainsRemote !== true ||
               (process.env.MODE === 'external' && returnState.sidecarInboundAcceptObserved !== true) ||
+              (process.env.MODE === 'external' && returnState.sidecarInboundProcessed !== true) ||
               (process.env.MODE === 'external' && (!signing?.ok || signing.actorUri !== origin.actorUri))) {
             throw new Error('live bidirectional federation evidence is incomplete');
           }
@@ -360,6 +362,7 @@ jobs:
             inboundSideEffectsProcessed: returnState.returnAcceptApplied,
             followingContainsRemote: returnState.followingContainsRemote,
             sidecarInboundAcceptObserved: returnState.sidecarInboundAcceptObserved,
+            sidecarInboundProcessed: returnState.sidecarInboundProcessed,
             trustEvaluationErrors: inbound.trustEvaluationErrors
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
