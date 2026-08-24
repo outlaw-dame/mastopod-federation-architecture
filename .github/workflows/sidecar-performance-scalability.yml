@@ -153,6 +153,43 @@ jobs:
           [[ "$ready" == true ]]
           curl -fsS "${SIDECAR_BASE_URL}/ready" > artifacts/sidecar-scale/ready-before.json
 
+          # The queue codec intentionally refuses Brotli when the integrity
+          # envelope would be larger than a tiny activity. Send one compressible
+          # ActivityStreams handoff through the same authenticated production
+          # path so this lane proves beneficial compression, not forced storage.
+          compression_intent="apdm-scale-compression-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          compression_summary="$(printf '%8192s' '' | tr ' ' x)"
+          compression_status="$(
+            jq -nc \
+              --arg intent "${compression_intent}" \
+              --arg summary "${compression_summary}" \
+              '{
+                actorUri:"https://remote.scale.test/users/relay",
+                activity:{
+                  "@context":"https://www.w3.org/ns/activitystreams",
+                  id:("https://remote.scale.test/activities/" + $intent),
+                  type:"Follow",
+                  actor:"https://remote.scale.test/users/relay",
+                  object:"https://relay.example.com/actor",
+                  to:["https://relay.example.com/actor"],
+                  summary:$summary
+                },
+                remoteTargets:[{
+                  targetDomain:"relay.example.com",
+                  inboxUrl:"https://relay.example.com/inbox",
+                  apdmAuthority:{schema:"ap.delivery-plan.v1",intentId:$intent}
+                }],
+                meta:{deliveryPlanSchema:"ap.delivery-plan.v1",deliveryPlanIntentId:$intent}
+              }' \
+              | curl -sS -o artifacts/sidecar-scale/compression-probe-response.json -w '%{http_code}' \
+                  -X POST "${SIDECAR_BASE_URL}/webhook/outbox" \
+                  -H 'content-type: application/json' \
+                  -H "authorization: Bearer ${SCALE_TOKEN}" \
+                  -H "X-APDM-Intent-Id: ${compression_intent}" \
+                  --data-binary @-
+          )"
+          [[ "${compression_status}" == 202 ]]
+
       - name: Run staged k6 authenticated handoff load
         shell: bash
         run: |
@@ -246,13 +283,16 @@ jobs:
             promotionEvidence: false,
             stages,
             scale: { lowVus: 10, highVus: 100, inboundThroughputGain, handoffThroughputGain },
-            scope: 'Freshly signed public inbox ingress, fail-closed verification, ActivityPods forwarding, Redis Streams compression, RedPanda Stream2/firehose, OpenSearch indexing, authenticated outbox handoff, and durable outbox-intent fanout under bounded staged load. Remote network delivery remains covered by dedicated live federation lanes.',
+            scope: 'Freshly signed public inbox ingress, fail-closed verification, ActivityPods forwarding, beneficial Redis Streams compression, RedPanda Stream2/firehose, OpenSearch indexing, authenticated outbox handoff, and durable outbox-intent fanout under bounded staged load. Remote network delivery remains covered by dedicated live federation lanes.',
           };
           fs.writeFileSync(`${dir}/performance-summary.json`, `${JSON.stringify(report, null, 2)}\n`);
           NODE
 
           inbound_expected="$(node -e "const fs=require('fs');let n=0;for(const f of ['inbound-low','inbound-medium','inbound-high'])n+=JSON.parse(fs.readFileSync('artifacts/sidecar-scale/'+f+'.json')).metrics.relay_loadtest_accepted_total.count;process.stdout.write(String(n))")"
-          expected="$(node -e "const fs=require('fs');let n=0;for(const f of ['handoff-low','handoff-medium','handoff-high'])n+=JSON.parse(fs.readFileSync('artifacts/sidecar-scale/'+f+'.json')).metrics.relay_loadtest_accepted_total.count+1;process.stdout.write(String(n))")"
+          # The dedicated compression probe contributes one additional handoff;
+          # each k6 run also contributes one setup probe in addition to its
+          # accepted iterations.
+          expected="$(node -e "const fs=require('fs');let n=1;for(const f of ['handoff-low','handoff-medium','handoff-high'])n+=JSON.parse(fs.readFileSync('artifacts/sidecar-scale/'+f+'.json')).metrics.relay_loadtest_accepted_total.count+1;process.stdout.write(String(n))")"
           inbound_pending=-1
           inbound_lag=-1
           inbound_dlq=-1
@@ -297,7 +337,7 @@ jobs:
             const entries = await client.xRange('ap:queue:outbound:v1', '-', '+', { COUNT: 1000 });
             if (entries.length === 0) throw new Error('outbound queue is empty after accepted handoffs');
             const compressed = entries.filter(entry => entry.message?.activity?.startsWith('apq1:br:')).length;
-            if (compressed === 0) throw new Error('no Brotli-compressed outbound activity payload was observed');
+            if (compressed === 0) throw new Error('no beneficial Brotli-compressed outbound activity payload was observed');
             process.stdout.write(`${JSON.stringify({ schema: 'apdm.sidecar-scale-compression.v1', sampled: entries.length, compressed })}\n`);
           } finally {
             await client.quit();
