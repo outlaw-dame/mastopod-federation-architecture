@@ -91,6 +91,7 @@ async function fetchJson(url, options = {}) {
   const requestedUrl = new URL(url);
   let currentUrl = requestedUrl;
   let response;
+  const timeoutMs = parsePositiveInteger(process.env.AP_INTEROP_FETCH_TIMEOUT_MS, 15000, 'fetch timeout', 60000);
   for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
     response = await fetch(currentUrl, {
       ...options,
@@ -99,7 +100,7 @@ async function fetchJson(url, options = {}) {
         accept: 'application/activity+json, application/ld+json, application/json',
         ...(options.headers || {}),
       },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (![301, 302, 303, 307, 308].includes(response.status)) break;
     if (redirectCount === 5) throw new Error('ActivityPub evidence fetch exceeded the redirect bound');
@@ -130,7 +131,33 @@ function arrayOf(value) {
 
 async function resolveCanonicalRemoteActorUri(requestedActorUri) {
   const requestedUrl = new URL(requestedActorUri);
-  const actor = await fetchJson(requestedUrl);
+  let actor;
+  try {
+    actor = await fetchJson(requestedUrl);
+  } catch (error) {
+    const statusMatch = String(error?.message).match(/HTTP\s+(401|403)/i);
+    if (statusMatch) {
+      const userMatch = requestedUrl.pathname.match(/^\/(?:users\/|@|profile\/)?([^/]+)/);
+      if (userMatch) {
+        const username = userMatch[1];
+        const webfingerUrl = `https://${requestedUrl.host}/.well-known/webfinger?resource=acct:${username}@${requestedUrl.host}`;
+        const jrd = await fetchJson(webfingerUrl, {
+          headers: { accept: 'application/jrd+json, application/json' },
+        });
+        const selfLink = Array.isArray(jrd?.links)
+          ? jrd.links.find(l => l?.rel === 'self' && typeof l?.href === 'string')?.href
+          : null;
+        if (selfLink) {
+          const canonicalUrl = new URL(selfLink);
+          if (canonicalUrl.protocol === 'https:' && canonicalUrl.origin === requestedUrl.origin
+            && !canonicalUrl.username && !canonicalUrl.password && !canonicalUrl.hash) {
+            return canonicalUrl.toString();
+          }
+        }
+      }
+    }
+    throw error;
+  }
   const actorTypes = arrayOf(actor?.type ?? actor?.['@type']).map(normalizeType).filter(Boolean);
   if (!actorTypes.some(type => ACTOR_TYPES.has(type))) {
     throw new Error('remote actor document does not declare a supported ActivityStreams actor type');
