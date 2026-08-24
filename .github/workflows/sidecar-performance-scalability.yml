@@ -100,7 +100,7 @@ jobs:
           (
             cd fedify-sidecar
             MOCK_ACTIVITYPODS_HOST=127.0.0.1 MOCK_ACTIVITYPODS_PORT=8794 \
-            MOCK_ACTIVITYPODS_TOKEN="${SCALE_TOKEN}" MOCK_ACTIVITYPODS_LOCAL_DOMAIN=scale.test \
+            MOCK_ACTIVITYPODS_TOKEN="${SCALE_TOKEN}" MOCK_ACTIVITYPODS_LOCAL_DOMAIN=remote.scale.test \
             MOCK_ACTIVITYPODS_KEY_DIR=/tmp/sidecar-scale-authority \
               npm exec -- tsx src/interop/ap/MockActivityPodsAuthority.ts \
               > ../artifacts/sidecar-scale/activitypods.log 2>&1
@@ -111,6 +111,10 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:8794/health >/dev/null
+          actor_document="$(curl -fsS -H "Authorization: Bearer ${SCALE_TOKEN}" \
+            http://127.0.0.1:8794/api/internal/actors/relay)"
+          docker exec sidecar-scale-redis redis-cli SET \
+            'ap:actor:https://remote.scale.test/users/relay' "$actor_document" EX 3600 >/dev/null
 
           (
             cd fedify-sidecar
@@ -161,6 +165,9 @@ jobs:
               --summary-export="/work/artifacts/sidecar-scale/${name}.json" \
               -e "SCENARIO=${scenario}" -e "TARGET_BASE_URL=${SIDECAR_BASE_URL}" \
               -e "SIDECAR_TOKEN=${SCALE_TOKEN}" -e "DURATION=${duration}" \
+              -e ACTIVITYPODS_URL=http://127.0.0.1:8794 -e "ACTIVITYPODS_TOKEN=${SCALE_TOKEN}" \
+              -e LOCAL_RELAY_ACTOR_URI=https://remote.scale.test/users/relay \
+              -e SIDECAR_PUBLIC_HOST=scale.test \
               -e RAMP_UP_DURATION=2s -e RAMP_DOWN_DURATION=2s \
               -e "VUS=${vus}" -e "RAMP_TARGET=${vus}" loadtest/relay-loadtest.js \
               > "artifacts/sidecar-scale/${name}.log" 2>&1
@@ -169,9 +176,9 @@ jobs:
             printf '%s=%s\n' "$name" "$status" >> artifacts/sidecar-scale/stage-status.txt
           }
 
-          run_stage inbound-low relay_inbound 10 10s
-          run_stage inbound-medium relay_inbound 40 15s
-          run_stage inbound-high relay_inbound 100 20s
+          run_stage inbound-low relay_inbound_signed 10 10s
+          run_stage inbound-medium relay_inbound_signed 40 15s
+          run_stage inbound-high relay_inbound_signed 100 20s
           run_stage handoff-high relay_subscribe 80 15s
 
       - name: Verify scale response and end-to-end drain

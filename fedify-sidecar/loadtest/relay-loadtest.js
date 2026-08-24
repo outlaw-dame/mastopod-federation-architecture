@@ -25,6 +25,12 @@
  *                    verification overhead without relying on stale behavior in
  *                    the public actor-specific inbox route.
  *
+ *   relay_inbound_signed
+ *                    Obtain a fresh HTTP Signature from an isolated remote
+ *                    fixture, then POST the exact signed bytes to the public
+ *                    actor inbox. This exercises fail-closed verification and
+ *                    the complete downstream queue/ActivityPods/stream path.
+ *
  *   relay_mixed      Concurrent 1:2 mix of relay_subscribe + relay_inbound.
  *                    Represents a steady-state deployment: some users
  *                    triggering relay follows while the relay concurrently
@@ -86,6 +92,7 @@ const localRelayActorUri = __ENV.LOCAL_RELAY_ACTOR_URI || __ENV.AP_RELAY_LOCAL_A
 // Username segment used for the actor-specific inbox path in relay_inbound.
 // /users/<segment>/inbox bypasses Fedify HTTP-signature verification.
 const relayInboxRecipient = __ENV.RELAY_INBOX_RECIPIENT || 'relaybot';
+const sidecarPublicHost = __ENV.SIDECAR_PUBLIC_HOST || 'localhost';
 
 const duration = __ENV.DURATION || '4m';
 const rampUpDuration = __ENV.RAMP_UP_DURATION || '20s';
@@ -303,6 +310,79 @@ function relayInboundRequest() {
   return res;
 }
 
+function relayInboundSigningPayload(body, suffix) {
+  return JSON.stringify({
+    requests: [{
+      requestId: `inbound-${runNonce}-${suffix}`,
+      actorUri: localRelayActorUri,
+      method: 'POST',
+      profile: 'ap_post_v1_ct',
+      target: {
+        host: sidecarPublicHost,
+        path: `/users/${relayInboxRecipient}/inbox`,
+        query: '',
+      },
+      body: { bytes: body, encoding: 'utf8' },
+      digest: { mode: 'server_compute' },
+    }],
+  });
+}
+
+function relayInboundSignedRequest() {
+  const suffix = `${__VU}-${__ITER}`;
+  const body = relayInboundPayload();
+  const signed = http.post(
+    `${activityPodsUrl}/api/internal/signatures/batch`,
+    relayInboundSigningPayload(body, suffix),
+    {
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${activityPodsToken}`,
+      },
+      tags: { endpoint: 'remote_signature_fixture' },
+    },
+  );
+
+  let outHeaders = null;
+  try {
+    const parsed = signed.json();
+    const result = parsed && Array.isArray(parsed.results) ? parsed.results[0] : null;
+    if (signed.status === 200 && result && result.ok === true) outHeaders = result.outHeaders;
+  } catch (_) {
+    outHeaders = null;
+  }
+
+  if (!outHeaders) {
+    expectedStatusRate.add(false, { endpoint: 'remote_signature_fixture' });
+    return signed;
+  }
+
+  const res = http.post(
+    `${baseUrl}/users/${relayInboxRecipient}/inbox`,
+    body,
+    {
+      headers: {
+        host: sidecarPublicHost,
+        'content-type': 'application/activity+json',
+        date: outHeaders.Date,
+        digest: outHeaders.Digest,
+        signature: outHeaders.Signature,
+      },
+      tags: { endpoint: 'relay_inbound_signed' },
+    },
+  );
+
+  appLatency.add(signed.timings.duration + res.timings.duration, {
+    endpoint: 'relay_inbound_signed',
+  });
+  const ok = check(res, {
+    'relay_inbound_signed status is 202': (r) => r.status === 202,
+  });
+  expectedStatusRate.add(ok, { endpoint: 'relay_inbound_signed' });
+  if (ok) acceptedCounter.add(1, { endpoint: 'relay_inbound_signed' });
+  return res;
+}
+
 function signingApiRequest() {
   const res = http.post(
     `${activityPodsUrl}/api/internal/signatures/batch`,
@@ -362,6 +442,16 @@ const scenarios = {
     exec: 'runRelayInbound',
   },
 
+  relay_inbound_signed: {
+    executor: 'ramping-vus',
+    stages: [
+      { duration: rampUpDuration, target: vus },
+      { duration,               target: rampTarget },
+      { duration: rampDownDuration, target: 0 },
+    ],
+    exec: 'runRelayInboundSigned',
+  },
+
   relay_mixed: {
     executor: 'ramping-vus',
     stages: [
@@ -396,6 +486,12 @@ const thresholdsByScenario = {
     http_req_duration:                ['p(95)<300', 'p(99)<600'],
     relay_loadtest_app_latency_ms:    ['p(95)<300', 'p(99)<600'],
   },
+  relay_inbound_signed: {
+    http_req_failed:                  ['rate<0.01'],
+    relay_loadtest_expected_status_rate: ['rate>0.99'],
+    http_req_duration:                ['p(95)<500', 'p(99)<1000'],
+    relay_loadtest_app_latency_ms:    ['p(95)<750', 'p(99)<1500'],
+  },
   relay_mixed: {
     http_req_failed:                  ['rate<0.02'],
     relay_loadtest_expected_status_rate: ['rate>0.98'],
@@ -428,7 +524,7 @@ export function setup() {
   });
 
   // Guard: signing_api needs explicit ActivityPods config.
-  if (activeScenario === 'signing_api') {
+  if (activeScenario === 'signing_api' || activeScenario === 'relay_inbound_signed') {
     if (!activityPodsToken) {
       throw new Error(
         'ACTIVITYPODS_TOKEN is required for the signing_api scenario. ' +
@@ -513,6 +609,11 @@ export function runSigningApi() {
 
 export function runRelayInbound() {
   relayInboundRequest();
+  sleep(0.05);
+}
+
+export function runRelayInboundSigned() {
+  relayInboundSignedRequest();
   sleep(0.05);
 }
 
