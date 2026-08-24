@@ -428,7 +428,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
+          router_container="$(docker compose -f "${GITHUB_WORKSPACE}/${COMPOSE_FILE}" -f "${GITHUB_WORKSPACE}/${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
+          if [[ -z "${router_container}" ]]; then
+            echo "Proof router container was not found after the authority-mode reset." >&2
+            exit 1
+          fi
           sidecar_host="$(node interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
           echo "AP_PROOF_SIDECAR_HOST=${sidecar_host}" >> "${GITHUB_ENV}"
           : > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl"
