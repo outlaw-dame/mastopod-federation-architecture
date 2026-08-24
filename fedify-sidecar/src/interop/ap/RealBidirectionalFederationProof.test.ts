@@ -13,7 +13,10 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(workflow).toContain("Prove native bidirectional federation and remote persistence");
     expect(workflow).toContain("Prove sidecar bidirectional federation, remote persistence, and real ActivityPods signer");
     expect(workflow).toContain("native-bidirectional.json");
+    expect(workflow).toContain("native-inbound-accept.json");
+    expect(workflow).toContain("native-wire-signature.json");
     expect(workflow).toContain("external-bidirectional.json");
+    expect(workflow).toContain("external-wire-signature.json");
     expect(workflow).toContain("nativeBidirectional?.returnAcceptApplied === true");
     expect(workflow).toContain("nativeBidirectional?.followingContainsRemote === true");
     expect(workflow).toContain("externalBidirectional?.returnAcceptApplied === true");
@@ -22,6 +25,7 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(workflow).toContain("typeof externalBidirectional?.returnAcceptActivityId === 'string'");
     expect(workflow).toContain("externalBidirectional.returnAcceptActivityId.length > 0");
     expect(workflow).toContain("returnAcceptActivityId: externalBidirectional.returnAcceptActivityId");
+    expect(workflow).toContain("externalWire?.signingCorrelation?.exactSignedHeadersMatched === true");
     expect(workflow).toContain("activitypods.activitypub.real-multi-implementation.v2");
   });
 
@@ -68,8 +72,8 @@ describe("real bidirectional ActivityPub federation proof", () => {
     expect(workflow).toContain("--no-deps --force-recreate ap-proof-router");
     expect(proxy).toContain("return 'inbound'");
     expect(proxy).toContain("/api/internal/activitypub-bridge/inbox/receive");
-    expect(proxy).toContain("the sidecar Redis");
-    expect(proxy).not.toContain("schema: 'ap.real-inbound-api-call.v1'");
+    expect(proxy).toContain("schema: 'ap.real-inbound-api-call.v1'");
+    expect(proxy).toContain("No raw inbound");
   });
 
   it("keeps the live proof state-based and correlates the external signer to the wire", () => {

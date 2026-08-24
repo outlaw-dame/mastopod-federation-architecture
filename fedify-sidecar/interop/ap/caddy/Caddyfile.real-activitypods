@@ -10,7 +10,9 @@ https://sidecar {
 
 https://gotosocial {
   tls /certs/gotosocial.crt /certs/gotosocial.key
-  reverse_proxy gotosocial-app:8080
+  reverse_proxy gotosocial-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://mastodon {
@@ -26,12 +28,16 @@ https://mastodon {
 
 https://akkoma {
   tls /certs/akkoma.crt /certs/akkoma.key
-  reverse_proxy akkoma-app:4000
+  reverse_proxy akkoma-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://pixelfed.test {
   tls /certs/pixelfed.test.crt /certs/pixelfed.test.key
-  reverse_proxy pixelfed-app:8080
+  reverse_proxy pixelfed-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://bonfire.test {
@@ -41,17 +47,23 @@ https://bonfire.test {
 
 https://misskey.test {
   tls /certs/misskey.test.crt /certs/misskey.test.key
-  reverse_proxy misskey-app:3000
+  reverse_proxy misskey-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://friendica.test {
   tls /certs/friendica.test.crt /certs/friendica.test.key
-  reverse_proxy friendica-app:80
+  reverse_proxy friendica-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://castopod.test {
   tls /certs/castopod.test.crt /certs/castopod.test.key
-  reverse_proxy castopod-app:8000
+  reverse_proxy castopod-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://peertube.test {
@@ -61,7 +73,9 @@ https://peertube.test {
 
 https://loops.test {
   tls /certs/loops.test.crt /certs/loops.test.key
-  reverse_proxy loops-app:8080
+  reverse_proxy loops-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 # The workflow selects exactly one return-path authority for each mode. Never

@@ -18,6 +18,62 @@ services:
     networks:
       - ap-interop
 
+  gotosocial-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://gotosocial-app:8080", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/gotosocial.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  akkoma-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://akkoma-app:4000", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/akkoma.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  pixelfed-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://pixelfed-app:8080", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/pixelfed.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  misskey-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://misskey-app:3000", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/misskey.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  friendica-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://friendica-app:80", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/friendica.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  castopod-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://castopod-app:8000", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/castopod.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  loops-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://loops-app:8080", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/loops.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
   ap-proof-router:
     image: caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
     profiles: ["real-activitypods"]
@@ -75,7 +131,7 @@ services:
       REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: "true"
       REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES: "1"
       REDIS_STREAM_PAYLOAD_BROTLI_QUALITY: "0"
-      ENABLE_INBOUND_WORKER: "false"
+      ENABLE_INBOUND_WORKER: ${AP_INTEROP_ENABLE_INBOUND_WORKER:-false}
       ENABLE_OUTBOUND_WORKER: "true"
       ENABLE_OUTBOX_INTENT_WORKER: "true"
       # Required for the same runtime that performs outbound delivery to also

@@ -86,7 +86,8 @@ describe("ActivityPods signing recording proxy", () => {
         AP_SIGNING_PROXY_PORT: String(proxyPort),
         AP_SIGNING_PROXY_TARGET_HOST: "127.0.0.1",
         AP_SIGNING_PROXY_TARGET_PORT: String(upstreamAddress.port),
-        AP_SIGNING_PROXY_EVIDENCE_PATH: evidencePath
+        AP_SIGNING_PROXY_EVIDENCE_PATH: evidencePath,
+        AP_SIGNING_PROXY_RECORD_INBOUND: "true",
       },
       stdio: "ignore"
     });
@@ -105,7 +106,17 @@ describe("ActivityPods signing recording proxy", () => {
           authorization: "Bearer super-secret-token",
           "content-type": "application/json"
         },
-        body: JSON.stringify({ type: "Accept" })
+        body: JSON.stringify({
+          id: "https://remote.test/accept/1",
+          type: "Accept",
+          actor: "https://remote.test/users/bob",
+          object: {
+            id: "https://activitypods.test/alice/follows/1",
+            type: "Follow",
+            actor: "https://activitypods.test/alice",
+            object: "https://remote.test/users/bob",
+          },
+        })
       });
       expect(inboundResponse.status).toBe(202);
       expect(inboundResponse.headers.get("x-inbox-upstream")).toBe("preserved");
@@ -127,11 +138,26 @@ describe("ActivityPods signing recording proxy", () => {
       let evidence = "";
       for (let attempt = 0; attempt < 100; attempt += 1) {
         evidence = await readFile(evidencePath, "utf8").catch(() => "");
-        if (evidence.trim()) break;
+        if (evidence.trim().split("\n").length === 2) break;
         await new Promise(resolveWait => setTimeout(resolveWait, 20));
       }
-      const record = JSON.parse(evidence.trim());
-      expect(record).toMatchObject({
+      const records = evidence.trim().split("\n").map(line => JSON.parse(line));
+      expect(records[0]).toMatchObject({
+        schema: "ap.real-inbound-api-call.v1",
+        method: "POST",
+        path: "/api/internal/activitypub-bridge/inbox/receive",
+        responseStatus: 202,
+        activityId: "https://remote.test/accept/1",
+        activityType: "Accept",
+        actorUri: "https://remote.test/users/bob",
+        objectId: "https://activitypods.test/alice/follows/1",
+        objectType: "Follow",
+        objectActorUri: "https://activitypods.test/alice",
+        objectTargetUri: "https://remote.test/users/bob",
+      });
+      expect(records[0]).not.toHaveProperty("requestHeaders");
+      expect(records[0]).not.toHaveProperty("body");
+      expect(records[1]).toMatchObject({
         schema: "ap.real-signing-api-call.v1",
         method: "POST",
         path: "/api/internal/signatures/batch",

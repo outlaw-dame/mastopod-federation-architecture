@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 120
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: 'c0762598f86c73be1890d3b310d78faf5a6b65a5'
+      ACTIVITYPODS_SHA: '6b0f52c9994a0b9cf51aeb9c3c2ee04b67f4fe95'
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
       REAL_OVERLAY: fedify-sidecar/interop/ap/docker-compose.real-activitypods.yml
       MASTODON_USERNAME: interop
@@ -278,7 +278,7 @@ jobs:
             up -d redis redpanda mock-activitypods
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
             run --rm --no-deps fedify-sidecar npm run topics:bootstrap
-          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+          AP_INTEROP_ENABLE_INBOUND_WORKER=true docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
             up -d fedify-sidecar
           ready=false
           for attempt in $(seq 1 120); do
@@ -318,7 +318,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ACTIVITYPODS_RETURN_PORT=8080 docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+          ACTIVITYPODS_RETURN_HOST=fedify-sidecar ACTIVITYPODS_RETURN_PORT=8080 \
+            docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
             up -d --no-deps --force-recreate ap-proof-router
           AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
             fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh mastodon activitypods sidecar \

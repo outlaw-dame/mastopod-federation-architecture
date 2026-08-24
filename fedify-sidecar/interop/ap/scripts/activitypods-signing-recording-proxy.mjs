@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import http from 'node:http';
 import { isIP } from 'node:net';
+import { createHash } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -11,6 +12,7 @@ const targetPort = parseIntegerEnv('AP_SIGNING_PROXY_TARGET_PORT', 3000, 1, 6553
 const evidencePath = process.env.AP_SIGNING_PROXY_EVIDENCE_PATH || 'measurements/ap-federation/signing-api.jsonl';
 const maxBodyBytes = parseIntegerEnv('AP_SIGNING_PROXY_MAX_BODY_BYTES', 2 * 1024 * 1024, 1024, 10 * 1024 * 1024);
 const timeoutMs = parseIntegerEnv('AP_SIGNING_PROXY_TIMEOUT_MS', 15000, 1000, 60000);
+const recordInbound = process.env.AP_SIGNING_PROXY_RECORD_INBOUND === 'true';
 const signingPath = '/api/internal/signatures/batch';
 const inboundReceiverPath = '/api/internal/activitypub-bridge/inbox/receive';
 const actorInboxPath = /^\/(?:users\/)?[A-Za-z0-9._-]{1,128}\/inbox\/?$/u;
@@ -160,10 +162,40 @@ const server = http.createServer((req, res) => {
             }
           }
 
-          // Signing responses remain gated on durable redacted evidence. Inbox
-          // pass-through is deliberately not recorded here: the sidecar Redis
-          // stream is the authoritative return-path evidence and avoids writing
-          // raw ActivityPub bodies or signature headers to an extra artifact.
+          if (requestClass === 'inbound' && recordInbound) {
+            let activity = null;
+            try { activity = JSON.parse(body.toString('utf8')); } catch {}
+            const object = activity && typeof activity.object === 'object' && !Array.isArray(activity.object)
+              ? activity.object
+              : null;
+            try {
+              await writeEvidence({
+                schema: 'ap.real-inbound-api-call.v1',
+                observedAt: Date.now(),
+                durationMs: Date.now() - startedAt,
+                method: req.method,
+                path: req.url,
+                responseStatus: upstreamRes.statusCode,
+                bodyBytes: body.length,
+                bodySha256Base64: createHash('sha256').update(body).digest('base64'),
+                activityId: entityId(activity),
+                activityType: normalizedType(activity?.type),
+                actorUri: entityId(activity?.actor),
+                objectId: entityId(activity?.object),
+                objectType: normalizedType(object?.type),
+                objectActorUri: entityId(object?.actor),
+                objectTargetUri: entityId(object?.object)
+              });
+            } catch {
+              res.writeHead(502, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'proxy_evidence_write_failure' }));
+              process.stderr.write('ActivityPods inbound recording proxy could not persist evidence\n');
+              return;
+            }
+          }
+
+          // Signing responses and explicitly enabled native inbox receipts are
+          // gated on durable, bounded, semantic-only evidence. No raw inbound
+          // body, authentication material, or signature header is persisted.
           res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
           res.end(responseBody);
         });
@@ -186,6 +218,20 @@ const server = http.createServer((req, res) => {
     upstream.end(body);
   });
 });
+
+function entityId(value) {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return typeof value.id === 'string' && value.id.length > 0
+    ? value.id
+    : typeof value['@id'] === 'string' && value['@id'].length > 0 ? value['@id'] : null;
+}
+
+function normalizedType(value) {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (!Array.isArray(value)) return null;
+  return value.find(item => typeof item === 'string' && item.length > 0) ?? null;
+}
 
 server.listen(listenPort, listenHost, () => {
   process.stdout.write(`ActivityPods signing recording proxy listening on ${listenHost}:${listenPort}\n`);

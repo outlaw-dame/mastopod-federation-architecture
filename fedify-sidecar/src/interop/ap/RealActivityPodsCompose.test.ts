@@ -83,6 +83,8 @@ describe("real ActivityPods sidecar compose authority", () => {
       'echo "AP_SIGNING_PROXY_DOCKER_HOST=${signing_proxy_host}" >> "${GITHUB_ENV}"',
     );
     expect(workflow).toContain("run --rm --no-deps fedify-sidecar npm run topics:bootstrap");
+    expect(workflow).toContain("AP_INTEROP_ENABLE_INBOUND_WORKER=true docker compose");
+    expect(workflow).toContain("ACTIVITYPODS_RETURN_HOST=fedify-sidecar ACTIVITYPODS_RETURN_PORT=8080");
     expect(workflow).not.toContain("AP_SIGNING_PROXY_HOST=0.0.0.0");
     expect(workflow).toContain("Reset ActivityPods state between authority modes");
     expect(workflow).toContain("sudo rm -rf data/fuseki_test data/redis_test");

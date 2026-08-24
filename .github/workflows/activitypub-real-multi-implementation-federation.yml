@@ -80,7 +80,7 @@ jobs:
             remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: 'c0762598f86c73be1890d3b310d78faf5a6b65a5'
+      ACTIVITYPODS_SHA: '6b0f52c9994a0b9cf51aeb9c3c2ee04b67f4fe95'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -99,6 +99,7 @@ jobs:
       TARGET_ACTOR_URI: ${{ matrix.actor_uri }}
       TARGET_USERNAME: interop
       EVIDENCE_DIR: measurements/ap-real-multi/${{ matrix.target }}
+      WIRE_EVIDENCE_PATH: fedify-sidecar/interop/ap/runtime/wire/${{ matrix.target }}.jsonl
 
     steps:
       - name: Checkout federation architecture
@@ -144,7 +145,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${EVIDENCE_DIR}"
+          mkdir -p "${EVIDENCE_DIR}" fedify-sidecar/interop/ap/runtime/wire
+          : > "${WIRE_EVIDENCE_PATH}"
           activitypods_token="$(openssl rand -hex 32)"
           sidecar_token="$(openssl rand -hex 32)"
           password_verify_token="$(openssl rand -hex 32)"
@@ -322,6 +324,8 @@ jobs:
               ;;
             *) exit 2 ;;
           esac
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            up -d "${TARGET}-wire-recorder"
           ACTIVITYPODS_RETURN_PORT=3000 docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods up -d ap-proof-router
           AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
             fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh "${TARGET_HOST}" "${ACTIVITYPODS_HOST}" \
@@ -378,6 +382,30 @@ jobs:
           done
           [[ "${ready}" == true ]]
 
+      - name: Record exact native ActivityPods inbox receipts
+        shell: bash
+        run: |
+          set -euo pipefail
+          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
+          recorder_host="$(node fedify-sidecar/interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
+          : > "${EVIDENCE_DIR}/native-inbound.jsonl"
+          AP_SIGNING_PROXY_HOST="${recorder_host}" AP_SIGNING_PROXY_PORT=3001 \
+          AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
+          AP_SIGNING_PROXY_RECORD_INBOUND=true \
+          AP_SIGNING_PROXY_EVIDENCE_PATH="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-inbound.jsonl" \
+            node fedify-sidecar/interop/ap/scripts/activitypods-signing-recording-proxy.mjs \
+            > "${EVIDENCE_DIR}/native-inbound-proxy.log" 2>&1 &
+          echo "$!" > "${EVIDENCE_DIR}/native-inbound-proxy.pid"
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl -fsS --max-time 2 -X OPTIONS "http://${recorder_host}:3001/ready" >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          [[ "${ready}" == true ]]
+          ACTIVITYPODS_RETURN_HOST="${recorder_host}" ACTIVITYPODS_RETURN_PORT=3001 \
+            docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            up -d --no-deps --force-recreate ap-proof-router
+
       - name: Prove native bidirectional federation and remote persistence
         id: native-proof
         continue-on-error: true
@@ -396,6 +424,12 @@ jobs:
             sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-acceptance.json"
           persisted_count="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-acceptance.json','utf8')).persistedFollowCount")"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-native-inbound-accept.mjs" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-inbound.jsonl" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json" \
+            "${TARGET_HOST}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-inbound-accept.json"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs" \
+            "${GITHUB_WORKSPACE}/${WIRE_EVIDENCE_PATH}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json" \
+            "${TARGET_HOST}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-wire-signature.json"
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-return-accept.mjs" \
             native "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" "${persisted_count}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-bidirectional.json"
@@ -405,6 +439,7 @@ jobs:
         run: |
           set -euo pipefail
           kill "$(cat "${EVIDENCE_DIR}/activitypods-native.pid")" 2>/dev/null || true
+          kill "$(cat "${EVIDENCE_DIR}/native-inbound-proxy.pid")" 2>/dev/null || true
           for attempt in $(seq 1 30); do
             if ! curl -sS --max-time 1 -o /dev/null http://127.0.0.1:3000/ 2>/dev/null; then exit 0; fi
             sleep 1
@@ -541,6 +576,10 @@ jobs:
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${TARGET_HOST}" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-signing.json"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs" \
+            "${GITHUB_WORKSPACE}/${WIRE_EVIDENCE_PATH}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" \
+            "${TARGET_HOST}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-wire-signature.json" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-signing.json"
 
       - name: Build exact implementation evidence summary
         if: always()
@@ -561,12 +600,18 @@ jobs:
           const nativeOrigin = readJson('native-origin.json');
           const nativeAcceptance = readJson('native-acceptance.json');
           const nativeBidirectional = readJson('native-bidirectional.json');
+          const nativeInbound = readJson('native-inbound-accept.json');
+          const nativeWire = readJson('native-wire-signature.json');
           const externalOrigin = readJson('external-origin.json');
           const externalAcceptance = readJson('external-acceptance.json');
           const externalBidirectional = readJson('external-bidirectional.json');
           const signing = readJson('external-signing.json');
+          const externalWire = readJson('external-wire-signature.json');
           const nativeComplete = process.env.NATIVE_PROOF_OUTCOME === 'success' &&
             nativeOrigin?.ok === true && nativeOrigin?.mode === 'native' && nativeAcceptance?.ok === true &&
+            nativeInbound?.ok === true && nativeInbound?.followActivityId === nativeOrigin?.activityId &&
+            nativeInbound?.actorUri === nativeOrigin?.actorUri && nativeWire?.ok === true &&
+            nativeWire?.activityId === nativeOrigin?.activityId && nativeWire?.actorUri === nativeOrigin?.actorUri &&
             nativeBidirectional?.ok === true && nativeBidirectional?.returnAcceptApplied === true &&
             nativeBidirectional?.followingContainsRemote === true && nativeBidirectional?.sidecarInboundAcceptObserved === false &&
             nativeBidirectional?.activityId === nativeOrigin?.activityId && nativeBidirectional?.actorUri === nativeOrigin?.actorUri;
@@ -577,9 +622,10 @@ jobs:
             externalBidirectional?.returnAcceptApplied === true && externalBidirectional?.followingContainsRemote === true &&
             externalBidirectional?.sidecarInboundAcceptObserved === true &&
             typeof externalBidirectional?.returnAcceptActivityId === 'string' && externalBidirectional.returnAcceptActivityId.length > 0 &&
-            signing?.ok === true &&
+            signing?.ok === true && externalWire?.ok === true && externalWire?.signingCorrelation?.exactSignedHeadersMatched === true &&
             externalBidirectional?.activityId === externalOrigin?.activityId && externalBidirectional?.actorUri === externalOrigin?.actorUri &&
-            signing?.activityId === externalOrigin?.activityId && signing?.actorUri === externalOrigin?.actorUri;
+            signing?.activityId === externalOrigin?.activityId && signing?.actorUri === externalOrigin?.actorUri &&
+            externalWire?.activityId === externalOrigin?.activityId && externalWire?.actorUri === externalOrigin?.actorUri;
           const complete = nativeComplete && externalComplete;
           const summary = {
             schema: 'activitypods.activitypub.real-multi-implementation.v2',
@@ -589,10 +635,10 @@ jobs:
             activityPodsSha: process.env.ACTIVITYPODS_SHA,
             federationSha: process.env.FEDERATION_SHA,
             native: nativeComplete
-              ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, returnAcceptApplied: nativeBidirectional.returnAcceptApplied, followingContainsRemote: nativeBidirectional.followingContainsRemote, sidecarRunning: false }
+              ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, returnAcceptApplied: nativeBidirectional.returnAcceptApplied, returnAcceptActivityId: nativeInbound.acceptActivityId, followingContainsRemote: nativeBidirectional.followingContainsRemote, wire: nativeWire, sidecarRunning: false }
               : { complete: false, stepOutcome: process.env.NATIVE_PROOF_OUTCOME },
             external: externalComplete
-              ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, returnAcceptApplied: externalBidirectional.returnAcceptApplied, returnAcceptActivityId: externalBidirectional.returnAcceptActivityId, followingContainsRemote: externalBidirectional.followingContainsRemote, sidecarInboundAcceptObserved: externalBidirectional.sidecarInboundAcceptObserved, sidecarInboundPath: externalBidirectional.sidecarInboundPath, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64 }
+              ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, returnAcceptApplied: externalBidirectional.returnAcceptApplied, returnAcceptActivityId: externalBidirectional.returnAcceptActivityId, followingContainsRemote: externalBidirectional.followingContainsRemote, sidecarInboundAcceptObserved: externalBidirectional.sidecarInboundAcceptObserved, sidecarInboundPath: externalBidirectional.sidecarInboundPath, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64, wire: externalWire }
               : { complete: false, stepOutcome: process.env.EXTERNAL_PROOF_OUTCOME }
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
@@ -605,7 +651,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: activitypub-real-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: measurements/ap-real-multi/${{ matrix.target }}/
+          path: |
+            measurements/ap-real-multi/${{ matrix.target }}/
+            fedify-sidecar/interop/ap/runtime/wire/${{ matrix.target }}.jsonl
           if-no-files-found: error
           retention-days: 30
 
@@ -640,7 +688,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          for file in activitypods-external.pid activitypods-native.pid sidecar.pid signing-proxy.pid; do
+          for file in activitypods-external.pid activitypods-native.pid native-inbound-proxy.pid sidecar.pid signing-proxy.pid; do
             if [[ -f "${EVIDENCE_DIR}/${file}" ]]; then kill "$(cat "${EVIDENCE_DIR}/${file}")" 2>/dev/null || true; fi
           done
           docker rm -f "ap-real-redpanda-${TARGET}" >/dev/null 2>&1 || true
