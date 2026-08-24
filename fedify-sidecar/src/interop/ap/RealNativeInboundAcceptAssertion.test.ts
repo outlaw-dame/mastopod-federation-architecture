@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+// @ts-expect-error The executable proof helper is intentionally plain ESM without a declaration file.
 import { isMatchingNativeInboundAccept } from "../../../interop/ap/scripts/assert-real-native-inbound-accept.mjs";
 
 const origin = {
