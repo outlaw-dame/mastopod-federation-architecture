@@ -30,7 +30,7 @@ jobs:
       REDPANDA_BROKERS: 127.0.0.1:19093
       OPENSEARCH_URL: http://127.0.0.1:19201
       SIDECAR_BASE_URL: http://127.0.0.1:18089
-      SCALE_INDEX: sidecar-scale-${{ github.run_id }}-${{ github.run_attempt }}
+      SCALE_INDEX: public-content-v1
 
     steps:
       - name: Checkout exact federation candidate
@@ -131,7 +131,7 @@ jobs:
             STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 \
             FIREHOSE_TOPIC=ap.firehose.v1 TOMBSTONE_TOPIC=ap.tombstones.v1 \
             SEARCH_BACKEND=opensearch OPENSEARCH_URL="${OPENSEARCH_URL}" OPENSEARCH_SSL_VERIFY=false \
-            OPENSEARCH_INDEX="${SCALE_INDEX}" SEARCH_INDEXER_MAX_BATCH_SIZE=100 \
+            SEARCH_INDEXER_MAX_BATCH_SIZE=100 \
             ENABLE_INBOUND_WORKER=true ENABLE_OUTBOX_INTENT_WORKER=true ENABLE_OPENSEARCH_INDEXER=true \
             ENABLE_OUTBOUND_WORKER=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=false ENABLE_XRPC_SERVER=false \
             ENABLE_MEDIA_ASSET_SYNC=false ENABLE_ACCOUNT_PROVISIONING=false ENABLE_ENTRYWAY=false \

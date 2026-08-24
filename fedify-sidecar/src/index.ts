@@ -2229,6 +2229,8 @@ async function main() {
           replayMaxIndexSize: Number.parseInt(process.env["FEP_3AB2_REPLAY_MAX_INDEX_SIZE"] || "10000", 10),
           maxPendingReplayPublishes:
             Number.parseInt(process.env["FEP_3AB2_MAX_PENDING_REPLAY_PUBLISHES"] || "2048", 10),
+          maxConcurrentReplayPublishes:
+            Number.parseInt(process.env["FEP_3AB2_MAX_CONCURRENT_REPLAY_PUBLISHES"] || "16", 10),
           maxStreamBufferBytes:
             Number.parseInt(process.env["FEP_3AB2_MAX_STREAM_BUFFER_BYTES"] || "1048576", 10),
         });
