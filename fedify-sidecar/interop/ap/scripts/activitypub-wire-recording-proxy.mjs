@@ -21,6 +21,32 @@ if (!['http:', 'https:'].includes(UPSTREAM.protocol) || UPSTREAM.username || UPS
 
 await mkdir(dirname(EVIDENCE_PATH), { recursive: true });
 let writeChain = Promise.resolve();
+const getCache = new Map();
+
+function getFromCache(req, target) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return null;
+  const accept = String(req.headers.accept || '');
+  const key = `${req.method}:${target.pathname}${target.search}:${accept}`;
+  const entry = getCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    getCache.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+function saveToCache(req, target, statusCode, headers, body) {
+  if ((req.method !== 'GET' && req.method !== 'HEAD') || statusCode !== 200) return;
+  const accept = String(req.headers.accept || '');
+  const key = `${req.method}:${target.pathname}${target.search}:${accept}`;
+  getCache.set(key, {
+    statusCode,
+    headers: { ...headers },
+    body: Buffer.from(body),
+    expiresAt: Date.now() + 60_000,
+  });
+}
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -38,6 +64,13 @@ const server = http.createServer(async (req, res) => {
       await writeChain;
     }
 
+    const cached = getFromCache(req, target);
+    if (cached) {
+      res.writeHead(cached.statusCode, cached.headers);
+      res.end(cached.body);
+      return;
+    }
+
     const upstream = await request(target, {
       method: req.method,
       headers: forwardedHeaders,
@@ -49,6 +82,7 @@ const server = http.createServer(async (req, res) => {
     const responseBody = await readBoundedUndiciBody(upstream.body, MAX_RESPONSE_BYTES);
     const responseHeaders = filterHopByHopHeaders(upstream.headers);
     responseHeaders['content-length'] = String(responseBody.length);
+    saveToCache(req, target, upstream.statusCode, responseHeaders, responseBody);
     res.writeHead(upstream.statusCode, responseHeaders);
     res.end(responseBody);
   } catch (error) {
