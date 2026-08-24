@@ -575,7 +575,9 @@ jobs:
             externalOrigin?.durableHandoffQueued === true && externalOrigin?.nativeRemotePostSuppressed === true &&
             externalAcceptance?.ok === true && externalBidirectional?.ok === true &&
             externalBidirectional?.returnAcceptApplied === true && externalBidirectional?.followingContainsRemote === true &&
-            externalBidirectional?.sidecarInboundAcceptObserved === true && signing?.ok === true &&
+            externalBidirectional?.sidecarInboundAcceptObserved === true &&
+            typeof externalBidirectional?.returnAcceptActivityId === 'string' && externalBidirectional.returnAcceptActivityId.length > 0 &&
+            signing?.ok === true &&
             externalBidirectional?.activityId === externalOrigin?.activityId && externalBidirectional?.actorUri === externalOrigin?.actorUri &&
             signing?.activityId === externalOrigin?.activityId && signing?.actorUri === externalOrigin?.actorUri;
           const complete = nativeComplete && externalComplete;
@@ -590,7 +592,7 @@ jobs:
               ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, returnAcceptApplied: nativeBidirectional.returnAcceptApplied, followingContainsRemote: nativeBidirectional.followingContainsRemote, sidecarRunning: false }
               : { complete: false, stepOutcome: process.env.NATIVE_PROOF_OUTCOME },
             external: externalComplete
-              ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, returnAcceptApplied: externalBidirectional.returnAcceptApplied, followingContainsRemote: externalBidirectional.followingContainsRemote, sidecarInboundAcceptObserved: externalBidirectional.sidecarInboundAcceptObserved, sidecarInboundPath: externalBidirectional.sidecarInboundPath, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64 }
+              ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, returnAcceptApplied: externalBidirectional.returnAcceptApplied, returnAcceptActivityId: externalBidirectional.returnAcceptActivityId, followingContainsRemote: externalBidirectional.followingContainsRemote, sidecarInboundAcceptObserved: externalBidirectional.sidecarInboundAcceptObserved, sidecarInboundPath: externalBidirectional.sidecarInboundPath, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64 }
               : { complete: false, stepOutcome: process.env.EXTERNAL_PROOF_OUTCOME }
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
