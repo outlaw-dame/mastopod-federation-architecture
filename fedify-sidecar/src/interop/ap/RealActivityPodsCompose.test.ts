@@ -119,7 +119,7 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(workflow).toContain('ACTIVITYPODS_RETURN_HOST="${AP_PROOF_SIDECAR_HOST}"');
   });
 
-  it("keeps the PeerTube public tunnel path-restricted without weakening SSRF protection", () => {
+  it("keeps SSRF-protected target tunnels path-restricted and readiness-gated", () => {
     const overlay = parse(readFileSync(
       resolve("interop/ap/docker-compose.real-activitypods.yml"),
       "utf8",
@@ -135,6 +135,9 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(workflow).toContain("target: peertube");
     expect(workflow).toContain("public-activitypub-tunnel-proxy.mjs");
     expect(workflow).toContain("start-cloudflare-quick-tunnel.sh");
+    expect(workflow).toContain("friendica\",\"loops\",\"peertube");
+    expect(workflow).toContain("/.well-known/ap-proof-health");
+    expect(workflow).toContain("healthStatus\":204");
     expect(workflow).toContain("AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002");
     expect(workflow).toContain("AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3001");
     expect(workflow).toContain("AP_PUBLIC_PROXY_INBOX_TARGET_PORT=8080");

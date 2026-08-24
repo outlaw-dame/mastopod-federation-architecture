@@ -88,7 +88,7 @@ jobs:
             remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: 'de93365488655421009d935a64455b95b73dbb64'
+      ACTIVITYPODS_SHA: '8a71c07e3ef04659ebf6eaf7e781836b43397011'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -366,13 +366,13 @@ jobs:
           done
           [[ "${ready}" == true ]]
 
-      - name: Publish restricted ActivityPub authority for PeerTube native mode
-        if: matrix.target == 'peertube'
+      - name: Publish restricted ActivityPub authority for SSRF-protected native targets
+        if: contains(fromJSON('["friendica","loops","peertube"]'), matrix.target)
         shell: bash
         run: |
           set -euo pipefail
           tunnel_host="$(
-            AP_INTEROP_TUNNEL_CONTAINER=ap-peertube-tunnel-native \
+            AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-native" \
             AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
             AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
               fedify-sidecar/interop/ap/scripts/start-cloudflare-quick-tunnel.sh
@@ -385,9 +385,19 @@ jobs:
           echo "$!" > "${EVIDENCE_DIR}/native-public-proxy.pid"
           sleep 1
           kill -0 "$(cat "${EVIDENCE_DIR}/native-public-proxy.pid")"
+          tunnel_ready=false
+          for attempt in $(seq 1 90); do
+            if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+              "https://${tunnel_host}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+              tunnel_ready=true
+              break
+            fi
+            sleep 2
+          done
+          [[ "${tunnel_ready}" == true ]]
           echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "$GITHUB_ENV"
-          printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"native","authority":"%s","origin":"path-restricted-proxy","security":"PeerTube SSRF prevention remains enabled"}\n' \
-            "${tunnel_host}" > "${EVIDENCE_DIR}/native-public-tunnel.json"
+          printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"native","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"security":"remote SSRF prevention remains enabled"}\n' \
+            "${TARGET}" "${tunnel_host}" > "${EVIDENCE_DIR}/native-public-tunnel.json"
 
       - name: Start ActivityPods native mode
         working-directory: activitypods/pod-provider/backend
@@ -512,11 +522,11 @@ jobs:
           fi
           sidecar_host="$(node interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
           echo "AP_PROOF_SIDECAR_HOST=${sidecar_host}" >> "${GITHUB_ENV}"
-          if [[ "${TARGET}" == peertube ]]; then
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
             kill "$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")" 2>/dev/null || true
-            docker rm -f ap-peertube-tunnel-native >/dev/null 2>&1 || true
+            docker rm -f "ap-${TARGET}-tunnel-native" >/dev/null 2>&1 || true
             tunnel_host="$(
-              AP_INTEROP_TUNNEL_CONTAINER=ap-peertube-tunnel-external \
+              AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external" \
               AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
               AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
                 interop/ap/scripts/start-cloudflare-quick-tunnel.sh
@@ -531,10 +541,20 @@ jobs:
             echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid"
             sleep 1
             kill -0 "$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid")"
+            tunnel_ready=false
+            for attempt in $(seq 1 90); do
+              if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+                "https://${tunnel_host}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+                tunnel_ready=true
+                break
+              fi
+              sleep 2
+            done
+            [[ "${tunnel_ready}" == true ]]
             export ACTIVITYPODS_HOST="${tunnel_host}"
             echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "${GITHUB_ENV}"
-            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","authority":"%s","origin":"path-restricted-proxy","security":"PeerTube SSRF prevention remains enabled"}\n' \
-              "${tunnel_host}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
+            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"security":"remote SSRF prevention remains enabled"}\n' \
+              "${TARGET}" "${tunnel_host}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
           fi
           : > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl"
           AP_SIGNING_PROXY_HOST=127.0.0.1 AP_SIGNING_PROXY_PORT=3001 AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
@@ -759,7 +779,7 @@ jobs:
           for file in activitypods-external.pid activitypods-native.pid native-inbound-proxy.pid native-public-proxy.pid external-public-proxy.pid sidecar.pid signing-proxy.pid; do
             if [[ -f "${EVIDENCE_DIR}/${file}" ]]; then kill "$(cat "${EVIDENCE_DIR}/${file}")" 2>/dev/null || true; fi
           done
-          docker rm -f ap-peertube-tunnel-native ap-peertube-tunnel-external >/dev/null 2>&1 || true
+          docker rm -f "ap-${TARGET}-tunnel-native" "ap-${TARGET}-tunnel-external" >/dev/null 2>&1 || true
           docker rm -f "ap-real-redpanda-${TARGET}" >/dev/null 2>&1 || true
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods down -v || true
           if [[ "${TARGET}" == pixelfed ]]; then

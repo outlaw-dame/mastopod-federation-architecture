@@ -73,6 +73,14 @@ const server = createServer(async (incoming, outgoing) => {
   }
 
   const method = incoming.method || "";
+  if ((method === "GET" || method === "HEAD") && incoming.url === "/.well-known/ap-proof-health") {
+    outgoing.writeHead(204, {
+      "cache-control": "no-store",
+      "content-length": "0",
+    });
+    outgoing.end();
+    return;
+  }
   const classification = classifyPublicActivityPubRequest(method, incoming.url || "/");
   if (!classification.allowed) {
     sendJson(outgoing, 404, { error: "Not Found" });

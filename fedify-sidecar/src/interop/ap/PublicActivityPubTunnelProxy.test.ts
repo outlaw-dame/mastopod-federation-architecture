@@ -60,6 +60,11 @@ describe("path-restricted public ActivityPub tunnel proxy", () => {
     child.stdout.on("data", chunk => { proxyEvidence += String(chunk); });
     await waitForListening(child);
 
+    const health = await send(proxyPort, authority, "GET", "/.well-known/ap-proof-health");
+    expect(health.status).toBe(204);
+    expect(health.headers["cache-control"]).toBe("no-store");
+    expect(upstreamRequests).toHaveLength(0);
+
     const actor = await send(proxyPort, authority, "GET", "/alice");
     expect(actor.status).toBe(200);
     expect(actor.headers["set-cookie"]).toBeUndefined();
