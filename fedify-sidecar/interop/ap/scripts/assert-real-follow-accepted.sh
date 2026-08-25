@@ -229,7 +229,7 @@ loops_diagnostics() {
     'curl --connect-timeout 5 --max-time 15 --silent --show-error --output /dev/null --header "Accept: application/activity+json" --write-out "loops_actor_curl_status=%{http_code} content_type=%{content_type} bytes=%{size_download}\n" "$AP_INTEROP_ACTOR_URI"' \
     >&2 || echo "Loops in-container actor fetch unavailable" >&2
   compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" loops-app php artisan tinker --execute=\
-'$url = getenv("AP_INTEROP_ACTOR_URI"); foreach (["unsigned" => false, "signed" => true] as $label => $signed) { $value = app(App\Services\ActivityPubService::class)->get($url, [], $signed, true, true, true); dump([$label => ["isArray" => is_array($value), "idExact" => is_array($value) && (($value["id"] ?? null) === $url), "type" => is_array($value) ? ($value["type"] ?? null) : null]]); }' \
+'$url = getenv("AP_INTEROP_ACTOR_URI"); $sanitized = app(App\Services\SanitizeService::class)->url($url, true, false); dump(["sanitizer" => ["accepted" => is_string($sanitized), "exact" => is_string($sanitized) && hash_equals($url, $sanitized)]]); foreach (["unsigned" => false, "signed" => true] as $label => $signed) { $value = app(App\Services\ActivityPubService::class)->get($url, [], $signed, true, true, true); dump([$label => ["isArray" => is_array($value), "idExact" => is_array($value) && (($value["id"] ?? null) === $url), "type" => is_array($value) ? ($value["type"] ?? null) : null]]); }' \
     >&2 || echo "Loops application actor-fetch diagnostic unavailable" >&2
 }
 

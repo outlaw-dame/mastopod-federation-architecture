@@ -156,15 +156,10 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(workflow).toContain("AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080");
     expect(workflow).toContain("public-inbox-route-mode");
     expect(workflow).toContain("external-public-proxy.pid");
-    expect(workflow.match(/reconfigure-loops-proof-authority\.sh/g)).toHaveLength(2);
-    const loopsOverlay = readFileSync("interop/ap/docker-compose.loops.yml", "utf8");
-    expect(loopsOverlay).toContain("LOOPS_LOCAL_DOMAINS: ${LOOPS_LOCAL_DOMAINS:-}");
-    const loopsAuthorityScript = readFileSync("interop/ap/scripts/reconfigure-loops-proof-authority.sh", "utf8");
-    expect(loopsAuthorityScript).toContain("config(\"loops.local_domains\") !== $expected");
-    expect(loopsAuthorityScript).toContain("^[a-z0-9-]+\\.trycloudflare\\.com$");
     expect(workflow).toContain("tail -n 5000 /var/log/friendica/friendica.log");
     const friendicaBootstrap = readFileSync("interop/ap/scripts/bootstrap-friendica-account.sh", "utf8");
     expect(friendicaBootstrap).toContain("ensure_config system logger_config stream");
+    expect(friendicaBootstrap).toContain("ensure_config system debugging 1");
     expect(friendicaBootstrap).toContain("ensure_config system logfile /var/log/friendica/friendica.log");
     expect(friendicaBootstrap).toContain("ensure_config system loglevel info");
     expect(workflow).toContain("AP_RELAY_ACTOR_URLS=''");

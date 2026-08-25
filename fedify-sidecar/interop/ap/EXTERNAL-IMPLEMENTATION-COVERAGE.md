@@ -54,8 +54,7 @@ accepted `actorFollow` row for the exact ActivityPods actor and local account.
 
 PeerTube's exact release has one relevant control:
 `federation.prevent_ssrf`. It can be enabled or disabled globally, but it does
-not provide a narrow hostname allowlist comparable to the Loops
-`LOOPS_LOCAL_DOMAINS` test exception. The proof therefore keeps SSRF prevention
+not provide a narrow hostname allowlist for ActivityPub fetches. The proof therefore keeps SSRF prevention
 enabled and publishes only the temporary ActivityPods actor/key/WebFinger and
 actor-inbox surface through a credentialless Cloudflare Quick Tunnel. A
 fail-closed origin proxy rejects other paths, the wrong authority, redirects,
@@ -73,6 +72,30 @@ Evidence:
 - pinned fixture: [`docker-compose.peertube.yml`](./docker-compose.peertube.yml)
 - restricted origin proxy: [`public-activitypub-tunnel-proxy.mjs`](./scripts/public-activitypub-tunnel-proxy.mjs)
 - fail-closed tunnel launcher: [`start-cloudflare-quick-tunnel.sh`](./scripts/start-cloudflare-quick-tunnel.sh)
+
+## Loops blocker
+
+The pinned Loops fixture starts cleanly and its target inbox returns HTTP 202,
+but neither the native nor external proof may claim coverage until the exact
+remote ActivityPods actor is persisted and the corresponding follower row is
+present. The credentialless Quick Tunnel hostname is reachable with `curl`
+inside the Loops application container, while Loops' application fetch returns
+no actor and the durable database assertion remains zero.
+
+This is not safely solved by setting `LOOPS_LOCAL_DOMAINS`. At the pinned source
+revision, `ActivityPubService::get()` invokes `SanitizeService::url()` with its
+third argument set to `false`, explicitly disabling the application-host bypass
+used by that setting. The lane therefore retains Loops' SSRF checks unchanged
+and emits only boolean, privacy-safe sanitizer/fetch diagnostics. A passing lane
+requires a stable public authority whose DNS is accepted by that exact fetch
+path, followed by the existing durable profile and follower assertions.
+
+Evidence:
+
+- pinned ActivityPub fetch path: <https://github.com/joinloops/loops/blob/b01ed9fd6db96a830dfc0fb0e10b4c2caf5c7873/app/Services/ActivityPubService.php#L16-L19>
+- pinned URL sanitizer: <https://github.com/joinloops/loops/blob/b01ed9fd6db96a830dfc0fb0e10b4c2caf5c7873/app/Services/SanitizeService.php#L248-L287>
+- reproducible durable assertion: [`assert-real-follow-accepted.sh`](./scripts/assert-real-follow-accepted.sh)
+- pinned fixture: [`docker-compose.loops.yml`](./docker-compose.loops.yml)
 
 ## Bandwagon blocker
 

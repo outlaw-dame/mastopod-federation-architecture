@@ -52,6 +52,7 @@ ensure_config() {
   fi
 }
 ensure_config system logger_config stream
+ensure_config system debugging 1
 ensure_config system logfile /var/log/friendica/friendica.log
 ensure_config system loglevel info
 
