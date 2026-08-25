@@ -142,12 +142,13 @@ jobs:
           castopod_db_root_password="$(openssl rand -hex 32)"
           castopod_analytics_salt="$(openssl rand -hex 32)"
           castopod_admin_password="$(openssl rand -hex 32)"
+          castopod_redis_password="$(openssl rand -hex 32)"
           bonfire_db_password="$(openssl rand -hex 32)"
           bonfire_secret_key_base="$(openssl rand -hex 64)"
           bonfire_signing_salt="$(openssl rand -hex 32)"
           bonfire_encryption_salt="$(openssl rand -hex 32)"
           bonfire_release_cookie="$(openssl rand -hex 32)"
-          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
+          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${castopod_redis_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
           {
             echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
             echo "SIDECAR_TOKEN=${sidecar_token}"
@@ -164,6 +165,7 @@ jobs:
             echo "CASTOPOD_DB_ROOT_PASSWORD=${castopod_db_root_password}"
             echo "CASTOPOD_ANALYTICS_SALT=${castopod_analytics_salt}"
             echo "CASTOPOD_ADMIN_PASSWORD=${castopod_admin_password}"
+            echo "CASTOPOD_REDIS_PASSWORD=${castopod_redis_password}"
             echo "BONFIRE_DB_PASSWORD=${bonfire_db_password}"
             echo "BONFIRE_SECRET_KEY_BASE=${bonfire_secret_key_base}"
             echo "BONFIRE_SIGNING_SALT=${bonfire_signing_salt}"

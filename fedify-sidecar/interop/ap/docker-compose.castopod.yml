@@ -18,8 +18,15 @@ services:
 
   castopod-redis:
     image: redis:7-alpine
+    # Castopod's cache-service bootstrap fails with an unrelated-looking
+    # "Undefined constant CodeIgniter\Log\CI_DEBUG" fatal (thrown deep inside
+    # CodeIgniter's own error-reporting path once cache initialization fails)
+    # when Redis has no password configured — a known upstream issue in
+    # Castopod's official Docker example since 1.6.1:
+    # https://code.castopod.org/adaures/castopod/-/issues/408
+    command: ["redis-server", "--requirepass", "${CASTOPOD_REDIS_PASSWORD:?CASTOPOD_REDIS_PASSWORD is required}"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"${CASTOPOD_REDIS_PASSWORD:?CASTOPOD_REDIS_PASSWORD is required}\" --no-auth-warning ping"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -42,7 +49,9 @@ services:
       CP_BASEURL: https://castopod.test/
       CP_ANALYTICS_SALT: ${CASTOPOD_ANALYTICS_SALT:?CASTOPOD_ANALYTICS_SALT is required}
       CP_DATABASE_HOSTNAME: castopod-db
+      CP_CACHE_HANDLER: redis
       CP_REDIS_HOST: castopod-redis
+      CP_REDIS_PASSWORD: ${CASTOPOD_REDIS_PASSWORD:?CASTOPOD_REDIS_PASSWORD is required}
       AP_INTEROP_CASTOPOD_BOOTSTRAP: "1"
       SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
       CURL_CA_BUNDLE: /interop/runtime/certs/rootCA.crt
