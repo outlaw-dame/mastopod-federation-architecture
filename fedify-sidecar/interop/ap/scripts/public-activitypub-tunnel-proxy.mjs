@@ -153,6 +153,7 @@ const server = createServer(async (incoming, outgoing) => {
     port: inboxRequest ? inboxRoute.port : DOCUMENT_TARGET_PORT,
     method,
     path: `${classification.url.pathname}${classification.url.search}`,
+    setHost: false,
     headers,
   });
 

@@ -95,7 +95,7 @@ jobs:
             remote_version: Owncast v0.2.5@65d03b4d5df13dfc2033311fa30e4513b63b3e16
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '406ce97057967f5fbbe072ffad115e3698cc7927'
+      ACTIVITYPODS_SHA: 'cb8ea6378e9c05e1fcbb3f9b2dca97ae2b8a07c3'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
