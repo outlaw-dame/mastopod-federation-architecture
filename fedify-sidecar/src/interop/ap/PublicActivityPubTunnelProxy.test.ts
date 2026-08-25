@@ -1,14 +1,18 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer, request as httpRequest, type Server } from "node:http";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 const children: ChildProcessWithoutNullStreams[] = [];
 const servers: Server[] = [];
+const directories: string[] = [];
 
 afterEach(async () => {
   for (const child of children.splice(0)) child.kill("SIGTERM");
   await Promise.all(servers.splice(0).map(server => new Promise<void>(done => server.close(() => done()))));
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 describe("path-restricted public ActivityPub tunnel proxy", () => {
@@ -39,7 +43,6 @@ describe("path-restricted public ActivityPub tunnel proxy", () => {
     const reserved = createServer();
     const proxyPort = await listen(reserved);
     await new Promise<void>(done => reserved.close(() => done()));
-    servers.pop();
 
     const authority = "bounded-proof.trycloudflare.com";
     let proxyEvidence = "";
@@ -86,6 +89,55 @@ describe("path-restricted public ActivityPub tunnel proxy", () => {
     expect(upstreamRequests.at(-1)).toMatchObject({ method: "POST", url: "/alice/inbox", host: authority, body: activity });
     expect(proxyEvidence).not.toContain("sensitive-signature-value");
     expect(proxyEvidence).not.toContain(activity);
+  });
+
+  it("switches inbox authority exactly once through a fail-closed mode file", async () => {
+    const receipts: string[] = [];
+    const makeUpstream = (name: string) => createServer((_request, response) => {
+      receipts.push(name);
+      response.writeHead(202, { "content-length": "0" }).end();
+    });
+    const native = makeUpstream("native");
+    const external = makeUpstream("external");
+    servers.push(native, external);
+    const nativePort = await listen(native);
+    const externalPort = await listen(external);
+
+    const reserved = createServer();
+    const proxyPort = await listen(reserved);
+    await new Promise<void>(done => reserved.close(() => done()));
+    const directory = mkdtempSync(join(tmpdir(), "public-ap-route-"));
+    directories.push(directory);
+    const modeFile = join(directory, "mode");
+    writeFileSync(modeFile, "native\n");
+
+    const authority = "bounded-switch.trycloudflare.com";
+    const child = spawn(process.execPath, [resolve("interop/ap/scripts/public-activitypub-tunnel-proxy.mjs")], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        AP_PUBLIC_PROXY_HOST: "127.0.0.1",
+        AP_PUBLIC_PROXY_PORT: String(proxyPort),
+        AP_PUBLIC_PROXY_AUTHORITY: authority,
+        AP_PUBLIC_PROXY_TARGET_HOST: "127.0.0.1",
+        AP_PUBLIC_PROXY_TARGET_PORT: String(nativePort),
+        AP_PUBLIC_PROXY_INBOX_MODE_FILE: modeFile,
+        AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST: "127.0.0.1",
+        AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT: String(nativePort),
+        AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST: "127.0.0.1",
+        AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT: String(externalPort),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    children.push(child);
+    await waitForListening(child);
+
+    expect((await send(proxyPort, authority, "POST", "/alice/inbox", "{}", "application/activity+json")).status).toBe(202);
+    writeFileSync(modeFile, "external\n");
+    expect((await send(proxyPort, authority, "POST", "/alice/inbox", "{}", "application/activity+json")).status).toBe(202);
+    writeFileSync(modeFile, "unexpected\n");
+    expect((await send(proxyPort, authority, "POST", "/alice/inbox", "{}", "application/activity+json")).status).toBe(503);
+    expect(receipts).toEqual(["native", "external"]);
   });
 });
 

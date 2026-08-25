@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
+import { readFile } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 
 const BIND_HOST = process.env.AP_PUBLIC_PROXY_HOST || "127.0.0.1";
 const BIND_PORT = parsePort(process.env.AP_PUBLIC_PROXY_PORT || "18002", "AP_PUBLIC_PROXY_PORT");
@@ -11,13 +13,22 @@ const DOCUMENT_TARGET_PORT = parsePort(
   process.env.AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT || process.env.AP_PUBLIC_PROXY_TARGET_PORT || "3000",
   "AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT",
 );
-const INBOX_TARGET_HOST = requirePrivateTarget(
+const STATIC_INBOX_TARGET_HOST = requirePrivateTarget(
   process.env.AP_PUBLIC_PROXY_INBOX_TARGET_HOST || process.env.AP_PUBLIC_PROXY_TARGET_HOST,
 );
-const INBOX_TARGET_PORT = parsePort(
+const STATIC_INBOX_TARGET_PORT = parsePort(
   process.env.AP_PUBLIC_PROXY_INBOX_TARGET_PORT || process.env.AP_PUBLIC_PROXY_TARGET_PORT || "3000",
   "AP_PUBLIC_PROXY_INBOX_TARGET_PORT",
 );
+const INBOX_MODE_FILE = optionalAbsolutePath(process.env.AP_PUBLIC_PROXY_INBOX_MODE_FILE);
+const NATIVE_INBOX_TARGET = INBOX_MODE_FILE ? {
+  host: requirePrivateTarget(process.env.AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST),
+  port: parsePort(process.env.AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT || "", "AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT"),
+} : null;
+const EXTERNAL_INBOX_TARGET = INBOX_MODE_FILE ? {
+  host: requirePrivateTarget(process.env.AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST),
+  port: parsePort(process.env.AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT || "", "AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT"),
+} : null;
 const MAX_REQUEST_BYTES = parsePositiveInteger(process.env.AP_PUBLIC_PROXY_MAX_REQUEST_BYTES || "2097152", "AP_PUBLIC_PROXY_MAX_REQUEST_BYTES");
 const MAX_RESPONSE_BYTES = parsePositiveInteger(process.env.AP_PUBLIC_PROXY_MAX_RESPONSE_BYTES || "4194304", "AP_PUBLIC_PROXY_MAX_RESPONSE_BYTES");
 
@@ -115,9 +126,18 @@ const server = createServer(async (incoming, outgoing) => {
   headers["content-length"] = String(body.length);
 
   const inboxRequest = classification.kind === "inbox";
+  let inboxRoute = null;
+  if (inboxRequest) {
+    try {
+      inboxRoute = await resolveInboxRoute();
+    } catch {
+      sendJson(outgoing, 503, { error: "Inbox Route Unavailable" });
+      return;
+    }
+  }
   const upstream = httpRequest({
-    hostname: inboxRequest ? INBOX_TARGET_HOST : DOCUMENT_TARGET_HOST,
-    port: inboxRequest ? INBOX_TARGET_PORT : DOCUMENT_TARGET_PORT,
+    hostname: inboxRequest ? inboxRoute.host : DOCUMENT_TARGET_HOST,
+    port: inboxRequest ? inboxRoute.port : DOCUMENT_TARGET_PORT,
     method,
     path: `${classification.url.pathname}${classification.url.search}`,
     headers,
@@ -149,6 +169,7 @@ const server = createServer(async (incoming, outgoing) => {
       method,
       path: classification.url.pathname,
       kind: classification.kind,
+      inboxRouteMode: inboxRoute?.mode ?? null,
       requestBytes: body.length,
       requestSha256: createHash("sha256").update(body).digest("hex"),
       responseStatus: response.statusCode || 502,
@@ -191,6 +212,24 @@ function requirePrivateTarget(value) {
     throw new Error("AP_PUBLIC_PROXY_TARGET_HOST must be an explicit loopback or RFC1918 address");
   }
   return host;
+}
+
+function optionalAbsolutePath(value) {
+  if (value === undefined || value === "") return null;
+  if (!isAbsolute(value) || value.includes("\0")) {
+    throw new Error("AP_PUBLIC_PROXY_INBOX_MODE_FILE must be an absolute path");
+  }
+  return value;
+}
+
+async function resolveInboxRoute() {
+  if (!INBOX_MODE_FILE) {
+    return { host: STATIC_INBOX_TARGET_HOST, port: STATIC_INBOX_TARGET_PORT, mode: "static" };
+  }
+  const mode = (await readFile(INBOX_MODE_FILE, { encoding: "utf8" })).trim();
+  if (mode === "native") return { ...NATIVE_INBOX_TARGET, mode };
+  if (mode === "external") return { ...EXTERNAL_INBOX_TARGET, mode };
+  throw new Error("public inbox route mode must be native or external");
 }
 
 function parsePort(value, name) {

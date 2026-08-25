@@ -88,7 +88,7 @@ jobs:
             remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '0cf793e245abda97c9cf6d32c99f3283bd5b7c99'
+      ACTIVITYPODS_SHA: 'ace3a06c54a02351fffd3f0241553b62d7caa1f0'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -373,16 +373,21 @@ jobs:
           set -euo pipefail
           router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
           recorder_host="$(node fedify-sidecar/interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
+          echo "AP_PUBLIC_PROXY_GATEWAY=${recorder_host}" >> "${GITHUB_ENV}"
           tunnel_host="$(
             AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-native" \
             AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
             AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
               fedify-sidecar/interop/ap/scripts/start-cloudflare-quick-tunnel.sh
           )"
+          printf '%s\n' native > "${EVIDENCE_DIR}/public-inbox-route-mode"
           AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
           AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
           AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
           AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${recorder_host}" AP_PUBLIC_PROXY_INBOX_TARGET_PORT=3001 \
+          AP_PUBLIC_PROXY_INBOX_MODE_FILE="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode" \
+          AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST="${recorder_host}" AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001 \
+          AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST="${recorder_host}" AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080 \
             node fedify-sidecar/interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
             > "${EVIDENCE_DIR}/native-public-proxy.jsonl" 2> "${EVIDENCE_DIR}/native-public-proxy.log" &
           echo "$!" > "${EVIDENCE_DIR}/native-public-proxy.pid"
@@ -529,43 +534,15 @@ jobs:
           sidecar_host="$(node interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
           echo "AP_PROOF_SIDECAR_HOST=${sidecar_host}" >> "${GITHUB_ENV}"
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
-            native_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")"
-            kill "${native_proxy_pid}" 2>/dev/null || true
-            for attempt in $(seq 1 30); do
-              if ! kill -0 "${native_proxy_pid}" 2>/dev/null; then break; fi
-              sleep 1
-            done
-            if kill -0 "${native_proxy_pid}" 2>/dev/null; then
-              echo "Native public proxy did not terminate before the authority-mode cutover." >&2
-              exit 1
-            fi
             tunnel_host="${ACTIVITYPODS_HOST:-}"
             if [[ -z "${tunnel_host}" || ! "${tunnel_host}" =~ ^[a-z0-9.-]+$ ]]; then
               echo "The validated native public tunnel authority is unavailable or malformed." >&2
               exit 1
             fi
-            AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
-            AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
-            AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
-            AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_INBOX_TARGET_PORT=8080 \
-              node interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
-              > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.jsonl" \
-              2> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" &
-            echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid"
-            sleep 1
-            kill -0 "$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid")"
-            tunnel_ready=false
-            for attempt in $(seq 1 90); do
-              if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
-                "https://${tunnel_host}/.well-known/ap-proof-health" || true)" == 204 ]]; then
-                tunnel_ready=true
-                break
-              fi
-              sleep 2
-            done
-            [[ "${tunnel_ready}" == true ]]
-            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"authorityContinuity":"same-bounded-tunnel","security":"remote SSRF prevention remains enabled"}\n' \
-              "${TARGET}" "${tunnel_host}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
+            if [[ -z "${AP_PUBLIC_PROXY_GATEWAY:-}" || "${sidecar_host}" != "${AP_PUBLIC_PROXY_GATEWAY}" ]]; then
+              echo "The sidecar gateway differs from the address bound by the public proof proxy." >&2
+              exit 1
+            fi
           fi
           : > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl"
           AP_SIGNING_PROXY_HOST=127.0.0.1 AP_SIGNING_PROXY_PORT=3001 AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
@@ -597,6 +574,23 @@ jobs:
             sleep 1
           done
           [[ "${ready}" == true ]]
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
+            route_file="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode"
+            printf '%s\n' external > "${route_file}.next"
+            mv "${route_file}.next" "${route_file}"
+            tunnel_ready=false
+            for attempt in $(seq 1 90); do
+              if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+                "https://${ACTIVITYPODS_HOST}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+                tunnel_ready=true
+                break
+              fi
+              sleep 2
+            done
+            [[ "${tunnel_ready}" == true ]]
+            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"authorityContinuity":"same-bounded-tunnel-and-proxy","inboxRouteMode":"external","security":"remote SSRF prevention remains enabled"}\n' \
+              "${TARGET}" "${ACTIVITYPODS_HOST}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
+          fi
 
       - name: Route returning ActivityPub through the external sidecar
         shell: bash
@@ -790,7 +784,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          for file in activitypods-external.pid activitypods-native.pid native-inbound-proxy.pid native-public-proxy.pid external-public-proxy.pid sidecar.pid signing-proxy.pid; do
+          for file in activitypods-external.pid activitypods-native.pid native-inbound-proxy.pid native-public-proxy.pid sidecar.pid signing-proxy.pid; do
             if [[ -f "${EVIDENCE_DIR}/${file}" ]]; then kill "$(cat "${EVIDENCE_DIR}/${file}")" 2>/dev/null || true; fi
           done
           docker rm -f "ap-${TARGET}-tunnel-native" "ap-${TARGET}-tunnel-external" >/dev/null 2>&1 || true
