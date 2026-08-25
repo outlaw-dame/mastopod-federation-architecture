@@ -41,7 +41,8 @@ jobs:
         working-directory: fedify-sidecar
         env:
           REDPANDA_RF3_IMAGE: redpandadata/redpanda:v24.1.3
-          REDPANDA_RF3_REPEATS: '3'
+          # Four arms need four rotated repeats for a balanced Latin square.
+          REDPANDA_RF3_REPEATS: '4'
           REDPANDA_RF3_MESSAGES: '4000'
           # p99 over 300 observations depends on only a handful of tail samples
           # and has produced contradictory codec decisions on identical heads.
@@ -64,7 +65,7 @@ jobs:
           const summary = JSON.parse(fs.readFileSync('measurements/redpanda-compression-rf3/summary.json', 'utf8'));
           const decision = JSON.parse(fs.readFileSync('measurements/redpanda-compression-rf3/decision.json', 'utf8'));
           const expected = ['gzip','zstd-1','zstd-2','zstd-3'];
-          if (summary.version !== 1 || summary.methodology?.brokers !== 3 || summary.methodology?.replicationFactor !== 3 || summary.methodology?.repeats !== 3) {
+          if (summary.version !== 2 || summary.methodology?.brokers !== 3 || summary.methodology?.replicationFactor !== 3 || summary.methodology?.repeats !== 4 || summary.methodology?.latinSquareArmOrder !== true || summary.methodology?.pairedRatiosWithinRepeat !== true) {
             throw new Error('RF3 methodology contract drift');
           }
           if (JSON.stringify(summary.medians.map((x) => x.arm)) !== JSON.stringify(expected)) throw new Error('RF3 arm drift');
