@@ -147,7 +147,9 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(workflow).toContain("AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000");
     expect(workflow).toContain('AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${recorder_host}"');
     expect(workflow).toContain('AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external"');
-    expect(workflow).toContain('authorityIsolation":"fresh-bounded-tunnel-and-proxy-for-mode"');
+    expect(workflow).toContain("authority_strategy=single-authority-mode-switch");
+    expect(workflow).toContain("authority_strategy=fresh-bounded-preflight-replacement");
+    expect(workflow).toContain("no signed cross-authority retry");
     expect(workflow).toContain("AP_PUBLIC_PROXY_INBOX_MODE_FILE=");
     expect(workflow).toContain("AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001");
     expect(workflow).toContain("AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080");

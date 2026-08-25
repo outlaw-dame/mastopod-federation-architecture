@@ -88,7 +88,7 @@ jobs:
             remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: 'fc8535071ccdc70dcf4ccf369bc6298ee9559a95'
+      ACTIVITYPODS_SHA: '00ba5a91814dc4251718f8c8b16090f4d5e6bb8c'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -539,41 +539,61 @@ jobs:
               echo "The sidecar gateway differs from the address bound by the public proof proxy." >&2
               exit 1
             fi
-            native_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")"
-            kill "${native_proxy_pid}" 2>/dev/null || true
-            for attempt in $(seq 1 20); do
-              if ! kill -0 "${native_proxy_pid}" 2>/dev/null; then break; fi
-              sleep 0.25
+            authority_strategy=single-authority-mode-switch
+            consecutive_health_checks=0
+            for attempt in $(seq 1 5); do
+              if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+                "https://${ACTIVITYPODS_HOST}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+                consecutive_health_checks=$((consecutive_health_checks + 1))
+                if [[ "${consecutive_health_checks}" -eq 3 ]]; then break; fi
+              else
+                consecutive_health_checks=0
+              fi
+              sleep 2
             done
-            if kill -0 "${native_proxy_pid}" 2>/dev/null; then
-              echo "The native public proxy did not stop before external authority isolation." >&2
-              exit 1
+            if [[ "${consecutive_health_checks}" -ne 3 ]]; then
+              # Replacement is a preflight authority selection, before the
+              # external actor or any signed delivery exists. A signed request
+              # is never retried against a different authority.
+              native_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")"
+              kill "${native_proxy_pid}" 2>/dev/null || true
+              for attempt in $(seq 1 20); do
+                if ! kill -0 "${native_proxy_pid}" 2>/dev/null; then break; fi
+                sleep 0.25
+              done
+              if kill -0 "${native_proxy_pid}" 2>/dev/null; then
+                echo "The public proxy did not stop before bounded preflight replacement." >&2
+                exit 1
+              fi
+              docker rm -f "ap-${TARGET}-tunnel-native" >/dev/null 2>&1 || true
+              tunnel_host="$(
+                AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external" \
+                AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
+                AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
+                  interop/ap/scripts/start-cloudflare-quick-tunnel.sh
+              )"
+              if [[ -z "${tunnel_host}" || ! "${tunnel_host}" =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]]; then
+                echo "The replacement public tunnel authority is unavailable or malformed." >&2
+                exit 1
+              fi
+              export ACTIVITYPODS_HOST="${tunnel_host}"
+              echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "${GITHUB_ENV}"
+              AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
+              AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
+              AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
+              AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_INBOX_TARGET_PORT=8080 \
+              AP_PUBLIC_PROXY_INBOX_MODE_FILE="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode" \
+              AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001 \
+              AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080 \
+                node interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
+                > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.jsonl" \
+                2> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" &
+              echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid"
+              authority_strategy=fresh-bounded-preflight-replacement
             fi
-            docker rm -f "ap-${TARGET}-tunnel-native" >/dev/null 2>&1 || true
-            tunnel_host="$(
-              AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external" \
-              AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
-              AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
-                interop/ap/scripts/start-cloudflare-quick-tunnel.sh
-            )"
-            if [[ -z "${tunnel_host}" || ! "${tunnel_host}" =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]]; then
-              echo "The external public tunnel authority is unavailable or malformed." >&2
-              exit 1
-            fi
-            export ACTIVITYPODS_HOST="${tunnel_host}"
-            echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "${GITHUB_ENV}"
             printf '%s\n' external > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode"
-            AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
-            AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
-            AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
-            AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_INBOX_TARGET_PORT=8080 \
-            AP_PUBLIC_PROXY_INBOX_MODE_FILE="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode" \
-            AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001 \
-            AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080 \
-              node interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
-              > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.jsonl" \
-              2> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" &
-            echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid"
+            export AP_PUBLIC_AUTHORITY_STRATEGY="${authority_strategy}"
+            echo "AP_PUBLIC_AUTHORITY_STRATEGY=${authority_strategy}" >> "${GITHUB_ENV}"
           fi
           : > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl"
           AP_SIGNING_PROXY_HOST=127.0.0.1 AP_SIGNING_PROXY_PORT=3001 AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
@@ -607,18 +627,20 @@ jobs:
           done
           [[ "${ready}" == true ]]
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
-            tunnel_ready=false
+            consecutive_health_checks=0
             for attempt in $(seq 1 90); do
               if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
                 "https://${ACTIVITYPODS_HOST}/.well-known/ap-proof-health" || true)" == 204 ]]; then
-                tunnel_ready=true
-                break
+                consecutive_health_checks=$((consecutive_health_checks + 1))
+                if [[ "${consecutive_health_checks}" -eq 3 ]]; then break; fi
+              else
+                consecutive_health_checks=0
               fi
               sleep 2
             done
-            [[ "${tunnel_ready}" == true ]]
-            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"authorityIsolation":"fresh-bounded-tunnel-and-proxy-for-mode","inboxRouteMode":"external","security":"remote SSRF prevention remains enabled"}\n' \
-              "${TARGET}" "${ACTIVITYPODS_HOST}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
+            [[ "${consecutive_health_checks}" -eq 3 ]]
+            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"authorityIsolation":"%s","inboxRouteMode":"external","security":"remote SSRF prevention remains enabled; no signed cross-authority retry"}\n' \
+              "${TARGET}" "${ACTIVITYPODS_HOST}" "${AP_PUBLIC_AUTHORITY_STRATEGY}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
           fi
 
       - name: Route returning ActivityPub through the external sidecar
