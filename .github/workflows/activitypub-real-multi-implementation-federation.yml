@@ -285,10 +285,18 @@ jobs:
             | tee "${EVIDENCE_DIR}/proof-router-hosts.json"
           readiness_uri="${TARGET_ACTOR_URI}"
           readiness_accept='application/activity+json'
-          if [[ "${TARGET}" == gotosocial ]]; then
+          if [[ "${TARGET}" == gotosocial || "${TARGET}" == misskey ]]; then
             # GoToSocial deliberately requires an HTTP signature on actor GETs.
-            # Its WebFinger document is the unsigned discovery endpoint and
-            # confirms that the bootstrapped account is reachable through TLS.
+            # Misskey 2026.7.0 returns a persistent 403 to every unauthenticated,
+            # content-negotiated GET of /@<user> observed on this pinned image
+            # (confirmed: identical from the very first retry, well before the
+            # instance could plausibly still be booting, and never once clears
+            # across the full 210-attempt/7-minute window) rather than 404/502
+            # while starting up or 200 once ready, so this is not a boot-timing
+            # race - the endpoint itself rejects the request outright. WebFinger
+            # is the unsigned, unauthenticated discovery endpoint for both and
+            # confirms the bootstrapped account is reachable through TLS without
+            # depending on whichever actor-endpoint restriction is in effect.
             readiness_uri="https://${TARGET_HOST}/.well-known/webfinger?resource=acct:${TARGET_USERNAME}@${TARGET_HOST}"
             readiness_accept='application/jrd+json'
           fi
