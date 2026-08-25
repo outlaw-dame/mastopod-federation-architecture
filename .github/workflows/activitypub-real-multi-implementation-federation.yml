@@ -88,7 +88,7 @@ jobs:
             remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: 'ace3a06c54a02351fffd3f0241553b62d7caa1f0'
+      ACTIVITYPODS_SHA: 'c89831a50bc2be071a88f10a2825a2b1fe6031ab'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -477,6 +477,7 @@ jobs:
           set -euo pipefail
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
+            export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
           fi
           AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-${TARGET}-native" \
             node scripts/activitypub-federation-follow-proof.js native "${TARGET_ACTOR_URI}" \
@@ -649,6 +650,7 @@ jobs:
           set -euo pipefail
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
+            export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
           fi
           AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-${TARGET}-external" \
             node scripts/activitypub-federation-follow-proof.js external "${TARGET_ACTOR_URI}" \

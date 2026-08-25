@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
 import http from 'node:http';
 import { dirname } from 'node:path';
@@ -49,6 +49,8 @@ function saveToCache(req, target, statusCode, headers, body) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const startedAt = Date.now();
+  let requestEvidence = null;
   try {
     const body = await readBoundedBody(req, MAX_BODY_BYTES);
     const target = new URL(req.url || '/', UPSTREAM);
@@ -58,14 +60,14 @@ const server = http.createServer(async (req, res) => {
     if (req.headers.host) forwardedHeaders.host = req.headers.host;
     forwardedHeaders['content-length'] = String(body.length);
 
-    const evidence = buildEvidence(req, body);
-    if (evidence) {
-      writeChain = writeChain.then(() => appendFile(EVIDENCE_PATH, `${JSON.stringify(evidence)}\n`, 'utf8'));
-      await writeChain;
+    requestEvidence = buildEvidence(req, body);
+    if (requestEvidence) {
+      await appendEvidence(requestEvidence);
     }
 
     const cached = getFromCache(req, target);
     if (cached) {
+      if (requestEvidence) await appendEvidence(buildResponseEvidence(requestEvidence, cached.statusCode, cached.body.length, startedAt, true));
       res.writeHead(cached.statusCode, cached.headers);
       res.end(cached.body);
       return;
@@ -83,9 +85,23 @@ const server = http.createServer(async (req, res) => {
     const responseHeaders = filterHopByHopHeaders(upstream.headers);
     responseHeaders['content-length'] = String(responseBody.length);
     saveToCache(req, target, upstream.statusCode, responseHeaders, responseBody);
+    if (requestEvidence) await appendEvidence(buildResponseEvidence(requestEvidence, upstream.statusCode, responseBody.length, startedAt, false));
     res.writeHead(upstream.statusCode, responseHeaders);
     res.end(responseBody);
   } catch (error) {
+    if (requestEvidence) {
+      await appendEvidence({
+        schema: 'ap.interop.wire-response.v1',
+        observedAt: Date.now(),
+        requestId: requestEvidence.requestId,
+        activityId: requestEvidence.activityId,
+        upstreamStatus: null,
+        responseBytes: 0,
+        durationMs: Date.now() - startedAt,
+        cached: false,
+        errorCode: safeErrorCode(error),
+      }).catch(() => {});
+    }
     const status = error?.code === 'BODY_TOO_LARGE' ? 413 : 502;
     res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(status === 413 ? 'request body too large' : 'wire recorder upstream failure');
@@ -117,6 +133,7 @@ function buildEvidence(req, body) {
 
   return {
     schema: 'ap.interop.wire-request.v1',
+    requestId: randomUUID(),
     observedAt: Date.now(),
     method: req.method || '',
     path: req.url || '/',
@@ -132,6 +149,30 @@ function buildEvidence(req, body) {
     actorUri: normalizeEntityId(activity?.actor),
     objectUri: normalizeEntityId(activity?.object),
   };
+}
+
+function buildResponseEvidence(requestEvidence, upstreamStatus, responseBytes, startedAt, cached) {
+  return {
+    schema: 'ap.interop.wire-response.v1',
+    observedAt: Date.now(),
+    requestId: requestEvidence.requestId,
+    activityId: requestEvidence.activityId,
+    upstreamStatus,
+    responseBytes,
+    durationMs: Date.now() - startedAt,
+    cached,
+    errorCode: null,
+  };
+}
+
+async function appendEvidence(evidence) {
+  writeChain = writeChain.then(() => appendFile(EVIDENCE_PATH, `${JSON.stringify(evidence)}\n`, 'utf8'));
+  await writeChain;
+}
+
+function safeErrorCode(error) {
+  const code = typeof error?.code === 'string' ? error.code : 'UPSTREAM_FAILURE';
+  return /^[A-Z0-9_]{1,64}$/u.test(code) ? code : 'UPSTREAM_FAILURE';
 }
 
 function normalizeType(value) {

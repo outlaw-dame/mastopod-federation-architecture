@@ -35,6 +35,7 @@ const MAX_RESPONSE_BYTES = parsePositiveInteger(process.env.AP_PUBLIC_PROXY_MAX_
 const ACTOR_SEGMENT = "[A-Za-z0-9][A-Za-z0-9._~-]{0,127}";
 const ACTOR_PATH = new RegExp(`^/${ACTOR_SEGMENT}/?$`);
 const KEY_PATH = new RegExp(`^/${ACTOR_SEGMENT}/keys/main/?$`);
+const FOLLOWING_PATH = new RegExp(`^/${ACTOR_SEGMENT}/following/?$`);
 const INBOX_PATH = new RegExp(`^/(?:users/)?${ACTOR_SEGMENT}/inbox/?$`);
 const ACTIVITY_CONTENT_TYPE = /^(application\/(?:activity\+json|json)|application\/ld\+json)(?:\s*;|$)/i;
 
@@ -59,8 +60,16 @@ const RESPONSE_HEADER_ALLOWLIST = new Set([
 
 export function classifyPublicActivityPubRequest(method, rawUrl) {
   const url = new URL(rawUrl, `https://${AUTHORITY}`);
-  if ((method === "GET" || method === "HEAD") && (ACTOR_PATH.test(url.pathname) || KEY_PATH.test(url.pathname))) {
+  if ((method === "GET" || method === "HEAD") && url.search === "" &&
+      (ACTOR_PATH.test(url.pathname) || KEY_PATH.test(url.pathname))) {
     return { allowed: true, kind: KEY_PATH.test(url.pathname) ? "key" : "actor", url };
+  }
+  if ((method === "GET" || method === "HEAD") && FOLLOWING_PATH.test(url.pathname)) {
+    const keys = [...url.searchParams.keys()];
+    const page = url.searchParams.get("page");
+    const allowedPage = keys.length === 0 ||
+      (keys.length === 1 && keys[0] === "page" && /^(?:[1-9][0-9]{0,3})$/.test(page || ""));
+    return allowedPage ? { allowed: true, kind: "following", url } : { allowed: false };
   }
   if ((method === "GET" || method === "HEAD") && url.pathname === "/.well-known/webfinger") {
     if ([...url.searchParams.keys()].some(key => key !== "resource")) return { allowed: false };

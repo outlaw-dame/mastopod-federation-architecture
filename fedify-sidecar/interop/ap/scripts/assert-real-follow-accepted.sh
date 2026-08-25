@@ -219,6 +219,18 @@ loops_diagnostics() {
       select concat('persisted_follow_count=', count(*)) from followers f join profiles follower on follower.id=f.profile_id join profiles target on target.id=f.following_id where follower.uri='${actor_sql}' and target.username='${username_sql}' and follower.local=0 and target.local=1;
       select concat('failed_job_count=', count(*)) from failed_jobs;\"" >&2 || echo "Loops database diagnostics unavailable" >&2
   compose exec -T loops-horizon php artisan horizon:status >&2 || echo "Loops Horizon status unavailable" >&2
+  for queue in activitypub-in default; do
+    ready=$(compose exec -T loops-redis /bin/sh -lc "redis-cli -a \"\$LOOPS_REDIS_PASSWORD\" --no-auth-warning llen queues:${queue}" 2>/dev/null || echo unavailable)
+    reserved=$(compose exec -T loops-redis /bin/sh -lc "redis-cli -a \"\$LOOPS_REDIS_PASSWORD\" --no-auth-warning zcard queues:${queue}:reserved" 2>/dev/null || echo unavailable)
+    delayed=$(compose exec -T loops-redis /bin/sh -lc "redis-cli -a \"\$LOOPS_REDIS_PASSWORD\" --no-auth-warning zcard queues:${queue}:delayed" 2>/dev/null || echo unavailable)
+    printf 'loops_queue=%s ready=%s reserved=%s delayed=%s\n' "${queue}" "${ready}" "${reserved}" "${delayed}" >&2
+  done
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" loops-app /bin/sh -lc \
+    'curl --connect-timeout 5 --max-time 15 --silent --show-error --output /dev/null --header "Accept: application/activity+json" --write-out "loops_actor_curl_status=%{http_code} content_type=%{content_type} bytes=%{size_download}\n" "$AP_INTEROP_ACTOR_URI"' \
+    >&2 || echo "Loops in-container actor fetch unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" loops-app php artisan tinker --execute=\
+'$url = getenv("AP_INTEROP_ACTOR_URI"); foreach (["unsigned" => false, "signed" => true] as $label => $signed) { $value = app(App\Services\ActivityPubService::class)->get($url, [], $signed, true, true, true); dump([$label => ["isArray" => is_array($value), "idExact" => is_array($value) && (($value["id"] ?? null) === $url), "type" => is_array($value) ? ($value["type"] ?? null) : null]]); }' \
+    >&2 || echo "Loops application actor-fetch diagnostic unavailable" >&2
 }
 
 peertube_diagnostics() {

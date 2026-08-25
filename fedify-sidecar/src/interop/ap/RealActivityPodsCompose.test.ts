@@ -138,6 +138,7 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(workflow).toContain("friendica\",\"loops\",\"peertube");
     expect(workflow).toContain("/.well-known/ap-proof-health");
     expect(workflow).toContain("AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true");
+    expect(workflow).toContain("AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl");
     expect(workflow).toContain("healthStatus\":204");
     expect(workflow).toContain("AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002");
     expect(readFileSync("interop/ap/scripts/start-cloudflare-quick-tunnel.sh", "utf8")).toContain(

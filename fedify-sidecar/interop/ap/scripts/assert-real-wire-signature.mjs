@@ -60,6 +60,19 @@ if (matches.length !== 1) {
   fail(`expected exactly one wire Follow for ${activityId}; found ${matches.length}`);
 }
 const match = matches[0];
+const requestId = requiredString(match.requestId, 'wire.requestId');
+const responseMatches = rows.filter(row =>
+  row?.schema === 'ap.interop.wire-response.v1' &&
+  row.requestId === requestId &&
+  row.activityId === activityId
+);
+if (responseMatches.length !== 1) {
+  fail(`expected exactly one upstream response for wire request ${requestId}; found ${responseMatches.length}`);
+}
+const upstreamStatus = responseMatches[0].upstreamStatus;
+if (!Number.isInteger(upstreamStatus) || upstreamStatus < 200 || upstreamStatus >= 300 || responseMatches[0].errorCode !== null) {
+  fail(`remote implementation did not accept the exact wire Follow; upstream status ${upstreamStatus ?? 'missing'}`);
+}
 const bodySha256Base64 = requiredString(match.bodySha256Base64, 'wire.bodySha256Base64');
 if (match.digest !== `SHA-256=${bodySha256Base64}`) {
   fail('wire Digest does not match the exact transmitted body hash');
@@ -127,6 +140,8 @@ const evidence = {
   remoteActorUri,
   targetHost,
   path: match.path,
+  requestId,
+  upstreamStatus,
   bodyBytes: match.bodyBytes,
   bodySha256Base64,
   keyId: signature.keyId,

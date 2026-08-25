@@ -19,6 +19,7 @@ function fixture(overrides: {
   signingDateMismatch?: boolean;
   signingDigestMismatch?: boolean;
   omitAlgorithm?: boolean;
+  upstreamStatus?: number;
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "wire-signature-assertion-"));
   directories.push(directory);
@@ -58,7 +59,16 @@ function fixture(overrides: {
     actorUri,
     objectUri: remoteActorUri,
   };
-  writeFileSync(wirePath, `${JSON.stringify(row)}\n${overrides.duplicate ? `${JSON.stringify(row)}\n` : ""}`);
+  const requestId = "wire-request-1";
+  Object.assign(row, { requestId });
+  const response = {
+    schema: "ap.interop.wire-response.v1",
+    requestId,
+    activityId,
+    upstreamStatus: overrides.upstreamStatus ?? 202,
+    errorCode: null,
+  };
+  writeFileSync(wirePath, `${JSON.stringify(row)}\n${overrides.duplicate ? `${JSON.stringify(row)}\n` : ""}${JSON.stringify(response)}\n`);
   writeFileSync(signingPath, JSON.stringify({
     ok: true,
     actorUri,
@@ -130,6 +140,7 @@ describe("real wire signature assertion", () => {
     [{ signingDateMismatch: true }, "signing/wire Date mismatch"],
     [{ signingDigestMismatch: true }, "signing/wire Digest mismatch"],
     [{ omitAlgorithm: true }, "missing literal wire algorithm"],
+    [{ upstreamStatus: 401 }, "remote implementation rejected the Follow"],
   ])("rejects %s (%s)", (overrides, _label) => {
     expect(run(fixture(overrides)).status).not.toBe(0);
   });

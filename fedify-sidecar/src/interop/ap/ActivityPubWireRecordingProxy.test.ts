@@ -134,7 +134,7 @@ describe("ActivityPub wire recording proxy", () => {
     expect(received.signature).toContain("/keys/main");
 
     const rows = readFileSync(evidencePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    expect(rows).toHaveLength(1);
+    expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({
       schema: "ap.interop.wire-request.v1",
       method: "POST",
@@ -147,6 +147,15 @@ describe("ActivityPub wire recording proxy", () => {
       bodyBytes: Buffer.byteLength(body),
     });
     expect(rows[0].signature).toContain("/keys/main");
+    expect(rows[0].requestId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(rows[1]).toMatchObject({
+      schema: "ap.interop.wire-response.v1",
+      requestId: rows[0].requestId,
+      activityId: activity.id,
+      upstreamStatus: 202,
+      cached: false,
+      errorCode: null,
+    });
     expect(JSON.stringify(rows[0])).not.toContain(body);
   });
 });
