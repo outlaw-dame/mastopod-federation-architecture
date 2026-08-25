@@ -39,5 +39,20 @@ if ! compose exec -T friendica-db /bin/sh -lc \
     "Interop Federation" "${USERNAME}" "interop@friendi.ca" en
 fi
 
+# The image's FRIENDICA_LOG* environment values are install-time inputs and do
+# not override the database-backed runtime settings. Persist the pinned
+# Friendica logging keys so HTTP 500s produce privacy-redactable evidence.
+ensure_config() {
+  category="$1"
+  key="$2"
+  value="$3"
+  current="$(compose exec -T friendica-app php bin/console.php config "${category}" "${key}")"
+  if [ "${current}" != "${category}.${key} => ${value}" ]; then
+    compose exec -T friendica-app php bin/console.php config "${category}" "${key}" "${value}"
+  fi
+}
+ensure_config config logfile /var/log/friendica/friendica.log
+ensure_config config loglevel info
+
 compose up -d friendica-worker
 echo "Bootstrapped Friendica federation target ${USERNAME}"

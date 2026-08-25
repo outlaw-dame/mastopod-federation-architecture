@@ -539,45 +539,38 @@ jobs:
               echo "The sidecar gateway differs from the address bound by the public proof proxy." >&2
               exit 1
             fi
-            authority_strategy=single-authority-mode-switch
-            consecutive_health_checks=0
-            for attempt in $(seq 1 5); do
-              if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
-                "https://${ACTIVITYPODS_HOST}/.well-known/ap-proof-health" || true)" == 204 ]]; then
-                consecutive_health_checks=$((consecutive_health_checks + 1))
-                if [[ "${consecutive_health_checks}" -eq 3 ]]; then break; fi
-              else
-                consecutive_health_checks=0
-              fi
-              sleep 2
+            # Quick Tunnel authorities are credentialless and can age out
+            # during a long native proof. Select a fresh authority before the
+            # external actor exists. Candidate retries are bounded preflight;
+            # signed requests are never retried across authorities.
+            native_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")"
+            kill "${native_proxy_pid}" 2>/dev/null || true
+            for attempt in $(seq 1 20); do
+              if ! kill -0 "${native_proxy_pid}" 2>/dev/null; then break; fi
+              sleep 0.25
             done
-            if [[ "${consecutive_health_checks}" -ne 3 ]]; then
-              # Replacement is a preflight authority selection, before the
-              # external actor or any signed delivery exists. A signed request
-              # is never retried against a different authority.
-              native_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")"
-              kill "${native_proxy_pid}" 2>/dev/null || true
-              for attempt in $(seq 1 20); do
-                if ! kill -0 "${native_proxy_pid}" 2>/dev/null; then break; fi
-                sleep 0.25
-              done
-              if kill -0 "${native_proxy_pid}" 2>/dev/null; then
-                echo "The public proxy did not stop before bounded preflight replacement." >&2
-                exit 1
-              fi
-              docker rm -f "ap-${TARGET}-tunnel-native" >/dev/null 2>&1 || true
-              tunnel_host="$(
+            if kill -0 "${native_proxy_pid}" 2>/dev/null; then
+              echo "The public proxy did not stop before bounded preflight selection." >&2
+              exit 1
+            fi
+            docker rm -f "ap-${TARGET}-tunnel-native" >/dev/null 2>&1 || true
+            printf '%s\n' external > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode"
+            authority_selected=false
+            for candidate in 1 2 3; do
+              docker rm -f "ap-${TARGET}-tunnel-external" >/dev/null 2>&1 || true
+              if ! tunnel_host="$(
                 AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external" \
                 AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
                 AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
                   interop/ap/scripts/start-cloudflare-quick-tunnel.sh
-              )"
-              if [[ -z "${tunnel_host}" || ! "${tunnel_host}" =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]]; then
-                echo "The replacement public tunnel authority is unavailable or malformed." >&2
-                exit 1
+              )"; then
+                echo "External tunnel candidate ${candidate} failed to start." >&2
+                continue
               fi
-              export ACTIVITYPODS_HOST="${tunnel_host}"
-              echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "${GITHUB_ENV}"
+              if [[ -z "${tunnel_host}" || ! "${tunnel_host}" =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]]; then
+                echo "External tunnel candidate ${candidate} is unavailable or malformed." >&2
+                continue
+              fi
               AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
               AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
               AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
@@ -586,12 +579,42 @@ jobs:
               AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001 \
               AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080 \
                 node interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
-                > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.jsonl" \
-                2> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" &
+                >> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.jsonl" \
+                2>> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" &
               echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid"
-              authority_strategy=fresh-bounded-preflight-replacement
+              consecutive_health_checks=0
+              for attempt in $(seq 1 12); do
+                if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+                  "https://${tunnel_host}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+                  consecutive_health_checks=$((consecutive_health_checks + 1))
+                  if [[ "${consecutive_health_checks}" -eq 5 ]]; then
+                    authority_selected=true
+                    break
+                  fi
+                else
+                  consecutive_health_checks=0
+                fi
+                sleep 2
+              done
+              if [[ "${authority_selected}" == true ]]; then break; fi
+              candidate_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid")"
+              kill "${candidate_proxy_pid}" 2>/dev/null || true
+              for attempt in $(seq 1 20); do
+                if ! kill -0 "${candidate_proxy_pid}" 2>/dev/null; then break; fi
+                sleep 0.25
+              done
+              if kill -0 "${candidate_proxy_pid}" 2>/dev/null; then
+                echo "External proxy candidate ${candidate} did not stop." >&2
+                exit 1
+              fi
+            done
+            if [[ "${authority_selected}" != true ]]; then
+              echo "No stable external authority passed bounded preflight selection." >&2
+              exit 1
             fi
-            printf '%s\n' external > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode"
+            export ACTIVITYPODS_HOST="${tunnel_host}"
+            echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "${GITHUB_ENV}"
+            authority_strategy=fresh-bounded-preflight-selection
             export AP_PUBLIC_AUTHORITY_STRATEGY="${authority_strategy}"
             echo "AP_PUBLIC_AUTHORITY_STRATEGY=${authority_strategy}" >> "${GITHUB_ENV}"
           fi
@@ -824,7 +847,8 @@ jobs:
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
             friendica)
               docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" ps friendica-app friendica-worker 2>/dev/null || true
-              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color --tail 5000 friendica-app friendica-worker 2>&1 \
+              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" exec -T friendica-app \
+                tail -n 5000 /var/log/friendica/friendica.log 2>&1 \
                 | node fedify-sidecar/interop/ap/scripts/redact-friendica-container-errors.mjs || true
               ;;
             castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true ;;
