@@ -86,6 +86,13 @@ jobs:
             # Replaced with the bootstrapped snowflake profile URI before use.
             actor_uri: https://loops.test/ap/users/pending
             remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
+          - target: owncast
+            target_host: owncast.test
+            # Owncast's production SSRF policy requires a public actor authority.
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.owncast.yml
+            actor_uri: https://owncast.test/federation/user/interop
+            remote_version: Owncast v0.2.5@65d03b4d5df13dfc2033311fa30e4513b63b3e16
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ACTIVITYPODS_SHA: '00ba5a91814dc4251718f8c8b16090f4d5e6bb8c'
@@ -101,6 +108,8 @@ jobs:
       BONFIRE_OVERLAY: fedify-sidecar/interop/ap/docker-compose.bonfire.yml
       LOOPS_OVERLAY: fedify-sidecar/interop/ap/docker-compose.loops.yml
       LOOPS_SHA: 'b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3'
+      OWNCAST_OVERLAY: fedify-sidecar/interop/ap/docker-compose.owncast.yml
+      OWNCAST_SHA: '65d03b4d5df13dfc2033311fa30e4513b63b3e16'
       TARGET: ${{ matrix.target }}
       TARGET_HOST: ${{ matrix.target_host }}
       ACTIVITYPODS_HOST: ${{ matrix.activitypods_host }}
@@ -144,6 +153,15 @@ jobs:
           path: loops
           persist-credentials: false
 
+      - name: Checkout exact Owncast fixture source
+        if: matrix.target == 'owncast'
+        uses: actions/checkout@v4
+        with:
+          repository: owncast/owncast
+          ref: ${{ env.OWNCAST_SHA }}
+          path: owncast
+          persist-credentials: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -174,12 +192,13 @@ jobs:
           castopod_admin_password="$(openssl rand -hex 32)"
           peertube_db_password="$(openssl rand -hex 32)"
           peertube_secret="$(openssl rand -hex 32)"
+          owncast_admin_password="$(openssl rand -hex 32)"
           bonfire_db_password="$(openssl rand -hex 32)"
           bonfire_secret_key_base="$(openssl rand -hex 64)"
           bonfire_signing_salt="$(openssl rand -hex 32)"
           bonfire_encryption_salt="$(openssl rand -hex 32)"
           bonfire_release_cookie="$(openssl rand -hex 32)"
-          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${peertube_db_password}" "${peertube_secret}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
+          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${peertube_db_password}" "${peertube_secret}" "${owncast_admin_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
           if [[ "${TARGET}" == loops ]]; then
             loops_db_password="$(openssl rand -hex 32)"
             loops_db_root_password="$(openssl rand -hex 32)"
@@ -206,6 +225,7 @@ jobs:
             echo "CASTOPOD_ADMIN_PASSWORD=${castopod_admin_password}"
             echo "PEERTUBE_DB_PASSWORD=${peertube_db_password}"
             echo "PEERTUBE_SECRET=${peertube_secret}"
+            echo "OWNCAST_ADMIN_PASSWORD=${owncast_admin_password}"
             echo "BONFIRE_DB_PASSWORD=${bonfire_db_password}"
             echo "BONFIRE_SECRET_KEY_BASE=${bonfire_secret_key_base}"
             echo "BONFIRE_SIGNING_SALT=${bonfire_signing_salt}"
@@ -340,6 +360,13 @@ jobs:
                 fedify-sidecar/interop/ap/scripts/bootstrap-loops-account.sh
               . fedify-sidecar/interop/ap/runtime/loops-actor.env
               ;;
+            owncast)
+              [[ -d owncast/.git ]]
+              [[ "$(git -C owncast rev-parse HEAD)" == "${OWNCAST_SHA}" ]]
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_OWNCAST_OVERLAY="${OWNCAST_OVERLAY}" \
+              AP_INTEROP_OWNCAST_USERNAME="${TARGET_USERNAME}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-owncast-account.sh
+              ;;
             *) exit 2 ;;
           esac
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
@@ -367,7 +394,7 @@ jobs:
           [[ "${ready}" == true ]]
 
       - name: Publish restricted ActivityPub authority for SSRF-protected native targets
-        if: contains(fromJSON('["friendica","loops","peertube"]'), matrix.target)
+        if: contains(fromJSON('["friendica","loops","peertube","owncast"]'), matrix.target)
         shell: bash
         run: |
           set -euo pipefail
@@ -475,7 +502,7 @@ jobs:
           SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
         run: |
           set -euo pipefail
-          if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
             export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
           fi
@@ -534,7 +561,7 @@ jobs:
           fi
           sidecar_host="$(node interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
           echo "AP_PROOF_SIDECAR_HOST=${sidecar_host}" >> "${GITHUB_ENV}"
-          if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
             if [[ -z "${AP_PUBLIC_PROXY_GATEWAY:-}" || "${sidecar_host}" != "${AP_PUBLIC_PROXY_GATEWAY}" ]]; then
               echo "The sidecar gateway differs from the address bound by the public proof proxy." >&2
               exit 1
@@ -649,7 +676,7 @@ jobs:
             sleep 1
           done
           [[ "${ready}" == true ]]
-          if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
             consecutive_health_checks=0
             for attempt in $(seq 1 90); do
               if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
@@ -721,7 +748,7 @@ jobs:
           SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
         run: |
           set -euo pipefail
-          if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
             export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
           fi
@@ -857,6 +884,7 @@ jobs:
             # Loops can log signed request context. The persistence assertion
             # already emits privacy-safe counters and Horizon state.
             loops) docker compose -f "${COMPOSE_FILE}" -f "${LOOPS_OVERLAY}" ps loops-app loops-horizon loops-db 2>/dev/null || true ;;
+            owncast) docker compose -f "${COMPOSE_FILE}" -f "${OWNCAST_OVERLAY}" ps owncast-app 2>/dev/null || true ;;
           esac
 
       - name: Stop isolated fixture
@@ -890,6 +918,9 @@ jobs:
           fi
           if [[ "${TARGET}" == loops ]]; then
             docker compose -f "${COMPOSE_FILE}" -f "${LOOPS_OVERLAY}" down -v || true
+          fi
+          if [[ "${TARGET}" == owncast ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${OWNCAST_OVERLAY}" down -v || true
           fi
           docker compose -f "${COMPOSE_FILE}" --profile mastodon --profile akkoma down -v || true
           cd activitypods/pod-provider

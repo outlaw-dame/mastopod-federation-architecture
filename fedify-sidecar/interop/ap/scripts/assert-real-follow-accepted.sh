@@ -44,12 +44,12 @@ if [ -n "${COMPOSE_OVERLAY}" ]; then
 fi
 
 if [ -z "${TARGET}" ] || [ -z "${ACTOR_URI}" ]; then
-  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod|peertube|loops> <actor-uri> [local-username]" >&2
+  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod|peertube|loops|owncast> <actor-uri> [local-username]" >&2
   exit 2
 fi
 
 case "${TARGET}" in
-  mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod|peertube|loops) ;;
+  mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod|peertube|loops|owncast) ;;
   *) fail "unsupported target '${TARGET}'" ;;
 esac
 case "${EXPECTED_COUNT}:${ATTEMPTS}:${DELAY_SECONDS}" in
@@ -132,6 +132,10 @@ query_count() {
       compose exec -T loops-db /bin/sh -lc \
         "MYSQL_PWD=\"\$MYSQL_PASSWORD\" mysql --batch --skip-column-names -u loops loops -e \"select count(*) from followers f join profiles follower on follower.id=f.profile_id join profiles target on target.id=f.following_id where follower.uri='${actor_sql}' and target.username='${username_sql}' and follower.local=0 and target.local=1;\""
       ;;
+    owncast)
+      sqlite3 "${SCRIPT_DIR}/../runtime/owncast/owncast.db" \
+        "PRAGMA busy_timeout=30000; select count(*) from ap_followers where iri='${actor_sql}' and approved_at is not null and disabled_at is null;"
+      ;;
   esac
 }
 
@@ -171,6 +175,7 @@ friendica_diagnostics() {
     printf '%s\n' "select concat('inbox_receiver_count=', count(*)) from \`inbox-entry-receiver\` r join \`inbox-entry\` e on e.id=r.\`queue-id\` where e.signer='${actor_sql}';"
     printf '%s\n' "select concat('introduction_count=', count(*)) from intro i join contact c on c.id=i.\`contact-id\` where c.url='${actor_sql}';"
     printf '%s\n' "select concat('pending_worker_count=', count(*), ',retrying_worker_count=', coalesce(sum(retrial > 0),0)) from workerqueue where done=0;"
+    printf '%s\n' "select concat('activitypub_inbound_count=', coalesce(max(cast(v as unsigned)),0)) from \`key-value\` where k='stats_packets_inbound_apub';"
   } | compose exec -T friendica-db /bin/sh -lc \
     'MYSQL_PWD="$MARIADB_PASSWORD" mariadb --batch --skip-column-names -u friendica friendica' \
     >&2 || echo "Friendica database diagnostics unavailable" >&2
@@ -186,6 +191,8 @@ friendica_diagnostics() {
       "actor_fetch_discard_count" => "Unable to retrieve AP contact for actor - message is discarded",
       "invalid_http_signature_count" => "Invalid HTTP signature, message will not be trusted.",
       "valid_http_signature_count" => "Valid HTTP signature",
+      "receiver_user_routing_count" => "Message for user ",
+      "trusted_matching_signer_count" => "Trusting post without JSON-LD signature, The actor fits the HTTP signer.",
     ];
     $counts = array_fill_keys(array_keys($patterns), 0);
     $lineCount = 0;
@@ -231,6 +238,9 @@ loops_diagnostics() {
   compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" loops-app php artisan tinker --execute=\
 '$url = getenv("AP_INTEROP_ACTOR_URI"); $sanitized = app(App\Services\SanitizeService::class)->url($url, true, false); dump(["sanitizer" => ["accepted" => is_string($sanitized), "exact" => is_string($sanitized) && hash_equals($url, $sanitized)]]); foreach (["unsigned" => false, "signed" => true] as $label => $signed) { $value = app(App\Services\ActivityPubService::class)->get($url, [], $signed, true, true, true); dump([$label => ["isArray" => is_array($value), "idExact" => is_array($value) && (($value["id"] ?? null) === $url), "type" => is_array($value) ? ($value["type"] ?? null) : null]]); }' \
     >&2 || echo "Loops application actor-fetch diagnostic unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" loops-app php artisan tinker --execute=\
+'$url = getenv("AP_INTEROP_ACTOR_URI"); try { $response = Illuminate\Support\Facades\Http::withOptions(["allow_redirects" => false, "stream" => true, "on_headers" => function (Psr\Http\Message\ResponseInterface $response) { $length = $response->getHeaderLine("Content-Length"); if ($length !== "" && (int) $length > App\Services\ActivityPubService::MAX_RESPONSE_SIZE) { throw new RuntimeException("oversize"); } }])->withHeaders(["Accept" => "application/activity+json", "User-Agent" => app("user_agent")])->timeout(5)->connectTimeout(3)->get($url); $body = $response->toPsrResponse()->getBody(); $bytes = 0; $oversize = false; try { while (!$body->eof()) { $bytes += strlen($body->read(8192)); if ($bytes > App\Services\ActivityPubService::MAX_RESPONSE_SIZE) { $oversize = true; break; } } } finally { $body->close(); } dump(["frameworkHttp" => ["status" => $response->status(), "contentType" => $response->header("Content-Type"), "bytes" => $bytes, "oversize" => $oversize]]); } catch (Throwable $error) { $previous = $error->getPrevious(); dump(["frameworkHttp" => ["errorClass" => get_class($error), "errorCode" => $error->getCode(), "previousClass" => $previous ? get_class($previous) : null, "previousCode" => $previous ? $previous->getCode() : null]]); }' \
+    >&2 || echo "Loops framework HTTP diagnostic unavailable" >&2
 }
 
 peertube_diagnostics() {
@@ -313,6 +323,11 @@ case "${TARGET}" in
     # Application logs may contain signed request context. Emit only fixed
     # database and worker-health counters on a failed proof.
     loops_diagnostics
+    ;;
+  owncast)
+    sqlite3 "${SCRIPT_DIR}/../runtime/owncast/owncast.db" \
+      "select 'owncast_remote_follower_count=' || count(*) || ',approved_count=' || coalesce(sum(approved_at is not null),0) || ',disabled_count=' || coalesce(sum(disabled_at is not null),0) from ap_followers where iri='${actor_sql}';" >&2 || true
+    compose ps owncast-app >&2 || true
     ;;
 esac
 exit 1

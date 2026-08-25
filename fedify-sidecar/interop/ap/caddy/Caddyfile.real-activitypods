@@ -80,6 +80,13 @@ https://loops.test {
   }
 }
 
+https://owncast.test {
+  tls /certs/owncast.test.crt /certs/owncast.test.key
+  reverse_proxy owncast-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
+}
+
 # The workflow selects exactly one return-path authority for each mode. Never
 # fail a signed POST over between upstreams: a retry can lose or alter its body,
 # and fallback would make the authority-path evidence ambiguous.

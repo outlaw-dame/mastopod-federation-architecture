@@ -82,6 +82,14 @@ services:
     volumes: ["./runtime/wire:/evidence"]
     networks: [ap-interop]
 
+  owncast-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://owncast-app:8080", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/owncast.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
   ap-proof-router:
     image: caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
     profiles: ["real-activitypods"]
@@ -117,6 +125,7 @@ services:
           - castopod.test
           - peertube.test
           - loops.test
+          - owncast.test
           - activitypods.test
 
   # Containerized real-ActivityPods sidecar proof. Keeping this service on the

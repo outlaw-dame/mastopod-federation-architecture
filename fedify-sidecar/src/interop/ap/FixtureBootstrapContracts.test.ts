@@ -86,6 +86,40 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(bootstrap).toContain("compose up -d --no-build loops-db loops-redis loops-app");
   });
 
+  it("builds Owncast from exact source without weakening federation transport security", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+    const compose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.owncast.yml"),
+      "utf8",
+    );
+    const bootstrap = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/bootstrap-owncast-account.sh"),
+      "utf8",
+    );
+    const assertion = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+
+    expect(compose).toContain("context: ${OWNCAST_SOURCE_DIR:-../../../owncast}");
+    expect(compose).toContain("GIT_COMMIT: 65d03b4d5df13dfc2033311fa30e4513b63b3e16");
+    expect(compose).toContain('user: "${OWNCAST_RUNTIME_UID:-1000}:${OWNCAST_RUNTIME_GID:-1000}"');
+    expect(workflow).toContain('[[ "$(git -C owncast rev-parse HEAD)" == "${OWNCAST_SHA}" ]]');
+    expect(workflow).toContain('["friendica","loops","peertube","owncast"]');
+    expect(bootstrap).toContain("while ! compose build owncast-app");
+    expect(bootstrap).toContain('compose up -d --no-build owncast-app');
+    expect(bootstrap).toContain('OWNCAST_RUNTIME_UID="${OWNCAST_RUNTIME_UID:-$(id -u)}"');
+    expect(bootstrap).toContain('[ -w "${SCRIPT_DIR}/../runtime/owncast" ]');
+    expect(assertion).toContain("from ap_followers where iri=");
+    expect(compose).not.toContain("OWNCAST_ALLOW_INTERNAL_FEDERATION");
+    expect(compose).not.toContain("OWNCAST_INSECURE_SKIP_VERIFY");
+    expect(workflow).not.toContain("OWNCAST_ALLOW_INTERNAL_FEDERATION");
+    expect(workflow).not.toContain("OWNCAST_INSECURE_SKIP_VERIFY");
+  });
+
   it("bounds retries for transient Pixelfed image-build downloads", () => {
     const script = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/build-pixelfed-fixture.sh"),
@@ -391,9 +425,12 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain("inbox_receiver_count=");
     expect(script).toContain("introduction_count=");
     expect(script).toContain("pending_worker_count=");
+    expect(script).toContain("activitypub_inbound_count=");
     expect(script).toContain("actor_fetch_discard_count");
     expect(script).toContain("invalid_http_signature_count");
     expect(script).toContain("valid_http_signature_count");
+    expect(script).toContain("receiver_user_routing_count");
+    expect(script).toContain("trusted_matching_signer_count");
     expect(script).toContain("friendica_log_line_count");
     expect(script).toContain("php /interop/actor-jsonld-diagnostic.php");
     expect(script).toContain('AP_INTEROP_EXPECTED_ACTOR_HOST="${ACTIVITYPODS_HOST:?ACTIVITYPODS_HOST is required}"');
@@ -410,6 +447,24 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(actorDiagnostic).toContain("actor_compact_public_key_pem_present");
     expect(actorDiagnostic).not.toContain("CURLOPT_HEADER");
     expect(actorDiagnostic).not.toMatch(/(?:echo|print|fwrite|printf).*publicKeyPem/);
+  });
+
+  it("records bounded Loops framework HTTP diagnostics without exposing request data", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+    const loopsDiagnostics = script
+      .split("loops_diagnostics() {")[1]
+      ?.split("\n}\n\npeertube_diagnostics() {")[0] ?? "";
+
+    expect(loopsDiagnostics).toContain('["frameworkHttp" => ["status" => $response->status()');
+    expect(loopsDiagnostics).toContain('"errorClass" => get_class($error)');
+    expect(loopsDiagnostics).toContain('"previousClass" => $previous ? get_class($previous) : null');
+    expect(loopsDiagnostics).toContain("ActivityPubService::MAX_RESPONSE_SIZE");
+    expect(loopsDiagnostics).not.toContain("$error->getMessage()");
+    expect(loopsDiagnostics).not.toContain('"errorMessage"');
+    expect(loopsDiagnostics).not.toContain('"body" => $response->body()');
   });
 
   it("passes quoted Friendica table names to MariaDB as SQL, not shell substitutions", () => {
