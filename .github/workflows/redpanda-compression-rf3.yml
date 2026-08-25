@@ -5,7 +5,10 @@ on:
     paths:
       - 'fedify-sidecar/scripts/benchmark-redpanda-compression-rf3.ts'
       - 'fedify-sidecar/scripts/analyze-redpanda-compression-rf3.mjs'
+      - 'fedify-sidecar/scripts/confirm-redpanda-compression-rf3.mjs'
       - 'fedify-sidecar/src/streams/kafka-compression.ts'
+      - 'fedify-sidecar/src/streams/tests/RedpandaRf3Analyzer.test.ts'
+      - 'fedify-sidecar/src/streams/tests/RedpandaRf3Confirmation.test.ts'
       - '.github/workflows/redpanda-compression-rf3.yml'
   workflow_dispatch:
 
@@ -18,11 +21,19 @@ concurrency:
 
 jobs:
   three-broker-rf3:
+    name: three-broker RF3 / independent campaign ${{ matrix.campaign }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        campaign: [1, 2, 3]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -70,32 +81,44 @@ jobs:
           }
           if (JSON.stringify(summary.medians.map((x) => x.arm)) !== JSON.stringify(expected)) throw new Error('RF3 arm drift');
           const z1 = decision.comparisons.find((x) => x.arm === 'zstd-1');
-          if (!z1 || !z1.eligible) throw new Error(`Zstd-1 is not RF3-eligible: ${JSON.stringify(z1?.reasons)}`);
+          if (!z1) throw new Error('Zstd-1 comparison missing');
           const selected = decision.comparisons.find((x) => x.arm === decision.selectedArm);
           if (!selected || !selected.eligible) {
             throw new Error(`RF3 analyzer selected an ineligible or missing arm: ${decision.selectedArm}`);
           }
           const validation = {
-            schema: 'apdm.redpanda.rf3-production-validation.v1',
+            schema: 'apdm.redpanda.rf3-production-validation.v2',
             productionArm: 'zstd-1',
-            productionArmEligible: true,
+            productionArmEligible: Boolean(z1?.eligible),
             selectedCandidateArm: decision.selectedArm,
             candidateDiffersFromProduction: decision.selectedArm !== 'zstd-1',
-            promotionPolicy: 'A different candidate is evidence for a repeated benchmark campaign, not an automatic production configuration change.',
+            campaign: {
+              id: Number(process.env.RF3_CAMPAIGN_ID),
+              runId: process.env.GITHUB_RUN_ID,
+              runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            },
+            promotionPolicy: 'A different candidate is retained evidence, never an automatic production configuration change. Production rejection requires the aggregate confirmation gate.',
             zstd1: z1,
           };
           fs.writeFileSync('measurements/redpanda-compression-rf3/production-validation.json', `${JSON.stringify(validation, null, 2)}\n`);
+          if (!validation.productionArmEligible) {
+            console.warn(`RF3 campaign ${validation.campaign.id} breached an unchanged Zstd-1 safety gate: ${JSON.stringify(z1?.reasons)}. Awaiting independent-campaign confirmation.`);
+          }
           if (validation.candidateDiffersFromProduction) {
-            console.warn(`RF3 candidate ${decision.selectedArm} differs from production zstd-1; preserving the eligible production arm pending repeated evidence.`);
+            console.warn(`RF3 candidate ${decision.selectedArm} differs from production zstd-1; preserving production pending the confirmation gate.`);
           }
           console.log(JSON.stringify(validation, null, 2));
           NODE
+        env:
+          RF3_CAMPAIGN_ID: ${{ matrix.campaign }}
 
       - name: Capture runner context
         if: always()
         run: |
           {
             echo "runner=$(uname -a)"
+            echo "campaign=${{ matrix.campaign }}"
+            echo "head_sha=${{ github.event.pull_request.head.sha || github.sha }}"
             echo "docker=$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
             echo "cpu_count=$(nproc)"
             echo "memory_kib=$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
@@ -105,7 +128,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: redpanda-compression-rf3-${{ github.run_id }}-${{ github.run_attempt }}
+          name: redpanda-compression-rf3-campaign-${{ matrix.campaign }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: measurements/redpanda-compression-rf3
           if-no-files-found: error
           retention-days: 30
@@ -115,3 +138,58 @@ jobs:
         run: |
           docker rm -f rf3-redpanda-0 rf3-redpanda-1 rf3-redpanda-2 >/dev/null 2>&1 || true
           docker network rm redpanda-compression-rf3 >/dev/null 2>&1 || true
+
+  confirm-production:
+    name: confirm production codec across independent RF3 campaigns
+    needs: three-broker-rf3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact federation head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Download all campaign evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: redpanda-compression-rf3-campaign-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redpanda-compression-rf3-campaigns
+          merge-multiple: false
+
+      - name: Build independent-campaign confirmation
+        run: |
+          mkdir -p measurements/redpanda-compression-rf3-confirmation
+          mapfile -t validations < <(find measurements/redpanda-compression-rf3-campaigns -name production-validation.json -type f | sort)
+          if [[ "${#validations[@]}" -ne 3 ]]; then
+            echo "Expected exactly 3 RF3 campaign validations, found ${#validations[@]}" >&2
+            printf '%s\n' "${validations[@]}" >&2
+            exit 1
+          fi
+          node fedify-sidecar/scripts/confirm-redpanda-compression-rf3.mjs \
+            "${validations[@]}" \
+            --output=measurements/redpanda-compression-rf3-confirmation/decision.json
+
+      - name: Enforce confirmed production safety result
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const decision = JSON.parse(fs.readFileSync('measurements/redpanda-compression-rf3-confirmation/decision.json', 'utf8'));
+          if (decision.schema !== 'apdm.redpanda.rf3-campaign-confirmation.v1' || decision.campaignCount !== 3 || decision.confirmationThreshold !== 2) {
+            throw new Error('RF3 campaign confirmation contract drift');
+          }
+          if (decision.confirmedRegression || !decision.productionArmEligible) {
+            throw new Error(`Confirmed Zstd-1 RF3 regression in ${decision.breachCount}/${decision.campaignCount} independent campaigns`);
+          }
+          console.log(JSON.stringify(decision, null, 2));
+          NODE
+
+      - name: Upload aggregate RF3 confirmation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redpanda-compression-rf3-confirmation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/redpanda-compression-rf3-confirmation
+          if-no-files-found: error
+          retention-days: 30
