@@ -403,6 +403,11 @@ jobs:
             sleep 2
           done
           [[ "${tunnel_ready}" == true ]]
+          if [[ "${TARGET}" == loops ]]; then
+            AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_LOOPS_OVERLAY="${LOOPS_OVERLAY}" \
+              fedify-sidecar/interop/ap/scripts/reconfigure-loops-proof-authority.sh "${tunnel_host}" \
+              | tee "${EVIDENCE_DIR}/native-loops-proof-authority.json"
+          fi
           echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "$GITHUB_ENV"
           printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"native","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"security":"remote SSRF prevention remains enabled"}\n' \
             "${TARGET}" "${tunnel_host}" > "${EVIDENCE_DIR}/native-public-tunnel.json"
@@ -617,6 +622,12 @@ jobs:
             authority_strategy=fresh-bounded-preflight-selection
             export AP_PUBLIC_AUTHORITY_STRATEGY="${authority_strategy}"
             echo "AP_PUBLIC_AUTHORITY_STRATEGY=${authority_strategy}" >> "${GITHUB_ENV}"
+            if [[ "${TARGET}" == loops ]]; then
+              AP_INTEROP_COMPOSE_FILE="${GITHUB_WORKSPACE}/${COMPOSE_FILE}" \
+              AP_INTEROP_LOOPS_OVERLAY="${GITHUB_WORKSPACE}/${LOOPS_OVERLAY}" \
+                interop/ap/scripts/reconfigure-loops-proof-authority.sh "${tunnel_host}" \
+                | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-loops-proof-authority.json"
+            fi
           fi
           : > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl"
           AP_SIGNING_PROXY_HOST=127.0.0.1 AP_SIGNING_PROXY_PORT=3001 AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \

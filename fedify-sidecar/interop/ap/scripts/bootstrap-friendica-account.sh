@@ -51,8 +51,9 @@ ensure_config() {
     compose exec -T friendica-app php bin/console.php config "${category}" "${key}" "${value}"
   fi
 }
-ensure_config config logfile /var/log/friendica/friendica.log
-ensure_config config loglevel info
+ensure_config system logger_config stream
+ensure_config system logfile /var/log/friendica/friendica.log
+ensure_config system loglevel info
 
 compose up -d friendica-worker
 echo "Bootstrapped Friendica federation target ${USERNAME}"

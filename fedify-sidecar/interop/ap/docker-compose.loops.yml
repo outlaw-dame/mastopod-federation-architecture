@@ -65,6 +65,9 @@ services:
       MAIL_FROM_ADDRESS: interop@loops.invalid
       MAIL_FROM_NAME: Loops Interop
       LOOPS_CAPTCHA: "false"
+      # Populated only for the exact path-restricted ephemeral proof authority.
+      # An empty default preserves Loops' production SSRF checks in every other lane.
+      LOOPS_LOCAL_DOMAINS: ${LOOPS_LOCAL_DOMAINS:-}
       LOG_CHANNEL: stderr
       LOG_LEVEL: info
       SSL_MODE: "off"

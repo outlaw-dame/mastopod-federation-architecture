@@ -16,7 +16,7 @@ afterEach(async () => {
 });
 
 describe("path-restricted public ActivityPub tunnel proxy", () => {
-  it("exposes only bounded actor, key, following, WebFinger, and inbox traffic", async () => {
+  it("exposes only bounded context, actor, key, following, WebFinger, and inbox traffic", async () => {
     const upstreamRequests: Array<{ method?: string; url?: string; host?: string; body: string }> = [];
     const upstream = createServer((request, response) => {
       const chunks: Buffer[] = [];
@@ -73,6 +73,14 @@ describe("path-restricted public ActivityPub tunnel proxy", () => {
     expect(actor.headers["set-cookie"]).toBeUndefined();
     expect(upstreamRequests.at(-1)).toMatchObject({ method: "GET", url: "/alice", host: authority });
 
+    const context = await send(proxyPort, authority, "GET", "/.well-known/context.jsonld");
+    expect(context.status).toBe(200);
+    expect(upstreamRequests.at(-1)).toMatchObject({
+      method: "GET",
+      url: "/.well-known/context.jsonld",
+      host: authority,
+    });
+
     const following = await send(proxyPort, authority, "GET", "/alice/following");
     expect(following.status).toBe(200);
     expect(upstreamRequests.at(-1)).toMatchObject({ method: "GET", url: "/alice/following", host: authority });
@@ -84,6 +92,8 @@ describe("path-restricted public ActivityPub tunnel proxy", () => {
     expect((await send(proxyPort, authority, "GET", "/alice/following?page=1&page=2")).status).toBe(404);
     expect((await send(proxyPort, authority, "GET", "/alice/following?cursor=1")).status).toBe(404);
     expect((await send(proxyPort, authority, "GET", "/alice/followers")).status).toBe(404);
+    expect((await send(proxyPort, authority, "GET", "/.well-known/context.jsonld?unexpected=1")).status).toBe(404);
+    expect((await send(proxyPort, authority, "GET", "/.well-known/other.jsonld")).status).toBe(404);
     expect((await send(proxyPort, authority, "GET", "/api/internal/signatures/batch")).status).toBe(404);
     expect((await send(proxyPort, "attacker.example", "GET", "/alice")).status).toBe(421);
     expect((await send(proxyPort, authority, "GET", `/.well-known/webfinger?resource=acct:alice@attacker.example`)).status).toBe(404);

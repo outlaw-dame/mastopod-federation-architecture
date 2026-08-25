@@ -60,6 +60,10 @@ const RESPONSE_HEADER_ALLOWLIST = new Set([
 
 export function classifyPublicActivityPubRequest(method, rawUrl) {
   const url = new URL(rawUrl, `https://${AUTHORITY}`);
+  if ((method === "GET" || method === "HEAD") &&
+      url.pathname === "/.well-known/context.jsonld" && url.search === "") {
+    return { allowed: true, kind: "context", url };
+  }
   if ((method === "GET" || method === "HEAD") && url.search === "" &&
       (ACTOR_PATH.test(url.pathname) || KEY_PATH.test(url.pathname))) {
     return { allowed: true, kind: KEY_PATH.test(url.pathname) ? "key" : "actor", url };
