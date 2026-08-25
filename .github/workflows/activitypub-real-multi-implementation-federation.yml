@@ -88,7 +88,7 @@ jobs:
             remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: 'c89831a50bc2be071a88f10a2825a2b1fe6031ab'
+      ACTIVITYPODS_SHA: 'ff9733c1211c3e784cc4b147b8adfe330ac7b071'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -535,15 +535,45 @@ jobs:
           sidecar_host="$(node interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
           echo "AP_PROOF_SIDECAR_HOST=${sidecar_host}" >> "${GITHUB_ENV}"
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
-            tunnel_host="${ACTIVITYPODS_HOST:-}"
-            if [[ -z "${tunnel_host}" || ! "${tunnel_host}" =~ ^[a-z0-9.-]+$ ]]; then
-              echo "The validated native public tunnel authority is unavailable or malformed." >&2
-              exit 1
-            fi
             if [[ -z "${AP_PUBLIC_PROXY_GATEWAY:-}" || "${sidecar_host}" != "${AP_PUBLIC_PROXY_GATEWAY}" ]]; then
               echo "The sidecar gateway differs from the address bound by the public proof proxy." >&2
               exit 1
             fi
+            native_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")"
+            kill "${native_proxy_pid}" 2>/dev/null || true
+            for attempt in $(seq 1 20); do
+              if ! kill -0 "${native_proxy_pid}" 2>/dev/null; then break; fi
+              sleep 0.25
+            done
+            if kill -0 "${native_proxy_pid}" 2>/dev/null; then
+              echo "The native public proxy did not stop before external authority isolation." >&2
+              exit 1
+            fi
+            docker rm -f "ap-${TARGET}-tunnel-native" >/dev/null 2>&1 || true
+            tunnel_host="$(
+              AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external" \
+              AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
+              AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
+                interop/ap/scripts/start-cloudflare-quick-tunnel.sh
+            )"
+            if [[ -z "${tunnel_host}" || ! "${tunnel_host}" =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]]; then
+              echo "The external public tunnel authority is unavailable or malformed." >&2
+              exit 1
+            fi
+            export ACTIVITYPODS_HOST="${tunnel_host}"
+            echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "${GITHUB_ENV}"
+            printf '%s\n' external > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode"
+            AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
+            AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
+            AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
+            AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_INBOX_TARGET_PORT=8080 \
+            AP_PUBLIC_PROXY_INBOX_MODE_FILE="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode" \
+            AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001 \
+            AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080 \
+              node interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
+              > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.jsonl" \
+              2> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" &
+            echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid"
           fi
           : > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl"
           AP_SIGNING_PROXY_HOST=127.0.0.1 AP_SIGNING_PROXY_PORT=3001 AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
@@ -552,6 +582,7 @@ jobs:
           echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-proxy.pid"
           docker compose -f "${GITHUB_WORKSPACE}/activitypods/pod-provider/docker-compose-test.yml" exec -T redis redis-cli -n 0 FLUSHDB >/dev/null
           NODE_ENV=development LOG_LEVEL=debug PORT=8080 HOST="${sidecar_host}" DOMAIN="${ACTIVITYPODS_HOST}" SIDECAR_STARTUP_MODE=blocking \
+          AP_RELAY_ACTOR_URLS='' \
           AP_INTEROP_ENABLE_MEDIA_FIXTURES=true APDM_INTEROP_PRIVATE_HOSTS="${TARGET_HOST}" \
           REDIS_URL=redis://127.0.0.1:6379 APDM_COMPLETION_MARKER_V2_CUTOVER=fresh REDPANDA_BROKERS=127.0.0.1:19092 \
           REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development \
@@ -576,9 +607,6 @@ jobs:
           done
           [[ "${ready}" == true ]]
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube)$ ]]; then
-            route_file="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode"
-            printf '%s\n' external > "${route_file}.next"
-            mv "${route_file}.next" "${route_file}"
             tunnel_ready=false
             for attempt in $(seq 1 90); do
               if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
@@ -589,7 +617,7 @@ jobs:
               sleep 2
             done
             [[ "${tunnel_ready}" == true ]]
-            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"authorityContinuity":"same-bounded-tunnel-and-proxy","inboxRouteMode":"external","security":"remote SSRF prevention remains enabled"}\n' \
+            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"authorityIsolation":"fresh-bounded-tunnel-and-proxy-for-mode","inboxRouteMode":"external","security":"remote SSRF prevention remains enabled"}\n' \
               "${TARGET}" "${ACTIVITYPODS_HOST}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
           fi
 
@@ -772,7 +800,11 @@ jobs:
             akkoma) docker compose -f "${COMPOSE_FILE}" --profile akkoma logs --no-color akkoma-app 2>/dev/null || true ;;
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
-            friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" ps friendica-app friendica-worker 2>/dev/null || true ;;
+            friendica)
+              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" ps friendica-app friendica-worker 2>/dev/null || true
+              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color --tail 5000 friendica-app friendica-worker 2>&1 \
+                | node fedify-sidecar/interop/ap/scripts/redact-friendica-container-errors.mjs || true
+              ;;
             castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true ;;
             peertube) docker compose -f "${COMPOSE_FILE}" -f "${PEERTUBE_OVERLAY}" ps peertube-app peertube-db peertube-redis 2>/dev/null || true ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
@@ -786,7 +818,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          for file in activitypods-external.pid activitypods-native.pid native-inbound-proxy.pid native-public-proxy.pid sidecar.pid signing-proxy.pid; do
+          for file in activitypods-external.pid activitypods-native.pid external-public-proxy.pid native-inbound-proxy.pid native-public-proxy.pid sidecar.pid signing-proxy.pid; do
             if [[ -f "${EVIDENCE_DIR}/${file}" ]]; then kill "$(cat "${EVIDENCE_DIR}/${file}")" 2>/dev/null || true; fi
           done
           docker rm -f "ap-${TARGET}-tunnel-native" "ap-${TARGET}-tunnel-external" >/dev/null 2>&1 || true

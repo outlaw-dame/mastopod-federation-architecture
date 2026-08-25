@@ -28,7 +28,19 @@ printf '%s' "${LOOPS_APP_KEY}" | LC_ALL=C grep -Eq '^base64:[A-Za-z0-9+/]{43}=$'
 }
 
 compose() { docker compose -f "${COMPOSE_FILE}" -f "${OVERLAY}" "$@"; }
-compose up -d loops-db loops-redis loops-app
+build_attempt=1
+build_delay=10
+while ! compose build loops-app; do
+  if [ "${build_attempt}" -ge 3 ]; then
+    echo "Loops image build failed after ${build_attempt} bounded attempts" >&2
+    exit 1
+  fi
+  echo "Loops image build attempt ${build_attempt} failed; retrying in ${build_delay}s" >&2
+  sleep "${build_delay}"
+  build_delay=$((build_delay * 2))
+  build_attempt=$((build_attempt + 1))
+done
+compose up -d --no-build loops-db loops-redis loops-app
 
 ready=false
 attempt=1

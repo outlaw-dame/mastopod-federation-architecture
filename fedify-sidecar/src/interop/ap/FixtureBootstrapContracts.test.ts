@@ -73,10 +73,17 @@ describe("real federation fixture bootstrap contracts", () => {
       resolve(process.cwd(), "interop/ap/docker-compose.loops.yml"),
       "utf8",
     );
+    const bootstrap = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/bootstrap-loops-account.sh"),
+      "utf8",
+    );
 
     expect(compose).toContain("context: ${LOOPS_SOURCE_DIR:-../../../loops}");
     expect(workflow).toContain('[[ -d loops/.git ]]');
     expect(workflow).toContain('[[ "$(git -C loops rev-parse HEAD)" == "${LOOPS_SHA}" ]]');
+    expect(bootstrap).toContain("while ! compose build loops-app");
+    expect(bootstrap).toContain('"${build_attempt}" -ge 3');
+    expect(bootstrap).toContain("compose up -d --no-build loops-db loops-redis loops-app");
   });
 
   it("bounds retries for transient Pixelfed image-build downloads", () => {
@@ -395,6 +402,7 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).not.toContain("select activity from \\`inbox-entry\\`");
     expect(script).not.toContain("compose logs --no-color friendica-app friendica-worker");
     expect(workflow).not.toContain("logs --no-color friendica-app friendica-worker");
+    expect(workflow).toContain("redact-friendica-container-errors.mjs");
     expect(workflow).toContain("ps friendica-app friendica-worker");
     expect(workflow).not.toContain('cat "${EVIDENCE_DIR}/signing-api.jsonl"');
     expect(twoModeWorkflow).not.toContain('cat "${EVIDENCE_DIR}/signing-api.jsonl"');
