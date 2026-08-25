@@ -65,6 +65,21 @@ services:
       - ap_interop_castopod_media:/var/www/castopod/public/media
       - ./castopod/InteropCreatePodcast.php:/var/www/castopod/app/Commands/InteropCreatePodcast.php:ro
       - ./runtime/certs:/interop/runtime/certs:ro
+      # SSL_CERT_FILE/CURL_CA_BUNDLE above only make the plain `curl` binary
+      # (used by this container's own healthcheck) trust the interop CA.
+      # Castopod's own outbound ActivityPub calls go through PHP's curl
+      # extension, which reads its trust store from curl.cainfo/
+      # openssl.cafile — neither env var reaches it. Without this, every
+      # outbound HTTPS fetch Castopod's federation code makes (in
+      # particular ActivityRequest fetching a remote actor's public key to
+      # verify an inbound HTTP Signature) fails with "SSL certificate
+      # problem: unable to get local issuer certificate", which
+      # Modules\Fediverse\Filters\FediverseFilter's verify-signature filter
+      # catches and reports as a bare 401 — indistinguishable from a real
+      # signature failure without patching the source to stop swallowing
+      # the exception. Same interop-ca.ini already used by friendica/
+      # pixelfed for the identical reason.
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
     networks:
       - ap-interop
 
