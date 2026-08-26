@@ -65,6 +65,22 @@ services:
       - ap_interop_castopod_media:/var/www/castopod/public/media
       - ./castopod/InteropCreatePodcast.php:/var/www/castopod/app/Commands/InteropCreatePodcast.php:ro
       - ./runtime/certs:/interop/runtime/certs:ro
+      # PHP's curl/OpenSSL configuration does not reliably inherit the
+      # command-line curl trust environment, so explicitly install the
+      # fixture CA for Castopod's outbound actor/key fetches.
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+      # Castopod 1.9.0 assumes keyId always dereferences to a full actor
+      # document with nested publicKey.publicKeyPem. ActivityPods serves a
+      # standalone CryptographicKey document with top-level publicKeyPem.
+      # Keep Castopod's signature verification intact while accepting both
+      # legitimate document shapes.
+      - ./castopod/HttpSignature.php:/var/www/castopod/modules/Fediverse/HttpSignature.php:ro
+      # Define only create_actor_from_uri() before Castopod loads its guarded
+      # helper file. This avoids maintaining a 500+ line helper override while
+      # allowing ActivityPub actors without optional display `name` and
+      # embedded key PEM fields to be materialized safely.
+      - ./castopod/actor_compat.php:/interop/castopod/actor_compat.php:ro
+      - ./fixtures/php/interop-castopod.ini:/usr/local/etc/php/conf.d/zz-interop-castopod.ini:ro
     networks:
       - ap-interop
 
