@@ -53,4 +53,7 @@ npm exec -- vitest run \
   src/federation/tests/Phase5OutboundProtocolMatrix.test.ts \
   src/delivery/tests/FederationRuntimeAdapterParity.test.ts \
   src/signing/tests/ActivityPubHttpSignatureGoldenVectors.test.ts \
-  src/core-domain/identity/RedisIdentityBindingRepository.test.ts
+  src/core-domain/identity/RedisIdentityBindingRepository.test.ts \
+  src/interop/ap/FixtureMetadata.test.ts \
+  src/interop/ap/FixtureBoundaryRunner.test.ts \
+  src/interop/ap/FixtureCorpus.test.ts
