@@ -67,8 +67,11 @@ printf '%s' "${actor_id}" | LC_ALL=C grep -Eq '^[0-9a-z]{16,32}$' || { echo "Mis
 # 'all' federation mode after bootstrap, verify the authoritative DB value,
 # then restart the app so the injected MiMeta snapshot is reloaded before the
 # external readiness/federation proof begins.
+compose exec -T misskey-db /bin/sh -lc \
+  "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U misskey -d misskey -v ON_ERROR_STOP=1 -c \"update meta set federation='all' where federation='none';\"" \
+  >/dev/null
 federation_mode=$(compose exec -T misskey-db /bin/sh -lc \
-  "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U misskey -d misskey -v ON_ERROR_STOP=1 -tAc \"update meta set federation='all' where federation='none'; select federation from meta;\"")
+  "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U misskey -d misskey -v ON_ERROR_STOP=1 -tAc \"select federation from meta;\"")
 federation_mode=$(printf '%s' "${federation_mode}" | tr -d '[:space:]')
 [ "${federation_mode}" = all ] || { echo "Misskey federation mode was not enabled" >&2; exit 1; }
 compose restart misskey-app >/dev/null
