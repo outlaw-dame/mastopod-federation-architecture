@@ -91,5 +91,32 @@ ensure_config system debugging 1
 ensure_config system logfile /var/log/friendica/friendica.log
 ensure_config system loglevel debug
 
+# Root-caused for real (not the earlier empty-nickname bug, which is fixed
+# and confirmed separately — see the block above): a brand-new inbound
+# Follow ALWAYS creates its contact row with pending=1
+# (Model/Contact::addRelationship() in Friendica's own source), and that
+# only auto-flips to accepted + triggers an Accept back to the sender when
+# the RECEIVING account's `page-flags` is Soapbox, Freelove, or Community —
+# never for a plain/normal profile (PAGE_FLAGS_NORMAL, the default this
+# account was created with). For a normal profile, every Follow instead
+# creates a manual "intro" that a human has to approve in the web UI, which
+# obviously never happens in CI. This isn't a bug in Friendica or in this
+# repo's earlier fixes — the interop test account was simply never
+# configured as a page type that accepts followers automatically. Confirmed
+# directly from Friendica's own pinned source
+# (Model/Contact.php's addRelationship(), Protocol/ActivityPub/Processor.php's
+# followUser()), not guessed: `pending` is unconditionally 1 on insert, and
+# the auto-accept branch is gated on
+# `in_array($user['page-flags'], [PAGE_FLAGS_SOAPBOX, PAGE_FLAGS_FREELOVE, PAGE_FLAGS_COMMUNITY])`.
+# PAGE_FLAGS_SOAPBOX (1) auto-accepts every follow — the DB update that
+# path takes only flips pending to false, it does NOT touch `rel` (that
+# only happens for FREELOVE), so the contact keeps its original insert-time
+# rel=FOLLOWER(1). Confirmed this lands as rel=1,pending=0, which is exactly
+# what this repo's own assertion query counts (`rel in (1,3) and pending=0`)
+# — the right, verified choice for a broadcast-style federation test actor
+# that only needs inbound follows to resolve, not to follow anyone back.
+compose exec -T friendica-db /bin/sh -lc \
+  "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"update user set \\\`page-flags\\\`=1 where nickname='${USERNAME}';\""
+
 compose up -d friendica-worker
 echo "Bootstrapped Friendica federation target ${USERNAME}"
