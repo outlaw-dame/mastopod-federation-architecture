@@ -88,7 +88,39 @@ export function classifyPublicActivityPubRequest(method, rawUrl) {
   return { allowed: false };
 }
 
+// Real CI shows a persistent (not transient) TLS-layer failure reaching
+// this proxy through the Cloudflare quick tunnel, with clean startup logs
+// on both the tunnel and this process and no error ever surfacing anywhere
+// — consistent with the request handler throwing/rejecting somewhere past
+// its own try/catches (which only cover specific known failure points, not
+// the whole handler) and Node's default unhandledRejection behavior
+// (terminate the process) silently killing this proxy mid-run. A dead
+// origin behind an already-established Cloudflare quick tunnel is exactly
+// documented to surface to the client as a generic TLS alert rather than a
+// clean connection-refused, matching the observed symptom. Guard against
+// that class of failure explicitly and keep the process alive so a single
+// bad request can't take down every subsequent one.
+process.on("uncaughtException", error => {
+  process.stderr.write(`[public-activitypub-tunnel-proxy] uncaughtException: ${error?.stack || error}\n`);
+});
+process.on("unhandledRejection", reason => {
+  process.stderr.write(`[public-activitypub-tunnel-proxy] unhandledRejection: ${reason?.stack || reason}\n`);
+});
+
 const server = createServer(async (incoming, outgoing) => {
+  try {
+    await handleRequest(incoming, outgoing);
+  } catch (error) {
+    process.stderr.write(`[public-activitypub-tunnel-proxy] request handler error: ${error?.stack || error}\n`);
+    if (!outgoing.headersSent) {
+      sendJson(outgoing, 500, { error: "Internal Server Error" });
+    } else if (!outgoing.writableEnded) {
+      outgoing.destroy();
+    }
+  }
+});
+
+async function handleRequest(incoming, outgoing) {
   const startedAt = Date.now();
   const incomingHost = normalizeHost(incoming.headers.host);
   if (incomingHost !== AUTHORITY) {
@@ -197,7 +229,7 @@ const server = createServer(async (incoming, outgoing) => {
   });
   if (body.length > 0) upstream.write(body);
   upstream.end();
-});
+}
 
 server.requestTimeout = 15_000;
 server.headersTimeout = 10_000;
