@@ -519,6 +519,25 @@ jobs:
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
             export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
           fi
+          if [[ "${TARGET}" == friendica ]]; then
+            # Friendica intermittently answers even unrelated GETs (including
+            # its own /profile/interop actor page) with a brief 503 window
+            # during its own startup/worker-daemon spin-up (confirmed from a
+            # real failing run's access log: two 503s on plain GETs, ~15s
+            # apart, sandwiched between otherwise-continuous 200s). A signed
+            # inbox POST landing in that window also gets a 503. This is
+            # recoverable: ActivityPods' own outbox delivery queue
+            # (@semapps/activitypub's outbox.js) retries failed remote posts
+            # up to 10 times with `backoff: { type: 'exponential', delay:
+            # 180000 }` — the first retry alone is 180s out, longer than this
+            # assertion script's 120s default polling window (60 attempts x
+            # 2s), so the whole run fails before ActivityPods ever gets a
+            # chance to retry past a transient hiccup that would very likely
+            # succeed. Give this target enough patience to survive at least
+            # the first retry.
+            export AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS=90
+            export AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS=3
+          fi
           AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-${TARGET}-native" \
             node scripts/activitypub-federation-follow-proof.js native "${TARGET_ACTOR_URI}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.log"
@@ -764,6 +783,25 @@ jobs:
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
             export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
+          fi
+          if [[ "${TARGET}" == friendica ]]; then
+            # Friendica intermittently answers even unrelated GETs (including
+            # its own /profile/interop actor page) with a brief 503 window
+            # during its own startup/worker-daemon spin-up (confirmed from a
+            # real failing run's access log: two 503s on plain GETs, ~15s
+            # apart, sandwiched between otherwise-continuous 200s). A signed
+            # inbox POST landing in that window also gets a 503. This is
+            # recoverable: ActivityPods' own outbox delivery queue
+            # (@semapps/activitypub's outbox.js) retries failed remote posts
+            # up to 10 times with `backoff: { type: 'exponential', delay:
+            # 180000 }` — the first retry alone is 180s out, longer than this
+            # assertion script's 120s default polling window (60 attempts x
+            # 2s), so the whole run fails before ActivityPods ever gets a
+            # chance to retry past a transient hiccup that would very likely
+            # succeed. Give this target enough patience to survive at least
+            # the first retry.
+            export AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS=90
+            export AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS=3
           fi
           AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-${TARGET}-external" \
             node scripts/activitypub-federation-follow-proof.js external "${TARGET_ACTOR_URI}" \
