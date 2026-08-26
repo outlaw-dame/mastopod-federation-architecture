@@ -936,6 +936,25 @@ jobs:
         shell: bash
         run: |
           set +e
+          # loops/owncast/peertube expose their public actor through an
+          # ephemeral Cloudflare quick tunnel. Its own health-check endpoint
+          # passing (required before the sidecar even starts) proves the
+          # tunnel infrastructure works at that point in time; a later
+          # persistent "tlsv1 alert internal error" on the actor-document
+          # fetch specifically (confirmed real, not a guess — see the
+          # AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS commit) with nothing
+          # in between restarting the tunnel means something changes state
+          # after that point that this workflow has never actually looked
+          # at. Dump the tunnel container and proxy's own logs so the next
+          # failure shows what, instead of guessing again.
+          tunnel_diagnostics() {
+            echo "::group::${TARGET} tunnel + public proxy diagnostics"
+            for mode in native external; do
+              docker logs "ap-${TARGET}-tunnel-${mode}" --tail 200 2>&1 || echo "ap-${TARGET}-tunnel-${mode} not running" >&2
+              tail -n 200 "${EVIDENCE_DIR}/${mode}-public-proxy.log" 2>/dev/null || echo "${mode}-public-proxy.log unavailable" >&2
+            done
+            echo "::endgroup::"
+          }
           tail -n 500 "${EVIDENCE_DIR}/activitypods-native.log" 2>/dev/null || true
           tail -n 500 "${EVIDENCE_DIR}/activitypods-external.log" 2>/dev/null || true
           tail -n 700 "${EVIDENCE_DIR}/sidecar.log" 2>/dev/null || true
@@ -974,12 +993,21 @@ jobs:
                 sh -c 'for f in writable/logs/*.log; do echo "--- $f ---"; cat "$f"; done' 2>/dev/null || true
               echo "::endgroup::"
               ;;
-            peertube) docker compose -f "${COMPOSE_FILE}" -f "${PEERTUBE_OVERLAY}" ps peertube-app peertube-db peertube-redis 2>/dev/null || true ;;
+            peertube)
+              docker compose -f "${COMPOSE_FILE}" -f "${PEERTUBE_OVERLAY}" ps peertube-app peertube-db peertube-redis 2>/dev/null || true
+              tunnel_diagnostics
+              ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
             # Loops can log signed request context. The persistence assertion
             # already emits privacy-safe counters and Horizon state.
-            loops) docker compose -f "${COMPOSE_FILE}" -f "${LOOPS_OVERLAY}" ps loops-app loops-horizon loops-db 2>/dev/null || true ;;
-            owncast) docker compose -f "${COMPOSE_FILE}" -f "${OWNCAST_OVERLAY}" ps owncast-app 2>/dev/null || true ;;
+            loops)
+              docker compose -f "${COMPOSE_FILE}" -f "${LOOPS_OVERLAY}" ps loops-app loops-horizon loops-db 2>/dev/null || true
+              tunnel_diagnostics
+              ;;
+            owncast)
+              docker compose -f "${COMPOSE_FILE}" -f "${OWNCAST_OVERLAY}" ps owncast-app 2>/dev/null || true
+              tunnel_diagnostics
+              ;;
           esac
 
       - name: Stop isolated fixture
