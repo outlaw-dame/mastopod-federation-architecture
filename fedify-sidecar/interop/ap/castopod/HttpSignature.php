@@ -114,31 +114,46 @@ class HttpSignature
         $headers = $parts['headers'] ?? 'date';
         $signature = $parts['signature'];
 
-        // Fetch the public key linked from keyId
-        $actorRequest = new ActivityRequest($keyId);
-        $actorResponse = $actorRequest->get();
-        $actor = json_decode($actorResponse->getBody(), false, 512, JSON_THROW_ON_ERROR);
+        // TEMP_DEBUG_REMOVE_BEFORE_MERGE: one-shot tracing to capture the
+        // real ActivityPods response shape from real CI, since real CI still
+        // 500s after this fix even though it's fully live-verified against a
+        // synthetic fixture built from @semapps/crypto's real source. Remove
+        // this whole try/catch (keep only the try body) once diagnosed.
+        try {
+            // Fetch the public key linked from keyId
+            $actorRequest = new ActivityRequest($keyId);
+            $actorResponse = $actorRequest->get();
+            fwrite(STDERR, "TEMP_DEBUG HS: keyId={$keyId} body=" . substr((string) $actorResponse->getBody(), 0, 1500) . "\n");
+            $actor = json_decode($actorResponse->getBody(), false, 512, JSON_THROW_ON_ERROR);
 
-        // INTEROP PATCH: accept both the Mastodon-family nested actor shape
-        // (`publicKey.publicKeyPem`, when `keyId` resolves to a full actor
-        // document) and a flat/standalone key-resource shape (`publicKeyPem`
-        // as a top-level property, when `keyId` resolves directly to a key
-        // document, per ActivityPods'/@semapps/crypto's real, spec-legitimate
-        // convention). Upstream only ever handled the former.
-        if (isset($actor->publicKey->publicKeyPem)) {
-            $publicKeyPem = (string) $actor->publicKey->publicKeyPem;
-        } elseif (isset($actor->publicKeyPem)) {
-            $publicKeyPem = (string) $actor->publicKeyPem;
-        } else {
-            throw new Exception('Unable to resolve a publicKeyPem from the keyId response.');
+            // INTEROP PATCH: accept both the Mastodon-family nested actor shape
+            // (`publicKey.publicKeyPem`, when `keyId` resolves to a full actor
+            // document) and a flat/standalone key-resource shape (`publicKeyPem`
+            // as a top-level property, when `keyId` resolves directly to a key
+            // document, per ActivityPods'/@semapps/crypto's real, spec-legitimate
+            // convention). Upstream only ever handled the former.
+            if (isset($actor->publicKey->publicKeyPem)) {
+                $publicKeyPem = (string) $actor->publicKey->publicKeyPem;
+            } elseif (isset($actor->publicKeyPem)) {
+                $publicKeyPem = (string) $actor->publicKeyPem;
+            } else {
+                throw new Exception('Unable to resolve a publicKeyPem from the keyId response.');
+            }
+            fwrite(STDERR, "TEMP_DEBUG HS: resolved publicKeyPem len=" . strlen($publicKeyPem) . "\n");
+
+            // Create a comparison string from the plaintext headers we got
+            // in the same order as was given in the signature header,
+            $data = $this->getPlainText(explode(' ', trim($headers)));
+            fwrite(STDERR, "TEMP_DEBUG HS: plaintext=" . json_encode($data) . "\n");
+
+            // Verify the data string using the public key and the original signature.
+            $result = $this->verifySignature($publicKeyPem, $data, $signature, $algorithm);
+            fwrite(STDERR, "TEMP_DEBUG HS: verifySignature=" . var_export($result, true) . "\n");
+            return $result;
+        } catch (\Throwable $__tempDebug) {
+            fwrite(STDERR, 'TEMP_DEBUG HS THREW: ' . get_class($__tempDebug) . ': ' . $__tempDebug->getMessage() . "\n" . $__tempDebug->getTraceAsString() . "\n");
+            throw $__tempDebug;
         }
-
-        // Create a comparison string from the plaintext headers we got
-        // in the same order as was given in the signature header,
-        $data = $this->getPlainText(explode(' ', trim($headers)));
-
-        // Verify the data string using the public key and the original signature.
-        return $this->verifySignature($publicKeyPem, $data, $signature, $algorithm);
     }
 
     /**

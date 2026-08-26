@@ -289,8 +289,26 @@ if (! function_exists('create_actor_from_uri')) {
      */
     function create_actor_from_uri(string $actorUri): ?Actor
     {
+        // TEMP_DEBUG_REMOVE_BEFORE_MERGE: wraps the whole function so ANY
+        // failure point (not just the publicKey line) is captured from real
+        // CI. Remove this try/catch (keep only the try body) once diagnosed.
+        try {
+            return create_actor_from_uri_temp_debug_inner($actorUri);
+        } catch (\Throwable $__tempDebug) {
+            fwrite(STDERR, 'TEMP_DEBUG helper THREW: ' . get_class($__tempDebug) . ': ' . $__tempDebug->getMessage() . "\n" . $__tempDebug->getTraceAsString() . "\n");
+            throw $__tempDebug;
+        }
+    }
+}
+
+if (! function_exists('create_actor_from_uri_temp_debug_inner')) {
+    function create_actor_from_uri_temp_debug_inner(string $actorUri): ?Actor
+    {
         $activityRequest = new ActivityRequest($actorUri);
         $actorResponse = $activityRequest->get();
+        // TEMP_DEBUG_REMOVE_BEFORE_MERGE: see HttpSignature.php's matching
+        // block for why this is here. Remove this fwrite once diagnosed.
+        fwrite(STDERR, 'TEMP_DEBUG helper: actorUri=' . $actorUri . ' body=' . substr((string) $actorResponse->getBody(), 0, 1500) . "\n");
         $actorPayload = json_decode($actorResponse->getBody(), false, 512, JSON_THROW_ON_ERROR);
 
         $newActor = new Actor();
