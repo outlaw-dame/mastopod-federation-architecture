@@ -89,7 +89,7 @@ ensure_config() {
 ensure_config system logger_config stream
 ensure_config system debugging 1
 ensure_config system logfile /var/log/friendica/friendica.log
-ensure_config system loglevel info
+ensure_config system loglevel debug
 
 compose up -d friendica-worker
 echo "Bootstrapped Friendica federation target ${USERNAME}"
