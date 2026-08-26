@@ -1,0 +1,14 @@
+{
+  "@context": "https://www.w3.org/ns/activitystreams",
+  "id": "https://mastodon.example/activities/create-note-missing-actor-1",
+  "type": "Create",
+  "published": "2026-08-24T12:05:00Z",
+  "to": ["https://www.w3.org/ns/activitystreams#Public"],
+  "object": {
+    "id": "https://mastodon.example/notes/note-missing-actor-1",
+    "type": "Note",
+    "attributedTo": "https://mastodon.example/users/alice",
+    "content": "<p>This Create activity has no top-level actor.</p>",
+    "to": ["https://www.w3.org/ns/activitystreams#Public"]
+  }
+}
