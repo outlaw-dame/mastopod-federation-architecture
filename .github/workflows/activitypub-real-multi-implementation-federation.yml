@@ -551,7 +551,19 @@ jobs:
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
             friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true ;;
-            castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true ;;
+            castopod)
+              docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true
+              # TEMP_DEBUG_REMOVE_BEFORE_MERGE: `docker compose logs` only
+              # captures container stdout/stderr, which does not include
+              # CodeIgniter's own file-based log (confirmed locally: castopod's
+              # NGINX Unit + PHP setup does not forward fwrite(STDERR,...)/
+              # error_log() to container stdout). Dump the actual app log file
+              # directly to find out why real CI still 500s after 8383e83.
+              echo "::group::castopod writable/logs (file-based CodeIgniter log)"
+              docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" exec -T castopod-app \
+                sh -c 'for f in writable/logs/*.log; do echo "--- $f ---"; cat "$f"; done' 2>/dev/null || true
+              echo "::endgroup::"
+              ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
           esac
 
