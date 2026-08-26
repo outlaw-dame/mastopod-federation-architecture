@@ -95,7 +95,7 @@ jobs:
             remote_version: Owncast v0.2.5@65d03b4d5df13dfc2033311fa30e4513b63b3e16
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '654d537cf0ae4860d2fff8bf93aba7528955f196'
+      ACTIVITYPODS_SHA: 'c7a1aba4ea6e597b4816e1f66fd465d47497ef71'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -518,6 +518,19 @@ jobs:
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
             export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
+            # loops/owncast/peertube expose their public actor through an
+            # ephemeral Cloudflare quick tunnel (friendica uses the fixed
+            # *.test router instead, so this mainly matters for the other
+            # three, but raising it is harmless there too). The default
+            # 10-attempt/~47.5s budget is sometimes too short for the
+            # tunnel's local backend to be ready — confirmed from a real
+            # failing run: `curl: (35) OpenSSL: SSL routines::tlsv1 alert
+            # internal error`, a known Cloudflare quick-tunnel symptom for
+            # "edge accepted the connection but the local origin behind the
+            # tunnel wasn't ready yet," not a cert or connectivity problem.
+            # 40 attempts is roughly a 287s (4m48s) budget at this
+            # function's existing exponential-capped-at-8s backoff.
+            export AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS=40
           fi
           if [[ "${TARGET}" == friendica ]]; then
             # Friendica intermittently answers even unrelated GETs (including
@@ -783,6 +796,19 @@ jobs:
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
             export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
+            # loops/owncast/peertube expose their public actor through an
+            # ephemeral Cloudflare quick tunnel (friendica uses the fixed
+            # *.test router instead, so this mainly matters for the other
+            # three, but raising it is harmless there too). The default
+            # 10-attempt/~47.5s budget is sometimes too short for the
+            # tunnel's local backend to be ready — confirmed from a real
+            # failing run: `curl: (35) OpenSSL: SSL routines::tlsv1 alert
+            # internal error`, a known Cloudflare quick-tunnel symptom for
+            # "edge accepted the connection but the local origin behind the
+            # tunnel wasn't ready yet," not a cert or connectivity problem.
+            # 40 attempts is roughly a 287s (4m48s) budget at this
+            # function's existing exponential-capped-at-8s backoff.
+            export AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS=40
           fi
           if [[ "${TARGET}" == friendica ]]; then
             # Friendica intermittently answers even unrelated GETs (including
