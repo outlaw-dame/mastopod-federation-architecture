@@ -142,12 +142,13 @@ jobs:
           castopod_db_root_password="$(openssl rand -hex 32)"
           castopod_analytics_salt="$(openssl rand -hex 32)"
           castopod_admin_password="$(openssl rand -hex 32)"
+          castopod_redis_password="$(openssl rand -hex 32)"
           bonfire_db_password="$(openssl rand -hex 32)"
           bonfire_secret_key_base="$(openssl rand -hex 64)"
           bonfire_signing_salt="$(openssl rand -hex 32)"
           bonfire_encryption_salt="$(openssl rand -hex 32)"
           bonfire_release_cookie="$(openssl rand -hex 32)"
-          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
+          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${castopod_redis_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
           {
             echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
             echo "SIDECAR_TOKEN=${sidecar_token}"
@@ -164,6 +165,7 @@ jobs:
             echo "CASTOPOD_DB_ROOT_PASSWORD=${castopod_db_root_password}"
             echo "CASTOPOD_ANALYTICS_SALT=${castopod_analytics_salt}"
             echo "CASTOPOD_ADMIN_PASSWORD=${castopod_admin_password}"
+            echo "CASTOPOD_REDIS_PASSWORD=${castopod_redis_password}"
             echo "BONFIRE_DB_PASSWORD=${bonfire_db_password}"
             echo "BONFIRE_SECRET_KEY_BASE=${bonfire_secret_key_base}"
             echo "BONFIRE_SIGNING_SALT=${bonfire_signing_salt}"
@@ -285,10 +287,18 @@ jobs:
             | tee "${EVIDENCE_DIR}/proof-router-hosts.json"
           readiness_uri="${TARGET_ACTOR_URI}"
           readiness_accept='application/activity+json'
-          if [[ "${TARGET}" == gotosocial ]]; then
+          if [[ "${TARGET}" == gotosocial || "${TARGET}" == misskey ]]; then
             # GoToSocial deliberately requires an HTTP signature on actor GETs.
-            # Its WebFinger document is the unsigned discovery endpoint and
-            # confirms that the bootstrapped account is reachable through TLS.
+            # Misskey 2026.7.0 returns a persistent 403 to every unauthenticated,
+            # content-negotiated GET of /@<user> observed on this pinned image
+            # (confirmed: identical from the very first retry, well before the
+            # instance could plausibly still be booting, and never once clears
+            # across the full 210-attempt/7-minute window) rather than 404/502
+            # while starting up or 200 once ready, so this is not a boot-timing
+            # race - the endpoint itself rejects the request outright. WebFinger
+            # is the unsigned, unauthenticated discovery endpoint for both and
+            # confirms the bootstrapped account is reachable through TLS without
+            # depending on whichever actor-endpoint restriction is in effect.
             readiness_uri="https://${TARGET_HOST}/.well-known/webfinger?resource=acct:${TARGET_USERNAME}@${TARGET_HOST}"
             readiness_accept='application/jrd+json'
           fi
@@ -549,7 +559,19 @@ jobs:
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
             friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true ;;
-            castopod) docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true ;;
+            castopod)
+              docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true
+              # TEMP_DEBUG_REMOVE_BEFORE_MERGE: `docker compose logs` only
+              # captures container stdout/stderr, which does not include
+              # CodeIgniter's own file-based log (confirmed locally: castopod's
+              # NGINX Unit + PHP setup does not forward fwrite(STDERR,...)/
+              # error_log() to container stdout). Dump the actual app log file
+              # directly to find out why real CI still 500s after 8383e83.
+              echo "::group::castopod writable/logs (file-based CodeIgniter log)"
+              docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" exec -T castopod-app \
+                sh -c 'for f in writable/logs/*.log; do echo "--- $f ---"; cat "$f"; done' 2>/dev/null || true
+              echo "::endgroup::"
+              ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
           esac
 
