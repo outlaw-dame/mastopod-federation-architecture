@@ -80,6 +80,24 @@ services:
       # the exception. Same interop-ca.ini already used by friendica/
       # pixelfed for the identical reason.
       - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+      # Castopod's own HttpSignature::verify() assumes keyId always resolves
+      # to a full actor document with a nested `publicKey.publicKeyPem`
+      # (Mastodon-family convention). ActivityPods'/@semapps/crypto's real
+      # key-serving code instead points keyId at a standalone key resource
+      # with `publicKeyPem` as a top-level property — a different, equally
+      # spec-legitimate convention that upstream castopod 1.9.0 doesn't
+      # handle, causing every inbound signature it verifies from ActivityPods
+      # to fail with an opaque 401. This mounts a minimally-patched copy of
+      # castopod's own HttpSignature.php (same file, same license header,
+      # single added fallback branch) that accepts both shapes. See
+      # castopod/HttpSignature.php's own header comment for the full
+      # writeup; not a fork, just a local override for this CI target.
+      - ./castopod/HttpSignature.php:/var/www/castopod/modules/Fediverse/HttpSignature.php:ro
+      # Same keyId-shape mismatch also breaks actor-record creation, a
+      # second, separate call site (create_actor_from_uri() in this helper)
+      # that also unconditionally assumes publicKey.publicKeyPem is nested.
+      # See fediverse_helper.php's own header comment for the full writeup.
+      - ./castopod/fediverse_helper.php:/var/www/castopod/modules/Fediverse/Helpers/fediverse_helper.php:ro
     networks:
       - ap-interop
 
