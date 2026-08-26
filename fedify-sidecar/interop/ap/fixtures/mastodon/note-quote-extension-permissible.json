@@ -1,0 +1,24 @@
+{
+  "@context": [
+    "https://www.w3.org/ns/activitystreams",
+    {
+      "fedibird": "http://fedibird.com/ns#",
+      "quoteUri": "fedibird:quoteUri"
+    }
+  ],
+  "id": "https://mastodon.example/activities/create-note-quote-1",
+  "type": "Create",
+  "actor": "https://mastodon.example/users/alice",
+  "published": "2026-08-24T12:00:00Z",
+  "to": ["https://www.w3.org/ns/activitystreams#Public"],
+  "cc": ["https://mastodon.example/users/alice/followers"],
+  "object": {
+    "id": "https://mastodon.example/notes/note-quote-1",
+    "type": "Note",
+    "attributedTo": "https://mastodon.example/users/alice",
+    "content": "<p>Quoting a real observation, not smuggling authority.</p>",
+    "quoteUri": "https://mastodon.example/notes/quoted-original-1",
+    "to": ["https://www.w3.org/ns/activitystreams#Public"],
+    "cc": ["https://mastodon.example/users/alice/followers"]
+  }
+}

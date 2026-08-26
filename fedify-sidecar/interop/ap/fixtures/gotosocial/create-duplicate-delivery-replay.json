@@ -1,0 +1,15 @@
+{
+  "@context": "https://www.w3.org/ns/activitystreams",
+  "id": "https://gotosocial.example/activities/create-note-replay-1",
+  "type": "Create",
+  "actor": "https://gotosocial.example/users/dee",
+  "published": "2026-08-24T12:30:00Z",
+  "to": ["https://www.w3.org/ns/activitystreams#Public"],
+  "object": {
+    "id": "https://gotosocial.example/notes/note-replay-1",
+    "type": "Note",
+    "attributedTo": "https://gotosocial.example/users/dee",
+    "content": "<p>Delivered twice with the identical activity id to prove idempotent handling.</p>",
+    "to": ["https://www.w3.org/ns/activitystreams#Public"]
+  }
+}

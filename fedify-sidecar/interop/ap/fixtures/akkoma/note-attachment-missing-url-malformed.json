@@ -1,0 +1,22 @@
+{
+  "@context": "https://www.w3.org/ns/activitystreams",
+  "id": "https://akkoma.example/activities/create-note-bad-attachment-1",
+  "type": "Create",
+  "actor": "https://akkoma.example/users/erin",
+  "published": "2026-08-24T12:35:00Z",
+  "to": ["https://www.w3.org/ns/activitystreams#Public"],
+  "object": {
+    "id": "https://akkoma.example/notes/note-bad-attachment-1",
+    "type": "Note",
+    "attributedTo": "https://akkoma.example/users/erin",
+    "content": "<p>Attachment declares no url, which is required for a Document attachment.</p>",
+    "to": ["https://www.w3.org/ns/activitystreams#Public"],
+    "attachment": [
+      {
+        "type": "Document",
+        "mediaType": "image/png",
+        "name": "A synthetic placeholder image with no retrievable location"
+      }
+    ]
+  }
+}
