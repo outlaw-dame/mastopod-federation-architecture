@@ -5,14 +5,119 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("real federation fixture bootstrap contracts", () => {
-  it("bounds slow post-setup actor readiness beyond Misskey's measured migration restart", () => {
+  it("enables verified Fedify ingress whenever the multi-lane inbound worker is active", () => {
     const workflow = readFileSync(
       resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
       "utf8",
     );
 
-    expect(workflow).toContain("for attempt in $(seq 1 210)");
-    expect(workflow).toContain("Misskey 2026.7.0's post-setup migration restart");
+    expect(workflow).toContain(
+      "ENABLE_INBOUND_WORKER=true ENABLE_ORIGIN_RECONCILIATION=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=true",
+    );
+    expect(workflow).not.toContain(
+      "ENABLE_INBOUND_WORKER=true ENABLE_ORIGIN_RECONCILIATION=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=false",
+    );
+  });
+
+  it("retries transient interop image dependency downloads with a strict bound", () => {
+    const dockerfile = readFileSync(resolve(process.cwd(), "Dockerfile.interop"), "utf8");
+
+    expect(dockerfile).toContain('while [ "$attempt" -le 4 ]');
+    expect(dockerfile).toContain("npm ci --legacy-peer-deps");
+    expect(dockerfile).toContain('delay=$((delay * 2))');
+    expect(dockerfile).toContain('if [ "$attempt" -eq 4 ]; then exit 1; fi');
+  });
+
+  it("binds host proof services only to a validated private Docker gateway", () => {
+    const resolver = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/resolve-private-docker-gateway.mjs"),
+      "utf8",
+    );
+    const workflows = [
+      "activitypub-live-bidirectional-federation.yml",
+      "activitypub-real-multi-implementation-federation.yml",
+      "activitypub-real-two-mode-federation.yml",
+    ].map((name) => readFileSync(resolve(process.cwd(), `../.github/workflows/${name}`), "utf8"));
+
+    expect(resolver).toContain("execFileSync(");
+    expect(resolver).toContain("isIP(gateway) === 4");
+    expect(resolver).toContain("Proof service must bind only to a private Docker gateway");
+    expect(resolver).toContain("process.platform === 'darwin' ? '127.0.0.1' : gateway");
+    expect(workflows.every((workflow) => workflow.includes("resolve-private-docker-gateway.mjs"))).toBe(true);
+    expect(workflows.slice(0, 2).every((workflow) => workflow.includes('HOST="${sidecar_host}"'))).toBe(true);
+    expect(workflows.slice(0, 2).every((workflow) => workflow.includes('AP_PROOF_SIDECAR_HOST=${sidecar_host}'))).toBe(true);
+    expect(workflows.slice(0, 2).every((workflow) => workflow.includes('SIDECAR_DELIVERY_HANDOFF_URL="http://${AP_PROOF_SIDECAR_HOST}:8080/webhook/outbox"'))).toBe(true);
+    expect(workflows.slice(0, 2).every((workflow) => workflow.includes("ACTIVITYPODS_RETURN_HOST="))).toBe(true);
+    expect(workflows.slice(0, 2).every((workflow) => !workflow.includes("PORT=8080 HOST=127.0.0.1"))).toBe(true);
+  });
+
+  it("gives only Misskey a longer bounded post-setup actor readiness window", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toContain("readiness_attempts=90");
+    expect(workflow).toContain('if [[ "${TARGET}" == "misskey" ]]');
+    expect(workflow).toContain("readiness_attempts=270");
+    expect(workflow).toContain('seq 1 "${readiness_attempts}"');
+    expect(workflow.match(/readiness_attempts=270/g)).toHaveLength(1);
+  });
+
+  it("builds Loops from the exact in-workspace source checkout", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+    const compose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.loops.yml"),
+      "utf8",
+    );
+    const bootstrap = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/bootstrap-loops-account.sh"),
+      "utf8",
+    );
+
+    expect(compose).toContain("context: ${LOOPS_SOURCE_DIR:-../../../loops}");
+    expect(workflow).toContain('[[ -d loops/.git ]]');
+    expect(workflow).toContain('[[ "$(git -C loops rev-parse HEAD)" == "${LOOPS_SHA}" ]]');
+    expect(bootstrap).toContain("while ! compose build loops-app");
+    expect(bootstrap).toContain('"${build_attempt}" -ge 3');
+    expect(bootstrap).toContain("compose up -d --no-build loops-db loops-redis loops-app");
+  });
+
+  it("builds Owncast from exact source without weakening federation transport security", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+    const compose = readFileSync(
+      resolve(process.cwd(), "interop/ap/docker-compose.owncast.yml"),
+      "utf8",
+    );
+    const bootstrap = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/bootstrap-owncast-account.sh"),
+      "utf8",
+    );
+    const assertion = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+
+    expect(compose).toContain("context: ${OWNCAST_SOURCE_DIR:-../../../owncast}");
+    expect(compose).toContain("GIT_COMMIT: 65d03b4d5df13dfc2033311fa30e4513b63b3e16");
+    expect(compose).toContain('user: "${OWNCAST_RUNTIME_UID:-1000}:${OWNCAST_RUNTIME_GID:-1000}"');
+    expect(workflow).toContain('[[ "$(git -C owncast rev-parse HEAD)" == "${OWNCAST_SHA}" ]]');
+    expect(workflow).toContain('["friendica","loops","peertube","owncast"]');
+    expect(bootstrap).toContain("while ! compose build owncast-app");
+    expect(bootstrap).toContain('compose up -d --no-build owncast-app');
+    expect(bootstrap).toContain('OWNCAST_RUNTIME_UID="${OWNCAST_RUNTIME_UID:-$(id -u)}"');
+    expect(bootstrap).toContain('[ -w "${SCRIPT_DIR}/../runtime/owncast" ]');
+    expect(assertion).toContain("from ap_followers where iri=");
+    expect(compose).not.toContain("OWNCAST_ALLOW_INTERNAL_FEDERATION");
+    expect(compose).not.toContain("OWNCAST_INSECURE_SKIP_VERIFY");
+    expect(workflow).not.toContain("OWNCAST_ALLOW_INTERNAL_FEDERATION");
+    expect(workflow).not.toContain("OWNCAST_INSECURE_SKIP_VERIFY");
   });
 
   it("bounds retries for transient Pixelfed image-build downloads", () => {
@@ -84,6 +189,9 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(prepare).toContain("172.31.240.0/24");
     expect(bootstrap).toContain('-e AP_INTEROP_SETUP_PASSWORD="${MISSKEY_SETUP_PASSWORD}"');
     expect(bootstrap).not.toContain("console.log");
+    expect(bootstrap).toContain('/api/admin/update-meta');
+    expect(bootstrap).toContain('authorization: `Bearer ${value.token}`');
+    expect(bootstrap).toContain('JSON.stringify({ federation: "all" })');
     expect(bootstrap).toContain("TARGET_ACTOR_URI=https://misskey.test/users/%s");
     expect(compose).toContain("misskey/misskey:2026.7.0@sha256:2fd5c68f");
     expect(compose).toContain("postgres:18-alpine@sha256:d3e1620b");
@@ -105,12 +213,29 @@ describe("real federation fixture bootstrap contracts", () => {
       resolve(process.cwd(), "interop/ap/docker-compose.friendica.yml"),
       "utf8",
     );
+    const corefile = readFileSync(
+      resolve(process.cwd(), "interop/ap/fixtures/friendica/Corefile"),
+      "utf8",
+    );
 
     expect(compose).toContain("friendica:2026.05@sha256:e496eeb3");
     expect(compose).toContain("entrypoint: /cron.sh");
     expect(compose).toContain("FRIENDICA_URL: https://friendica.test\n");
     expect(compose).not.toContain("FRIENDICA_URL: https://friendica.test/\n");
     expect(compose).toContain("CURL_CA_BUNDLE: /interop/runtime/certs/rootCA.crt");
+    expect(compose).toContain("FRIENDICA_LOGFILE: /var/log/friendica/friendica.log");
+    expect(compose).toContain("FRIENDICA_LOGLEVEL: info");
+    expect(compose).toContain("FRIENDICA_LOGGER: stream");
+    expect(compose).toContain("coredns/coredns:1.11.3@sha256:9caabbf6");
+    expect(compose.match(/dns:\n\s+- 172\.31\.240\.253/g)).toHaveLength(2);
+    expect(compose).toContain("ipv4_address: 172.31.240.253");
+    expect(corefile).toContain("172.31.240.254 activitypods.test");
+    expect(corefile).toContain("forward . 127.0.0.11");
+    expect(corefile).not.toContain("tls://");
+    expect(compose).toContain("friendica-log-init:");
+    expect(compose.match(/ap_interop_friendica_log:\/var\/log\/friendica/g)).toHaveLength(3);
+    expect(compose).toContain("./fixtures/friendica/actor-jsonld-diagnostic.php:/interop/actor-jsonld-diagnostic.php:ro");
+    expect(compose).toContain("condition: service_completed_successfully");
     expect(compose).not.toContain("FRIENDICA_NO_VALIDATION");
     expect(bootstrap).toContain("php bin/console.php user add");
     expect(bootstrap).toContain("compose up -d friendica-worker");
@@ -139,6 +264,10 @@ describe("real federation fixture bootstrap contracts", () => {
       resolve(process.cwd(), "interop/ap/castopod/InteropCreatePodcast.php"),
       "utf8",
     );
+    const bootConfig = readFileSync(
+      resolve(process.cwd(), "interop/ap/fixtures/castopod/interop-boot.ini"),
+      "utf8",
+    );
     const compose = readFileSync(
       resolve(process.cwd(), "interop/ap/docker-compose.castopod.yml"),
       "utf8",
@@ -148,8 +277,10 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(compose).not.toContain("CP_DISABLE_HTTPS");
     expect(bootstrap).toContain('grep -qx "cache.redis.database=0" .env');
     expect(bootstrap).toContain("http://127.0.0.1:8000/");
-    expect(bootstrap).toContain(
-      "-d auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php",
+    expect(compose).toContain("fixtures/php/interop-ca.ini");
+    expect(compose).toContain("fixtures/castopod/interop-boot.ini");
+    expect(bootConfig).toContain(
+      "auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php",
     );
     expect(bootstrap).toContain("spark install:init-database");
     expect(bootstrap).toContain("spark install:create-superadmin");
@@ -157,6 +288,7 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(bootstrap).not.toContain("interop-admin");
     expect(bootstrap).toContain("spark interop:create-podcast");
     expect(bootstrap).not.toContain("define('CI_DEBUG'");
+    expect(bootstrap).not.toContain("-d auto_prepend_file=");
     expect(command).toContain("new PodcastModel()");
     expect(command).toContain("where('username', 'interopadmin')");
     expect(command).not.toContain("interop-admin");
@@ -171,12 +303,12 @@ describe("real federation fixture bootstrap contracts", () => {
       "utf8",
     );
 
-    expect(coverage).toContain("Pixelfed's MySQL database | Executable lane, but federation persistence is not yet proven");
+    expect(coverage).toContain("Pixelfed's MySQL database | Covered at architecture `9a2fd328d779cef178e56af06c64f9717bd5e23a`");
     expect(coverage).toContain("Exact-head candidate lane; not covered until CI proves both modes");
     expect(coverage).toContain("Hosted Micro.blog blocker");
     expect(coverage).toContain("Hosted write.as blocker");
     expect(coverage).toContain("must not be reported as write.as coverage");
-    for (const target of ["Pixelfed", "Misskey", "Friendica", "Castopod", "Micro.blog", "write.as"]) {
+    for (const target of ["Misskey", "Friendica", "Castopod", "Micro.blog", "write.as"]) {
       const row = coverage.split("\n").find(line => line.startsWith(`| ${target} |`));
       expect(row).toBeDefined();
       expect(row).not.toMatch(/\| Covered\s*\|$/);
@@ -272,15 +404,67 @@ describe("real federation fixture bootstrap contracts", () => {
       resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
       "utf8",
     );
+    const workflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-multi-implementation-federation.yml"),
+      "utf8",
+    );
+    const twoModeWorkflow = readFileSync(
+      resolve(process.cwd(), "../.github/workflows/activitypub-real-two-mode-federation.yml"),
+      "utf8",
+    );
+    const actorDiagnostic = readFileSync(
+      resolve(process.cwd(), "interop/ap/fixtures/friendica/actor-jsonld-diagnostic.php"),
+      "utf8",
+    );
 
     expect(script).toContain("Friendica fail-closed persistence diagnostics:");
     expect(script).toContain("remote_contact_count=");
+    expect(script).toContain("apcontact_count=");
+    expect(script).toContain("actor_uri_cache_count=");
     expect(script).toContain("inbox_entry_count=");
     expect(script).toContain("inbox_receiver_count=");
     expect(script).toContain("introduction_count=");
     expect(script).toContain("pending_worker_count=");
+    expect(script).toContain("activitypub_inbound_count=");
+    expect(script).toContain("actor_fetch_discard_count");
+    expect(script).toContain("invalid_http_signature_count");
+    expect(script).toContain("valid_http_signature_count");
+    expect(script).toContain("receiver_user_routing_count");
+    expect(script).toContain("trusted_matching_signer_count");
+    expect(script).toContain("friendica_log_line_count");
+    expect(script).toContain("php /interop/actor-jsonld-diagnostic.php");
+    expect(script).toContain('AP_INTEROP_EXPECTED_ACTOR_HOST="${ACTIVITYPODS_HOST:?ACTIVITYPODS_HOST is required}"');
+    expect(script).toContain('fopen("/var/log/friendica/friendica.log", "rb")');
     expect(script).not.toContain("select parameter from workerqueue");
     expect(script).not.toContain("select activity from \\`inbox-entry\\`");
+    expect(script).not.toContain("compose logs --no-color friendica-app friendica-worker");
+    expect(workflow).not.toContain("logs --no-color friendica-app friendica-worker");
+    expect(workflow).toContain("redact-friendica-container-errors.mjs");
+    expect(workflow).toContain("ps friendica-app friendica-worker");
+    expect(workflow).not.toContain('cat "${EVIDENCE_DIR}/signing-api.jsonl"');
+    expect(twoModeWorkflow).not.toContain('cat "${EVIDENCE_DIR}/signing-api.jsonl"');
+    expect(actorDiagnostic).toContain("AP_INTEROP_EXPECTED_ACTOR_HOST");
+    expect(actorDiagnostic).toContain("actor_compact_public_key_pem_present");
+    expect(actorDiagnostic).not.toContain("CURLOPT_HEADER");
+    expect(actorDiagnostic).not.toMatch(/(?:echo|print|fwrite|printf).*publicKeyPem/);
+  });
+
+  it("records bounded Loops framework HTTP diagnostics without exposing request data", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+    const loopsDiagnostics = script
+      .split("loops_diagnostics() {")[1]
+      ?.split("\n}\n\npeertube_diagnostics() {")[0] ?? "";
+
+    expect(loopsDiagnostics).toContain('["frameworkHttp" => ["status" => $response->status()');
+    expect(loopsDiagnostics).toContain('"errorClass" => get_class($error)');
+    expect(loopsDiagnostics).toContain('"previousClass" => $previous ? get_class($previous) : null');
+    expect(loopsDiagnostics).toContain("ActivityPubService::MAX_RESPONSE_SIZE");
+    expect(loopsDiagnostics).not.toContain("$error->getMessage()");
+    expect(loopsDiagnostics).not.toContain('"errorMessage"');
+    expect(loopsDiagnostics).not.toContain('"body" => $response->body()');
   });
 
   it("passes quoted Friendica table names to MariaDB as SQL, not shell substitutions", () => {
@@ -313,6 +497,7 @@ esac
           AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS: "1",
           AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS: "0",
           AP_INTEROP_SQL_CAPTURE: capturePath,
+          ACTIVITYPODS_HOST: "activitypods.example",
         },
       });
 

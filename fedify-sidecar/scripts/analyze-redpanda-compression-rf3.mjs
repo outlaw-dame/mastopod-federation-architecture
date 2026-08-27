@@ -4,8 +4,9 @@ const input = process.env.REDPANDA_RF3_INPUT ?? "../measurements/redpanda-compre
 const output = process.env.REDPANDA_RF3_DECISION_OUTPUT ?? "../measurements/redpanda-compression-rf3/decision.json";
 const summary = JSON.parse(fs.readFileSync(input, "utf8"));
 
-if (summary.version !== 1) throw new Error(`Unsupported RF3 summary version ${summary.version}`);
-if (summary.methodology?.brokers !== 3 || summary.methodology?.replicationFactor !== 3 || summary.methodology?.repeats !== 3) {
+if (summary.version !== 2) throw new Error(`Unsupported RF3 summary version ${summary.version}`);
+if (summary.methodology?.brokers !== 3 || summary.methodology?.replicationFactor !== 3 || summary.methodology?.repeats !== 4
+  || summary.methodology?.latinSquareArmOrder !== true || summary.methodology?.pairedRatiosWithinRepeat !== true) {
   throw new Error("RF3 methodology contract drift");
 }
 
@@ -13,13 +14,17 @@ const expected = ["gzip", "zstd-1", "zstd-2", "zstd-3"];
 if (JSON.stringify(summary.medians?.map((entry) => entry.arm)) !== JSON.stringify(expected)) {
   throw new Error(`RF3 arm drift: ${JSON.stringify(summary.medians?.map((entry) => entry.arm))}`);
 }
+if (JSON.stringify(summary.comparisons?.map((entry) => entry.arm)) !== JSON.stringify(expected)) {
+  throw new Error(`RF3 comparison arm drift: ${JSON.stringify(summary.comparisons?.map((entry) => entry.arm))}`);
+}
 
-const gzip = required(summary.medians.find((entry) => entry.arm === "gzip"), "gzip median");
 const comparisons = summary.comparisons.map((entry) => {
-  const median = required(summary.medians.find((candidate) => candidate.arm === entry.arm), `${entry.arm} median`);
   const r = entry.ratiosToGzip;
-  const p99DeltaMs = median.producer.singletonAckMs.p99 - gzip.producer.singletonAckMs.p99;
-  const p95DeltaMs = median.producer.singletonAckMs.p95 - gzip.producer.singletonAckMs.p95;
+  for (const metric of ["topicDisk", "clusterNetwork", "producerCpu", "consumerCpu", "brokerCpu", "totalCpu", "throughput", "singletonP95", "singletonP99"]) {
+    requiredPositiveFinite(r?.[metric], `${entry.arm} ${metric} ratio`);
+  }
+  const p99DeltaMs = requiredFinite(entry.absoluteTailDeltaMs?.p99, `${entry.arm} paired p99 delta`);
+  const p95DeltaMs = requiredFinite(entry.absoluteTailDeltaMs?.p95, `${entry.arm} paired p95 delta`);
   const reasons = [];
 
   // Tail latency is a hard eligibility condition, not the primary optimizer.
@@ -32,8 +37,8 @@ const comparisons = summary.comparisons.map((entry) => {
     if (r.clusterNetwork > 1.05) reasons.push(`cluster network ${r.clusterNetwork}x > 1.05x GZIP`);
     if (r.totalCpu > 0.90) reasons.push(`total CPU ${r.totalCpu}x > 0.90x GZIP`);
     if (r.throughput < 1.25) reasons.push(`producer throughput ${r.throughput}x < 1.25x GZIP`);
-    if (r.singletonP95 > 1.15) reasons.push(`singleton p95 ${r.singletonP95}x > 1.15x GZIP`);
-    if (r.singletonP99 > 1.25) reasons.push(`singleton p99 ${r.singletonP99}x > 1.25x GZIP`);
+    if (r.singletonP95 > 1.15 && p95DeltaMs > 0.5) reasons.push(`singleton p95 ${r.singletonP95}x > 1.15x GZIP`);
+    if (r.singletonP99 > 1.25 && p99DeltaMs > 0.5) reasons.push(`singleton p99 ${r.singletonP99}x > 1.25x GZIP`);
     if (p99DeltaMs > 0.5) reasons.push(`singleton p99 absolute delta ${p99DeltaMs.toFixed(3)} ms > 0.5 ms`);
   }
 
@@ -53,13 +58,15 @@ const eligibleZstd = comparisons.filter((entry) => entry.arm.startsWith("zstd-")
 eligibleZstd.sort((a, b) => {
   const aMedian = required(summary.medians.find((entry) => entry.arm === a.arm), `${a.arm} median`);
   const bMedian = required(summary.medians.find((entry) => entry.arm === b.arm), `${b.arm} median`);
+  const aP99 = requiredPositiveFinite(aMedian.producer?.singletonAckMs?.p99, `${a.arm} median singleton p99`);
+  const bP99 = requiredPositiveFinite(bMedian.producer?.singletonAckMs?.p99, `${b.arm} median singleton p99`);
   const aInfrastructure = a.ratiosToGzip.topicDisk + a.ratiosToGzip.clusterNetwork;
   const bInfrastructure = b.ratiosToGzip.topicDisk + b.ratiosToGzip.clusterNetwork;
   return (
     a.ratiosToGzip.totalCpu - b.ratiosToGzip.totalCpu ||
     aInfrastructure - bInfrastructure ||
     b.ratiosToGzip.throughput - a.ratiosToGzip.throughput ||
-    aMedian.producer.singletonAckMs.p99 - bMedian.producer.singletonAckMs.p99
+    aP99 - bP99
   );
 });
 
@@ -87,4 +94,15 @@ console.log(JSON.stringify(decision, null, 2));
 function required(value, label) {
   if (value === undefined) throw new Error(`Missing ${label}`);
   return value;
+}
+
+function requiredFinite(value, label) {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`Invalid ${label}`);
+  return value;
+}
+
+function requiredPositiveFinite(value, label) {
+  const number = requiredFinite(value, label);
+  if (number <= 0) throw new Error(`Invalid ${label}`);
+  return number;
 }

@@ -3,7 +3,17 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --legacy-peer-deps
+RUN set -eu; \
+    attempt=1; delay=2; \
+    while [ "$attempt" -le 4 ]; do \
+      if npm ci --legacy-peer-deps; then exit 0; fi; \
+      if [ "$attempt" -eq 4 ]; then exit 1; fi; \
+      echo "npm ci transient failure; retrying in ${delay}s (attempt ${attempt}/4)" >&2; \
+      sleep "$delay"; \
+      attempt=$((attempt + 1)); \
+      delay=$((delay * 2)); \
+    done; \
+    exit 1
 
 COPY src ./src
 COPY interop ./interop

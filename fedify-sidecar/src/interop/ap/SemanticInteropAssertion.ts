@@ -194,6 +194,28 @@ export const SemanticInteropAssertionSchema = z.object({
   }
 
   if (
+    value.evidence.transportAuthentication === "fedify_http_signature" &&
+    value.evidence.entryPoint !== "wire_fedify"
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidence", "entryPoint"],
+      message: "Fedify HTTP-signature evidence is valid only at the wire_fedify entry point",
+    });
+  }
+
+  if (
+    value.evidence.transportAuthentication === "native_http_signature" &&
+    value.evidence.entryPoint !== "wire_native"
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidence", "entryPoint"],
+      message: "native HTTP-signature evidence is valid only at the wire_native entry point",
+    });
+  }
+
+  if (
     (value.evidence.transportAuthentication === "fedify_http_signature" ||
       value.evidence.transportAuthentication === "native_http_signature") &&
     !boundarySet.has("wire_authentication")
@@ -283,6 +305,22 @@ export const SemanticInteropAssertionSchema = z.object({
     });
   }
 
+  const semanticFactsAsserted =
+    value.semantic.types.length > 0 ||
+    value.semantic.id !== undefined ||
+    value.semantic.actor !== undefined ||
+    value.semantic.attributedTo.length > 0 ||
+    value.semantic.object !== undefined ||
+    value.semantic.target !== undefined;
+
+  if (semanticFactsAsserted && !boundarySet.has("jsonld_semantics")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["semantic"],
+      message: "normalized semantic facts require the jsonld_semantics boundary to execute",
+    });
+  }
+
   if (value.structuralOutcome !== "not_executed" && !boundarySet.has("activitystreams_structure")) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -296,6 +334,22 @@ export const SemanticInteropAssertionSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["authorizationOutcome"],
       message: "authorization outcomes require the authority_policy boundary to execute",
+    });
+  }
+
+  const visibilityClassificationAsserted =
+    value.visibility.class !== "unknown" && value.visibility.class !== "not_applicable";
+  const visibilityRecipientsAsserted =
+    value.visibility.recipients.length > 0 || value.visibility.blindRecipientFieldsObserved.length > 0;
+
+  if (
+    (visibilityClassificationAsserted || visibilityRecipientsAsserted) &&
+    !boundarySet.has("visibility_privacy")
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["visibility"],
+      message: "visibility classifications and recipient evidence require the visibility_privacy boundary to execute",
     });
   }
 

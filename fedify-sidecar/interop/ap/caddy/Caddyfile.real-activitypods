@@ -10,22 +10,34 @@ https://sidecar {
 
 https://gotosocial {
   tls /certs/gotosocial.crt /certs/gotosocial.key
-  reverse_proxy gotosocial-app:8080
+  reverse_proxy gotosocial-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://mastodon {
   tls /certs/mastodon.crt /certs/mastodon.key
-  reverse_proxy mastodon-web-app:3000
+  # Transparent test-only recorder retains bounded signer/body-correlation
+  # metadata and forwards the request unchanged to the real Mastodon process.
+  # Preserve the public authority explicitly because Host is part of the
+  # Cavage signature base string verified by Mastodon.
+  reverse_proxy mastodon-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://akkoma {
   tls /certs/akkoma.crt /certs/akkoma.key
-  reverse_proxy akkoma-app:4000
+  reverse_proxy akkoma-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://pixelfed.test {
   tls /certs/pixelfed.test.crt /certs/pixelfed.test.key
-  reverse_proxy pixelfed-app:8080
+  reverse_proxy pixelfed-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://bonfire.test {
@@ -35,29 +47,72 @@ https://bonfire.test {
 
 https://misskey.test {
   tls /certs/misskey.test.crt /certs/misskey.test.key
-  reverse_proxy misskey-app:3000
+  reverse_proxy misskey-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://friendica.test {
   tls /certs/friendica.test.crt /certs/friendica.test.key
-  reverse_proxy friendica-app:80
+  reverse_proxy friendica-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
 }
 
 https://castopod.test {
   tls /certs/castopod.test.crt /certs/castopod.test.key
-  reverse_proxy castopod-app:8000
+  reverse_proxy castopod-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
+}
+
+https://peertube.test {
+  tls /certs/peertube.test.crt /certs/peertube.test.key
+  reverse_proxy peertube-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
+}
+
+https://loops.test {
+  tls /certs/loops.test.crt /certs/loops.test.key
+  reverse_proxy loops-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
+}
+
+https://owncast.test {
+  tls /certs/owncast.test.crt /certs/owncast.test.key
+  reverse_proxy owncast-wire-recorder:8788 {
+    header_up Host {http.request.host}
+  }
+}
+
+# The workflow selects exactly one return-path authority for each mode. Never
+# fail a signed POST over between upstreams: a retry can lose or alter its body,
+# and fallback would make the authority-path evidence ambiguous.
+(activitypods_return_path) {
+  @actorInbox {
+    method POST
+    path_regexp actor_inbox ^/(users/)?[^/]+/inbox/?$
+  }
+  handle @actorInbox {
+    reverse_proxy {$ACTIVITYPODS_RETURN_HOST:host.docker.internal}:{$ACTIVITYPODS_RETURN_PORT:3000}
+  }
+  handle {
+    reverse_proxy host.docker.internal:3000
+  }
 }
 
 # Canonical public ActivityPods actor/key surface for the live federation proof.
-# The backend remains a host process so the exact PR checkout is exercised;
-# Caddy supplies the local trusted TLS name that remote implementations can
-# dereference from inside the interop Docker network.
+# Actor/key/discovery GETs always remain authoritative on ActivityPods itself;
+# only remote POSTs to a concrete actor inbox participate in the return-path
+# routing above.
 https://activitypods {
   tls /certs/activitypods.crt /certs/activitypods.key
-  reverse_proxy host.docker.internal:3000
+  import activitypods_return_path
 }
 
 https://activitypods.test {
   tls /certs/activitypods.test.crt /certs/activitypods.test.key
-  reverse_proxy host.docker.internal:3000
+  import activitypods_return_path
 }

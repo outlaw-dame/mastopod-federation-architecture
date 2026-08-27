@@ -71,9 +71,31 @@ jobs:
             compose_overlay: fedify-sidecar/interop/ap/docker-compose.castopod.yml
             actor_uri: https://castopod.test/@interop
             remote_version: Castopod 1.9.0@sha256:3ad8970f1decc9c9009502be3efedcf2f5d9fda5c7c9fd85a4408edc84a0bbb9
+          - target: peertube
+            target_host: peertube.test
+            # Replaced with a path-restricted public tunnel authority per mode.
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.peertube.yml
+            actor_uri: https://peertube.test/accounts/root
+            target_username: root
+            remote_version: PeerTube v8.2.4@sha256:b4e49e7ca29ba79d8ae145d76d7a5cad612f096bfa0b9aea0138e86728a6ee50
+          - target: loops
+            target_host: loops.test
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.loops.yml
+            # Replaced with the bootstrapped snowflake profile URI before use.
+            actor_uri: https://loops.test/ap/users/pending
+            remote_version: Loops b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
+          - target: owncast
+            target_host: owncast.test
+            # Owncast's production SSRF policy requires a public actor authority.
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.owncast.yml
+            actor_uri: https://owncast.test/federation/user/interop
+            remote_version: Owncast v0.2.5@65d03b4d5df13dfc2033311fa30e4513b63b3e16
     env:
       FEDERATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      ACTIVITYPODS_SHA: '5dbc74e66ae05dd9a78843b8d9c9f73bc4ee84d7'
+      ACTIVITYPODS_SHA: 'c7a1aba4ea6e597b4816e1f66fd465d47497ef71'
       PIXELFED_SHA: 'e33026a9e5334d2c124a7321f8b15d4329b8961f'
       PIXELFED_IMAGE: ap-pixelfed:e33026a9e5334d2c124a7321f8b15d4329b8961f
       COMPOSE_FILE: fedify-sidecar/interop/ap/docker-compose.ap-interop.yml
@@ -82,14 +104,31 @@ jobs:
       MISSKEY_OVERLAY: fedify-sidecar/interop/ap/docker-compose.misskey.yml
       FRIENDICA_OVERLAY: fedify-sidecar/interop/ap/docker-compose.friendica.yml
       CASTOPOD_OVERLAY: fedify-sidecar/interop/ap/docker-compose.castopod.yml
+      PEERTUBE_OVERLAY: fedify-sidecar/interop/ap/docker-compose.peertube.yml
       BONFIRE_OVERLAY: fedify-sidecar/interop/ap/docker-compose.bonfire.yml
+      LOOPS_OVERLAY: fedify-sidecar/interop/ap/docker-compose.loops.yml
+      LOOPS_SHA: 'b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3'
+      OWNCAST_OVERLAY: fedify-sidecar/interop/ap/docker-compose.owncast.yml
+      OWNCAST_SHA: '65d03b4d5df13dfc2033311fa30e4513b63b3e16'
       TARGET: ${{ matrix.target }}
       TARGET_HOST: ${{ matrix.target_host }}
       ACTIVITYPODS_HOST: ${{ matrix.activitypods_host }}
       TARGET_COMPOSE_OVERLAY: ${{ matrix.compose_overlay }}
       TARGET_ACTOR_URI: ${{ matrix.actor_uri }}
-      TARGET_USERNAME: interop
+      TARGET_USERNAME: ${{ matrix.target_username || 'interop' }}
       EVIDENCE_DIR: measurements/ap-real-multi/${{ matrix.target }}
+      WIRE_EVIDENCE_PATH: fedify-sidecar/interop/ap/runtime/wire/${{ matrix.target }}.jsonl
+      CLOUDFLARED_IMAGE: cloudflare/cloudflared:2026.3.0@sha256:6b599ca3e974349ead3286d178da61d291961182ec3fe9c505e1dd02c8ac31b0
+      # Authenticated named Cloudflare Tunnel, used only for the
+      # friendica/loops/owncast/peertube SSRF-protected-native legs (see
+      # "Publish restricted ActivityPub authority for SSRF-protected native
+      # targets" below). Replaces the free/anonymous Quick Tunnel, which had
+      # no uptime guarantee and was the confirmed source of persistent
+      # `tlsv1 alert internal error` failures on those four targets.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TUNNEL_ZONE: ${{ secrets.CLOUDFLARE_TUNNEL_ZONE }}
 
     steps:
       - name: Checkout federation architecture
@@ -97,6 +136,27 @@ jobs:
         with:
           ref: ${{ env.FEDERATION_SHA }}
           persist-credentials: false
+
+      - name: Sanitize Cloudflare tunnel secrets
+        if: contains(fromJSON('["friendica","loops","peertube","owncast"]'), matrix.target)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Repo secrets are routinely pasted in by hand and can carry an
+          # invisible trailing CR/newline or surrounding whitespace.
+          # Confirmed as a real failure mode: an embedded control character
+          # in CLOUDFLARE_TUNNEL_ZONE survived into a minted hostname and
+          # produced `curl: (3) URL rejected: Bad hostname` on every one of
+          # 90 retry attempts. Strip once here so every downstream consumer
+          # (this workflow's own checks and both cloudflare-named-tunnel
+          # scripts) sees the same clean value.
+          strip_ws() { printf '%s' "$1" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          {
+            echo "CLOUDFLARE_API_TOKEN=$(strip_ws "${CLOUDFLARE_API_TOKEN}")"
+            echo "CLOUDFLARE_ACCOUNT_ID=$(strip_ws "${CLOUDFLARE_ACCOUNT_ID}")"
+            echo "CLOUDFLARE_ZONE_ID=$(strip_ws "${CLOUDFLARE_ZONE_ID}")"
+            echo "CLOUDFLARE_TUNNEL_ZONE=$(strip_ws "${CLOUDFLARE_TUNNEL_ZONE}")"
+          } >> "$GITHUB_ENV"
 
       - name: Checkout exact ActivityPods signing candidate
         uses: actions/checkout@v4
@@ -115,6 +175,24 @@ jobs:
           path: pixelfed
           persist-credentials: false
 
+      - name: Checkout exact Loops fixture source
+        if: matrix.target == 'loops'
+        uses: actions/checkout@v4
+        with:
+          repository: joinloops/loops-server
+          ref: ${{ env.LOOPS_SHA }}
+          path: loops
+          persist-credentials: false
+
+      - name: Checkout exact Owncast fixture source
+        if: matrix.target == 'owncast'
+        uses: actions/checkout@v4
+        with:
+          repository: owncast/owncast
+          ref: ${{ env.OWNCAST_SHA }}
+          path: owncast
+          persist-credentials: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -126,7 +204,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${EVIDENCE_DIR}"
+          mkdir -p "${EVIDENCE_DIR}" fedify-sidecar/interop/ap/runtime/wire
+          : > "${WIRE_EVIDENCE_PATH}"
           activitypods_token="$(openssl rand -hex 32)"
           sidecar_token="$(openssl rand -hex 32)"
           password_verify_token="$(openssl rand -hex 32)"
@@ -143,12 +222,23 @@ jobs:
           castopod_analytics_salt="$(openssl rand -hex 32)"
           castopod_admin_password="$(openssl rand -hex 32)"
           castopod_redis_password="$(openssl rand -hex 32)"
+          peertube_db_password="$(openssl rand -hex 32)"
+          peertube_secret="$(openssl rand -hex 32)"
+          owncast_admin_password="$(openssl rand -hex 32)"
           bonfire_db_password="$(openssl rand -hex 32)"
           bonfire_secret_key_base="$(openssl rand -hex 64)"
           bonfire_signing_salt="$(openssl rand -hex 32)"
           bonfire_encryption_salt="$(openssl rand -hex 32)"
           bonfire_release_cookie="$(openssl rand -hex 32)"
-          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${castopod_redis_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
+          for value in "${activitypods_token}" "${sidecar_token}" "${password_verify_token}" "${pixelfed_db_password}" "${pixelfed_db_root_password}" "${pixelfed_app_key}" "${misskey_db_password}" "${misskey_setup_password}" "${misskey_user_password}" "${friendica_db_password}" "${friendica_db_root_password}" "${castopod_db_password}" "${castopod_db_root_password}" "${castopod_analytics_salt}" "${castopod_admin_password}" "${castopod_redis_password}" "${peertube_db_password}" "${peertube_secret}" "${owncast_admin_password}" "${bonfire_db_password}" "${bonfire_secret_key_base}" "${bonfire_signing_salt}" "${bonfire_encryption_salt}" "${bonfire_release_cookie}"; do echo "::add-mask::${value}"; done
+          if [[ "${TARGET}" == loops ]]; then
+            loops_db_password="$(openssl rand -hex 32)"
+            loops_db_root_password="$(openssl rand -hex 32)"
+            loops_redis_password="$(openssl rand -hex 32)"
+            loops_admin_password="$(openssl rand -hex 32)"
+            loops_app_key="base64:$(openssl rand -base64 32)"
+            for value in "${loops_db_password}" "${loops_db_root_password}" "${loops_redis_password}" "${loops_admin_password}" "${loops_app_key}"; do echo "::add-mask::${value}"; done
+          fi
           {
             echo "ACTIVITYPODS_TOKEN=${activitypods_token}"
             echo "SIDECAR_TOKEN=${sidecar_token}"
@@ -166,12 +256,24 @@ jobs:
             echo "CASTOPOD_ANALYTICS_SALT=${castopod_analytics_salt}"
             echo "CASTOPOD_ADMIN_PASSWORD=${castopod_admin_password}"
             echo "CASTOPOD_REDIS_PASSWORD=${castopod_redis_password}"
+            echo "PEERTUBE_DB_PASSWORD=${peertube_db_password}"
+            echo "PEERTUBE_SECRET=${peertube_secret}"
+            echo "OWNCAST_ADMIN_PASSWORD=${owncast_admin_password}"
             echo "BONFIRE_DB_PASSWORD=${bonfire_db_password}"
             echo "BONFIRE_SECRET_KEY_BASE=${bonfire_secret_key_base}"
             echo "BONFIRE_SIGNING_SALT=${bonfire_signing_salt}"
             echo "BONFIRE_ENCRYPTION_SALT=${bonfire_encryption_salt}"
             echo "BONFIRE_RELEASE_COOKIE=${bonfire_release_cookie}"
           } >> "$GITHUB_ENV"
+          if [[ "${TARGET}" == loops ]]; then
+            {
+              echo "LOOPS_DB_PASSWORD=${loops_db_password}"
+              echo "LOOPS_DB_ROOT_PASSWORD=${loops_db_root_password}"
+              echo "LOOPS_REDIS_PASSWORD=${loops_redis_password}"
+              echo "LOOPS_ADMIN_PASSWORD=${loops_admin_password}"
+              echo "LOOPS_APP_KEY=${loops_app_key}"
+            } >> "$GITHUB_ENV"
+          fi
           printf '{"schema":"activitypods.activitypub.real-multi-run.v1","target":"%s","activityPodsSha":"%s","federationSha":"%s"}\n' \
             "${TARGET}" "${ACTIVITYPODS_SHA}" "${FEDERATION_SHA}" > "${EVIDENCE_DIR}/run-started.json"
 
@@ -274,14 +376,35 @@ jobs:
               AP_INTEROP_CASTOPOD_HANDLE="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-castopod-account.sh
               ;;
+            peertube)
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_PEERTUBE_OVERLAY="${PEERTUBE_OVERLAY}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-peertube-account.sh
+              ;;
             bonfire)
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_BONFIRE_OVERLAY="${BONFIRE_OVERLAY}" \
               AP_INTEROP_BONFIRE_USERNAME="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
               ;;
+            loops)
+              [[ -d loops/.git ]]
+              [[ "$(git -C loops rev-parse HEAD)" == "${LOOPS_SHA}" ]]
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_LOOPS_OVERLAY="${LOOPS_OVERLAY}" \
+              AP_INTEROP_LOOPS_USERNAME="${TARGET_USERNAME}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-loops-account.sh
+              . fedify-sidecar/interop/ap/runtime/loops-actor.env
+              ;;
+            owncast)
+              [[ -d owncast/.git ]]
+              [[ "$(git -C owncast rev-parse HEAD)" == "${OWNCAST_SHA}" ]]
+              AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_OWNCAST_OVERLAY="${OWNCAST_OVERLAY}" \
+              AP_INTEROP_OWNCAST_USERNAME="${TARGET_USERNAME}" \
+                fedify-sidecar/interop/ap/scripts/bootstrap-owncast-account.sh
+              ;;
             *) exit 2 ;;
           esac
-          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods up -d ap-proof-router
+          docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            up -d "${TARGET}-wire-recorder"
+          ACTIVITYPODS_RETURN_PORT=3000 docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods up -d ap-proof-router
           AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
             fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh "${TARGET_HOST}" "${ACTIVITYPODS_HOST}" \
             | tee "${EVIDENCE_DIR}/proof-router-hosts.json"
@@ -303,23 +426,83 @@ jobs:
             readiness_accept='application/jrd+json'
           fi
           ready=false
-          # First-boot migrations for larger fixtures (notably Misskey) can
-          # legitimately outlive the common three-minute window. Keep this
-          # bounded while allowing seven minutes for the real actor endpoint.
-          # Misskey 2026.7.0's post-setup migration restart measured just over
-          # six minutes on the hosted runner, after its setup API had returned.
-          for attempt in $(seq 1 210); do
+          readiness_attempts=90
+          if [[ "${TARGET}" == "misskey" ]]; then
+            readiness_attempts=270
+          fi
+          for attempt in $(seq 1 "${readiness_attempts}"); do
             if curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt -fsS \
               -H "Accept: ${readiness_accept}" "${readiness_uri}" >/dev/null; then ready=true; break; fi
             sleep 2
           done
           [[ "${ready}" == true ]]
 
+      - name: Publish restricted ActivityPub authority for SSRF-protected native targets
+        if: contains(fromJSON('["friendica","loops","peertube","owncast"]'), matrix.target)
+        shell: bash
+        run: |
+          set -euo pipefail
+          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
+          recorder_host="$(node fedify-sidecar/interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
+          echo "AP_PUBLIC_PROXY_GATEWAY=${recorder_host}" >> "${GITHUB_ENV}"
+          tunnel_host="$(
+            AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-native" \
+            AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
+            AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
+              fedify-sidecar/interop/ap/scripts/start-cloudflare-named-tunnel.sh
+          )"
+          printf '%s\n' native > "${EVIDENCE_DIR}/public-inbox-route-mode"
+          AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
+          AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
+          AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
+          AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${recorder_host}" AP_PUBLIC_PROXY_INBOX_TARGET_PORT=3001 \
+          AP_PUBLIC_PROXY_INBOX_MODE_FILE="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode" \
+          AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST="${recorder_host}" AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001 \
+          AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST="${recorder_host}" AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080 \
+          AP_PUBLIC_PROXY_AUTHORITY_ZONE="${CLOUDFLARE_TUNNEL_ZONE}" \
+            node fedify-sidecar/interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
+            > "${EVIDENCE_DIR}/native-public-proxy.jsonl" 2> "${EVIDENCE_DIR}/native-public-proxy.log" &
+          echo "$!" > "${EVIDENCE_DIR}/native-public-proxy.pid"
+          sleep 1
+          kill -0 "$(cat "${EVIDENCE_DIR}/native-public-proxy.pid")"
+          tunnel_ready=false
+          for attempt in $(seq 1 90); do
+            if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+              "https://${tunnel_host}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+              tunnel_ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "${tunnel_ready}" != true ]]; then
+            # curl's own error is too terse to show which handshake stage
+            # failed. A local test against this same zone's pre-existing
+            # tunnel succeeded cleanly (real TLS 1.3, valid cert, HTTP/2,
+            # a real HTTP response) — ruling out the zone/cert/tunnel
+            # infrastructure itself. The one constant across every failure
+            # so far, both the old Quick Tunnel and this named tunnel, is
+            # that it only ever happens from this runner's own egress path.
+            # Get a full handshake trace from here to either confirm or
+            # rule that out directly instead of guessing again.
+            echo "::group::openssl s_client handshake trace against ${tunnel_host}"
+            openssl s_client -connect "${tunnel_host}:443" -servername "${tunnel_host}" \
+              -brief </dev/null 2>&1 || true
+            echo "::endgroup::"
+            echo "::group::openssl s_client verbose handshake trace (TLS 1.3 only)"
+            openssl s_client -connect "${tunnel_host}:443" -servername "${tunnel_host}" \
+              -tls1_3 -msg </dev/null 2>&1 | head -100 || true
+            echo "::endgroup::"
+          fi
+          [[ "${tunnel_ready}" == true ]]
+          echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "$GITHUB_ENV"
+          printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"native","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"security":"remote SSRF prevention remains enabled"}\n' \
+            "${TARGET}" "${tunnel_host}" > "${EVIDENCE_DIR}/native-public-tunnel.json"
+
       - name: Start ActivityPods native mode
         working-directory: activitypods/pod-provider/backend
         shell: bash
         env:
-          SEMAPPS_HOME_URL: https://${{ matrix.activitypods_host }}/
+          SEMAPPS_HOME_URL: https://${{ env.ACTIVITYPODS_HOST }}/
           SEMAPPS_PORT: '3000'
           SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
           SEMAPPS_QUEUE_SERVICE_URL: redis://127.0.0.1:6379/1
@@ -336,6 +519,7 @@ jobs:
           APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
         run: |
           set -euo pipefail
+          export SEMAPPS_HOME_URL="https://${ACTIVITYPODS_HOST}/"
           if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null 2>&1; then exit 1; fi
           log="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-native.log"
           "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
@@ -349,7 +533,31 @@ jobs:
           done
           [[ "${ready}" == true ]]
 
-      - name: Prove native federation and remote persistence
+      - name: Record exact native ActivityPods inbox receipts
+        shell: bash
+        run: |
+          set -euo pipefail
+          router_container="$(docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
+          recorder_host="$(node fedify-sidecar/interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
+          : > "${EVIDENCE_DIR}/native-inbound.jsonl"
+          AP_SIGNING_PROXY_HOST="${recorder_host}" AP_SIGNING_PROXY_PORT=3001 \
+          AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
+          AP_SIGNING_PROXY_RECORD_INBOUND=true \
+          AP_SIGNING_PROXY_EVIDENCE_PATH="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-inbound.jsonl" \
+            node fedify-sidecar/interop/ap/scripts/activitypods-signing-recording-proxy.mjs \
+            > "${EVIDENCE_DIR}/native-inbound-proxy.log" 2>&1 &
+          echo "$!" > "${EVIDENCE_DIR}/native-inbound-proxy.pid"
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl -fsS --max-time 2 -X OPTIONS "http://${recorder_host}:3001/ready" >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          [[ "${ready}" == true ]]
+          ACTIVITYPODS_RETURN_HOST="${recorder_host}" ACTIVITYPODS_RETURN_PORT=3001 \
+            docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            up -d --no-deps --force-recreate ap-proof-router
+
+      - name: Prove native bidirectional federation and remote persistence
         id: native-proof
         continue-on-error: true
         working-directory: activitypods/pod-provider/backend
@@ -358,6 +566,45 @@ jobs:
           SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
         run: |
           set -euo pipefail
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
+            export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
+            export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
+            # loops/owncast/peertube expose their public actor through an
+            # authenticated named Cloudflare Tunnel (friendica uses the fixed
+            # *.test router instead, so this mainly matters for the other
+            # three, but raising it is harmless there too). The default
+            # 10-attempt/~47.5s budget was sometimes too short even for the
+            # free/anonymous Quick Tunnel this replaced — repeatedly
+            # confirmed as `curl: (35) OpenSSL: SSL routines::tlsv1 alert
+            # internal error` with clean logs on both cloudflared and the
+            # local proxy, meaning the failure was in Cloudflare's own edge
+            # routing for that free tier rather than something raising the
+            # budget or hardening the proxy could fix. This budget is kept
+            # generous after the migration to a named tunnel as a hedge, not
+            # because it's known to matter here. 40 attempts is roughly a
+            # 287s (4m48s) budget at this function's existing
+            # exponential-capped-at-8s backoff.
+            export AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS=40
+          fi
+          if [[ "${TARGET}" == friendica ]]; then
+            # Friendica intermittently answers even unrelated GETs (including
+            # its own /profile/interop actor page) with a brief 503 window
+            # during its own startup/worker-daemon spin-up (confirmed from a
+            # real failing run's access log: two 503s on plain GETs, ~15s
+            # apart, sandwiched between otherwise-continuous 200s). A signed
+            # inbox POST landing in that window also gets a 503. This is
+            # recoverable: ActivityPods' own outbox delivery queue
+            # (@semapps/activitypub's outbox.js) retries failed remote posts
+            # up to 10 times with `backoff: { type: 'exponential', delay:
+            # 180000 }` — the first retry alone is 180s out, longer than this
+            # assertion script's 120s default polling window (60 attempts x
+            # 2s), so the whole run fails before ActivityPods ever gets a
+            # chance to retry past a transient hiccup that would very likely
+            # succeed. Give this target enough patience to survive at least
+            # the first retry.
+            export AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS=90
+            export AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS=3
+          fi
           AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-${TARGET}-native" \
             node scripts/activitypub-federation-follow-proof.js native "${TARGET_ACTOR_URI}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.log"
@@ -366,12 +613,23 @@ jobs:
           AP_INTEROP_COMPOSE_OVERLAY="${TARGET_COMPOSE_OVERLAY}" \
             sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-acceptance.json"
+          persisted_count="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-acceptance.json','utf8')).persistedFollowCount")"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-native-inbound-accept.mjs" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-inbound.jsonl" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json" \
+            "${TARGET_HOST}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-inbound-accept.json"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs" \
+            "${GITHUB_WORKSPACE}/${WIRE_EVIDENCE_PATH}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json" \
+            "${TARGET_HOST}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-wire-signature.json"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-return-accept.mjs" \
+            native "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" "${persisted_count}" \
+            | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-bidirectional.json"
 
       - name: Stop native ActivityPods
         shell: bash
         run: |
           set -euo pipefail
           kill "$(cat "${EVIDENCE_DIR}/activitypods-native.pid")" 2>/dev/null || true
+          kill "$(cat "${EVIDENCE_DIR}/native-inbound-proxy.pid")" 2>/dev/null || true
           for attempt in $(seq 1 30); do
             if ! curl -sS --max-time 1 -o /dev/null http://127.0.0.1:3000/ 2>/dev/null; then exit 0; fi
             sleep 1
@@ -395,20 +653,117 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          router_container="$(docker compose -f "${GITHUB_WORKSPACE}/${COMPOSE_FILE}" -f "${GITHUB_WORKSPACE}/${REAL_OVERLAY}" --profile real-activitypods ps -q ap-proof-router)"
+          if [[ -z "${router_container}" ]]; then
+            echo "Proof router container was not found after the authority-mode reset." >&2
+            exit 1
+          fi
+          sidecar_host="$(node interop/ap/scripts/resolve-private-docker-gateway.mjs "${router_container}")"
+          echo "AP_PROOF_SIDECAR_HOST=${sidecar_host}" >> "${GITHUB_ENV}"
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
+            if [[ -z "${AP_PUBLIC_PROXY_GATEWAY:-}" || "${sidecar_host}" != "${AP_PUBLIC_PROXY_GATEWAY}" ]]; then
+              echo "The sidecar gateway differs from the address bound by the public proof proxy." >&2
+              exit 1
+            fi
+            # Named tunnel authorities are still per-run ephemeral (created
+            # fresh and torn down at job end, see
+            # start/stop-cloudflare-named-tunnel.sh) to keep the native and
+            # external legs on distinct authorities. Select a fresh one
+            # before the external actor exists. Candidate retries are
+            # bounded preflight; signed requests are never retried across
+            # authorities.
+            native_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")"
+            kill "${native_proxy_pid}" 2>/dev/null || true
+            for attempt in $(seq 1 20); do
+              if ! kill -0 "${native_proxy_pid}" 2>/dev/null; then break; fi
+              sleep 0.25
+            done
+            if kill -0 "${native_proxy_pid}" 2>/dev/null; then
+              echo "The public proxy did not stop before bounded preflight selection." >&2
+              exit 1
+            fi
+            interop/ap/scripts/stop-cloudflare-named-tunnel.sh "ap-${TARGET}-tunnel-native"
+            printf '%s\n' external > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode"
+            authority_selected=false
+            for candidate in 1 2 3; do
+              interop/ap/scripts/stop-cloudflare-named-tunnel.sh "ap-${TARGET}-tunnel-external"
+              if ! tunnel_host="$(
+                AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external" \
+                AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
+                AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
+                  interop/ap/scripts/start-cloudflare-named-tunnel.sh
+              )"; then
+                echo "External tunnel candidate ${candidate} failed to start." >&2
+                continue
+              fi
+              if [[ -z "${tunnel_host}" || "${tunnel_host}" != *".${CLOUDFLARE_TUNNEL_ZONE}" ]]; then
+                echo "External tunnel candidate ${candidate} is unavailable or malformed." >&2
+                continue
+              fi
+              AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
+              AP_PUBLIC_PROXY_AUTHORITY="${tunnel_host}" \
+              AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST=127.0.0.1 AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000 \
+              AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_INBOX_TARGET_PORT=8080 \
+              AP_PUBLIC_PROXY_INBOX_MODE_FILE="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode" \
+              AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001 \
+              AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080 \
+              AP_PUBLIC_PROXY_AUTHORITY_ZONE="${CLOUDFLARE_TUNNEL_ZONE}" \
+                node interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
+                >> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.jsonl" \
+                2>> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" &
+              echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid"
+              consecutive_health_checks=0
+              for attempt in $(seq 1 12); do
+                if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+                  "https://${tunnel_host}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+                  consecutive_health_checks=$((consecutive_health_checks + 1))
+                  if [[ "${consecutive_health_checks}" -eq 5 ]]; then
+                    authority_selected=true
+                    break
+                  fi
+                else
+                  consecutive_health_checks=0
+                fi
+                sleep 2
+              done
+              if [[ "${authority_selected}" == true ]]; then break; fi
+              candidate_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid")"
+              kill "${candidate_proxy_pid}" 2>/dev/null || true
+              for attempt in $(seq 1 20); do
+                if ! kill -0 "${candidate_proxy_pid}" 2>/dev/null; then break; fi
+                sleep 0.25
+              done
+              if kill -0 "${candidate_proxy_pid}" 2>/dev/null; then
+                echo "External proxy candidate ${candidate} did not stop." >&2
+                exit 1
+              fi
+            done
+            if [[ "${authority_selected}" != true ]]; then
+              echo "No stable external authority passed bounded preflight selection." >&2
+              exit 1
+            fi
+            export ACTIVITYPODS_HOST="${tunnel_host}"
+            echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "${GITHUB_ENV}"
+            authority_strategy=fresh-bounded-preflight-selection
+            export AP_PUBLIC_AUTHORITY_STRATEGY="${authority_strategy}"
+            echo "AP_PUBLIC_AUTHORITY_STRATEGY=${authority_strategy}" >> "${GITHUB_ENV}"
+          fi
           : > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl"
           AP_SIGNING_PROXY_HOST=127.0.0.1 AP_SIGNING_PROXY_PORT=3001 AP_SIGNING_PROXY_TARGET_HOST=127.0.0.1 AP_SIGNING_PROXY_TARGET_PORT=3000 \
           AP_SIGNING_PROXY_EVIDENCE_PATH="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" \
             node interop/ap/scripts/activitypods-signing-recording-proxy.mjs > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-proxy.log" 2>&1 &
           echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-proxy.pid"
           docker compose -f "${GITHUB_WORKSPACE}/activitypods/pod-provider/docker-compose-test.yml" exec -T redis redis-cli -n 0 FLUSHDB >/dev/null
-          NODE_ENV=development PORT=8080 HOST=127.0.0.1 DOMAIN="${ACTIVITYPODS_HOST}" SIDECAR_STARTUP_MODE=blocking \
+          NODE_ENV=development LOG_LEVEL=debug PORT=8080 HOST="${sidecar_host}" DOMAIN="${ACTIVITYPODS_HOST}" SIDECAR_STARTUP_MODE=blocking \
+          AP_RELAY_ACTOR_URLS='' \
           AP_INTEROP_ENABLE_MEDIA_FIXTURES=true APDM_INTEROP_PRIVATE_HOSTS="${TARGET_HOST}" \
           REDIS_URL=redis://127.0.0.1:6379 APDM_COMPLETION_MARKER_V2_CUTOVER=fresh REDPANDA_BROKERS=127.0.0.1:19092 \
           REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development \
           STREAM1_TOPIC=ap.stream1.local-public.v1 STREAM2_TOPIC=ap.stream2.remote-public.v1 \
           FIREHOSE_TOPIC=ap.firehose.v1 TOMBSTONE_TOPIC=ap.tombstones.v1 ACTIVITYPODS_URL=http://127.0.0.1:3001 \
+          ACTIVITYPODS_PUBLIC_URL="https://${ACTIVITYPODS_HOST}" \
           ACTIVITYPODS_TOKEN="${ACTIVITYPODS_TOKEN}" SIDECAR_TOKEN="${SIDECAR_TOKEN}" ENABLE_OUTBOUND_WORKER=true ENABLE_OUTBOX_INTENT_WORKER=true \
-          ENABLE_INBOUND_WORKER=false ENABLE_ORIGIN_RECONCILIATION=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=false ENABLE_OPENSEARCH_INDEXER=false \
+          ENABLE_INBOUND_WORKER=true ENABLE_ORIGIN_RECONCILIATION=false ENABLE_FEDIFY_RUNTIME_INTEGRATION=true ENABLE_OPENSEARCH_INDEXER=false \
           ENABLE_XRPC_SERVER=false ENABLE_MEDIA_ASSET_SYNC=false ENABLE_ACCOUNT_PROVISIONING=false ENABLE_ENTRYWAY=false ENABLE_FOLLOWERS_SYNC=false \
           ENABLE_MRF_ADMIN_API=false ENABLE_MODERATION_BRIDGE_API=false ENABLE_CANONICAL_EVENT_LOG=false ENABLE_CANONICAL_NOTIFICATIONS=false \
           ENABLE_AT_JETSTREAM=false ENABLE_AT_EXTERNAL_FIREHOSE=false CONSUMER_GROUP=sidecar-workers INBOUND_STREAM_KEY=ap:queue:inbound:v1 \
@@ -419,17 +774,44 @@ jobs:
           pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/sidecar.pid")"
           ready=false
           for attempt in $(seq 1 120); do
-            if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null; then ready=true; break; fi
+            if curl -fsS --max-time 2 "http://${sidecar_host}:8080/health" >/dev/null; then ready=true; break; fi
             if ! kill -0 "${pid}" 2>/dev/null; then tail -n 500 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/sidecar.log"; exit 1; fi
             sleep 1
           done
           [[ "${ready}" == true ]]
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
+            consecutive_health_checks=0
+            for attempt in $(seq 1 90); do
+              if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+                "https://${ACTIVITYPODS_HOST}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+                consecutive_health_checks=$((consecutive_health_checks + 1))
+                if [[ "${consecutive_health_checks}" -eq 3 ]]; then break; fi
+              else
+                consecutive_health_checks=0
+              fi
+              sleep 2
+            done
+            [[ "${consecutive_health_checks}" -eq 3 ]]
+            printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"authorityIsolation":"%s","inboxRouteMode":"external","security":"remote SSRF prevention remains enabled; no signed cross-authority retry"}\n' \
+              "${TARGET}" "${ACTIVITYPODS_HOST}" "${AP_PUBLIC_AUTHORITY_STRATEGY}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
+          fi
+
+      - name: Route returning ActivityPub through the external sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTIVITYPODS_RETURN_HOST="${AP_PROOF_SIDECAR_HOST}" ACTIVITYPODS_RETURN_PORT=8080 \
+            docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
+            up -d --no-deps --force-recreate ap-proof-router
+          AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_REAL_OVERLAY="${REAL_OVERLAY}" \
+            fedify-sidecar/interop/ap/scripts/configure-proof-router-hosts.sh "${TARGET_HOST}" "${ACTIVITYPODS_HOST}" \
+            | tee "${EVIDENCE_DIR}/proof-router-hosts-external.json"
 
       - name: Start ActivityPods external sidecar mode
         working-directory: activitypods/pod-provider/backend
         shell: bash
         env:
-          SEMAPPS_HOME_URL: https://${{ matrix.activitypods_host }}/
+          SEMAPPS_HOME_URL: https://${{ env.ACTIVITYPODS_HOST }}/
           SEMAPPS_PORT: '3000'
           SEMAPPS_SPARQL_ENDPOINT: http://127.0.0.1:3040/
           SEMAPPS_QUEUE_SERVICE_URL: redis://127.0.0.1:6379/1
@@ -440,15 +822,16 @@ jobs:
           SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: external
           SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: 'true'
           SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: 'false'
-          SIDECAR_DELIVERY_HANDOFF_URL: http://127.0.0.1:8080/webhook/outbox
           APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
           APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
           APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
           APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
         run: |
           set -euo pipefail
+          export SEMAPPS_HOME_URL="https://${ACTIVITYPODS_HOST}/"
           log="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.log"
-          "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
+          SIDECAR_DELIVERY_HANDOFF_URL="http://${AP_PROOF_SIDECAR_HOST}:8080/webhook/outbox" \
+            "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/start-real-activitypods.sh" > "${log}" 2>&1 &
           echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.pid"
           pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/activitypods-external.pid")"
           ready=false
@@ -459,7 +842,7 @@ jobs:
           done
           [[ "${ready}" == true ]]
 
-      - name: Prove sidecar federation, remote persistence, and real ActivityPods signer
+      - name: Prove sidecar bidirectional federation, remote persistence, and real ActivityPods signer
         id: external-proof
         continue-on-error: true
         working-directory: activitypods/pod-provider/backend
@@ -468,6 +851,45 @@ jobs:
           SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
         run: |
           set -euo pipefail
+          if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
+            export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
+            export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
+            # loops/owncast/peertube expose their public actor through an
+            # authenticated named Cloudflare Tunnel (friendica uses the fixed
+            # *.test router instead, so this mainly matters for the other
+            # three, but raising it is harmless there too). The default
+            # 10-attempt/~47.5s budget was sometimes too short even for the
+            # free/anonymous Quick Tunnel this replaced — repeatedly
+            # confirmed as `curl: (35) OpenSSL: SSL routines::tlsv1 alert
+            # internal error` with clean logs on both cloudflared and the
+            # local proxy, meaning the failure was in Cloudflare's own edge
+            # routing for that free tier rather than something raising the
+            # budget or hardening the proxy could fix. This budget is kept
+            # generous after the migration to a named tunnel as a hedge, not
+            # because it's known to matter here. 40 attempts is roughly a
+            # 287s (4m48s) budget at this function's existing
+            # exponential-capped-at-8s backoff.
+            export AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS=40
+          fi
+          if [[ "${TARGET}" == friendica ]]; then
+            # Friendica intermittently answers even unrelated GETs (including
+            # its own /profile/interop actor page) with a brief 503 window
+            # during its own startup/worker-daemon spin-up (confirmed from a
+            # real failing run's access log: two 503s on plain GETs, ~15s
+            # apart, sandwiched between otherwise-continuous 200s). A signed
+            # inbox POST landing in that window also gets a 503. This is
+            # recoverable: ActivityPods' own outbox delivery queue
+            # (@semapps/activitypub's outbox.js) retries failed remote posts
+            # up to 10 times with `backoff: { type: 'exponential', delay:
+            # 180000 }` — the first retry alone is 180s out, longer than this
+            # assertion script's 120s default polling window (60 attempts x
+            # 2s), so the whole run fails before ActivityPods ever gets a
+            # chance to retry past a transient hiccup that would very likely
+            # succeed. Give this target enough patience to survive at least
+            # the first retry.
+            export AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS=90
+            export AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS=3
+          fi
           AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-${TARGET}-external" \
             node scripts/activitypub-federation-follow-proof.js external "${TARGET_ACTOR_URI}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.log"
@@ -481,8 +903,17 @@ jobs:
           AP_INTEROP_COMPOSE_OVERLAY="${TARGET_COMPOSE_OVERLAY}" \
             sh "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-acceptance.json"
+          persisted_count="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-acceptance.json','utf8')).persistedFollowCount")"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-return-accept.mjs" \
+            external "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" "${persisted_count}" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/sidecar.log" \
+            | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-bidirectional.json"
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${TARGET_HOST}" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-signing.json"
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs" \
+            "${GITHUB_WORKSPACE}/${WIRE_EVIDENCE_PATH}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" \
+            "${TARGET_HOST}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-wire-signature.json" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-signing.json"
 
       - name: Build exact implementation evidence summary
@@ -503,34 +934,51 @@ jobs:
           };
           const nativeOrigin = readJson('native-origin.json');
           const nativeAcceptance = readJson('native-acceptance.json');
+          const nativeBidirectional = readJson('native-bidirectional.json');
+          const nativeInbound = readJson('native-inbound-accept.json');
+          const nativeWire = readJson('native-wire-signature.json');
           const externalOrigin = readJson('external-origin.json');
           const externalAcceptance = readJson('external-acceptance.json');
+          const externalBidirectional = readJson('external-bidirectional.json');
           const signing = readJson('external-signing.json');
+          const externalWire = readJson('external-wire-signature.json');
           const nativeComplete = process.env.NATIVE_PROOF_OUTCOME === 'success' &&
-            nativeOrigin?.ok === true && nativeOrigin?.mode === 'native' && nativeAcceptance?.ok === true;
+            nativeOrigin?.ok === true && nativeOrigin?.mode === 'native' && nativeAcceptance?.ok === true &&
+            nativeInbound?.ok === true && nativeInbound?.followActivityId === nativeOrigin?.activityId &&
+            nativeInbound?.actorUri === nativeOrigin?.actorUri && nativeWire?.ok === true &&
+            nativeWire?.activityId === nativeOrigin?.activityId && nativeWire?.actorUri === nativeOrigin?.actorUri &&
+            nativeBidirectional?.ok === true && nativeBidirectional?.returnAcceptApplied === true &&
+            nativeBidirectional?.followingContainsRemote === true && nativeBidirectional?.sidecarInboundAcceptObserved === false &&
+            nativeBidirectional?.activityId === nativeOrigin?.activityId && nativeBidirectional?.actorUri === nativeOrigin?.actorUri;
           const externalComplete = process.env.EXTERNAL_PROOF_OUTCOME === 'success' &&
             externalOrigin?.ok === true && externalOrigin?.mode === 'external' &&
             externalOrigin?.durableHandoffQueued === true && externalOrigin?.nativeRemotePostSuppressed === true &&
-            externalAcceptance?.ok === true && signing?.ok === true &&
-            signing?.activityId === externalOrigin?.activityId && signing?.actorUri === externalOrigin?.actorUri;
+            externalAcceptance?.ok === true && externalBidirectional?.ok === true &&
+            externalBidirectional?.returnAcceptApplied === true && externalBidirectional?.followingContainsRemote === true &&
+            externalBidirectional?.sidecarInboundAcceptObserved === true &&
+            typeof externalBidirectional?.returnAcceptActivityId === 'string' && externalBidirectional.returnAcceptActivityId.length > 0 &&
+            signing?.ok === true && externalWire?.ok === true && externalWire?.signingCorrelation?.exactSignedHeadersMatched === true &&
+            externalBidirectional?.activityId === externalOrigin?.activityId && externalBidirectional?.actorUri === externalOrigin?.actorUri &&
+            signing?.activityId === externalOrigin?.activityId && signing?.actorUri === externalOrigin?.actorUri &&
+            externalWire?.activityId === externalOrigin?.activityId && externalWire?.actorUri === externalOrigin?.actorUri;
           const complete = nativeComplete && externalComplete;
           const summary = {
-            schema: 'activitypods.activitypub.real-multi-implementation.v1',
+            schema: 'activitypods.activitypub.real-multi-implementation.v2',
             complete,
             target: process.env.TARGET,
             remoteVersion: process.env.REMOTE_VERSION,
             activityPodsSha: process.env.ACTIVITYPODS_SHA,
             federationSha: process.env.FEDERATION_SHA,
             native: nativeComplete
-              ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, sidecarRunning: false }
+              ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, returnAcceptApplied: nativeBidirectional.returnAcceptApplied, returnAcceptActivityId: nativeInbound.acceptActivityId, followingContainsRemote: nativeBidirectional.followingContainsRemote, wire: nativeWire, sidecarRunning: false }
               : { complete: false, stepOutcome: process.env.NATIVE_PROOF_OUTCOME },
             external: externalComplete
-              ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64 }
+              ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, returnAcceptApplied: externalBidirectional.returnAcceptApplied, returnAcceptActivityId: externalBidirectional.returnAcceptActivityId, followingContainsRemote: externalBidirectional.followingContainsRemote, sidecarInboundAcceptObserved: externalBidirectional.sidecarInboundAcceptObserved, sidecarInboundPath: externalBidirectional.sidecarInboundPath, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64, wire: externalWire }
               : { complete: false, stepOutcome: process.env.EXTERNAL_PROOF_OUTCOME }
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
           console.log(JSON.stringify(summary, null, 2));
-          if (!complete) throw new Error('both federation modes require valid remote-persistence and signer evidence');
+          if (!complete) throw new Error('both federation modes require remote persistence, returning Accept application, and exact authority-path evidence');
           NODE
 
       - name: Upload implementation evidence
@@ -538,7 +986,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: activitypub-real-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: measurements/ap-real-multi/${{ matrix.target }}/
+          path: |
+            measurements/ap-real-multi/${{ matrix.target }}/
+            fedify-sidecar/interop/ap/runtime/wire/${{ matrix.target }}.jsonl
           if-no-files-found: error
           retention-days: 30
 
@@ -547,10 +997,38 @@ jobs:
         shell: bash
         run: |
           set +e
+          # loops/owncast/peertube expose their public actor through an
+          # authenticated named Cloudflare Tunnel (see
+          # start-cloudflare-named-tunnel.sh). This migrated off the
+          # free/anonymous Quick Tunnel after real CI evidence showed a
+          # persistent "tlsv1 alert internal error" on the actor-document
+          # fetch with both cloudflared's and the local proxy's own logs
+          # completely clean — ruling out a crash or misconfiguration on
+          # this repo's side and pointing at Cloudflare's free-tier edge
+          # routing itself (see AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS and
+          # the proxy's uncaughtException/unhandledRejection handlers, both
+          # real fixes that did not resolve it). Its own health-check
+          # endpoint passing (required before the sidecar even starts)
+          # proves the tunnel infrastructure works at that point in time; a
+          # later failure on the actor-document fetch specifically, with
+          # nothing in between restarting the tunnel, means something changes state
+          # after that point that this workflow has never actually looked
+          # at. Dump the tunnel container and proxy's own logs so the next
+          # failure shows what, instead of guessing again.
+          tunnel_diagnostics() {
+            echo "::group::${TARGET} tunnel + public proxy diagnostics"
+            for mode in native external; do
+              docker logs "ap-${TARGET}-tunnel-${mode}" --tail 200 2>&1 || echo "ap-${TARGET}-tunnel-${mode} not running" >&2
+              tail -n 200 "${EVIDENCE_DIR}/${mode}-public-proxy.log" 2>/dev/null || echo "${mode}-public-proxy.log unavailable" >&2
+            done
+            echo "::endgroup::"
+          }
           tail -n 500 "${EVIDENCE_DIR}/activitypods-native.log" 2>/dev/null || true
           tail -n 500 "${EVIDENCE_DIR}/activitypods-external.log" 2>/dev/null || true
           tail -n 700 "${EVIDENCE_DIR}/sidecar.log" 2>/dev/null || true
-          cat "${EVIDENCE_DIR}/signing-api.jsonl" 2>/dev/null || true
+          if [[ -f "${EVIDENCE_DIR}/signing-api.jsonl" ]]; then
+            echo "signing_api_record_count=$(wc -l < "${EVIDENCE_DIR}/signing-api.jsonl")"
+          fi
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods logs --no-color ap-proof-router 2>/dev/null || true
           case "${TARGET}" in
             mastodon) docker compose -f "${COMPOSE_FILE}" --profile mastodon logs --no-color mastodon-web-app mastodon-sidekiq 2>/dev/null || true ;;
@@ -558,21 +1036,46 @@ jobs:
             akkoma) docker compose -f "${COMPOSE_FILE}" --profile akkoma logs --no-color akkoma-app 2>/dev/null || true ;;
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
-            friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true ;;
+            friendica)
+              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true
+              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" ps friendica-app friendica-worker 2>/dev/null || true
+              # `docker compose logs` only captures container stdout/stderr;
+              # dump the app's own file-based log too, redacted, since that's
+              # what actually shows a PHP-level exception for this target.
+              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" exec -T friendica-app \
+                tail -n 5000 /var/log/friendica/friendica.log 2>&1 \
+                | node fedify-sidecar/interop/ap/scripts/redact-friendica-container-errors.mjs || true
+              ;;
             castopod)
               docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true
-              # TEMP_DEBUG_REMOVE_BEFORE_MERGE: `docker compose logs` only
-              # captures container stdout/stderr, which does not include
-              # CodeIgniter's own file-based log (confirmed locally: castopod's
-              # NGINX Unit + PHP setup does not forward fwrite(STDERR,...)/
-              # error_log() to container stdout). Dump the actual app log file
-              # directly to find out why real CI still 500s after 8383e83.
+              # `docker compose logs` only captures container stdout/stderr,
+              # which does not include CodeIgniter's own file-based log —
+              # confirmed both locally and in real CI that this image's NGINX
+              # Unit + PHP setup does not forward fwrite(STDERR,...)/
+              # error_log() to container stdout, so the file log is the only
+              # way to see a castopod-side exception's real class/message/
+              # trace on failure here. This is what actually surfaced the
+              # `Undefined property: stdClass::$name` root cause fixed in #115.
               echo "::group::castopod writable/logs (file-based CodeIgniter log)"
               docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" exec -T castopod-app \
                 sh -c 'for f in writable/logs/*.log; do echo "--- $f ---"; cat "$f"; done' 2>/dev/null || true
               echo "::endgroup::"
               ;;
+            peertube)
+              docker compose -f "${COMPOSE_FILE}" -f "${PEERTUBE_OVERLAY}" ps peertube-app peertube-db peertube-redis 2>/dev/null || true
+              tunnel_diagnostics
+              ;;
             bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
+            # Loops can log signed request context. The persistence assertion
+            # already emits privacy-safe counters and Horizon state.
+            loops)
+              docker compose -f "${COMPOSE_FILE}" -f "${LOOPS_OVERLAY}" ps loops-app loops-horizon loops-db 2>/dev/null || true
+              tunnel_diagnostics
+              ;;
+            owncast)
+              docker compose -f "${COMPOSE_FILE}" -f "${OWNCAST_OVERLAY}" ps owncast-app 2>/dev/null || true
+              tunnel_diagnostics
+              ;;
           esac
 
       - name: Stop isolated fixture
@@ -580,9 +1083,14 @@ jobs:
         shell: bash
         run: |
           set +e
-          for file in activitypods-external.pid activitypods-native.pid sidecar.pid signing-proxy.pid; do
+          for file in activitypods-external.pid activitypods-native.pid external-public-proxy.pid native-inbound-proxy.pid native-public-proxy.pid sidecar.pid signing-proxy.pid; do
             if [[ -f "${EVIDENCE_DIR}/${file}" ]]; then kill "$(cat "${EVIDENCE_DIR}/${file}")" 2>/dev/null || true; fi
           done
+          # Also deletes the underlying Cloudflare Tunnel + DNS record, not
+          # just the local container — a plain `docker rm -f` here would
+          # leak both in the Cloudflare account across runs.
+          fedify-sidecar/interop/ap/scripts/stop-cloudflare-named-tunnel.sh "ap-${TARGET}-tunnel-native"
+          fedify-sidecar/interop/ap/scripts/stop-cloudflare-named-tunnel.sh "ap-${TARGET}-tunnel-external"
           docker rm -f "ap-real-redpanda-${TARGET}" >/dev/null 2>&1 || true
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods down -v || true
           if [[ "${TARGET}" == pixelfed ]]; then
@@ -597,8 +1105,17 @@ jobs:
           if [[ "${TARGET}" == castopod ]]; then
             docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" down -v || true
           fi
+          if [[ "${TARGET}" == peertube ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${PEERTUBE_OVERLAY}" down -v || true
+          fi
           if [[ "${TARGET}" == bonfire ]]; then
             docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" down -v || true
+          fi
+          if [[ "${TARGET}" == loops ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${LOOPS_OVERLAY}" down -v || true
+          fi
+          if [[ "${TARGET}" == owncast ]]; then
+            docker compose -f "${COMPOSE_FILE}" -f "${OWNCAST_OVERLAY}" down -v || true
           fi
           docker compose -f "${COMPOSE_FILE}" --profile mastodon --profile akkoma down -v || true
           cd activitypods/pod-provider

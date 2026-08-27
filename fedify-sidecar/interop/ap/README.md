@@ -41,8 +41,11 @@ The sidecar currently requires HTTPS federation targets, and that is correct for
 - `gotosocial`
 - `mastodon`
 - `akkoma`
+- `pixelfed.test`, `bonfire.test`, `misskey.test`, `friendica.test`, and `castopod.test`
+- `peertube.test` and `loops.test`
+- `activitypods` and `activitypods.test`
 
-The generated root CA is mounted into the sidecar, GoToSocial, Mastodon, and the proof runner so they can trust those certificates during local federation.
+The generated root CA is mounted into the sidecar, the proof runner, and each relevant target fixture so they can trust those certificates during local federation.
 
 ## Setup
 
@@ -212,7 +215,7 @@ The repo now uses two CI lanes for the sidecar:
 - `Fedify Sidecar Fast Checks`: required on ordinary sidecar PRs; runs typecheck plus a focused Vitest slice
 - `AP Interop Smoke`: dockerized federation proof lane; automatically skips irrelevant PRs, runs GoToSocial plus Mastodon for normal federation/runtime changes, and expands to Akkoma when Akkoma-specific harness changes are present or when manually requested with workflow dispatch inputs
 
-The separate `ActivityPub Real Multi-Implementation Federation` workflow runs the exact ActivityPods candidate in both native and external-sidecar modes and requires remote persisted-follow evidence. Its executable targets, immutable fixture authorities, and the explicit Bandwagon blocker are recorded in [EXTERNAL-IMPLEMENTATION-COVERAGE.md](./EXTERNAL-IMPLEMENTATION-COVERAGE.md).
+The separate `ActivityPub Real Multi-Implementation Federation` workflow runs the exact ActivityPods candidate in both native and external-sidecar modes and requires remote persisted-follow evidence. Its executable targets, immutable fixture authorities, and explicit external blockers (including PeerTube and Bandwagon) are recorded in [EXTERNAL-IMPLEMENTATION-COVERAGE.md](./EXTERNAL-IMPLEMENTATION-COVERAGE.md). A fixture being present is not itself coverage: PeerTube remains excluded because its pinned release would require disabling global SSRF prevention in this RFC1918 proof topology.
 
 For manual workflow dispatches, `AP Interop Smoke` accepts a space-delimited `targets` input. The default manual value is:
 

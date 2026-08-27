@@ -51,7 +51,7 @@ function fixture(overrides: {
       deliveryUrl
     }
   }));
-  const keyId = overrides.keyId ?? `${activity.actor}/keys/main`;
+  const keyId = overrides.keyId ?? `${activity.actor}#main-key`;
   const signedHeaders = overrides.signedHeaders ?? "(request-target) host date digest";
   const call = {
     schema: "ap.real-signing-api-call.v1",
@@ -79,7 +79,7 @@ function fixture(overrides: {
   writeFileSync(callsPath, overrides.malformedJson
     ? '{not-json}\n'
     : `${JSON.stringify(call)}\n${overrides.duplicate ? `${JSON.stringify(call)}\n` : ""}`);
-  return { callsPath, originPath };
+  return { callsPath, originPath, bodySha256Base64, keyId, signedHeaders };
 }
 
 function run(callsPath: string, originPath: string) {
@@ -91,7 +91,7 @@ afterEach(() => {
 });
 
 describe("real ActivityPods signing call assertion", () => {
-  it("accepts only a digest-bound POST Follow for the external handoff", () => {
+  it("accepts only a digest-bound POST Follow for the external handoff and preserves exact signed headers", () => {
     const paths = fixture();
     const result = run(paths.callsPath, paths.originPath);
     expect(result.status).toBe(0);
@@ -99,7 +99,10 @@ describe("real ActivityPods signing call assertion", () => {
       ok: true,
       activityId: "https://activitypods/outbox/follow-1",
       deliveredInboxPaths: ["/inbox"],
-      successfulSigningCalls: 1
+      successfulSigningCalls: 1,
+      signature: `keyId="${paths.keyId}",algorithm="rsa-sha256",headers="${paths.signedHeaders}",signature="proof"`,
+      date: "Fri, 21 Aug 2026 12:00:00 GMT",
+      digest: `SHA-256=${paths.bodySha256Base64}`,
     });
   });
 
@@ -108,7 +111,7 @@ describe("real ActivityPods signing call assertion", () => {
     [{ digest: "SHA-256=wrong" }, "body digest mismatch"],
     [{ originMode: "native" }, "non-external origin evidence"],
     [{ requestPath: "/users/bob/inbox" }, "signed path outside the selected shared inbox"],
-    [{ keyId: "https://activitypods/users/alice#main-key" }, "legacy key fragment instead of the exact published key document"],
+    [{ keyId: "https://activitypods/users/alice/keys/main" }, "stored key document leaked instead of the public signing alias"],
     [{ deliveryUrl: "https://mastodon/users/bob/inbox" }, "delivery URL inconsistent with the authoritative shared inbox"],
     [{ remoteTargetActorUri: "https://mastodon/users/mallory" }, "remote target actor drift"],
     [{ signedHeaders: "(request-target) host date" }, "digest omitted from the signed components"],

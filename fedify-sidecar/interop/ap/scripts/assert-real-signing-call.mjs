@@ -76,7 +76,7 @@ if (!actorUrl || actorUrl.search) {
   console.error('external origin actorUri cannot own a signing key');
   process.exit(1);
 }
-actorUrl.pathname = `${actorUrl.pathname.replace(/\/$/u, '')}/keys/main`;
+actorUrl.hash = 'main-key';
 const expectedKeyId = actorUrl.toString();
 
 const rows = fs.existsSync(evidencePath)
@@ -140,7 +140,10 @@ for (const row of rows) {
       activityId,
       bodySha256Base64,
       keyId,
-      signedHeaders: result.meta?.signedHeaders || null
+      signedHeaders: result.meta?.signedHeaders || null,
+      signature,
+      date,
+      digest
     });
   });
 }
@@ -150,6 +153,7 @@ if (matches.length !== 1 || successfulPostCalls.length !== 1) {
   process.exit(1);
 }
 
+const match = matches[0];
 const evidence = {
   schema: 'activitypods.activitypub.real-signing-proof.v1',
   ok: true,
@@ -158,12 +162,15 @@ const evidence = {
   activityId,
   remoteActorUri,
   remoteDeliveryTarget,
-  deliveredInboxPaths: [...new Set(matches.map(match => match.targetPath))],
-  bodySha256Base64: [...new Set(matches.map(match => match.bodySha256Base64))],
+  deliveredInboxPaths: [match.targetPath],
+  bodySha256Base64: [match.bodySha256Base64],
   successfulSigningCalls: matches.length,
   allSuccessfulPostSigningCalls: successfulPostCalls.length,
-  signerKeyIds: [...new Set(matches.map(match => match.keyId))],
-  requestIds: [...new Set(matches.map(match => match.requestId))]
+  signerKeyIds: [match.keyId],
+  requestIds: [match.requestId],
+  signature: match.signature,
+  date: match.date,
+  digest: match.digest
 };
 
 const json = `${JSON.stringify(evidence, null, 2)}\n`;
