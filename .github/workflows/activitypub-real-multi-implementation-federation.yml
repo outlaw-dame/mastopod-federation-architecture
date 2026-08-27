@@ -119,6 +119,16 @@ jobs:
       EVIDENCE_DIR: measurements/ap-real-multi/${{ matrix.target }}
       WIRE_EVIDENCE_PATH: fedify-sidecar/interop/ap/runtime/wire/${{ matrix.target }}.jsonl
       CLOUDFLARED_IMAGE: cloudflare/cloudflared:2026.3.0@sha256:6b599ca3e974349ead3286d178da61d291961182ec3fe9c505e1dd02c8ac31b0
+      # Authenticated named Cloudflare Tunnel, used only for the
+      # friendica/loops/owncast/peertube SSRF-protected-native legs (see
+      # "Publish restricted ActivityPub authority for SSRF-protected native
+      # targets" below). Replaces the free/anonymous Quick Tunnel, which had
+      # no uptime guarantee and was the confirmed source of persistent
+      # `tlsv1 alert internal error` failures on those four targets.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TUNNEL_ZONE: ${{ secrets.CLOUDFLARE_TUNNEL_ZONE }}
 
     steps:
       - name: Checkout federation architecture
@@ -418,7 +428,7 @@ jobs:
             AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-native" \
             AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
             AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
-              fedify-sidecar/interop/ap/scripts/start-cloudflare-quick-tunnel.sh
+              fedify-sidecar/interop/ap/scripts/start-cloudflare-named-tunnel.sh
           )"
           printf '%s\n' native > "${EVIDENCE_DIR}/public-inbox-route-mode"
           AP_PUBLIC_PROXY_HOST=127.0.0.1 AP_PUBLIC_PROXY_PORT=18002 \
@@ -519,17 +529,20 @@ jobs:
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
             export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
             # loops/owncast/peertube expose their public actor through an
-            # ephemeral Cloudflare quick tunnel (friendica uses the fixed
+            # authenticated named Cloudflare Tunnel (friendica uses the fixed
             # *.test router instead, so this mainly matters for the other
             # three, but raising it is harmless there too). The default
-            # 10-attempt/~47.5s budget is sometimes too short for the
-            # tunnel's local backend to be ready — confirmed from a real
-            # failing run: `curl: (35) OpenSSL: SSL routines::tlsv1 alert
-            # internal error`, a known Cloudflare quick-tunnel symptom for
-            # "edge accepted the connection but the local origin behind the
-            # tunnel wasn't ready yet," not a cert or connectivity problem.
-            # 40 attempts is roughly a 287s (4m48s) budget at this
-            # function's existing exponential-capped-at-8s backoff.
+            # 10-attempt/~47.5s budget was sometimes too short even for the
+            # free/anonymous Quick Tunnel this replaced — repeatedly
+            # confirmed as `curl: (35) OpenSSL: SSL routines::tlsv1 alert
+            # internal error` with clean logs on both cloudflared and the
+            # local proxy, meaning the failure was in Cloudflare's own edge
+            # routing for that free tier rather than something raising the
+            # budget or hardening the proxy could fix. This budget is kept
+            # generous after the migration to a named tunnel as a hedge, not
+            # because it's known to matter here. 40 attempts is roughly a
+            # 287s (4m48s) budget at this function's existing
+            # exponential-capped-at-8s backoff.
             export AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS=40
           fi
           if [[ "${TARGET}" == friendica ]]; then
@@ -611,10 +624,13 @@ jobs:
               echo "The sidecar gateway differs from the address bound by the public proof proxy." >&2
               exit 1
             fi
-            # Quick Tunnel authorities are credentialless and can age out
-            # during a long native proof. Select a fresh authority before the
-            # external actor exists. Candidate retries are bounded preflight;
-            # signed requests are never retried across authorities.
+            # Named tunnel authorities are still per-run ephemeral (created
+            # fresh and torn down at job end, see
+            # start/stop-cloudflare-named-tunnel.sh) to keep the native and
+            # external legs on distinct authorities. Select a fresh one
+            # before the external actor exists. Candidate retries are
+            # bounded preflight; signed requests are never retried across
+            # authorities.
             native_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-public-proxy.pid")"
             kill "${native_proxy_pid}" 2>/dev/null || true
             for attempt in $(seq 1 20); do
@@ -625,21 +641,21 @@ jobs:
               echo "The public proxy did not stop before bounded preflight selection." >&2
               exit 1
             fi
-            docker rm -f "ap-${TARGET}-tunnel-native" >/dev/null 2>&1 || true
+            interop/ap/scripts/stop-cloudflare-named-tunnel.sh "ap-${TARGET}-tunnel-native"
             printf '%s\n' external > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode"
             authority_selected=false
             for candidate in 1 2 3; do
-              docker rm -f "ap-${TARGET}-tunnel-external" >/dev/null 2>&1 || true
+              interop/ap/scripts/stop-cloudflare-named-tunnel.sh "ap-${TARGET}-tunnel-external"
               if ! tunnel_host="$(
                 AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external" \
                 AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002 \
                 AP_INTEROP_CLOUDFLARED_IMAGE="${CLOUDFLARED_IMAGE}" \
-                  interop/ap/scripts/start-cloudflare-quick-tunnel.sh
+                  interop/ap/scripts/start-cloudflare-named-tunnel.sh
               )"; then
                 echo "External tunnel candidate ${candidate} failed to start." >&2
                 continue
               fi
-              if [[ -z "${tunnel_host}" || ! "${tunnel_host}" =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]]; then
+              if [[ -z "${tunnel_host}" || "${tunnel_host}" != *".${CLOUDFLARE_TUNNEL_ZONE}" ]]; then
                 echo "External tunnel candidate ${candidate} is unavailable or malformed." >&2
                 continue
               fi
@@ -797,17 +813,20 @@ jobs:
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
             export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
             # loops/owncast/peertube expose their public actor through an
-            # ephemeral Cloudflare quick tunnel (friendica uses the fixed
+            # authenticated named Cloudflare Tunnel (friendica uses the fixed
             # *.test router instead, so this mainly matters for the other
             # three, but raising it is harmless there too). The default
-            # 10-attempt/~47.5s budget is sometimes too short for the
-            # tunnel's local backend to be ready — confirmed from a real
-            # failing run: `curl: (35) OpenSSL: SSL routines::tlsv1 alert
-            # internal error`, a known Cloudflare quick-tunnel symptom for
-            # "edge accepted the connection but the local origin behind the
-            # tunnel wasn't ready yet," not a cert or connectivity problem.
-            # 40 attempts is roughly a 287s (4m48s) budget at this
-            # function's existing exponential-capped-at-8s backoff.
+            # 10-attempt/~47.5s budget was sometimes too short even for the
+            # free/anonymous Quick Tunnel this replaced — repeatedly
+            # confirmed as `curl: (35) OpenSSL: SSL routines::tlsv1 alert
+            # internal error` with clean logs on both cloudflared and the
+            # local proxy, meaning the failure was in Cloudflare's own edge
+            # routing for that free tier rather than something raising the
+            # budget or hardening the proxy could fix. This budget is kept
+            # generous after the migration to a named tunnel as a hedge, not
+            # because it's known to matter here. 40 attempts is roughly a
+            # 287s (4m48s) budget at this function's existing
+            # exponential-capped-at-8s backoff.
             export AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS=40
           fi
           if [[ "${TARGET}" == friendica ]]; then
@@ -937,13 +956,20 @@ jobs:
         run: |
           set +e
           # loops/owncast/peertube expose their public actor through an
-          # ephemeral Cloudflare quick tunnel. Its own health-check endpoint
-          # passing (required before the sidecar even starts) proves the
-          # tunnel infrastructure works at that point in time; a later
+          # authenticated named Cloudflare Tunnel (see
+          # start-cloudflare-named-tunnel.sh). This migrated off the
+          # free/anonymous Quick Tunnel after real CI evidence showed a
           # persistent "tlsv1 alert internal error" on the actor-document
-          # fetch specifically (confirmed real, not a guess — see the
-          # AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS commit) with nothing
-          # in between restarting the tunnel means something changes state
+          # fetch with both cloudflared's and the local proxy's own logs
+          # completely clean — ruling out a crash or misconfiguration on
+          # this repo's side and pointing at Cloudflare's free-tier edge
+          # routing itself (see AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS and
+          # the proxy's uncaughtException/unhandledRejection handlers, both
+          # real fixes that did not resolve it). Its own health-check
+          # endpoint passing (required before the sidecar even starts)
+          # proves the tunnel infrastructure works at that point in time; a
+          # later failure on the actor-document fetch specifically, with
+          # nothing in between restarting the tunnel, means something changes state
           # after that point that this workflow has never actually looked
           # at. Dump the tunnel container and proxy's own logs so the next
           # failure shows what, instead of guessing again.
@@ -1018,7 +1044,11 @@ jobs:
           for file in activitypods-external.pid activitypods-native.pid external-public-proxy.pid native-inbound-proxy.pid native-public-proxy.pid sidecar.pid signing-proxy.pid; do
             if [[ -f "${EVIDENCE_DIR}/${file}" ]]; then kill "$(cat "${EVIDENCE_DIR}/${file}")" 2>/dev/null || true; fi
           done
-          docker rm -f "ap-${TARGET}-tunnel-native" "ap-${TARGET}-tunnel-external" >/dev/null 2>&1 || true
+          # Also deletes the underlying Cloudflare Tunnel + DNS record, not
+          # just the local container — a plain `docker rm -f` here would
+          # leak both in the Cloudflare account across runs.
+          fedify-sidecar/interop/ap/scripts/stop-cloudflare-named-tunnel.sh "ap-${TARGET}-tunnel-native"
+          fedify-sidecar/interop/ap/scripts/stop-cloudflare-named-tunnel.sh "ap-${TARGET}-tunnel-external"
           docker rm -f "ap-real-redpanda-${TARGET}" >/dev/null 2>&1 || true
           docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods down -v || true
           if [[ "${TARGET}" == pixelfed ]]; then
