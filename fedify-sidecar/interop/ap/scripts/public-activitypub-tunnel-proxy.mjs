@@ -5,6 +5,12 @@ import { isAbsolute } from "node:path";
 
 const BIND_HOST = process.env.AP_PUBLIC_PROXY_HOST || "127.0.0.1";
 const BIND_PORT = parsePort(process.env.AP_PUBLIC_PROXY_PORT || "18002", "AP_PUBLIC_PROXY_PORT");
+// Set to the same zone passed to start-cloudflare-named-tunnel.sh
+// (CLOUDFLARE_TUNNEL_ZONE) so the authenticated named-tunnel hostnames that
+// script mints are accepted here too, alongside the legacy
+// *.trycloudflare.com Quick Tunnel hostnames. Optional: unset means only
+// Quick Tunnel hostnames are accepted, same as before this existed.
+const AUTHORITY_ZONE = process.env.AP_PUBLIC_PROXY_AUTHORITY_ZONE || "";
 const AUTHORITY = requireAuthority(process.env.AP_PUBLIC_PROXY_AUTHORITY);
 const DOCUMENT_TARGET_HOST = requirePrivateTarget(
   process.env.AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST || process.env.AP_PUBLIC_PROXY_TARGET_HOST,
@@ -246,10 +252,20 @@ function normalizeHost(value) {
 
 function requireAuthority(value) {
   const authority = normalizeHost(value);
-  if (!/^[a-z0-9-]+\.trycloudflare\.com$/.test(authority)) {
-    throw new Error("AP_PUBLIC_PROXY_AUTHORITY must be one trycloudflare.com hostname");
+  const isQuickTunnelHostname = /^[a-z0-9-]+\.trycloudflare\.com$/.test(authority);
+  const isNamedTunnelHostname =
+    AUTHORITY_ZONE !== "" &&
+    new RegExp(`^[a-z0-9-]+\\.${escapeRegExp(AUTHORITY_ZONE.toLowerCase())}$`).test(authority);
+  if (!isQuickTunnelHostname && !isNamedTunnelHostname) {
+    throw new Error(
+      "AP_PUBLIC_PROXY_AUTHORITY must be a trycloudflare.com hostname, or a single-label subdomain of AP_PUBLIC_PROXY_AUTHORITY_ZONE",
+    );
   }
   return authority;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function requirePrivateTarget(value) {

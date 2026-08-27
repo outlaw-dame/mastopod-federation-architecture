@@ -438,6 +438,7 @@ jobs:
           AP_PUBLIC_PROXY_INBOX_MODE_FILE="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode" \
           AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST="${recorder_host}" AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001 \
           AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST="${recorder_host}" AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080 \
+          AP_PUBLIC_PROXY_AUTHORITY_ZONE="${CLOUDFLARE_TUNNEL_ZONE}" \
             node fedify-sidecar/interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
             > "${EVIDENCE_DIR}/native-public-proxy.jsonl" 2> "${EVIDENCE_DIR}/native-public-proxy.log" &
           echo "$!" > "${EVIDENCE_DIR}/native-public-proxy.pid"
@@ -666,6 +667,7 @@ jobs:
               AP_PUBLIC_PROXY_INBOX_MODE_FILE="${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/public-inbox-route-mode" \
               AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_NATIVE_INBOX_TARGET_PORT=3001 \
               AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_HOST="${sidecar_host}" AP_PUBLIC_PROXY_EXTERNAL_INBOX_TARGET_PORT=8080 \
+              AP_PUBLIC_PROXY_AUTHORITY_ZONE="${CLOUDFLARE_TUNNEL_ZONE}" \
                 node interop/ap/scripts/public-activitypub-tunnel-proxy.mjs \
                 >> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.jsonl" \
                 2>> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" &
