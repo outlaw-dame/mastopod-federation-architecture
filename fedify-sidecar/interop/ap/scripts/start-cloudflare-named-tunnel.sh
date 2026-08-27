@@ -43,6 +43,24 @@ CLOUDFLARE_ACCOUNT_ID="$(strip_ws "${CLOUDFLARE_ACCOUNT_ID}")"
 CLOUDFLARE_ZONE_ID="$(strip_ws "${CLOUDFLARE_ZONE_ID}")"
 CLOUDFLARE_TUNNEL_ZONE="$(strip_ws "${CLOUDFLARE_TUNNEL_ZONE}")"
 
+# Validate the zone is actually a well-formed hostname/domain shape after
+# sanitizing, and fail loudly here with real diagnostics if not — the
+# alternative is a hostname built from a malformed zone silently reaching
+# curl 90 retries and ~3 minutes later as an opaque
+# `curl: (3) URL rejected: Bad hostname` (confirmed real: the CR/whitespace
+# strip above did not fix this in a live run, and curl's "Bad hostname"
+# message specifically — as opposed to "Malformed input to a URL
+# function" — was reproduced locally only by a literal `%`-escape
+# sequence in the hostname, not by embedded whitespace or control
+# characters). A hex dump is safe to print here: this value is a DNS zone
+# that becomes public the moment it's used, not a credential.
+if [[ ! "${CLOUDFLARE_TUNNEL_ZONE}" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]; then
+  echo "CLOUDFLARE_TUNNEL_ZONE is not a valid DNS zone/hostname after sanitizing (length ${#CLOUDFLARE_TUNNEL_ZONE})." >&2
+  echo "Hex dump of the sanitized value:" >&2
+  printf '%s' "${CLOUDFLARE_TUNNEL_ZONE}" | od -An -c >&2
+  exit 2
+fi
+
 if [[ ! "${AP_INTEROP_TUNNEL_CONTAINER}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ ]]; then
   echo "Invalid tunnel container name" >&2
   exit 2
