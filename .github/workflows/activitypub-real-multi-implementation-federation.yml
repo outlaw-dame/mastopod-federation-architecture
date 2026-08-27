@@ -137,6 +137,27 @@ jobs:
           ref: ${{ env.FEDERATION_SHA }}
           persist-credentials: false
 
+      - name: Sanitize Cloudflare tunnel secrets
+        if: contains(fromJSON('["friendica","loops","peertube","owncast"]'), matrix.target)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Repo secrets are routinely pasted in by hand and can carry an
+          # invisible trailing CR/newline or surrounding whitespace.
+          # Confirmed as a real failure mode: an embedded control character
+          # in CLOUDFLARE_TUNNEL_ZONE survived into a minted hostname and
+          # produced `curl: (3) URL rejected: Bad hostname` on every one of
+          # 90 retry attempts. Strip once here so every downstream consumer
+          # (this workflow's own checks and both cloudflare-named-tunnel
+          # scripts) sees the same clean value.
+          strip_ws() { printf '%s' "$1" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          {
+            echo "CLOUDFLARE_API_TOKEN=$(strip_ws "${CLOUDFLARE_API_TOKEN}")"
+            echo "CLOUDFLARE_ACCOUNT_ID=$(strip_ws "${CLOUDFLARE_ACCOUNT_ID}")"
+            echo "CLOUDFLARE_ZONE_ID=$(strip_ws "${CLOUDFLARE_ZONE_ID}")"
+            echo "CLOUDFLARE_TUNNEL_ZONE=$(strip_ws "${CLOUDFLARE_TUNNEL_ZONE}")"
+          } >> "$GITHUB_ENV"
+
       - name: Checkout exact ActivityPods signing candidate
         uses: actions/checkout@v4
         with:

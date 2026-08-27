@@ -10,7 +10,7 @@ const BIND_PORT = parsePort(process.env.AP_PUBLIC_PROXY_PORT || "18002", "AP_PUB
 // script mints are accepted here too, alongside the legacy
 // *.trycloudflare.com Quick Tunnel hostnames. Optional: unset means only
 // Quick Tunnel hostnames are accepted, same as before this existed.
-const AUTHORITY_ZONE = process.env.AP_PUBLIC_PROXY_AUTHORITY_ZONE || "";
+const AUTHORITY_ZONE = (process.env.AP_PUBLIC_PROXY_AUTHORITY_ZONE || "").trim();
 const AUTHORITY = requireAuthority(process.env.AP_PUBLIC_PROXY_AUTHORITY);
 const DOCUMENT_TARGET_HOST = requirePrivateTarget(
   process.env.AP_PUBLIC_PROXY_DOCUMENT_TARGET_HOST || process.env.AP_PUBLIC_PROXY_TARGET_HOST,

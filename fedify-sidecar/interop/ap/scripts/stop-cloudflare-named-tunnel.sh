@@ -25,6 +25,13 @@ if [[ ! -d "${state_dir}" ]]; then
 fi
 
 if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  # See start-cloudflare-named-tunnel.sh: pasted-in secrets can carry an
+  # invisible trailing CR/newline or surrounding whitespace.
+  strip_ws() { printf '%s' "$1" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+  CLOUDFLARE_API_TOKEN="$(strip_ws "${CLOUDFLARE_API_TOKEN}")"
+  CLOUDFLARE_ACCOUNT_ID="$(strip_ws "${CLOUDFLARE_ACCOUNT_ID:-}")"
+  CLOUDFLARE_ZONE_ID="$(strip_ws "${CLOUDFLARE_ZONE_ID:-}")"
+
   api="https://api.cloudflare.com/client/v4"
   auth=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
 

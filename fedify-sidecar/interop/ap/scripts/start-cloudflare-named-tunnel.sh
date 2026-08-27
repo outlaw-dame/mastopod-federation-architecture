@@ -31,6 +31,18 @@ set -euo pipefail
 : "${CLOUDFLARE_ZONE_ID:?CLOUDFLARE_ZONE_ID is required}"
 : "${CLOUDFLARE_TUNNEL_ZONE:?CLOUDFLARE_TUNNEL_ZONE is required}"
 
+# Repo secrets are routinely pasted in by hand and can carry a trailing
+# CR/newline or surrounding whitespace invisibly (confirmed as the cause of
+# a real `curl: (3) URL rejected: Bad hostname` failure downstream, where
+# an embedded control character in a value survived all the way into a
+# hostname). Strip that here once, at the point every one of these values
+# enters the script, rather than trusting every call site downstream.
+strip_ws() { printf '%s' "$1" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+CLOUDFLARE_API_TOKEN="$(strip_ws "${CLOUDFLARE_API_TOKEN}")"
+CLOUDFLARE_ACCOUNT_ID="$(strip_ws "${CLOUDFLARE_ACCOUNT_ID}")"
+CLOUDFLARE_ZONE_ID="$(strip_ws "${CLOUDFLARE_ZONE_ID}")"
+CLOUDFLARE_TUNNEL_ZONE="$(strip_ws "${CLOUDFLARE_TUNNEL_ZONE}")"
+
 if [[ ! "${AP_INTEROP_TUNNEL_CONTAINER}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ ]]; then
   echo "Invalid tunnel container name" >&2
   exit 2
