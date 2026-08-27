@@ -474,6 +474,25 @@ jobs:
             fi
             sleep 2
           done
+          if [[ "${tunnel_ready}" != true ]]; then
+            # curl's own error is too terse to show which handshake stage
+            # failed. A local test against this same zone's pre-existing
+            # tunnel succeeded cleanly (real TLS 1.3, valid cert, HTTP/2,
+            # a real HTTP response) — ruling out the zone/cert/tunnel
+            # infrastructure itself. The one constant across every failure
+            # so far, both the old Quick Tunnel and this named tunnel, is
+            # that it only ever happens from this runner's own egress path.
+            # Get a full handshake trace from here to either confirm or
+            # rule that out directly instead of guessing again.
+            echo "::group::openssl s_client handshake trace against ${tunnel_host}"
+            openssl s_client -connect "${tunnel_host}:443" -servername "${tunnel_host}" \
+              -brief </dev/null 2>&1 || true
+            echo "::endgroup::"
+            echo "::group::openssl s_client verbose handshake trace (TLS 1.3 only)"
+            openssl s_client -connect "${tunnel_host}:443" -servername "${tunnel_host}" \
+              -tls1_3 -msg </dev/null 2>&1 | head -100 || true
+            echo "::endgroup::"
+          fi
           [[ "${tunnel_ready}" == true ]]
           echo "ACTIVITYPODS_HOST=${tunnel_host}" >> "$GITHUB_ENV"
           printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"native","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"security":"remote SSRF prevention remains enabled"}\n' \
