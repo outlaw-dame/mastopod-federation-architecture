@@ -93,9 +93,13 @@ dns_record_id="$(printf '%s' "${dns_response}" | jq -r '.result.id')"
 printf '%s' "${dns_record_id}" > "${state_dir}/dns_record_id"
 
 docker rm -f "${AP_INTEROP_TUNNEL_CONTAINER}" >/dev/null 2>&1 || true
+# `--loglevel` is a tunnel-level option, not a `run` subcommand option — it
+# must come before `run`, or cloudflared rejects the whole invocation with
+# "flag provided but not defined: -loglevel" before ever attempting a
+# connection (confirmed from a real failing run on this exact command).
 docker run -d --name "${AP_INTEROP_TUNNEL_CONTAINER}" --network host \
-  "${AP_INTEROP_CLOUDFLARED_IMAGE}" tunnel --no-autoupdate run \
-  --token "${tunnel_token}" --url "${AP_INTEROP_TUNNEL_ORIGIN}" --loglevel info >/dev/null
+  "${AP_INTEROP_CLOUDFLARED_IMAGE}" tunnel --no-autoupdate --loglevel info run \
+  --token "${tunnel_token}" --url "${AP_INTEROP_TUNNEL_ORIGIN}" >/dev/null
 
 connected=false
 for attempt in $(seq 1 60); do
