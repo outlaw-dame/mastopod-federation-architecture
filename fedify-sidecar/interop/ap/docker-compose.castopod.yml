@@ -53,6 +53,7 @@ services:
       CP_REDIS_HOST: castopod-redis
       CP_REDIS_PASSWORD: ${CASTOPOD_REDIS_PASSWORD:?CASTOPOD_REDIS_PASSWORD is required}
       AP_INTEROP_CASTOPOD_BOOTSTRAP: "1"
+      PHP_CLI_SERVER_WORKERS: "8"
       SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
       CURL_CA_BUNDLE: /interop/runtime/certs/rootCA.crt
     healthcheck:

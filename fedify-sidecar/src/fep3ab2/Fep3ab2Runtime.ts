@@ -35,6 +35,7 @@ export interface Fep3ab2RuntimeOptions {
   replayMaxEvents?: number;
   replayMaxIndexSize?: number;
   maxPendingReplayPublishes?: number;
+  maxConcurrentReplayPublishes?: number;
   maxStreamBufferBytes?: number;
 }
 
@@ -74,6 +75,7 @@ export class Fep3ab2Runtime {
     });
     this.dispatcher = new Fep3ab2Dispatcher(this.eventHub, this.replayStore, {
       maxPendingReplayPublishes: options.maxPendingReplayPublishes,
+      maxConcurrentReplayPublishes: options.maxConcurrentReplayPublishes,
     });
     this.topicRouter = new Fep3ab2TopicRouter(this.dispatcher);
     this.mutationSubscriber = new Fep3ab2SessionMutationSubscriber(
@@ -128,11 +130,12 @@ export class Fep3ab2Runtime {
 
   public async shutdown(): Promise<void> {
     this.unregisterObserver();
-    this.eventHub.shutdown();
     await Promise.allSettled([
       this.mutationSubscriber.close(),
       this.privateRealtimeSubscriber.close(),
     ]);
+    await this.dispatcher.drain();
+    this.eventHub.shutdown();
     try {
       await this.redis.quit();
     } catch {

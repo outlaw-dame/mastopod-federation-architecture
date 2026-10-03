@@ -46,40 +46,46 @@ try {
   const matches: StreamEvidence[] = [];
 
   for (const stream of streamKeys) {
-    const rows = await client.xRange(stream, "-", "+", { COUNT: 10_000 });
-    for (const row of rows) {
-      const message = row.message as Record<string, string>;
-      if (message["activityId"] !== activityId) continue;
+    let start = "-";
+    while (true) {
+      const rows = await client.xRange(stream, start, "+", { COUNT: 1_000 });
+      for (const row of rows) {
+        const message = row.message as Record<string, string>;
+        if (message["activityId"] !== activityId) continue;
 
-      const storedActivity = message["activity"];
-      if (typeof storedActivity !== "string" || !storedActivity.startsWith(REDIS_STREAM_PAYLOAD_ENVELOPE_PREFIX)) {
-        continue;
+        const storedActivity = message["activity"];
+        if (typeof storedActivity !== "string" || !storedActivity.startsWith(REDIS_STREAM_PAYLOAD_ENVELOPE_PREFIX)) {
+          throw new Error(`Redis Stream activity ${activityId} was not stored in the Brotli envelope`);
+        }
+
+        const decoded = codec.decode(storedActivity);
+        const parsed = JSON.parse(decoded) as unknown;
+        const decodedId = activityObjectId(parsed);
+        if (decodedId !== activityId) {
+          throw new Error(
+            `Compressed Redis Stream activity decoded to unexpected id ${decodedId ?? "<missing>"}; expected ${activityId}`,
+          );
+        }
+
+        const sourceBytes = Buffer.byteLength(decoded);
+        const storedBytes = Buffer.byteLength(storedActivity);
+        if (storedBytes >= sourceBytes) {
+          throw new Error("Compressed Redis Stream envelope did not reduce stored bytes");
+        }
+
+        matches.push({
+          stream,
+          messageId: row.id,
+          activityId,
+          activityCompressed: true,
+          sourceBytes,
+          storedBytes,
+          storageReduction: sourceBytes / storedBytes,
+        });
       }
 
-      const decoded = codec.decode(storedActivity);
-      const parsed = JSON.parse(decoded) as unknown;
-      const decodedId = activityObjectId(parsed);
-      if (decodedId !== activityId) {
-        throw new Error(
-          `Compressed Redis Stream activity decoded to unexpected id ${decodedId ?? "<missing>"}; expected ${activityId}`,
-        );
-      }
-
-      const sourceBytes = Buffer.byteLength(decoded);
-      const storedBytes = Buffer.byteLength(storedActivity);
-      if (storedBytes >= sourceBytes) {
-        throw new Error("Compressed Redis Stream envelope did not reduce stored bytes");
-      }
-
-      matches.push({
-        stream,
-        messageId: row.id,
-        activityId,
-        activityCompressed: true,
-        sourceBytes,
-        storedBytes,
-        storageReduction: sourceBytes / storedBytes,
-      });
+      if (rows.length < 1_000) break;
+      start = `(${rows[rows.length - 1]!.id}`;
     }
   }
 

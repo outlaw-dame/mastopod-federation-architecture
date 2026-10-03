@@ -2,12 +2,21 @@ import { describe, expect, it } from "vitest";
 import {
   AS_PUBLIC,
   getSearchableBy,
+  isExplicitPublicSearchOptOut,
   isPublicSearchIndexable,
   normalizePublicSearchConsent,
   resolvePublicSearchConsent,
 } from "../searchConsent.js";
 
 describe("searchConsent", () => {
+  it("distinguishes absent metadata from an explicit search opt-out", () => {
+    const absent = resolvePublicSearchConsent({ type: "Note", to: [AS_PUBLIC] });
+
+    expect(absent).toMatchObject({ explicitlySet: false, isPublic: false, source: "none" });
+    expect(isExplicitPublicSearchOptOut(absent)).toBe(false);
+    expect(isExplicitPublicSearchOptOut({ ...absent, explicitlySet: true })).toBe(true);
+  });
+
   it("treats empty searchableBy arrays as semantically undefined", () => {
     expect(getSearchableBy({ searchableBy: [] })).toEqual([]);
   });

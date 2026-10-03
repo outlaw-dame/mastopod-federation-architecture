@@ -34,7 +34,10 @@ import type {
   SearchAuthorDeleteV1,
 } from '../events/SearchEvents.js';
 import { OutboxIntentDeduper, extractOutboxIntentId } from '../../utils/OutboxIntentDeduper.js';
-import { normalizePublicSearchConsent } from '../../utils/searchConsent.js';
+import {
+  isExplicitPublicSearchOptOut,
+  normalizePublicSearchConsent,
+} from '../../utils/searchConsent.js';
 import { ensureRedpandaCompressionCodec } from '../../streams/kafka-compression.js';
 
 export interface SearchIndexerServiceConfig {
@@ -268,7 +271,7 @@ export class SearchIndexerService {
         }
 
         const consent = normalizePublicSearchConsent((event['meta'] as any)?.searchConsent);
-        if (consent?.isPublic === false) {
+        if (isExplicitPublicSearchOptOut(consent)) {
           plans.push({ message, raw, retryKey, outboxIntentId });
           await payload.heartbeat();
           continue;
@@ -420,7 +423,7 @@ export class SearchIndexerService {
         await this.projector.onApTombstoneEvent(event);
       } else {
         const consent = normalizePublicSearchConsent((event['meta'] as any)?.searchConsent);
-        if (consent?.isPublic === false) {
+        if (isExplicitPublicSearchOptOut(consent)) {
           logger.debug('[SearchIndexerService] Skipping non-searchable activity (FEP-268d)', {
             activityId: (event['activity'] as any)?.id, source: consent.source,
           });

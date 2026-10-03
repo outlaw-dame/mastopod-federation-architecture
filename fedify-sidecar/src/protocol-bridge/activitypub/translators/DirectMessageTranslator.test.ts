@@ -79,8 +79,8 @@ describe("DirectMessageTranslator.supports()", () => {
     expect(t.supports(makeDmActivity({ to: PUBLIC }))).toBe(false);
   });
 
-  it("returns false for two recipients (group DM — not yet supported as AP inbound)", () => {
-    expect(t.supports(makeDmActivity({ to: [BOB_URI, CAROL_URI] }))).toBe(false);
+  it("returns true for a Create{Note} with multiple non-public recipients", () => {
+    expect(t.supports(makeDmActivity({ to: [BOB_URI, CAROL_URI] }))).toBe(true);
   });
 
   it("returns false when the 'to' field is absent", () => {
@@ -134,14 +134,14 @@ describe("translateDirectMessageActivity()", () => {
     expect(result!.visibility).toBe("direct");
   });
 
-  it("falls back to a generated messageId when the object has no id", async () => {
+  it("uses the stable required activity id when the object has no id", async () => {
     const ctx = makeCtx();
     const activity = makeDmActivity();
     delete (activity.object as Record<string, unknown>)["id"];
 
     const result = await translateDirectMessageActivity(activity, ctx);
     expect(result).not.toBeNull();
-    expect(result!.messageId).toMatch(/^https:\/\/alice\.example\.com\/users\/alice#dm-\d+/);
+    expect(result!.messageId).toBe(activity.id);
   });
 
   it("strips null bytes from the message text", async () => {
@@ -196,13 +196,17 @@ describe("translateDirectMessageActivity()", () => {
     expect(result).toBeNull();
   });
 
-  it("returns null for multi-recipient input", async () => {
+  it("preserves every recipient for multi-recipient input", async () => {
     const ctx = makeCtx();
     const result = await translateDirectMessageActivity(
       makeDmActivity({ to: [BOB_URI, CAROL_URI] }),
       ctx,
     );
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.recipient.activityPubActorUri).toBe(BOB_URI);
+    expect(result!.additionalRecipients).toEqual([
+      expect.objectContaining({ activityPubActorUri: CAROL_URI }),
+    ]);
   });
 
   it("returns null for invalid input", async () => {
@@ -253,14 +257,17 @@ describe("ActivityPubToCanonicalTranslator: DirectMessage routing", () => {
     expect(result!.kind).toBe("PostCreate");
   });
 
-  it("does not produce DirectMessage for a multi-recipient Note", async () => {
+  it("routes a multi-recipient Note to DirectMessage without dropping participants", async () => {
     const ctx = makeCtx();
     const activity = makeDmActivity({ to: [BOB_URI, CAROL_URI] });
 
     const result = await registry.translate(activity, ctx);
-    if (result !== null) {
-      expect(result.kind).not.toBe("DirectMessage");
-    }
+    expect(result).not.toBeNull();
+    expect(result!.kind).toBe("DirectMessage");
+    const dm = result as CanonicalDirectMessageIntent;
+    expect(dm.recipient.activityPubActorUri).toBe(BOB_URI);
+    expect(dm.additionalRecipients).toEqual([
+      expect.objectContaining({ activityPubActorUri: CAROL_URI }),
+    ]);
   });
 });
-

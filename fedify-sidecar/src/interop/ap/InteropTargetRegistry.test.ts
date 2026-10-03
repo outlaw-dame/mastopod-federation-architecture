@@ -71,6 +71,30 @@ describe("ActivityPub interop target registry", () => {
     }
   });
 
+  it("records Pixelfed as exact pinned coverage only after durable two-mode proof", () => {
+    const pixelfed = getInteropTarget("pixelfed");
+    expect(pixelfed?.status).toBe("existing");
+    expect(pixelfed?.versionPolicy).toBe("existing_pin");
+    expect(pixelfed?.capabilities).toContain("target_persistence");
+    expect(pixelfed?.notes?.join(" ")).toContain("CI run 32648934561");
+  });
+
+  it("records Misskey as exact pinned coverage only after durable two-mode proof", () => {
+    const misskey = getInteropTarget("misskey");
+    expect(misskey?.status).toBe("existing");
+    expect(misskey?.versionPolicy).toBe("existing_pin");
+    expect(misskey?.capabilities).toContain("target_persistence");
+    expect(misskey?.notes?.join(" ")).toContain("CI run 32650757788");
+  });
+
+  it("records Castopod as exact pinned coverage only after durable two-mode proof", () => {
+    const castopod = getInteropTarget("castopod");
+    expect(castopod?.status).toBe("existing");
+    expect(castopod?.versionPolicy).toBe("existing_pin");
+    expect(castopod?.capabilities).toContain("target_persistence");
+    expect(castopod?.notes?.join(" ")).toContain("CI run 32651949364");
+  });
+
   it("does not mislabel WriteFreely as exact Write.as conformance", () => {
     const writeFreely = getInteropTarget("writefreely");
     const writeAs = getInteropTarget("write-as-hosted");

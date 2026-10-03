@@ -17,6 +17,7 @@ import { DefaultSearchDedupService } from '../aliases/SearchDedupService.js';
 import { SearchEventBus } from '../service/SearchEventBus.js';
 import type { SearchPublicUpsertV1, SearchPublicDeleteV1 } from '../events/SearchEvents.js';
 import type { IdentityAliasResolver, ResolvedIdentity } from '../identity/IdentityAliasResolver.js';
+import { isExplicitPublicSearchOptOut, normalizePublicSearchConsent } from '../../utils/searchConsent.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -212,15 +213,15 @@ describe('SearchIndexerService pipeline — FEP-268d consent gate', () => {
   function applyConsumerConsentGate(
     event: ReturnType<typeof makeCreateNote>,
   ): boolean {
-    const consent = (event.meta as any)?.searchConsent;
-    if (consent?.isPublic === false) {
+    const consent = normalizePublicSearchConsent((event.meta as any)?.searchConsent);
+    if (isExplicitPublicSearchOptOut(consent)) {
       return false; // blocked
     }
     return true;
   }
 
   it('passes through events with no explicit consent signal (liberal default)', () => {
-    const event = makeCreateNote();
+    const event = makeCreateNote({ meta: {} });
     expect(applyConsumerConsentGate(event)).toBe(true);
   });
 
