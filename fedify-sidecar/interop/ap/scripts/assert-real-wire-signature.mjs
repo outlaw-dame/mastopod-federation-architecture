@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { fetchPublishedActor, verifyWireRsa } from './verify-wire-rsa.mjs';
 
 const [wirePath, descriptorPath, targetHost, outputPath, signingPath] = process.argv.slice(2);
 if (!wirePath || !descriptorPath || !targetHost) {
@@ -15,6 +16,9 @@ const actorUri = requiredString(descriptor.actorUri, 'descriptor.actorUri');
 const activityId = requiredString(descriptor.activityId, 'descriptor.activityId');
 const remoteActorUri = requiredString(descriptor.remoteActorUri, 'descriptor.remoteActorUri');
 const mode = requiredString(descriptor.mode, 'descriptor.mode');
+const activityType = descriptor.activityType ?? 'Follow';
+if (!['Follow', 'Create'].includes(activityType)) fail('unsupported activity type');
+const objectUri = activityType === 'Follow' ? remoteActorUri : requiredString(descriptor.objectUri, 'descriptor.objectUri');
 if (!['native', 'external', 'sidecar_service'].includes(mode)) {
   fail(`unsupported descriptor mode: ${mode}`);
 }
@@ -52,12 +56,12 @@ const matches = rows.filter(row =>
   row.method === 'POST' &&
   row.host === targetHost &&
   row.activityId === activityId &&
-  row.activityType === 'Follow' &&
+  row.activityType === activityType &&
   row.actorUri === actorUri &&
-  row.objectUri === remoteActorUri
+  row.objectUri === objectUri
 );
 if (matches.length !== 1) {
-  fail(`expected exactly one wire Follow for ${activityId}; found ${matches.length}`);
+  fail(`expected exactly one wire ${activityType} for ${activityId}; found ${matches.length}`);
 }
 const match = matches[0];
 const requestId = requiredString(match.requestId, 'wire.requestId');
@@ -104,6 +108,9 @@ if (signature.keyId !== expectedKeyId) {
   fail(`wire keyId authority mismatch: expected ${expectedKeyId}, got ${signature.keyId}`);
 }
 
+const publishedActor = await fetchPublishedActor(actorUri);
+verifyWireRsa(match, signature, publishedActor);
+
 let signingCorrelation = null;
 if (signingPath) {
   const signing = JSON.parse(fs.readFileSync(signingPath, 'utf8'));
@@ -137,6 +144,8 @@ const evidence = {
   mode,
   actorUri,
   activityId,
+  activityType,
+  objectUri,
   remoteActorUri,
   targetHost,
   path: match.path,
@@ -147,6 +156,7 @@ const evidence = {
   keyId: signature.keyId,
   signedHeaders: signature.headers,
   algorithm: signature.algorithm,
+  independentlyVerifiedRsa: true,
   ...(signingCorrelation ? { signingCorrelation } : {}),
 };
 const json = `${JSON.stringify(evidence, null, 2)}\n`;
@@ -157,7 +167,8 @@ function parseSignature(value) {
   const result = {};
   for (const part of value.split(/,(?=\s*[A-Za-z][A-Za-z0-9_-]*=)/u)) {
     const match = /^\s*([A-Za-z][A-Za-z0-9_-]*)=(?:"([^"]*)"|([^,\s]+))\s*$/u.exec(part);
-    if (!match) continue;
+    if (!match) fail('malformed Signature parameter');
+    if (Object.hasOwn(result, match[1])) fail('duplicate Signature parameter');
     result[match[1]] = match[2] ?? match[3] ?? '';
   }
   return result;

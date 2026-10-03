@@ -21,14 +21,16 @@ function fixture(overrides: {
   date?: string;
   duplicate?: boolean;
   malformedJson?: boolean;
+  create?: boolean;
+  objectMismatch?: boolean;
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "real-signing-assertion-"));
   directories.push(directory);
   const activity = {
     id: "https://activitypods/outbox/follow-1",
-    type: "Follow",
+    type: overrides.create ? 'Create' : 'Follow',
     actor: "https://activitypods/users/alice",
-    object: "https://mastodon/users/bob"
+    object: overrides.create ? { id: 'https://activitypods/objects/note-1', type: 'Note' } : "https://mastodon/users/bob"
   };
   const bytes = JSON.stringify(activity);
   const bodySha256Base64 = createHash("sha256").update(bytes).digest("base64");
@@ -42,9 +44,11 @@ function fixture(overrides: {
     nativeRemotePostSuppressed: true,
     actorUri: activity.actor,
     activityId: activity.id,
-    remoteActorUri: activity.object,
+    remoteActorUri: "https://mastodon/users/bob",
+    activityType: activity.type,
+    objectUri: overrides.objectMismatch ? 'https://wrong.example/object' : 'https://activitypods/objects/note-1',
     remoteDeliveryTarget: {
-      actorUri: overrides.remoteTargetActorUri ?? activity.object,
+      actorUri: overrides.remoteTargetActorUri ?? "https://mastodon/users/bob",
       inboxUrl: "https://mastodon/users/bob/inbox",
       sharedInboxUrl: "https://mastodon/inbox",
       targetDomain: "mastodon",
@@ -91,6 +95,12 @@ afterEach(() => {
 });
 
 describe("real ActivityPods signing call assertion", () => {
+  it('binds inline Create object identity to the authoritative delivery plan', () => {
+    const good = fixture({ create: true });
+    expect(run(good.callsPath, good.originPath).status).toBe(0);
+    const bad = fixture({ create: true, objectMismatch: true });
+    expect(run(bad.callsPath, bad.originPath).status).not.toBe(0);
+  });
   it("accepts only a digest-bound POST Follow for the external handoff and preserves exact signed headers", () => {
     const paths = fixture();
     const result = run(paths.callsPath, paths.originPath);

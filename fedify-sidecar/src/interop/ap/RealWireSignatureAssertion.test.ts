@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 const directories: string[] = [];
@@ -20,6 +21,8 @@ function fixture(overrides: {
   signingDigestMismatch?: boolean;
   omitAlgorithm?: boolean;
   upstreamStatus?: number;
+  activityType?: 'Follow' | 'Create';
+  objectMismatch?: boolean;
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "wire-signature-assertion-"));
   directories.push(directory);
@@ -34,30 +37,40 @@ function fixture(overrides: {
   const descriptorPath = join(directory, "descriptor.json");
   const wirePath = join(directory, "wire.jsonl");
   const signingPath = join(directory, "signing.json");
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const publishedActor = { id: actorUri, publicKey: { id: expectedKeyId, owner: actorUri,
+    publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString() } };
+  const fetchStubPath = join(directory, 'fetch-stub.mjs');
+  writeFileSync(fetchStubPath, `globalThis.fetch = async () => new Response(${JSON.stringify(JSON.stringify(publishedActor))}, {headers: {'content-type': 'application/activity+json'}});`);
   writeFileSync(descriptorPath, JSON.stringify({
     ok: true,
     mode,
     actorUri,
     activityId,
     remoteActorUri,
+    activityType: overrides.activityType ?? 'Follow',
+    objectUri: `${actorUri}/objects/note-1`,
     durableHandoffQueued: mode === "external",
     nativeRemotePostSuppressed: mode === "external",
   }));
   const algorithmPart = overrides.omitAlgorithm ? "" : "algorithm=\"rsa-sha256\",";
+  const date = "Sun, 23 Aug 2026 12:00:00 GMT";
+  const digest = overrides.digest ?? `SHA-256=${bodySha}`;
+  const signatureBytes = sign('RSA-SHA256', Buffer.from(`(request-target): post /inbox\nhost: mastodon\ndate: ${date}\ndigest: ${digest}`), privateKey).toString('base64');
   const row = {
     schema: "ap.interop.wire-request.v1",
     method: "POST",
     path: "/inbox",
     host: overrides.host ?? "mastodon",
-    date: "Sun, 23 Aug 2026 12:00:00 GMT",
-    digest: overrides.digest ?? `SHA-256=${bodySha}`,
-    signature: `keyId="${overrides.keyId ?? expectedKeyId}",${algorithmPart}headers="(request-target) host date digest",signature="proof"`,
+    date,
+    digest,
+    signature: `keyId="${overrides.keyId ?? expectedKeyId}",${algorithmPart}headers="(request-target) host date digest",signature="${signatureBytes}"`,
     bodyBytes: 321,
     bodySha256Base64: bodySha,
     activityId,
-    activityType: "Follow",
+    activityType: overrides.activityType ?? 'Follow',
     actorUri,
-    objectUri: remoteActorUri,
+    objectUri: overrides.objectMismatch ? 'https://wrong.example/object' : overrides.activityType === 'Create' ? `${actorUri}/objects/note-1` : remoteActorUri,
   };
   const requestId = "wire-request-1";
   Object.assign(row, { requestId });
@@ -84,11 +97,12 @@ function fixture(overrides: {
     date: overrides.signingDateMismatch ? "Mon, 24 Aug 2026 12:00:00 GMT" : row.date,
     digest: overrides.signingDigestMismatch ? "SHA-256=other" : row.digest,
   }));
-  return { descriptorPath, wirePath, signingPath };
+  return { descriptorPath, wirePath, signingPath, fetchStubPath };
 }
 
 function run(paths: ReturnType<typeof fixture>, withSigning = true) {
   return spawnSync(process.execPath, [
+    '--import', paths.fetchStubPath,
     script,
     paths.wirePath,
     paths.descriptorPath,
@@ -103,6 +117,12 @@ afterEach(() => {
 });
 
 describe("real wire signature assertion", () => {
+  it('verifies a Create signature bound to the exact published object', () => {
+    const result = run(fixture({ activityType: 'Create' }));
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ activityType: 'Create', independentlyVerifiedRsa: true });
+    expect(run(fixture({ activityType: 'Create', objectMismatch: true })).status).not.toBe(0);
+  });
   it("correlates an external ActivityPods wire signature with the exact signer result", () => {
     const result = run(fixture());
     expect(result.status).toBe(0);

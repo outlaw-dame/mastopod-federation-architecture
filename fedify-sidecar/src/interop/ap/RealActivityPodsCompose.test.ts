@@ -134,16 +134,17 @@ describe("real ActivityPods sidecar compose authority", () => {
     );
     expect(workflow).toContain("target: peertube");
     expect(workflow).toContain("public-activitypub-tunnel-proxy.mjs");
-    expect(workflow).toContain("start-cloudflare-quick-tunnel.sh");
+    expect(workflow).toContain("start-cloudflare-named-tunnel.sh");
+    expect(workflow).toContain("stop-cloudflare-named-tunnel.sh");
     expect(workflow).toContain("friendica\",\"loops\",\"peertube");
     expect(workflow).toContain("/.well-known/ap-proof-health");
     expect(workflow).toContain("AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true");
     expect(workflow).toContain("AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl");
     expect(workflow).toContain("healthStatus\":204");
     expect(workflow).toContain("AP_INTEROP_TUNNEL_ORIGIN=http://127.0.0.1:18002");
-    expect(readFileSync("interop/ap/scripts/start-cloudflare-quick-tunnel.sh", "utf8")).toContain(
-      "tunnel --protocol http2 --no-autoupdate",
-    );
+    const tunnel = readFileSync("interop/ap/scripts/start-cloudflare-named-tunnel.sh", "utf8");
+    expect(tunnel).toContain('CLOUDFLARE_API_TOKEN:?');
+    expect(tunnel).toContain('Tunnel origin must be an explicit loopback or RFC1918 HTTP host and port');
     expect(workflow).toContain("AP_PUBLIC_PROXY_DOCUMENT_TARGET_PORT=3000");
     expect(workflow).toContain('AP_PUBLIC_PROXY_INBOX_TARGET_HOST="${recorder_host}"');
     expect(workflow).toContain('AP_INTEROP_TUNNEL_CONTAINER="ap-${TARGET}-tunnel-external"');
@@ -161,7 +162,7 @@ describe("real ActivityPods sidecar compose authority", () => {
     expect(friendicaBootstrap).toContain("ensure_config system logger_config stream");
     expect(friendicaBootstrap).toContain("ensure_config system debugging 1");
     expect(friendicaBootstrap).toContain("ensure_config system logfile /var/log/friendica/friendica.log");
-    expect(friendicaBootstrap).toContain("ensure_config system loglevel info");
+    expect(friendicaBootstrap).toContain("ensure_config system loglevel debug");
     expect(workflow).toContain("AP_RELAY_ACTOR_URLS=''");
     expect(workflow).not.toContain("PEERTUBE_FEDERATION_PREVENT_SSRF=false");
     expect(workflow).not.toMatch(/AP_INTEROP_TUNNEL_ORIGIN=http:\/\/[^\s]*:(?:3000|3001|8080)/u);

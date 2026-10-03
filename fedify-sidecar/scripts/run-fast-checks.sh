@@ -59,4 +59,9 @@ npm exec -- vitest run \
   src/core-domain/identity/RedisIdentityBindingRepository.test.ts \
   src/interop/ap/FixtureMetadata.test.ts \
   src/interop/ap/FixtureBoundaryRunner.test.ts \
+  src/interop/ap/RealWireSignatureAssertion.test.ts \
+  src/interop/ap/WireRsaVerification.test.ts \
+  src/interop/ap/RealContentExchange.test.ts \
+  src/interop/ap/NativeIsolation.test.ts \
+  src/interop/ap/RealSigningCallAssertion.test.ts \
   src/interop/ap/FixtureCorpus.test.ts

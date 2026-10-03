@@ -17,6 +17,11 @@ if (origin.ok !== true || origin.mode !== 'external' || origin.durableHandoffQue
   process.exit(1);
 }
 const { actorUri, activityId, remoteActorUri } = origin;
+const activityType = origin.activityType ?? 'Follow';
+const objectUri = activityType === 'Follow' ? remoteActorUri : origin.objectUri;
+if (!['Follow', 'Create'].includes(activityType) || typeof objectUri !== 'string' || !objectUri) {
+  throw new Error('unsupported activity type or missing object identity');
+}
 if (![actorUri, activityId, remoteActorUri].every(value => typeof value === 'string' && value.length > 0)) {
   console.error('external origin evidence is missing actorUri, activityId, or remoteActorUri');
   process.exit(1);
@@ -119,7 +124,8 @@ for (const row of rows) {
     if (requestItem.body?.encoding !== 'utf8' || typeof requestItem.body?.bytes !== 'string') return;
     let activity;
     try { activity = JSON.parse(requestItem.body.bytes); } catch { return; }
-    if (activity?.type !== 'Follow' || activity?.id !== activityId || activity?.actor !== actorUri || activity?.object !== remoteActorUri) return;
+    const signedObjectUri = typeof activity?.object === 'string' ? activity.object : activity?.object?.id;
+    if (activity?.type !== activityType || activity?.id !== activityId || activity?.actor !== actorUri || signedObjectUri !== objectUri) return;
     if (!result || result.ok !== true || result.requestId !== requestItem.requestId) return;
     const keyId = result.meta?.keyId;
     const signature = result.outHeaders?.Signature;
@@ -160,6 +166,8 @@ const evidence = {
   actorUri,
   targetHost,
   activityId,
+  activityType,
+  objectUri,
   remoteActorUri,
   remoteDeliveryTarget,
   deliveredInboxPaths: [match.targetPath],

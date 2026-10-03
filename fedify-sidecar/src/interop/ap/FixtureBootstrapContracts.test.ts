@@ -265,7 +265,7 @@ describe("real federation fixture bootstrap contracts", () => {
       "utf8",
     );
     const bootConfig = readFileSync(
-      resolve(process.cwd(), "interop/ap/fixtures/castopod/interop-boot.ini"),
+      resolve(process.cwd(), "interop/ap/fixtures/php/interop-castopod.ini"),
       "utf8",
     );
     const compose = readFileSync(
@@ -278,9 +278,9 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(bootstrap).toContain('grep -qx "cache.redis.database=0" .env');
     expect(bootstrap).toContain("http://127.0.0.1:8000/");
     expect(compose).toContain("fixtures/php/interop-ca.ini");
-    expect(compose).toContain("fixtures/castopod/interop-boot.ini");
+    expect(compose).toContain("fixtures/php/interop-castopod.ini");
     expect(bootConfig).toContain(
-      "auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php",
+      "auto_prepend_file=/interop/castopod/actor_compat.php",
     );
     expect(bootstrap).toContain("spark install:init-database");
     expect(bootstrap).toContain("spark install:create-superadmin");
@@ -438,7 +438,7 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).not.toContain("select parameter from workerqueue");
     expect(script).not.toContain("select activity from \\`inbox-entry\\`");
     expect(script).not.toContain("compose logs --no-color friendica-app friendica-worker");
-    expect(workflow).not.toContain("logs --no-color friendica-app friendica-worker");
+    expect(workflow).toMatch(/logs --no-color friendica-app friendica-worker 2>&1\s*\\\s*\| node fedify-sidecar\/interop\/ap\/scripts\/redact-friendica-container-errors\.mjs/);
     expect(workflow).toContain("redact-friendica-container-errors.mjs");
     expect(workflow).toContain("ps friendica-app friendica-worker");
     expect(workflow).not.toContain('cat "${EVIDENCE_DIR}/signing-api.jsonl"');

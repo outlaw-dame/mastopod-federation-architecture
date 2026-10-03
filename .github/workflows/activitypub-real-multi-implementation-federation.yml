@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   real-federation:
-    name: ${{ matrix.target }} native + sidecar federation
+    name: ${{ matrix.target }} native + sidecar federation (${{ matrix.fixture_variant || 'configured upstream' }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -66,6 +66,7 @@ jobs:
             actor_uri: https://friendica.test/profile/interop
             remote_version: Friendica 2026.05@sha256:e496eeb34fc2c9eb24eae94d2835c39e9a715966f625db769b188427b61ece6d
           - target: castopod
+            fixture_variant: compatibility-patched
             target_host: castopod.test
             activitypods_host: activitypods.test
             compose_overlay: fedify-sidecar/interop/ap/docker-compose.castopod.yml
@@ -111,6 +112,7 @@ jobs:
       OWNCAST_OVERLAY: fedify-sidecar/interop/ap/docker-compose.owncast.yml
       OWNCAST_SHA: '65d03b4d5df13dfc2033311fa30e4513b63b3e16'
       TARGET: ${{ matrix.target }}
+      REMOTE_FIXTURE_VARIANT: ${{ matrix.fixture_variant || 'configured-upstream' }}
       TARGET_HOST: ${{ matrix.target_host }}
       ACTIVITYPODS_HOST: ${{ matrix.activitypods_host }}
       TARGET_COMPOSE_OVERLAY: ${{ matrix.compose_overlay }}
@@ -557,6 +559,9 @@ jobs:
             docker compose -f "${COMPOSE_FILE}" -f "${REAL_OVERLAY}" --profile real-activitypods \
             up -d --no-deps --force-recreate ap-proof-router
 
+      - name: Capture immutable running image identities
+        run: node fedify-sidecar/interop/ap/scripts/capture-runtime-images.mjs "${EVIDENCE_DIR}/runtime-images.json"
+
       - name: Prove native bidirectional federation and remote persistence
         id: native-proof
         continue-on-error: true
@@ -566,6 +571,8 @@ jobs:
           SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
         run: |
           set -euo pipefail
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-native-isolation.mjs" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-isolation-before.json"
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
             export AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY=true
             export AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT=curl
@@ -623,6 +630,12 @@ jobs:
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-return-accept.mjs" \
             native "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json" "${TARGET}" "${actor_uri}" "${TARGET_USERNAME}" "${persisted_count}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-bidirectional.json"
+          if [[ "${TARGET}" == mastodon ]]; then
+            node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/prove-mastodon-content-exchange.mjs" \
+              "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-content.json"
+          fi
+          node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-native-isolation.mjs" \
+            "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-isolation-after.json"
 
       - name: Stop native ActivityPods
         shell: bash
@@ -911,6 +924,11 @@ jobs:
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-signing-call.mjs" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/signing-api.jsonl" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${TARGET_HOST}" \
             "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-signing.json"
+
+          if [[ "${TARGET}" == mastodon ]]; then
+            node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/prove-mastodon-content-exchange.mjs" \
+              "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-content.json"
+          fi
           node "${GITHUB_WORKSPACE}/fedify-sidecar/interop/ap/scripts/assert-real-wire-signature.mjs" \
             "${GITHUB_WORKSPACE}/${WIRE_EVIDENCE_PATH}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json" \
             "${TARGET_HOST}" "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-wire-signature.json" \
@@ -942,7 +960,20 @@ jobs:
           const externalBidirectional = readJson('external-bidirectional.json');
           const signing = readJson('external-signing.json');
           const externalWire = readJson('external-wire-signature.json');
+          const runtimeImages = readJson('runtime-images.json');
+          const isolationBefore = readJson('native-isolation-before.json');
+          const isolationAfter = readJson('native-isolation-after.json');
+          const content = { native: readJson('native-content.json'), external: readJson('external-content.json') };
+          const contentComplete = (mode, origin) => process.env.TARGET !== 'mastodon' || (
+            content[mode]?.ok === true && content[mode]?.mode === mode &&
+            content[mode]?.actorUri === origin?.actorUri && content[mode]?.remoteActorUri === origin?.remoteActorUri &&
+            content[mode]?.outbound?.remotePersisted === true && content[mode]?.inbound?.inboxPersisted === true &&
+            content[mode]?.outbound?.independentlyVerifiedRsa === true &&
+            (mode !== 'external' || content[mode]?.outbound?.planBoundSigning === true));
           const nativeComplete = process.env.NATIVE_PROOF_OUTCOME === 'success' &&
+            isolationBefore?.ok === true && isolationBefore.sidecarListening === false &&
+            isolationAfter?.ok === true && isolationAfter.sidecarListening === false &&
+            nativeWire?.independentlyVerifiedRsa === true && contentComplete('native', nativeOrigin) &&
             nativeOrigin?.ok === true && nativeOrigin?.mode === 'native' && nativeAcceptance?.ok === true &&
             nativeInbound?.ok === true && nativeInbound?.followActivityId === nativeOrigin?.activityId &&
             nativeInbound?.actorUri === nativeOrigin?.actorUri && nativeWire?.ok === true &&
@@ -951,6 +982,7 @@ jobs:
             nativeBidirectional?.followingContainsRemote === true && nativeBidirectional?.sidecarInboundAcceptObserved === false &&
             nativeBidirectional?.activityId === nativeOrigin?.activityId && nativeBidirectional?.actorUri === nativeOrigin?.actorUri;
           const externalComplete = process.env.EXTERNAL_PROOF_OUTCOME === 'success' &&
+            externalWire?.independentlyVerifiedRsa === true && contentComplete('external', externalOrigin) &&
             externalOrigin?.ok === true && externalOrigin?.mode === 'external' &&
             externalOrigin?.durableHandoffQueued === true && externalOrigin?.nativeRemotePostSuppressed === true &&
             externalAcceptance?.ok === true && externalBidirectional?.ok === true &&
@@ -961,16 +993,25 @@ jobs:
             externalBidirectional?.activityId === externalOrigin?.activityId && externalBidirectional?.actorUri === externalOrigin?.actorUri &&
             signing?.activityId === externalOrigin?.activityId && signing?.actorUri === externalOrigin?.actorUri &&
             externalWire?.activityId === externalOrigin?.activityId && externalWire?.actorUri === externalOrigin?.actorUri;
-          const complete = nativeComplete && externalComplete;
+          const complete = nativeComplete && externalComplete && runtimeImages?.images?.length > 0;
           const summary = {
             schema: 'activitypods.activitypub.real-multi-implementation.v2',
             complete,
             target: process.env.TARGET,
             remoteVersion: process.env.REMOTE_VERSION,
+            remoteFixtureVariant: process.env.REMOTE_FIXTURE_VARIANT,
+            unmodifiedRemoteImplementation: process.env.REMOTE_FIXTURE_VARIANT === 'configured-upstream',
             activityPodsSha: process.env.ACTIVITYPODS_SHA,
             federationSha: process.env.FEDERATION_SHA,
+            runtimeImages,
+            nativeIsolation: { before: isolationBefore, after: isolationAfter },
+            scenarios: {
+              followAcceptHandshake: { native: nativeComplete, external: externalComplete },
+              independentCreateExchange: process.env.TARGET === 'mastodon'
+                ? content : { status: 'not_implemented', reason: 'platform publishing adapter is required' },
+            },
             native: nativeComplete
-              ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, returnAcceptApplied: nativeBidirectional.returnAcceptApplied, returnAcceptActivityId: nativeInbound.acceptActivityId, followingContainsRemote: nativeBidirectional.followingContainsRemote, wire: nativeWire, sidecarRunning: false }
+              ? { complete: true, actorUri: nativeOrigin.actorUri, activityId: nativeOrigin.activityId, persistedFollowCount: nativeAcceptance.persistedFollowCount, returnAcceptApplied: nativeBidirectional.returnAcceptApplied, returnAcceptActivityId: nativeInbound.acceptActivityId, followingContainsRemote: nativeBidirectional.followingContainsRemote, wire: nativeWire, sidecarListenerAbsent: true }
               : { complete: false, stepOutcome: process.env.NATIVE_PROOF_OUTCOME },
             external: externalComplete
               ? { complete: true, actorUri: externalOrigin.actorUri, activityId: externalOrigin.activityId, persistedFollowCount: externalAcceptance.persistedFollowCount, returnAcceptApplied: externalBidirectional.returnAcceptApplied, returnAcceptActivityId: externalBidirectional.returnAcceptActivityId, followingContainsRemote: externalBidirectional.followingContainsRemote, sidecarInboundAcceptObserved: externalBidirectional.sidecarInboundAcceptObserved, sidecarInboundPath: externalBidirectional.sidecarInboundPath, durableHandoffQueued: externalOrigin.durableHandoffQueued, nativeRemotePostSuppressed: externalOrigin.nativeRemotePostSuppressed, successfulActivityPodsSigningCalls: signing.successfulSigningCalls, signerKeyIds: signing.signerKeyIds, deliveredInboxPaths: signing.deliveredInboxPaths, bodySha256Base64: signing.bodySha256Base64, wire: externalWire }
@@ -978,7 +1019,7 @@ jobs:
           };
           fs.writeFileSync(`${root}/summary.json`, JSON.stringify(summary, null, 2) + '\n');
           console.log(JSON.stringify(summary, null, 2));
-          if (!complete) throw new Error('both federation modes require remote persistence, returning Accept application, and exact authority-path evidence');
+          if (!complete) throw new Error('both federation modes require remote persistence, returning Accept application, verified RSA, native isolation, and applicable content exchange evidence');
           NODE
 
       - name: Upload implementation evidence
@@ -1037,7 +1078,8 @@ jobs:
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
             friendica)
-              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true
+               docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>&1 \
+                 | node fedify-sidecar/interop/ap/scripts/redact-friendica-container-errors.mjs || true
               docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" ps friendica-app friendica-worker 2>/dev/null || true
               # `docker compose logs` only captures container stdout/stderr;
               # dump the app's own file-based log too, redacted, since that's
