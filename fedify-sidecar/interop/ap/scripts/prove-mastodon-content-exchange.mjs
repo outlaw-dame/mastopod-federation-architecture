@@ -44,8 +44,9 @@ export function inboundContentQuery(inbox, remoteActorUri, objectUri) {
   // as:current, not as an as:object edge directly to the live object URI.
   return `PREFIX as: <${AS}> SELECT DISTINCT ?activity ?actor ?object ?content WHERE {
     <${inbox}> as:items ?activity .
-    ?activity a as:Create; as:actor ?actor; as:object ?storedObject .
-    { ?storedObject as:current ?object } UNION { BIND(?storedObject AS ?object) }
+    ?activity a as:Create; as:actor ?actor .
+    { ?activity as:object ?storedObject . ?storedObject as:current ?object }
+    UNION { ?activity as:object ?object . BIND(?object AS ?storedObject) }
     FILTER(?actor = <${remoteActorUri}> && ?object = <${objectUri}>)
     ?storedObject as:attributedTo <${remoteActorUri}>; as:content ?content .
   } LIMIT 2`;
