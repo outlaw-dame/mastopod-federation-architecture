@@ -468,31 +468,36 @@ jobs:
           sleep 1
           kill -0 "$(cat "${EVIDENCE_DIR}/native-public-proxy.pid")"
           tunnel_ready=false
+          last_http_code=""
           for attempt in $(seq 1 90); do
-            if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
-              "https://${tunnel_host}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+            last_http_code="$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+              "https://${tunnel_host}/.well-known/ap-proof-health" 2>&1 || true)"
+            if [[ "${last_http_code}" == 204 ]]; then
               tunnel_ready=true
               break
             fi
             sleep 2
           done
           if [[ "${tunnel_ready}" != true ]]; then
-            # curl's own error is too terse to show which handshake stage
-            # failed. A local test against this same zone's pre-existing
-            # tunnel succeeded cleanly (real TLS 1.3, valid cert, HTTP/2,
-            # a real HTTP response) — ruling out the zone/cert/tunnel
-            # infrastructure itself. The one constant across every failure
-            # so far, both the old Quick Tunnel and this named tunnel, is
-            # that it only ever happens from this runner's own egress path.
-            # Get a full handshake trace from here to either confirm or
-            # rule that out directly instead of guessing again.
-            echo "::group::openssl s_client handshake trace against ${tunnel_host}"
-            openssl s_client -connect "${tunnel_host}:443" -servername "${tunnel_host}" \
-              -brief </dev/null 2>&1 || true
-            echo "::endgroup::"
-            echo "::group::openssl s_client verbose handshake trace (TLS 1.3 only)"
-            openssl s_client -connect "${tunnel_host}:443" -servername "${tunnel_host}" \
-              -tls1_3 -msg </dev/null 2>&1 | head -100 || true
+            # A prior run of this exact diagnostic (an openssl s_client
+            # handshake trace, now removed) showed a clean TLS handshake
+            # immediately after this loop gave up, and — tellingly — zero
+            # curl errors printed to stderr during any of the 90 attempts
+            # above (curl prints real transport/TLS errors on its own; -sS
+            # only suppresses the progress meter). That means curl was
+            # completing successfully every time and getting a real,
+            # non-204 HTTP response this whole loop silently discarded.
+            # Capture what that response actually was, plus the full
+            # request/response and both logs from the exact failure
+            # moment, instead of guessing again.
+            echo "::group::${TARGET} native tunnel health-check failure diagnostics"
+            echo "Last observed status for https://${tunnel_host}/.well-known/ap-proof-health: ${last_http_code}"
+            echo "--- curl -v of the same request right now ---"
+            curl -v --connect-timeout 5 --max-time 15 "https://${tunnel_host}/.well-known/ap-proof-health" 2>&1 || true
+            echo "--- local proxy's own stderr log (native-public-proxy.log) ---"
+            tail -n 200 "${EVIDENCE_DIR}/native-public-proxy.log" 2>/dev/null || echo "native-public-proxy.log unavailable"
+            echo "--- cloudflared container's own log ---"
+            docker logs "ap-${TARGET}-tunnel-native" --tail 200 2>&1 || echo "ap-${TARGET}-tunnel-native not running"
             echo "::endgroup::"
           fi
           [[ "${tunnel_ready}" == true ]]
@@ -726,9 +731,11 @@ jobs:
                 2>> "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" &
               echo "$!" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid"
               consecutive_health_checks=0
+              last_external_http_code=""
               for attempt in $(seq 1 12); do
-                if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
-                  "https://${tunnel_host}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+                last_external_http_code="$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+                  "https://${tunnel_host}/.well-known/ap-proof-health" 2>&1 || true)"
+                if [[ "${last_external_http_code}" == 204 ]]; then
                   consecutive_health_checks=$((consecutive_health_checks + 1))
                   if [[ "${consecutive_health_checks}" -eq 5 ]]; then
                     authority_selected=true
@@ -740,6 +747,7 @@ jobs:
                 sleep 2
               done
               if [[ "${authority_selected}" == true ]]; then break; fi
+              echo "External tunnel candidate ${candidate} last observed status for https://${tunnel_host}/.well-known/ap-proof-health: ${last_external_http_code}" >&2
               candidate_proxy_pid="$(cat "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.pid")"
               kill "${candidate_proxy_pid}" 2>/dev/null || true
               for attempt in $(seq 1 20); do
@@ -753,6 +761,13 @@ jobs:
             done
             if [[ "${authority_selected}" != true ]]; then
               echo "No stable external authority passed bounded preflight selection." >&2
+              echo "::group::${TARGET} external tunnel preflight failure diagnostics"
+              curl -v --connect-timeout 5 --max-time 15 "https://${tunnel_host}/.well-known/ap-proof-health" 2>&1 || true
+              echo "--- local proxy's own stderr log (external-public-proxy.log) ---"
+              tail -n 200 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" 2>/dev/null || echo "external-public-proxy.log unavailable"
+              echo "--- cloudflared container's own log ---"
+              docker logs "ap-${TARGET}-tunnel-external" --tail 200 2>&1 || echo "ap-${TARGET}-tunnel-external not running"
+              echo "::endgroup::"
               exit 1
             fi
             export ACTIVITYPODS_HOST="${tunnel_host}"
@@ -794,9 +809,11 @@ jobs:
           [[ "${ready}" == true ]]
           if [[ "${TARGET}" =~ ^(friendica|loops|peertube|owncast)$ ]]; then
             consecutive_health_checks=0
+            last_post_sidecar_http_code=""
             for attempt in $(seq 1 90); do
-              if [[ "$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
-                "https://${ACTIVITYPODS_HOST}/.well-known/ap-proof-health" || true)" == 204 ]]; then
+              last_post_sidecar_http_code="$(curl --connect-timeout 5 --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+                "https://${ACTIVITYPODS_HOST}/.well-known/ap-proof-health" 2>&1 || true)"
+              if [[ "${last_post_sidecar_http_code}" == 204 ]]; then
                 consecutive_health_checks=$((consecutive_health_checks + 1))
                 if [[ "${consecutive_health_checks}" -eq 3 ]]; then break; fi
               else
@@ -804,6 +821,14 @@ jobs:
               fi
               sleep 2
             done
+            if [[ "${consecutive_health_checks}" -ne 3 ]]; then
+              echo "::group::${TARGET} post-sidecar external authority stability failure diagnostics"
+              echo "Last observed status for https://${ACTIVITYPODS_HOST}/.well-known/ap-proof-health: ${last_post_sidecar_http_code}"
+              curl -v --connect-timeout 5 --max-time 15 "https://${ACTIVITYPODS_HOST}/.well-known/ap-proof-health" 2>&1 || true
+              tail -n 200 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-proxy.log" 2>/dev/null || echo "external-public-proxy.log unavailable"
+              docker logs "ap-${TARGET}-tunnel-external" --tail 200 2>&1 || echo "ap-${TARGET}-tunnel-external not running"
+              echo "::endgroup::"
+            fi
             [[ "${consecutive_health_checks}" -eq 3 ]]
             printf '{"schema":"activitypods.activitypub.public-tunnel.v1","mode":"external","target":"%s","authority":"%s","origin":"path-restricted-proxy","healthStatus":204,"authorityIsolation":"%s","inboxRouteMode":"external","security":"remote SSRF prevention remains enabled; no signed cross-authority retry"}\n' \
               "${TARGET}" "${ACTIVITYPODS_HOST}" "${AP_PUBLIC_AUTHORITY_STRATEGY}" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-public-tunnel.json"
@@ -1087,6 +1112,7 @@ jobs:
               docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" exec -T friendica-app \
                 tail -n 5000 /var/log/friendica/friendica.log 2>&1 \
                 | node fedify-sidecar/interop/ap/scripts/redact-friendica-container-errors.mjs || true
+              tunnel_diagnostics
               ;;
             castopod)
               docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true
