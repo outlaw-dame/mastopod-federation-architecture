@@ -272,3 +272,13 @@ export function isPublicSearchIndexable(
 
   return isPublicAddressed(object) && consent.isPublic;
 }
+
+/** True only when the publisher supplied an explicit negative search signal. */
+export function isExplicitPublicSearchOptOut(
+  consent: PublicSearchConsentSignal | null | undefined,
+): consent is PublicSearchConsentSignal {
+  // A normalized source:"none" signal has isPublic:false, but means metadata
+  // was absent. Consumers must retain the projector's public-addressing
+  // fallback for that legacy case.
+  return consent?.explicitlySet === true && consent.isPublic === false;
+}

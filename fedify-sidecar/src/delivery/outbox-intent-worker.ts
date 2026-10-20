@@ -238,7 +238,11 @@ export class OutboxIntentWorker {
         Math.max(0, (Date.now() - intent.createdAt) / 1000),
       );
 
-      logger.info("Outbox intent completed", {
+      // Completion is represented by durable markers and Prometheus counters.
+      // Keep per-intent identifiers at debug level so normal production load
+      // does not turn successful fan-out into synchronous high-cardinality log
+      // traffic. Warnings and failures remain visible at their existing levels.
+      logger.debug("Outbox intent completed", {
         intentId: intent.intentId,
         activityId: intent.activityId,
         targetCount: normalizedTargets.targets.length,

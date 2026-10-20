@@ -1,4 +1,13 @@
 services:
+  friendica-dns:
+    image: coredns/coredns:1.11.3@sha256:9caabbf6238b189a65d0d6e6ac138de60d6a1c419e5a341fbbb7c78382559c6e
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./fixtures/friendica/Corefile:/etc/coredns/Corefile:ro
+    networks:
+      ap-interop:
+        ipv4_address: 172.31.240.253
+
   friendica-db:
     image: mariadb:11.4@sha256:4f1d8d202fcf7bcb3902f63af09f9c1a050c2922a89652f22abaec0d4f015e83
     environment:
@@ -21,6 +30,10 @@ services:
     depends_on:
       friendica-db:
         condition: service_healthy
+      friendica-log-init:
+        condition: service_completed_successfully
+      friendica-dns:
+        condition: service_started
     environment: &friendica_environment
       # Friendica concatenates ActivityPub route paths onto its configured
       # base URL. A trailing slash produces non-canonical //inbox URLs and
@@ -35,6 +48,15 @@ services:
       MYSQL_PASSWORD: ${FRIENDICA_DB_PASSWORD:?FRIENDICA_DB_PASSWORD is required}
       SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
       CURL_CA_BUNDLE: /interop/runtime/certs/rootCA.crt
+      FRIENDICA_LOGFILE: /var/log/friendica/friendica.log
+      FRIENDICA_LOGLEVEL: info
+      FRIENDICA_LOGGER: stream
+    # Friendica intentionally calls dns_get_record before outbound fetches;
+    # Docker aliases and /etc/hosts do not satisfy that API. This isolated DNS
+    # fixture publishes only the proof router's RFC1918 ActivityPods address
+    # and forwards all other lookups to Docker's embedded resolver.
+    dns:
+      - 172.31.240.253
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H 'Accept: application/activity+json' http://127.0.0.1/profile/interop >/dev/null"]
       interval: 10s
@@ -45,6 +67,8 @@ services:
       - ap_interop_friendica_html:/var/www/html
       - ./runtime/certs:/interop/runtime/certs:ro
       - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+      - ./fixtures/friendica/actor-jsonld-diagnostic.php:/interop/actor-jsonld-diagnostic.php:ro
+      - ap_interop_friendica_log:/var/log/friendica
     networks:
       - ap-interop
 
@@ -54,14 +78,30 @@ services:
     depends_on:
       friendica-app:
         condition: service_healthy
+      friendica-dns:
+        condition: service_started
     environment: *friendica_environment
+    dns:
+      - 172.31.240.253
     volumes:
       - ap_interop_friendica_html:/var/www/html
       - ./runtime/certs:/interop/runtime/certs:ro
       - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+      - ap_interop_friendica_log:/var/log/friendica
+    networks:
+      - ap-interop
+
+  friendica-log-init:
+    image: friendica:2026.05@sha256:e496eeb34fc2c9eb24eae94d2835c39e9a715966f625db769b188427b61ece6d
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - install -d -o www-data -g www-data -m 0750 /var/log/friendica && install -o www-data -g www-data -m 0640 /dev/null /var/log/friendica/friendica.log
+    volumes:
+      - ap_interop_friendica_log:/var/log/friendica
     networks:
       - ap-interop
 
 volumes:
   ap_interop_friendica_db:
   ap_interop_friendica_html:
+  ap_interop_friendica_log:

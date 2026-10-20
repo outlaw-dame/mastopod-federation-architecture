@@ -1,0 +1,21 @@
+services:
+  owncast-app:
+    build:
+      context: ${OWNCAST_SOURCE_DIR:-../../../owncast}
+      dockerfile: Dockerfile
+      args:
+        VERSION: v0.2.5
+        GIT_COMMIT: 65d03b4d5df13dfc2033311fa30e4513b63b3e16
+        NAME: ap-interop-ci
+    command: ["-adminpassword", "${OWNCAST_ADMIN_PASSWORD:?OWNCAST_ADMIN_PASSWORD is required}"]
+    user: "${OWNCAST_RUNTIME_UID:-1000}:${OWNCAST_RUNTIME_GID:-1000}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/api/status"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    volumes:
+      - ./runtime/owncast:/app/data
+    networks:
+      - ap-interop

@@ -49,6 +49,8 @@ export class RedisStreamPayloadCodec {
   private readonly decodeCacheMaxBytes: number;
   private readonly decodeCache = new Map<string, DecodeCacheEntry>();
   private decodeCacheBytes = 0;
+  private readonly encodeCache = new Map<string, { payload: EncodedRedisStreamPayload; bytes: number }>();
+  private encodeCacheBytes = 0;
 
   constructor(config: RedisStreamPayloadCodecConfig = {}) {
     this.writeEnabled = config.writeEnabled === true;
@@ -72,10 +74,19 @@ export class RedisStreamPayloadCodec {
   }
 
   encode(value: string): EncodedRedisStreamPayload {
+    const cached = this.encodeCache.get(value);
+    if (cached !== undefined) {
+      this.encodeCache.delete(value);
+      this.encodeCache.set(value, cached);
+      return cached.payload;
+    }
+
     const source = Buffer.from(value);
     const sourceBytes = source.byteLength;
     if (!this.writeEnabled || sourceBytes < this.minBytes) {
-      return { value, compressed: false, sourceBytes, storedBytes: sourceBytes };
+      const result: EncodedRedisStreamPayload = { value, compressed: false, sourceBytes, storedBytes: sourceBytes };
+      this.cacheEncoded(value, result, sourceBytes * 2);
+      return result;
     }
     if (sourceBytes > this.maxDecompressedBytes) {
       throw new Error(
@@ -98,10 +109,32 @@ export class RedisStreamPayloadCodec {
     const storedBytes = Buffer.byteLength(encoded);
 
     if (storedBytes >= sourceBytes) {
-      return { value, compressed: false, sourceBytes, storedBytes: sourceBytes };
+      const result: EncodedRedisStreamPayload = { value, compressed: false, sourceBytes, storedBytes: sourceBytes };
+      this.cacheEncoded(value, result, sourceBytes * 2);
+      return result;
     }
 
-    return { value: encoded, compressed: true, sourceBytes, storedBytes };
+    const result: EncodedRedisStreamPayload = { value: encoded, compressed: true, sourceBytes, storedBytes };
+    this.cacheEncoded(value, result, sourceBytes + storedBytes);
+    return result;
+  }
+
+  private cacheEncoded(key: string, payload: EncodedRedisStreamPayload, bytes: number): void {
+    if (bytes > this.decodeCacheMaxBytes) return;
+    const existing = this.encodeCache.get(key);
+    if (existing) {
+      this.encodeCacheBytes -= existing.bytes;
+      this.encodeCache.delete(key);
+    }
+    while (this.encodeCacheBytes + bytes > this.decodeCacheMaxBytes && this.encodeCache.size > 0) {
+      const oldestKey = this.encodeCache.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      const oldest = this.encodeCache.get(oldestKey);
+      if (oldest) this.encodeCacheBytes -= oldest.bytes;
+      this.encodeCache.delete(oldestKey);
+    }
+    this.encodeCache.set(key, { payload, bytes });
+    this.encodeCacheBytes += bytes;
   }
 
   decode(value: string): string {

@@ -44,12 +44,12 @@ if [ -n "${COMPOSE_OVERLAY}" ]; then
 fi
 
 if [ -z "${TARGET}" ] || [ -z "${ACTOR_URI}" ]; then
-  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod> <actor-uri> [local-username]" >&2
+  echo "usage: assert-real-follow-accepted.sh <mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod|peertube|loops|owncast> <actor-uri> [local-username]" >&2
   exit 2
 fi
 
 case "${TARGET}" in
-  mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod) ;;
+  mastodon|gotosocial|akkoma|pixelfed|bonfire|misskey|friendica|castopod|peertube|loops|owncast) ;;
   *) fail "unsupported target '${TARGET}'" ;;
 esac
 case "${EXPECTED_COUNT}:${ATTEMPTS}:${DELAY_SECONDS}" in
@@ -124,6 +124,18 @@ query_count() {
       compose exec -T castopod-db /bin/sh -lc \
         "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u castopod castopod -e \"select count(*) from cp_fediverse_follows f join cp_fediverse_actors follower on follower.id=f.actor_id join cp_fediverse_actors target on target.id=f.target_actor_id where follower.uri='${actor_sql}' and target.username='${username_sql}' and target.domain='castopod.test';\""
       ;;
+    peertube)
+      compose exec -T peertube-db /bin/sh -lc \
+        "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -v ON_ERROR_STOP=1 -tAc \"select count(*) from \\\"actorFollow\\\" f join actor follower on follower.id=f.\\\"actorId\\\" join actor target on target.id=f.\\\"targetActorId\\\" where follower.url='${actor_sql}' and target.\\\"preferredUsername\\\"='${username_sql}' and target.\\\"serverId\\\" is null and target.\\\"accountId\\\" is not null and f.state='accepted';\""
+      ;;
+    loops)
+      compose exec -T loops-db /bin/sh -lc \
+        "MYSQL_PWD=\"\$MYSQL_PASSWORD\" mysql --batch --skip-column-names -u loops loops -e \"select count(*) from followers f join profiles follower on follower.id=f.profile_id join profiles target on target.id=f.following_id where follower.uri='${actor_sql}' and target.username='${username_sql}' and follower.local=0 and target.local=1;\""
+      ;;
+    owncast)
+      sqlite3 "${SCRIPT_DIR}/../runtime/owncast/owncast.db" \
+        "PRAGMA busy_timeout=30000; select count(*) from ap_followers where iri='${actor_sql}' and approved_at is not null and disabled_at is null;"
+      ;;
   esac
 }
 
@@ -131,7 +143,7 @@ pixelfed_diagnostics() {
   echo "Pixelfed fail-closed persistence diagnostics:" >&2
   compose exec -T pixelfed-db /bin/sh -lc \
     "MYSQL_PWD=\"\$MYSQL_PASSWORD\" mysql --batch --skip-column-names -u pixelfed pixelfed -e \"
-      select concat('remote_profile_count=', count(*), ',key_id_matches=', coalesce(sum(key_id=concat(remote_url, '/keys/main')),0), ',public_key_count=', coalesce(sum(public_key is not null),0)) from profiles where remote_url='${actor_sql}';
+      select concat('remote_profile_count=', count(*), ',key_id_matches=', coalesce(sum(key_id=concat(remote_url, '#main-key')),0), ',public_key_count=', coalesce(sum(public_key is not null),0)) from profiles where remote_url='${actor_sql}';
       select concat('local_target_count=', count(*), ',private_count=', coalesce(sum(is_private=1),0)) from profiles where username='${username_sql}' and domain is null;
       select concat('follow_request_count=', count(*)) from follow_requests fr join profiles follower on follower.id=fr.follower_id join profiles target on target.id=fr.following_id where follower.remote_url='${actor_sql}' and target.username='${username_sql}' and target.domain is null;
       select concat('failed_job_count=', count(*)) from failed_jobs;\"" >&2 || echo "Pixelfed database diagnostics unavailable" >&2
@@ -157,13 +169,88 @@ friendica_diagnostics() {
   echo "Friendica fail-closed persistence diagnostics:" >&2
   {
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
+    printf '%s\n' "select concat('apcontact_count=', count(*), ',pubkey_count=', coalesce(sum(pubkey is not null and pubkey <> ''),0), ',inbox_count=', coalesce(sum(inbox is not null and inbox <> ''),0), ',account_type_count=', coalesce(sum(type in ('Person','Organization','Service','Group','Application')),0)) from apcontact where url='${actor_sql}';"
+    printf '%s\n' "select concat('actor_uri_cache_count=', count(*)) from \`item-uri\` where uri='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
     printf '%s\n' "select concat('inbox_receiver_count=', count(*)) from \`inbox-entry-receiver\` r join \`inbox-entry\` e on e.id=r.\`queue-id\` where e.signer='${actor_sql}';"
     printf '%s\n' "select concat('introduction_count=', count(*)) from intro i join contact c on c.id=i.\`contact-id\` where c.url='${actor_sql}';"
     printf '%s\n' "select concat('pending_worker_count=', count(*), ',retrying_worker_count=', coalesce(sum(retrial > 0),0)) from workerqueue where done=0;"
+    printf '%s\n' "select concat('activitypub_inbound_count=', coalesce(max(cast(v as unsigned)),0)) from \`key-value\` where k='stats_packets_inbound_apub';"
   } | compose exec -T friendica-db /bin/sh -lc \
     'MYSQL_PWD="$MARIADB_PASSWORD" mariadb --batch --skip-column-names -u friendica friendica' \
     >&2 || echo "Friendica database diagnostics unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" \
+    -e AP_INTEROP_EXPECTED_ACTOR_HOST="${ACTIVITYPODS_HOST:?ACTIVITYPODS_HOST is required}" friendica-app \
+    php /interop/actor-jsonld-diagnostic.php \
+    >&2 || echo "Friendica privacy-safe actor JSON-LD diagnostic failed" >&2
+  # Friendica's invalid-signature notice includes the full request headers and
+  # body. Count only fixed event messages so failure evidence cannot disclose
+  # credentials, signatures, or queued ActivityPub payloads.
+  compose exec -T friendica-app php -r '
+    $patterns = [
+      "actor_fetch_discard_count" => "Unable to retrieve AP contact for actor - message is discarded",
+      "invalid_http_signature_count" => "Invalid HTTP signature, message will not be trusted.",
+      "valid_http_signature_count" => "Valid HTTP signature",
+      "receiver_user_routing_count" => "Message for user ",
+      "trusted_matching_signer_count" => "Trusting post without JSON-LD signature, The actor fits the HTTP signer.",
+    ];
+    $counts = array_fill_keys(array_keys($patterns), 0);
+    $lineCount = 0;
+    $handle = @fopen("/var/log/friendica/friendica.log", "rb");
+    if ($handle === false) {
+      fwrite(STDERR, "friendica_log_status=unavailable\n");
+      exit(0);
+    }
+    while (($line = fgets($handle)) !== false) {
+      $lineCount++;
+      foreach ($patterns as $label => $message) {
+        if (str_contains($line, $message)) {
+          $counts[$label]++;
+        }
+      }
+    }
+    fclose($handle);
+    fwrite(STDERR, "friendica_log_line_count=" . $lineCount . "\n");
+    foreach ($counts as $label => $count) {
+      fwrite(STDERR, $label . "=" . $count . "\n");
+    }
+  ' >&2 || echo "Friendica log counters unavailable" >&2
+}
+
+loops_diagnostics() {
+  echo "Loops fail-closed persistence diagnostics:" >&2
+  compose exec -T loops-db /bin/sh -lc \
+    "MYSQL_PWD=\"\$MYSQL_PASSWORD\" mysql --batch --skip-column-names -u loops loops -e \"
+      select concat('remote_profile_count=', count(*), ',public_key_count=', coalesce(sum(public_key is not null and public_key <> ''),0), ',inbox_count=', coalesce(sum(inbox_url is not null and inbox_url <> ''),0)) from profiles where uri='${actor_sql}';
+      select concat('local_target_count=', count(*)) from profiles where username='${username_sql}' and local=1;
+      select concat('persisted_follow_count=', count(*)) from followers f join profiles follower on follower.id=f.profile_id join profiles target on target.id=f.following_id where follower.uri='${actor_sql}' and target.username='${username_sql}' and follower.local=0 and target.local=1;
+      select concat('failed_job_count=', count(*)) from failed_jobs;\"" >&2 || echo "Loops database diagnostics unavailable" >&2
+  compose exec -T loops-horizon php artisan horizon:status >&2 || echo "Loops Horizon status unavailable" >&2
+  for queue in activitypub-in default; do
+    ready=$(compose exec -T loops-redis /bin/sh -lc "redis-cli -a \"\$LOOPS_REDIS_PASSWORD\" --no-auth-warning llen queues:${queue}" 2>/dev/null || echo unavailable)
+    reserved=$(compose exec -T loops-redis /bin/sh -lc "redis-cli -a \"\$LOOPS_REDIS_PASSWORD\" --no-auth-warning zcard queues:${queue}:reserved" 2>/dev/null || echo unavailable)
+    delayed=$(compose exec -T loops-redis /bin/sh -lc "redis-cli -a \"\$LOOPS_REDIS_PASSWORD\" --no-auth-warning zcard queues:${queue}:delayed" 2>/dev/null || echo unavailable)
+    printf 'loops_queue=%s ready=%s reserved=%s delayed=%s\n' "${queue}" "${ready}" "${reserved}" "${delayed}" >&2
+  done
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" loops-app /bin/sh -lc \
+    'curl --connect-timeout 5 --max-time 15 --silent --show-error --output /dev/null --header "Accept: application/activity+json" --write-out "loops_actor_curl_status=%{http_code} content_type=%{content_type} bytes=%{size_download}\n" "$AP_INTEROP_ACTOR_URI"' \
+    >&2 || echo "Loops in-container actor fetch unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" loops-app php artisan tinker --execute=\
+'$url = getenv("AP_INTEROP_ACTOR_URI"); $sanitized = app(App\Services\SanitizeService::class)->url($url, true, false); dump(["sanitizer" => ["accepted" => is_string($sanitized), "exact" => is_string($sanitized) && hash_equals($url, $sanitized)]]); foreach (["unsigned" => false, "signed" => true] as $label => $signed) { $value = app(App\Services\ActivityPubService::class)->get($url, [], $signed, true, true, true); dump([$label => ["isArray" => is_array($value), "idExact" => is_array($value) && (($value["id"] ?? null) === $url), "type" => is_array($value) ? ($value["type"] ?? null) : null]]); }' \
+    >&2 || echo "Loops application actor-fetch diagnostic unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" loops-app php artisan tinker --execute=\
+'$url = getenv("AP_INTEROP_ACTOR_URI"); try { $response = Illuminate\Support\Facades\Http::withOptions(["allow_redirects" => false, "stream" => true, "on_headers" => function (Psr\Http\Message\ResponseInterface $response) { $length = $response->getHeaderLine("Content-Length"); if ($length !== "" && (int) $length > App\Services\ActivityPubService::MAX_RESPONSE_SIZE) { throw new RuntimeException("oversize"); } }])->withHeaders(["Accept" => "application/activity+json", "User-Agent" => app("user_agent")])->timeout(5)->connectTimeout(3)->get($url); $body = $response->toPsrResponse()->getBody(); $bytes = 0; $oversize = false; try { while (!$body->eof()) { $bytes += strlen($body->read(8192)); if ($bytes > App\Services\ActivityPubService::MAX_RESPONSE_SIZE) { $oversize = true; break; } } } finally { $body->close(); } dump(["frameworkHttp" => ["status" => $response->status(), "contentType" => $response->header("Content-Type"), "bytes" => $bytes, "oversize" => $oversize]]); } catch (Throwable $error) { $previous = $error->getPrevious(); dump(["frameworkHttp" => ["errorClass" => get_class($error), "errorCode" => $error->getCode(), "previousClass" => $previous ? get_class($previous) : null, "previousCode" => $previous ? $previous->getCode() : null]]); }' \
+    >&2 || echo "Loops framework HTTP diagnostic unavailable" >&2
+}
+
+peertube_diagnostics() {
+  echo "PeerTube fail-closed persistence diagnostics:" >&2
+  compose exec -T peertube-db /bin/sh -lc \
+    "PGPASSWORD=\"\$POSTGRES_PASSWORD\" psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -v ON_ERROR_STOP=1 -tAc \"
+      select concat('remote_actor_count=', count(*), ',public_key_count=', coalesce(sum(case when \\\"publicKey\\\" is not null and \\\"publicKey\\\" <> '' then 1 else 0 end),0)) from actor where url='${actor_sql}';
+      select concat('local_target_count=', count(*)) from actor where \\\"preferredUsername\\\"='${username_sql}' and \\\"serverId\\\" is null and \\\"accountId\\\" is not null;
+      select concat('accepted_follow_count=', count(*)) from \\\"actorFollow\\\" f join actor follower on follower.id=f.\\\"actorId\\\" join actor target on target.id=f.\\\"targetActorId\\\" where follower.url='${actor_sql}' and target.\\\"preferredUsername\\\"='${username_sql}' and target.\\\"serverId\\\" is null and target.\\\"accountId\\\" is not null and f.state='accepted';\"" >&2 || echo "PeerTube database diagnostics unavailable" >&2
+  compose ps peertube-app peertube-db peertube-redis >&2 || true
 }
 
 query_error_file=$(mktemp "${TMPDIR:-/tmp}/ap-follow-query.XXXXXX")
@@ -224,10 +311,23 @@ case "${TARGET}" in
     ;;
   friendica)
     friendica_diagnostics
-    compose logs --no-color friendica-app friendica-worker >&2 || true
+    compose ps friendica-app friendica-worker >&2 || true
     ;;
   castopod)
     compose logs --no-color castopod-app >&2 || true
+    ;;
+  peertube)
+    peertube_diagnostics
+    ;;
+  loops)
+    # Application logs may contain signed request context. Emit only fixed
+    # database and worker-health counters on a failed proof.
+    loops_diagnostics
+    ;;
+  owncast)
+    sqlite3 "${SCRIPT_DIR}/../runtime/owncast/owncast.db" \
+      "select 'owncast_remote_follower_count=' || count(*) || ',approved_count=' || coalesce(sum(approved_at is not null),0) || ',disabled_count=' || coalesce(sum(disabled_at is not null),0) from ap_followers where iri='${actor_sql}';" >&2 || true
+    compose ps owncast-app >&2 || true
     ;;
 esac
 exit 1

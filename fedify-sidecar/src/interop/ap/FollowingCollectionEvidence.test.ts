@@ -1,0 +1,111 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+// @ts-expect-error The executable proof helper is intentionally plain ESM without a declaration file.
+import { findProcessedSidecarAccept, hasProcessedSidecarAccept, queryFollowingMembership, resolveCanonicalRemoteActorUri } from "../../../interop/ap/scripts/assert-real-return-accept.mjs";
+
+const origin = {
+  remoteActorUri: "https://remote.example/users/bob",
+  canonicalRemoteActorUri: "https://remote.example/ap/users/123",
+};
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("public following collection evidence", () => {
+  it("finds exact membership through bounded same-origin pagination", async () => {
+    const responses = new Map([
+      ["https://activitypods.example/alice/following", {
+        id: "https://activitypods.example/alice/following",
+        type: "Collection",
+        first: "https://activitypods.example/alice/following?page=1",
+      }],
+      ["https://activitypods.example/alice/following?page=1", {
+        type: "CollectionPage",
+        items: [origin.canonicalRemoteActorUri],
+      }],
+    ]);
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const body = responses.get(String(url));
+      return new Response(JSON.stringify(body), {
+        status: body ? 200 : 404,
+        headers: { "content-type": "application/activity+json" },
+      });
+    }));
+
+    await expect(queryFollowingMembership(origin, "https://activitypods.example/alice/following"))
+      .resolves.toBe(true);
+  });
+
+  it("rejects pagination that escapes the ActivityPods authority", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      type: "Collection",
+      first: "https://evil.example/collect",
+    }), { status: 200 })));
+
+    await expect(queryFollowingMembership(origin, "https://activitypods.example/alice/following"))
+      .rejects.toThrow(/escaped its authority/u);
+  });
+
+  it("rejects a following response redirected outside its requested authority", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://evil.example/collect" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(queryFollowingMembership(origin, "https://activitypods.example/alice/following"))
+      .rejects.toThrow(/redirect escaped its requested HTTPS authority/u);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds a requested actor alias to a same-authority canonical actor id", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: origin.canonicalRemoteActorUri,
+      type: "Person",
+    }), { status: 200 })));
+
+    await expect(resolveCanonicalRemoteActorUri(origin.remoteActorUri))
+      .resolves.toBe(origin.canonicalRemoteActorUri);
+  });
+
+  it("rejects a canonical actor id that escapes the requested authority", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: "https://evil.example/ap/users/123",
+      type: "Person",
+    }), { status: 200 })));
+
+    await expect(resolveCanonicalRemoteActorUri(origin.remoteActorUri))
+      .rejects.toThrow(/escaped its requested HTTPS authority/u);
+  });
+
+  it("rejects a non-actor document even when its id stays on the requested authority", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      id: origin.canonicalRemoteActorUri,
+      type: "Note",
+    }), { status: 200 })));
+
+    await expect(resolveCanonicalRemoteActorUri(origin.remoteActorUri))
+      .rejects.toThrow(/supported ActivityStreams actor type/u);
+  });
+
+  it("correlates the queued envelope with its post-verification processed receipt", () => {
+    const identity = {
+      canonicalRemoteActorUri: origin.canonicalRemoteActorUri,
+    };
+    const acceptActivityId = "https://remote.example/ap/users/123#accepts/follows/1";
+    const receipt = JSON.stringify({
+      msg: "Inbound activity processed",
+      envelopeId: "envelope-1",
+      activityId: acceptActivityId,
+      actor: identity.canonicalRemoteActorUri,
+      type: "Accept",
+    });
+
+    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-1", acceptActivityId)).toBe(true);
+    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-2", acceptActivityId)).toBe(false);
+    expect(hasProcessedSidecarAccept(receipt, identity, "envelope-1", `${acceptActivityId}-other`)).toBe(false);
+
+    expect(findProcessedSidecarAccept([
+      { envelopeId: "rejected-envelope", acceptActivityId, streamId: "1-0", path: "/alice/inbox" },
+      { envelopeId: "envelope-1", acceptActivityId, streamId: "2-0", path: "/alice/inbox" },
+    ], receipt, identity)).toMatchObject({ envelopeId: "envelope-1", streamId: "2-0" });
+  });
+});

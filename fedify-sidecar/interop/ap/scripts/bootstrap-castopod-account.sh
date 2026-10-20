@@ -43,14 +43,10 @@ done
   exit 1
 }
 
-# Castopod 1.9.0's pinned spark front controller does not load its production
-# Boot file before constructing the logger. Prepending that unmodified,
-# image-owned Boot file supplies the intended production CI_DEBUG=false value
-# without patching the server or weakening its federation runtime.
+# The fixture's read-only PHP configuration prepends Castopod's unmodified
+# production Boot file for every web, cron, and CLI entry point.
 spark() {
-  compose exec -T castopod-app php \
-    -d auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php \
-    spark "$@"
+  compose exec -T castopod-app php spark "$@"
 }
 
 spark install:init-database
@@ -59,8 +55,6 @@ if ! compose exec -T castopod-db /bin/sh -lc \
   printf '%s\n%s\n' "${CASTOPOD_ADMIN_PASSWORD}" "${CASTOPOD_ADMIN_PASSWORD}" | \
     spark install:create-superadmin -n interopadmin -e interop@castopod.org
 fi
-compose exec -T -e AP_INTEROP_CASTOPOD_HANDLE="${HANDLE}" castopod-app php \
-  -d auto_prepend_file=/var/www/castopod/app/Config/Boot/production.php \
-  spark interop:create-podcast
+compose exec -T -e AP_INTEROP_CASTOPOD_HANDLE="${HANDLE}" castopod-app php spark interop:create-podcast
 
 echo "Bootstrapped Castopod federation target ${HANDLE}"
