@@ -110,3 +110,66 @@ AP HTTP signature, AT repository commit signature and DID PLC rotation signature
 5. What are the exact app capability checks and internal action authentication paths? Reject generic service-level `system` impersonation by external callers.
 
 **Phase disposition:** The contract is a design artifact only. Group provisioning, membership, AT Group Host and federated Group dispatch are **not implemented**. Do not promote G1 as complete on the basis of this document, existing `groups.js`, or a green legacy-security test PR.
+
+## 9. Application-neutral group capability, SAI consent and per-group delegation
+
+**Architectural invariant:** Paper is only one of potentially many ActivityPods clients. The hosting ActivityPods provider issues Group identity and authoritative role/membership state. No app URI is hard-coded as the unique Group UI or long-term operator, and a group's continued existence is not dependent on Paper's installation or availability.
+
+### Evidence from the current ActivityPods app framework
+
+- `app-framework/app/service.js` declares `settings.accessNeeds.required` and `optional` and registers both groups of needs.
+- `pod-provider/backend/services/sai/applications.js` resolves the app's required access needs and special rights from its advertised Access Need Groups.
+- `pod-provider/backend/services/sai/auth-agent.js` provides `registerApp`, `upgradeApp` and `removeApp` flows, passing accepted access needs and special rights to app registrations.
+- `pod-provider/backend/services/sai/access-authorizations.js` persists application-specific authorizations and supports retrieval of special rights; `data-authorizations.js` handles access needs for Shape Tree-registered resources.
+- The provider also implements OAuth consent services. **Solid-OIDC authentication, OAuth token scopes, SAI app registration/resource grants, and group-specific provider operation delegations are not automatically the same entitlement.** Group operation checks must bind these layers explicitly and avoid granting privileges by merely detecting a successful login.
+- Existing `apods:CreateAclGroup` and WAC `acl:Control` grant WebACL-related actions, **not** the right to issue or administer a federated social Group.
+
+References: [ActivityPods app framework](https://github.com/outlaw-dame/activity-pods/blob/master/app-framework/app/service.js), [SAI auth agent](https://github.com/outlaw-dame/activity-pods/blob/master/pod-provider/backend/services/sai/auth-agent.js), [SAI authorization storage](https://github.com/outlaw-dame/activity-pods/blob/master/pod-provider/backend/services/sai/access-authorizations.js), [ActivityPods permissions docs](https://docs.activitypods.org/app-framework/backend/handling-permissions/).
+
+### Proposed three-part authorization model
+
+1. **App access and provider capability:** The user explicitly authorizes the identifiable app for well-scoped group actions, and the provider permits this app to request those operations. Approved app status is a ceiling, not proof of user consent.
+2. **Per-group delegation:** For management actions, an app is allowed to act on an explicitly selected Group and operation set, not all groups globally by default. The provider stores the delegation in its durable authoritative authorization registry, with expiry/revocation, actor/app/group binding, and versioning.
+3. **Current effective group authority:** At mutation and signer boundaries the provider reevaluates the acting human/automated principal's live group role, suspended/removed state, group policy revision, provider restrictions and object/visibility ACL. An app cannot grant group roles it lacks authorization to assign.
+
+**Example proposed app permission vocabulary (not existing framework rights; exact names are provisional and subject to operation inventory):**
+
+| Proposed permission | Meaning | Default consent posture |
+| --- | --- | --- |
+| `apods:ReadGroups` | Read group metadata/content the user may access | Optional unless essential for app function; no member-directory disclosure implied |
+| `apods:CreateGroup` | Request provider-issued group creation | Just-in-time on Create Group, with provider eligibility checks |
+| `apods:JoinGroups` | Request/accept/leave membership as user | Optional, user-scoped |
+| `apods:ContributeToGroups` | Submit contributions using user identity | Optional; no automatic group-actor signing |
+| `apods:ManageGroupMembers` | Moderate admissions/membership where principal authorized | Optional; per-group delegation required |
+| `apods:ModerateGroups` | Apply authorized moderation to group | Optional; per-group delegation required |
+| `apods:ManageGroupSettings` | Change group boundaries and configuration as allowed | Optional; per-group delegation required |
+| `apods:ManageGroupGovernance` | Grant/revoke roles; protected governance transitions | Optional, elevated reauthorization; per-operation controls |
+
+**Avoid unnecessary consent prompts:** Apps request only operations they actually support. Ordinary participation needs no blanket group-administration scope. Initial registration can contain minimal access needs; additional privileges may use ActivityPods' `upgradeApp` path. High-risk provider actions can additionally use transaction-bound step-up approval. The scope vocabulary and exact mechanism (SAI special rights extension vs OAuth claim vs a separate provider-issued operation grant) require implementation review; **a new SAI right alone is not sufficient enforcement**.
+
+**Do not mistake group resource access for a Pod-wide grant.** Shape Tree permissions apply to explicitly registered resource types; no app obtains unrestricted access to every user's Pod by holding a group action permission. A group's owner cannot authorize access to another member's Pod resources. Similarly `apods:ReadInbox` and `apods:ReadOutbox` are not automatically required just to receive group notifications; prefer a scoped event subscription when supported.
+
+### App portability and simultaneous apps
+
+Alice may authorize Paper, a forum-oriented ActivityPods client, and a third moderation dashboard independently. All three resolve the **same** provider-issued Group actor URI, AT DID and revisioned group governance, but each receives independent app-specific grants. Revoking Paper must not suspend/delete the group, strip Alice's legitimate member/owner role, or revoke another app's authorization; it must terminate Paper's ability to perform new group actions (including queued or signed actions) and revoke associated group-specific access/subscriptions and credentials. Neither an app installation nor its service credentials imply ownership of the Group.
+
+A group may outlive its original creator/app and have co-owners. If Alice leaves, other authorized owners can continue group governance. If the hosting provider suspends the Group, all app and group operation grants are subordinate to suspension.
+
+### Security and negative acceptance tests
+
+- App is authenticated through Solid-OIDC but did not obtain `CreateGroup` authorization: creation denied.
+- App has `CreateGroup` permission but provider disabled group issuance: creation denied before any durable side effects.
+- Alice authorizes group moderation in Group A but not Group B: Group B mutation/signing denied despite app-level general moderation permission.
+- Alice is removed as moderator while app retains consent: all subsequent moderation and queued operations fail, including stale signed-action authorization.
+- Two apps have independent grants; revoking App A cannot revoke App B or destroy the Group.
+- Group owner Alice changes applications; Group actor URI, AT DID, content ownership and group role history remain stable.
+- App asks for `apods:CreateAclGroup` or `acl:Control` but not a social group operation: cannot create or govern an AP Group.
+- App requests only group member interaction: no implicit access to personal inbox, all Pod data, group owner keys, or full member directory.
+- Login alone never confers app provisioning permission; remote AP follower state alone never confers restricted group membership.
+- Replay of an expired app-group grant, cross-user or cross-group request, wrong app ID, retired group, changed policy revision or mismatched signed payload: deny.
+- OAuth consent, SAI access-grant and provider group-operation checks cannot be confused or bypassed by an untrusted client-controlled `ctx.meta` field.
+- Concurrent permission revocation and queued delivery use revision-fenced decisions; no post-revocation group action is newly authorized.
+
+### G1 implementation decision gate
+
+Before coding any group permission screen, map each provider Group API to (a) a canonical authenticated principal, (b) a registered app and approved capability, (c) user consent where required, (d) group-specific delegated grants, (e) current owner/role authorization, and (f) resource policy. Add authorization denial integration tests for every sensitive mutation and for the internal signer. Keep the vocabulary provider-wide and app-neutral; do not introduce Paper-specific hard-coded grants.
