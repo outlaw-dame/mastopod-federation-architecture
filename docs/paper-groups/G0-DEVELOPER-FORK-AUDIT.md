@@ -79,3 +79,15 @@ An added top-level `activitpod-aptoroto` entry is present in the comparison. The
 - [ADSP status](../activitypods-distributed-scalability/STATUS.md) — existing deployment and transport gates.
 
 **Evidence scope:** Source inspection on accessible fork branches on 2026-11-06. The developer branch was not executed, dependencies were not exhaustively traced, and no claim of end-to-end PDS compliance is made. Revalidate against pinned SHAs before forward-porting.
+
+## 2026-11-06 implementation update — reuse existing ActivityPods groups service
+
+**Important correction:** `outlaw-dame/activity-pods/pod-provider/backend/services/groups.js` already exists on current master and provisions `foaf:Group`/`as:Group` group WebIDs, group account records, Solid storage, and owner WebACL rights. This is a **legacy group-account/storage implementation**, not evidence of completed threadiverse federation, collective group-role policy, native Group Host/Spaces, or a group AT DID. Reuse the existing identity path where compatible; do not create a second independent group registry until a proof shows a genuinely missing responsibility.
+
+- The provider defines `SEMAPPS_ENABLE_GROUPS`; the Moleculer pod-cell loads `services/*.js` and `services/**/*.js`. A service-level create guard is therefore required independent of UI.
+- The legacy `groups.claim` action formerly added a caller-supplied `groupWebId` to an account's `owns` collection without proving the target was a provider-registered group owned by the claimant. This is an ownership-link IDOR/authorization issue.
+- **Code PR:** [ActivityPods #116](https://github.com/outlaw-dame/activity-pods/pull/116), draft: adds an exact registered-group ownership check, preflight slug validation, provider feature-gate enforcement and Jest coverage. It intentionally does not add group DID issuance, collective permissions or alter the dual-stack signing authority contract.
+- ActivityPods signing service `_validateLocalActor` already resolves canonical local actors from `auth.account.findByWebId` and actor documents, regardless of Person/Group; `_resolveActivityPubSigningMaterial` requires a unique attached actor-owned RSA key. Real group provisioning and key attachment must be proven before describing this as functional group signing.
+- Existing `identitybindings.service.js` currently hard-requires `canonicalAccountId === webId` on an account upsert path. Group identity bindings must not be forced into an account binding or silently made equivalent to a group DID; define a separate provider-authoritative group binding or explicit typed extension following an architecture review.
+
+**G1 decision:** Security-hardening the existing legacy group path can ship as a narrow reviewed change. Genuine dual-protocol group issuance requires a subsequent, isolated provider-authoritative provisioning design and tests, including crash/partial-provisioning recovery.
