@@ -91,3 +91,10 @@ An added top-level `activitpod-aptoroto` entry is present in the comparison. The
 - Existing `identitybindings.service.js` currently hard-requires `canonicalAccountId === webId` on an account upsert path. Group identity bindings must not be forced into an account binding or silently made equivalent to a group DID; define a separate provider-authoritative group binding or explicit typed extension following an architecture review.
 
 **G1 decision:** Security-hardening the existing legacy group path can ship as a narrow reviewed change. Genuine dual-protocol group issuance requires a subsequent, isolated provider-authoritative provisioning design and tests, including crash/partial-provisioning recovery.
+
+### Validated narrow implementation evidence (2026-11-06)
+
+- ActivityPods [draft PR #116](https://github.com/outlaw-dame/activity-pods/pull/116) head `5b42900b85639414351e49a7625ce69edc56f73a` passed [Backend checks run 42277497826](https://github.com/outlaw-dame/activity-pods/actions/runs/42277497826): **131 test suites and 1006 Jest tests passed**.
+- Implementation adds authoritative `SEMAPPS_ENABLE_GROUPS` create gating, pre-side-effect group-slug validation, strict registered local group-ownership proof for claims, deleted/disabled lifecycle checks, malformed URL normalization rejection and sequential claim replay suppression. It also tests Group actor provenance in the existing ActivityPods signer.
+- The offline ATProto multibase script passed its local checks; its remote `serviceValidation` subcheck was **skipped** due to failed fetch and does not establish remote PDS conformance.
+- **G0/G1 remains incomplete.** This PR does not prove crash-safe account/WebID/Pod provisioning, concurrent-claim transactionality, group signing-key attachment, native group DID issuance, provider-delegated collective membership, or cross-protocol restricted federation. The source fork and existing provider code require further reviewed integration. Keep the code PR draft until outstanding gates are met.
