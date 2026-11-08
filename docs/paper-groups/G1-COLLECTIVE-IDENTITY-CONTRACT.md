@@ -347,3 +347,16 @@ Configuration: `PROVIDER_COLLECTIVES_RESERVATIONS_ENABLED`, `PROVIDER_COLLECTIVE
 Still missing: full real OIDC/SAI browser-provider end-to-end proof; sender-constrained client authorization; service-to-service worker issuer/reconciliation; rate limits and audit telemetry; restart/retry safety for real AP keys and DID genesis; provider-governed membership; real `Group` actor dereference, collections, signing and ActivityPub/ATProto interop. Keep all Group functionality disabled by default and the implementation PR in draft until proven.
 
 **Proof status:** Actual isolated Fuseki TDB2 concurrency/restart proof has passed. SAI and Solid-OIDC service interactions have regression tests using test doubles; do not represent them as an authenticated production integration test.
+
+## 15. Final reviewed incremental verification (2026-11-08)
+
+Current source head of [ActivityPods draft PR #117](https://github.com/outlaw-dame/activity-pods/pull/117): `ce33fd587efd0e2dbf8118d8d3f2650b9030348d`.
+
+- [Backend checks 42466061490](https://github.com/outlaw-dame/activity-pods/actions/runs/42466061490): **134/134 test suites, 1,067/1,067 Jest tests passed**, including the Group projection validator, Fuseki reservation adapter fixtures, live SAI consent policy checks and reverified Solid-OIDC gateway tests.
+- [Frontend checks 42466061462](https://github.com/outlaw-dame/activity-pods/actions/runs/42466061462): completed **successfully**, including the frontend production build and tests.
+- [Real Fuseki TDB2 integration 42466061497](https://github.com/outlaw-dame/activity-pods/actions/runs/42466061497): completed **successfully**. It uses the service's actual SPARQL conditional writes, validates 12 concurrent reservations, rejects concurrent stale CAS updates and checks persisted revision after container restart.
+- The backend workflow retains native dependency execution, installing system libvips rather than depending on an unreliable external Sharp binary download. It has bounded retries without skipping all native postinstall work.
+
+**Verified outcome:** durable G1 reservation, revision-fenced staging, application-independent provider records, current SAI registration/special-right gating, a provider-only worker token boundary, and a disabled-by-default, signed-Solid-OIDC provider-mediated reservation route are implemented and tested at the levels above.
+
+**Not verified/not built:** production sender-constrained OIDC or step-up; actual in-browser SAI registration/revocation against the running provider; a durable worker issuer/reconciler; AP Group signing-key issuance, valid AT DID genesis, group activation, Fedify Group dispatch/collections, or cross-protocol community federation. **G1 is not complete and PR #117 must remain draft/unmerged.**
