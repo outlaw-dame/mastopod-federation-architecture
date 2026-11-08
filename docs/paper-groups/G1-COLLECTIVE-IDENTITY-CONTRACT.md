@@ -259,7 +259,7 @@ The PR adds `pod-provider/backend/services/utils/collective-identity-boundary.js
 - **Resumption:** `get` returns persisted current stage/revision for authorized users, enabling later reconciler design without in-memory-only state; actual worker leases, scanning and external-step replay evidence remain to be implemented.
 - **Security tests:** malformed URI, missing/tampered/expired grants, disabled provider, conflicting requests, cross-user IDOR, cross-app authority, concurrent reservations and CAS, stable IDs across grant-key rotation, simulated restart using retained store, write failure and recovery.
 
-**CI:** [ActivityPods Backend checks 42445546684](https://github.com/outlaw-dame/activity-pods/actions/runs/42445546684) on commit `5fb504ddf8d9d33236b41cf72c56a9dce802491d`: **132/132 Jest suites and 1011/1011 tests passed.** All new service persistence tests use a fake SPARQL adapter that models conditional writes. CI success **does not prove live Jena/Fuseki concurrency, durability, replicated-service behavior or public authorization integration**.
+**Final checked CI:** [ActivityPods Backend checks 42445818480](https://github.com/outlaw-dame/activity-pods/actions/runs/42445818480) on commit `5bdde01b2d88644ec44fc8fe9bb067911b749488`: **132/132 Jest suites and 1013/1013 tests passed.** All new service persistence tests use a fake SPARQL adapter that models conditional writes. CI success **does not prove live Jena/Fuseki concurrency, durability, replicated-service behavior or public authorization integration**.
 
 ### Required gates before enabling the default-off service
 
@@ -270,4 +270,4 @@ The PR adds `pod-provider/backend/services/utils/collective-identity-boundary.js
 5. Provide the authenticated provider collective actor lookup and real Fedify Group dispatcher and collections, without routing through `auth.account` or `Person`.
 6. Verify multi-app access and role-based per-group delegation beyond the initial owner-only restriction.
 
-**Status:** The persisted reservation and revision-fenced staging subsystem is coded and unit-tested. **Complete G1 collective issuance, app/user authorization integration, external reconciliation and group federation are NOT yet complete.** Keep ActivityPods PR #117 draft and disabled until gates pass. Neither its passing CI nor its submitted source is evidence of production Group provisioning.
+**Status:** The provider-side reservation and revision-fenced staging subsystem is coded and unit-tested; its provider-origin handling accepts an optional canonical trailing slash without creating double-slash actor IDs. **Complete G1 collective issuance, app/user authorization integration, external reconciliation and group federation are NOT yet complete.** Keep ActivityPods PR #117 draft and disabled until gates pass. Neither its passing CI nor its submitted source is evidence of production Group provisioning.
