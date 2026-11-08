@@ -360,3 +360,28 @@ Current source head of [ActivityPods draft PR #117](https://github.com/outlaw-da
 **Verified outcome:** durable G1 reservation, revision-fenced staging, application-independent provider records, current SAI registration/special-right gating, a provider-only worker token boundary, and a disabled-by-default, signed-Solid-OIDC provider-mediated reservation route are implemented and tested at the levels above.
 
 **Not verified/not built:** production sender-constrained OIDC or step-up; actual in-browser SAI registration/revocation against the running provider; a durable worker issuer/reconciler; AP Group signing-key issuance, valid AT DID genesis, group activation, Fedify Group dispatch/collections, or cross-protocol community federation. **G1 is not complete and PR #117 must remain draft/unmerged.**
+
+## 16. G1 high-trust authorization and durable lease-fenced provisioning boundary (2026-11-08)
+
+[ActivityPods draft PR #117](https://github.com/outlaw-dame/activity-pods/pull/117) now contains **three** mutually reinforcing security boundaries for collective identity reservations:
+
+1. **User/application consent:** a provider-verified Solid-OIDC subject and authorized app identity; current local account status; explicit SAI app registration and `apods:CreateGroup` for reservation or `apods:ReadGroups` for reads; provider-approved app allowlist. No app, including Paper, owns the Group after creation.
+2. **High-trust sender proof for the experimental HTTP reservation route:** a signed, short-lived token carrying exact issuer, audience, `sub == webid`, `azp`, recent `iat` and **recent `auth_time`**, nonempty authentication methods, and `cnf.jkt` binding to the actual DPoP signing key. The HTTP request's DPoP JWS must prove method, URI, JWK thumbprint and `ath` matching the exact bearer token; Redis atomic replay fencing rejects a used JTI. Invalid or absent claims fail closed. This is cryptographic gating **not proof that the current Solid-OIDC provider already issues suitable bound tokens**.
+3. **Independent provider worker ownership:** operations that change provisioning stages require a distinct signed worker grant, with exact Group ID, stage, revision, worker ID, lease epoch and lease-token digest. A live lease record is maintained by conditional SPARQL writes in the authoritative Fuseki settings dataset; claims are unique, renewals and releases are token-scoped, and expired ownership may be reclaimed after a crash. The Group lifecycle CAS **atomically requires** matching nonexpired worker lease fields in its own conditional write. App operation tokens cannot substitute for worker credentials.
+
+### Verification categories and non-equivalence
+
+- **Actual Redis/DPoP cryptography:** Jest signs real ES256 JWTs and DPoP JWS, validates `cnf.jkt`, `ath`, endpoint/method, wrong bearer, wrong key and JTI replay; Redis nonce consumption uses atomic `GETDEL` instead of a `GET`/ `DEL` race.
+- **Actual Fuseki/TDB2 integration:** isolated CI uses persistent Fuseki storage for 12-worker contention, renewal/release, lease expiration and recovery following container restart, plus 12-way identity reservation and single-winner stage CAS. Test operation credentials are fixtures, not production worker identities.
+- **SAI and Solid-OIDC service integration:** permission / account checks and gateway binding are tested with service call doubles. The cryptographic verification pieces have an additional combined real-signature test. This **is not** a running-provider browser/OIDC/SAI end-to-end authorization ceremony.
+- **Feature status:** Group service, API and lease worker capability remain **off by default** and the PR is draft/unmerged; no live AP Group actor, key material, DID, group member store or active federation has been issued.
+
+### Critical unresolved production gates
+
+1. Current ActivityPods Solid-OIDC configuration emits long-lived ID tokens and is **not verified to issue short-lived `cnf.jkt`-bound tokens with recent real `auth_time`** suitable for this Group API. Implement and test an interoperable sender-constrained token issuance and reauthentication flow—or replace with an equally secure user-verified, request-bound step-up flow—without changing established Solid-OIDC client behavior.
+2. Exercise **real browser sign-in → app manifest/Solid consent sheet → SAI grant → authenticated Group reservation → revocation** against a running ActivityPods provider, including denied rights, client substitution and a revoke-vs-reserve race. Existing mocks and signed-fixture tests are insufficient.
+3. Build a **trusted provider worker credential issuer and actual reconciliation executor** which securely uses the new durable leases. An app must never receive the worker key or obtain a grant for another worker's lease. Confirm bounded retry/backoff, crash recovery, telemetry, leasing under multiple replicas and correct state transitions under fault injection. Lease plumbing alone is not the worker.
+4. Implement provider-controlled AP Group key creation with durable side-effect evidence, actual AT DID genesis/signing/verification, actor profile and collections, and complete cross-protocol privacy controls **before any transition to active**.
+5. Review Redis `GETDEL` availability across supported Redis deployments (requires Redis 6.2+), lease expiry clock skew and production backup/restore of stable identity derivation and signing secrets.
+
+**Implementation status:** provider-side high-trust and worker-fencing foundations are coded, tests/checks are running, but complete G1 provisioning is **not yet deliverable**. Do not equate an isolated passing proof with production issuance, group governance or federation.
