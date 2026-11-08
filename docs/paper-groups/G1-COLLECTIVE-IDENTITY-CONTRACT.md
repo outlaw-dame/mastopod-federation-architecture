@@ -233,3 +233,13 @@ Names and shapes are working interfaces, not additional deployed microservices. 
 ### Decision gate
 
 **Do not implement production Fedify Group dispatch against the existing Person-only `/users/{identifier}` or synthetic collection APIs.** First agree the provider's typed Group record, public Group URI/namespace, signing-key attachment and exact authorization operation path. Then implement with live provider + sidecar integration tests and separate reviewable PRs. This protects the agreed authority model while leaving ordinary Person and Service federation behavior unchanged.
+
+## 11. G1 implementation increment — pure public projection boundary (2026-11-07)
+
+**Draft runtime PR:** [ActivityPods #117](https://github.com/outlaw-dame/activity-pods/pull/117) on `feat/collectives-g1-authority-boundary`.
+
+The PR adds `pod-provider/backend/services/utils/collective-identity-boundary.js` and a focused Jest regression suite. The module strictly screens a **provider-originated and separately authorized** typed public Group projection: exact provider/actor URI, state `active`, revision numbers, public endpoint URI consistency, public key URI binding shape, and explicit field allowlisting (no private membership, group-policy internals or key secrets). A separate DID helper checks managed `did:plc` syntax **only**.
+
+**Do not misrepresent this increment:** It is not a functioning provider Group store, provisioning saga, DID genesis/PLC validation, API authorization, signing enforcement or Fedify Group dispatcher. No public service route or database mutation is introduced. The input **must** be from trusted provider-authoritative storage and separately authorized; the helper does not prove source authenticity, signer possession or DID control.
+
+**Status at documentation update:** Implementation committed to a draft PR. Backend checks are pending; green CI is not claimed. G1 remains in progress. Subsequent steps must establish actual provider persistence and authoritative lookup before integrating this DTO with a public actor route.
