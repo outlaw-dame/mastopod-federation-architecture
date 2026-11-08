@@ -1,5 +1,7 @@
 # G1 Design Contract — Provider-Issued Collective Identity
 
+> **CURRENT G1 IMPLEMENTATION DECISION (2026-11-08):** Provider-owned Group creation uses ActivityPods' **existing Solid-OIDC login and SAI application consent**. Passkeys/WebAuthn, a Group-only step-up token issuer, and new login ceremonies are **not** dependencies of G1. Those additions were removed from the draft [ActivityPods PR #117](https://github.com/outlaw-dame/activity-pods/pull/117); shared OAuth/Passkey service changes were reverted. Earlier implementation-history sections discussing mandatory WebAuthn/DPoP step-up are **SUPERSEDED**, retained only for the audit trail; do not implement them. Keep the separate provider reservation, identity validation, SAI checks, TDB2 concurrency and provider-worker lease architecture. Creation stays disabled by default pending real provider integration and revocation-at-commit fencing.
+
 **Status:** PROPOSED CONTRACT / NOT IMPLEMENTED  
 **Project:** Paper — dual-protocol Group actors  
 **Date:** 2026-11-06  
@@ -310,7 +312,7 @@ These checks are made before reserve/read actions, not supplied by the caller in
 
 Do not interpret application authorization, owner status or an HMAC grant alone as sufficient authority. The publisher's authorization must survive cross-component execution without silently broadening audience or protocol scopes.
 
-## 14. Default-off Solid-OIDC→SAI→reservation ingress and worker separation (2026-11-08)
+## 14. Default-off Solid-OIDC→SAI→reservation ingress and worker separation (2026-11-08) — **SUPERSEDED authentication design (audit history only)**
 
 **Draft code:** [ActivityPods #117](https://github.com/outlaw-dame/activity-pods/pull/117). This is an independent ActivityPods provider capability, not a Paper-specific service or a complete Group implementation.
 
@@ -361,7 +363,7 @@ Current source head of [ActivityPods draft PR #117](https://github.com/outlaw-da
 
 **Not verified/not built:** production sender-constrained OIDC or step-up; actual in-browser SAI registration/revocation against the running provider; a durable worker issuer/reconciler; AP Group signing-key issuance, valid AT DID genesis, group activation, Fedify Group dispatch/collections, or cross-protocol community federation. **G1 is not complete and PR #117 must remain draft/unmerged.**
 
-## 16. G1 high-trust authorization and durable lease-fenced provisioning boundary (2026-11-08)
+## 16. G1 high-trust authorization and durable lease-fenced provisioning boundary (2026-11-08) — **SUPERSEDED authentication design (audit history only)**
 
 [ActivityPods draft PR #117](https://github.com/outlaw-dame/activity-pods/pull/117) now contains **three** mutually reinforcing security boundaries for collective identity reservations:
 
@@ -388,7 +390,7 @@ Current source head of [ActivityPods draft PR #117](https://github.com/outlaw-da
 
 **Implementation status:** provider-side high-trust and worker-fencing foundations are coded and these targeted tests passed. The current Solid-OIDC issuer still needs an interoperable sender-bound token issuance/reauthentication flow, the full running-provider SAI consent/revocation E2E test remains unperformed, and the trusted provisioning executor and real cryptographic identity issuance are absent. Complete G1 provisioning is **not yet deliverable**. Do not equate an isolated passing proof with production issuance, group governance or federation.
 
-## 17. Dedicated high-trust Group credential issuer and running gateway test (2026-11-08)
+## 17. Dedicated high-trust Group credential issuer and running gateway test (2026-11-08) — **SUPERSEDED authentication design (audit history only)**
 
 The ActivityPods G1 draft PR now implements a **purpose-limited step-up bridge** that leaves ordinary Solid-OIDC ID-token issuance and existing clients unchanged. This intentionally avoids changing the ordinary long-lived Solid credential's security semantics.
 
@@ -421,3 +423,15 @@ The running HTTP test uses a virtual P-256 authenticator to generate a **real si
 Before enabling the feature, execute an **actual provider deployment** integration flow covering real Solid-OIDC browser sign-in, on-screen SAI acceptance/denial, persistent ApplicationRegistration and AccessAuthorization records, authenticated passkey step-up with the configured browser origin, real Fuseki reservation, and revocation-vs-reservation concurrency. Confirm DPoP transport and issuer/host trust under the deployed proxy configuration; verify Redis 6.2+ and backed-up independent secrets. Implement provider policy revision fencing if the revoke-versus-write race remains possible. Until demonstrated, keep all Group mutation feature flags off, PR draft, and no activated Group actor or DID issuance.
 
 Additional secrets: `PROVIDER_COLLECTIVES_STEPUP_SECRET` signs only Group credentials; `PROVIDER_COLLECTIVES_STEPUP_ISSUER_SECRET` signs short-lived mint attestations. Both must be distinct from each other, the Solid-OIDC JWK, `PROVIDER_COLLECTIVES_GRANT_SECRET`, `PROVIDER_COLLECTIVES_WORKER_SECRET`, and `PROVIDER_COLLECTIVES_ID_KEY`.
+
+## 18. Corrected G1 implementation — reuse native Solid-OIDC and SAI (2026-11-08)
+
+The working decision is **no mandatory passkeys for Group creation**. The proposed implementation no longer creates or consumes a Group-specific WebAuthn attestation or credential, does not change the shared OAuth/DPoP or passkey services, and does not require an app to implement another login flow.
+
+The default-off `POST /api/collectives/reserve` route uses existing ActivityPods gateway authentication and authorization. It independently re-verifies the same signed Solid ID token with the established provider key, checks signed `sub`, `webid`, `azp`, issuer and audience against gateway-verified identity, then derives the exact principal and application identity server-side. The existing app SAI registration and explicit `apods:CreateGroup` rights are checked at the authoritative reservation service. Neither the client-provided JSON nor a separate passkey establishes Group ownership.
+
+The provider-owned operation-grant signature, application-neutral collective identity, persistent idempotent reservation, provider worker leases and revision-fenced Fuseki state transitions remain intact. Group identities are not activated and no AP/ATProto signing keys or DIDs have been issued.
+
+**Release gates remain:** validate the actual running provider's Solid-OIDC issuer and SAI records, genuine browser consent and revocation flow, and a transaction-level policy revision fence for revocation racing a reservation commit. Complete the provider-worker reconciler, AP signing/DID issuance and federated Group actor/collections separately. Do not claim production readiness from isolated fixture-based HTTP tests and TDB2 integration proofs.
+
+**Engineering decision standard:** Before adding code, verify that the feature belongs in the architecture, solves a demonstrated requirement, reuses available provider capabilities, and does not introduce unnecessary dependencies, duplicate authentication, or scope drift. Passing security tests cannot justify an unneeded feature.
