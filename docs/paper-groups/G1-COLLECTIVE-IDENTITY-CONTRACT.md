@@ -309,3 +309,41 @@ These checks are made before reserve/read actions, not supplied by the caller in
 5. Service configuration/secret rotation operational runbook. No new default-on Group functionality.
 
 Do not interpret application authorization, owner status or an HMAC grant alone as sufficient authority. The publisher's authorization must survive cross-component execution without silently broadening audience or protocol scopes.
+
+## 14. Default-off Solid-OIDC→SAI→reservation ingress and worker separation (2026-11-08)
+
+**Draft code:** [ActivityPods #117](https://github.com/outlaw-dame/activity-pods/pull/117). This is an independent ActivityPods provider capability, not a Paper-specific service or a complete Group implementation.
+
+### Implemented reservation ingress
+
+`pod-provider/backend/services/collective-reservations-api.service.js` conditionally registers `POST /api/collectives/reserve` when **both** `PROVIDER_COLLECTIVES_RESERVATIONS_ENABLED=true` and `PROVIDER_COLLECTIVES_API_ENABLED=true`. The route requires gateway authentication and authorization.
+
+The handler re-verifies the provider-signed Solid-OIDC JWT with the provider's `jwk.verifyToken`; **neither the principal WebID nor app WebID is taken from request JSON**. It derives:
+- app identity from signed `azp` and checks it against the gateway's verified app projection;
+- human identity from signed `webid` and checks it against the gateway's impersonated-user projection;
+- actual token audience `aud` against the app, `iss` against the provider, and `iat` within a 10-minute issuance window;
+- an appropriately formatted `Idempotency-Key` from the HTTP header.
+
+Using shared exact request-fingerprint generation (`utils/collective-grant-claims.js`), the gateway mints a bounded, short-lived HMAC operation token **inside provider services**, invokes `collective-reservations.reserve` and returns only inactive reservation details. The app does not receive the internal grant or any signing material.
+
+The reservation service **independently** checks `auth.account.findByWebId` (including disabled/deleted/suspended-account rejection), exact provider-approved app URI, `app-registrations.isRegistered`, and `access-authorizations.getSpecialRights` for `apods:CreateGroup`. A read instead requires `apods:ReadGroups`. These proposed rights are visibly labeled on the existing ActivityPods SAI consent sheet in English and French; they are not blanket personal Pod rights.
+
+### Internal worker boundary
+
+Lifecycle `advance` does **not** accept an app-signed `provider.collective.reservation.v1` token. It requires a distinct `provider.collective.worker.advance.v1` grant with a separate `PROVIDER_COLLECTIVES_WORKER_SECRET`, bound to exact Group ID, expected revision and next stage. The worker issuer, step evidence, reconciler and safe side-effect handling are **not implemented**. No active/public status transition is exposed. Worker tokens must never be minted or returned through user app routes.
+
+### Security and privacy findings incorporated
+
+- Valid Solid WebIDs containing a fragment such as `#me` are supported; actor and app URI parsing is separately stricter.
+- HMAC checks reject malformed Unicode or nonhex digests before `timingSafeEqual`, preventing unequal-buffer-length crypto exceptions.
+- Group IDs depend on stable provider identity key, not the rotatable app or worker signing secret.
+- The existing ActivityPods Solid-OIDC configuration allows ID tokens with **1-year validity**. The experimental endpoint requires fresh token `iat`, but **this is not proof of recent reauthentication and is not a substitute for DPoP/sender constraints or step-up authorization**. Do not enable in production until the actual Solid-OIDC browser client/token/proof flow has been verified and strengthened.
+- App revocation is rechecked before the current reserve/read request, rather than relying solely on a previously minted HMAC grant. Concurrent revocation versus a reservation commit is an outstanding transaction-policy/fencing integration test.
+
+### Deployment controls and remaining non-negotiable gates
+
+Configuration: `PROVIDER_COLLECTIVES_RESERVATIONS_ENABLED`, `PROVIDER_COLLECTIVES_API_ENABLED`, `PROVIDER_COLLECTIVES_APPROVED_APPS`, `PROVIDER_COLLECTIVES_GRANT_SECRET`, `PROVIDER_COLLECTIVES_WORKER_SECRET`, `PROVIDER_COLLECTIVES_ID_KEY`, and canonical `SEMAPPS_HOME_URL`. The two signing keys and identity-derivation key must be strong, distinct, access-controlled and backed up appropriately; do not reuse credentials.
+
+Still missing: full real OIDC/SAI browser-provider end-to-end proof; sender-constrained client authorization; service-to-service worker issuer/reconciliation; rate limits and audit telemetry; restart/retry safety for real AP keys and DID genesis; provider-governed membership; real `Group` actor dereference, collections, signing and ActivityPub/ATProto interop. Keep all Group functionality disabled by default and the implementation PR in draft until proven.
+
+**Proof status:** Actual isolated Fuseki TDB2 concurrency/restart proof has passed. SAI and Solid-OIDC service interactions have regression tests using test doubles; do not represent them as an authenticated production integration test.
