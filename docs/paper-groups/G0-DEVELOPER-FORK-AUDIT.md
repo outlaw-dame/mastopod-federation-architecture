@@ -100,3 +100,25 @@ The canonical design remains the living specification v0.2 (external Markdown ma
 [ActivityPods draft PR #116](https://github.com/outlaw-dame/activity-pods/pull/116) addresses an ownership-link authorization issue in the pre-existing legacy `groups.claim` path, malformed group identifiers, disabled/tombstoned accounts and provider feature gating. It is a **legacy security-maintenance change only**, **not G1 progress**, **not a dependency** of Paper groups, and must not be merged merely to satisfy a Paper milestone. The final inspected head `5b42900b85639414351e49a7625ce69edc56f73a` passed [Backend checks run 42277497826](https://github.com/outlaw-dame/activity-pods/actions/runs/42277497826) (131 suites, 1006 Jest tests). This is unit/CI evidence, not a live group-federation proof; the offline AT multibase script's remote service validation was skipped.
 
 **Next approved G0/G1 work:** Audit the actor provisioning and exact canonical URI/key/managed DID APIs in current provider and sidecar; design the *independent collective identity* contract and negative authorization fixtures **without changing `groups.js` or adding a new runtime route until the contract is reviewed**. No change to provider > Pod user/app > delegated group governance hierarchy.
+
+## Developer Git pointer investigation — resolved object type, unresolved contents (2026-11-07)
+
+The developer `sh-mvp` tree at `e4d0bb74142afbaf4573d2f93e28028479d6b52d` contains:
+
+```
+160000 commit 9f1c7fc3511487150ce458f025e9dc4477133221 activitpod-aptoroto
+```
+
+This is a **Gitlink** (submodule-style commit pointer), *not an ordinary readable file or directory snapshot*. The same branch's `.gitmodules` declares only submodule `memory` (`https://github.com/AmoreTechLllc/memory`); **it has no entry for `activitpod-aptoroto`**, therefore this commit alone provides neither a clone URL nor reproducible source for the target. The target commit's actual repository and contents remain unverified. Do not claim the middleware implementation has been inspected, or that it can be automatically cloned or merged. The developer's blueprint document is a plan, not evidence the actions were implemented.
+
+**Updated G0 checklist interpretation:** The original `activitpod-aptoroto` Git object type is now VERIFIED; **source provenance, target repository, pinned commit contents and independent test evidence are still OPEN**. The Gitlink is not a blocker for independent provider group design; it remains a blocker for trusting/forward-porting that purported middleware implementation.
+
+## Current Fedify Group actor gap — verified upstream source (2026-11-07)
+
+In current upstream `fedify-sidecar/src/federation/FedifyFederationAdapter.ts`:
+- `registerActorDispatcher` binds **`/users/{identifier}`** and returns `Person` for non-service actors after retrieving an actor document via `internal-actors-api`, without an explicit `Group` dispatch branch. Sidecar-owned service actors are a distinct `Service` path.
+- `registerCollectionDispatchers` binds `/users/{identifier}/outbox|followers|following|featured|featuredTags`. Its current `resolveSyntheticCollection` returns `{items: []}` for valid resolved actors. These are not interoperable threadiverse Group outbox/followers/replies collections.
+- ActivityPods `pod-provider/backend/services/internal-actors-api.service.js` currently resolves an identifier through `auth.account.findByUsername` and `account.webId`. The endpoint therefore does **not** provide an independently provisioned collective Group lookup contract.
+- `ActorAuthoritySigningRouter.ts` explicitly segregates provider-signed Pod actors and sidecar-owned service actors; adding new provider-controlled Group actor authority requires a typed provider-identity/signing contract, **not** classifying groups as local sidecar service actors.
+
+**Required independent G1→G3 seam:** A provider-authoritative Group lookup using exact canonical group ID and actor URI, returning typed `Group` metadata and signing-key verification **without** needing a legacy account/Pod. Fedify must dispatch a genuine Group actor and real group collections using provider-approved data, preserving its existing Person and Service routes. Missing/ambiguous group records must return no actor, not a Person fallback, synthetic fake collections or a sidecar-owned signing key. URI namespace and routing collisions require a testable design before any production dispatcher code.
