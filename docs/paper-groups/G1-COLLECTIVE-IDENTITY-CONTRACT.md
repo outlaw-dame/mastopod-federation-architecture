@@ -173,3 +173,63 @@ A group may outlive its original creator/app and have co-owners. If Alice leaves
 ### G1 implementation decision gate
 
 Before coding any group permission screen, map each provider Group API to (a) a canonical authenticated principal, (b) a registered app and approved capability, (c) user consent where required, (d) group-specific delegated grants, (e) current owner/role authorization, and (f) resource policy. Add authorization denial integration tests for every sensitive mutation and for the internal signer. Keep the vocabulary provider-wide and app-neutral; do not introduce Paper-specific hard-coded grants.
+
+## 10. Concrete G1→G3 provider/Fedify integration seam — implementation review (2026-11-07)
+
+Source reconnaissance establishes that current provider `internal-actors-api.getActorByIdentifier` is a **username→account.webId** lookup, and the current Fedify dispatcher returns `Person` from `/users/{identifier}`; its collections are placeholders. These are not the Group API. Building Paper Groups by calling that API would recreate the legacy-account dependency that the specification forbids.
+
+### Proposed minimum typed provider read interface (contract, not deployed endpoint)
+
+```ts
+type GroupAuthorityResultV1 =
+  | { found: false }
+  | {
+      found: true;
+      canonicalGroupId: string;            // opaque, provider-issued
+      actorUri: string;                   // exact provider-approved public URI
+      actorType: "Group";
+      displayName: string;
+      preferredUsername: string;
+      state: "active" | "suspended" | "retired" | "provisioning";
+      identityRevision: number;
+      policyRevision: number;
+      approvedPublicKeyId: string | null; // reference to public verification material only
+      inboxUri: string;
+      outboxUri: string;
+      followersUri: string;               // NOT group membership roster
+      publicCollectionVersion: number;
+    };
+```
+
+The provider must **authenticate the workload** querying nonpublic operational metadata, bind the returned group to the target provider tenant, and not disclose private membership/role records through this public actor read DTO. Public actor rendering requires only vetted public fields. Data projections must be explicitly typed, provenance-checked, revisioned and bounded in size.
+
+**URI routing:** `/groups/{opaque-or-stable-id}` is a *candidate namespace* to avoid aliasing `/users/{identifier}`; it is not yet a finalized address. The canonical URI must be selected by provider routing ownership (hostname/proxy), dereferenceability and signing-key controller tests. No application, including Paper, may define a separate group actor URI after issuance.
+
+**Group WebID:** Optional collective-WebID representation is evaluated separately from the ActivityPub Group actor URI. If a combined URI is used, RDF/ACL semantics and DID link proof must be validated. Do not require a personal-style group Pod or put Group actors into `auth.account` solely to satisfy existing `signing._validateLocalActor`.
+
+### Proposed provider-only mutating actions (contracts, not exposed today)
+
+- `provider.collectives.reserve`: requires signed verified principal+app authorization, unique idempotency key and exact payload hash. Produces a pending opaque ID and reserved URI without keys or public federation.
+- `provider.collectives.provision`: idempotently advances a durable state machine; may issue AP key and real AT DID with separate, unique signer references. Does not accept arbitrary remote DID or private key from caller.
+- `provider.collectives.getPublicActor`: returns only approved public typed Group profile and public signing material when `active`.
+- `provider.collectives.authorizeOperation`: derives current app, principal, group role, provider policy, visibility and immutable recipient/payload digest; issues bounded approval for a specific activity.
+- `provider.collectives.getPublicCollection`: paginated, ordered, visibility-filtered data. Followers are subscription state, NOT membership by default; do not disclose private group roster.
+
+Names and shapes are working interfaces, not additional deployed microservices. Prefer extending provider modules and existing persistence, transaction, signing and authorization primitives where those are proven suitable; no duplication for its own sake.
+
+### Required cross-repository acceptance fixtures (not yet executed)
+
+1. **Valid public group:** given exact verified provider Group response, Fedify renders `type: Group` with correct `id`, endpoints and matching public key controller, never `Person` or `Service`.
+2. **Unknown or stale group:** missing/revoked/suspended/provisioning actor cannot be silently converted to `Person`, and private group metadata is never exposed.
+3. **URI mismatch:** requested public URL differing from returned authoritative `actorUri` fails closed; no cross-host or user/group namespace alias.
+4. **Legacy group account:** RDF `foaf:Group` / `as:Group` typed legacy storage record without an actual collective authority record cannot be treated as a federated community.
+5. **Signed group post:** valid group Announce uses a provider-authorized Group key with immutable payload and recipient plan; sidecar cannot select a local key or substitute the principal.
+6. **Collections:** real empty collection and missing/unavailable collection are distinguished; pagination/audience rules are tested against AP threadiverse implementation fixtures.
+7. **App neutrality:** two distinct approved apps with separately granted permissions manage the same provider Group, and revoking one does not transfer the group's identity or remove the other's access.
+8. **AT binding:** a DID claimed for a Group resolves to a valid provider-controlled DID document; unregistered mock did:plc strings are rejected.
+9. **Resume after partial provisioning:** replay with same idempotency key and payload never issues a second canonical Group ID, signing-key set or DID.
+10. **Tenancy/IDOR:** authenticated operations cannot access or mutate another provider's Group by changing `groupId`, `actorUri` or `appId`.
+
+### Decision gate
+
+**Do not implement production Fedify Group dispatch against the existing Person-only `/users/{identifier}` or synthetic collection APIs.** First agree the provider's typed Group record, public Group URI/namespace, signing-key attachment and exact authorization operation path. Then implement with live provider + sidecar integration tests and separate reviewable PRs. This protects the agreed authority model while leaving ordinary Person and Service federation behavior unchanged.
