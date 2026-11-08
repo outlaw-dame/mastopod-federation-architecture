@@ -243,3 +243,31 @@ The PR adds `pod-provider/backend/services/utils/collective-identity-boundary.js
 **Do not misrepresent this increment:** It is not a functioning provider Group store, provisioning saga, DID genesis/PLC validation, API authorization, signing enforcement or Fedify Group dispatcher. No public service route or database mutation is introduced. The input **must** be from trusted provider-authoritative storage and separately authorized; the helper does not prove source authenticity, signer possession or DID control.
 
 **Verified backend CI:** [workflow run 42444806999](https://github.com/outlaw-dame/activity-pods/actions/runs/42444806999) on PR #117 head `b22462b5d0e5386d1a0295970d4a6fcac6060303` completed successfully: **131/131 Jest suites and 995/995 tests passed**, including `collective-identity-boundary.test.js`. This is unit-test evidence for the validation module, not integration or deployment proof. G1 remains in progress. Subsequent steps must establish actual provider persistence and authoritative lookup before integrating this DTO with a public actor route.
+
+## 12. Implemented G1 reservation/staging substrate — independently verified CI (2026-11-07)
+
+**Source:** [ActivityPods draft PR #117](https://github.com/outlaw-dame/activity-pods/pull/117), `pod-provider/backend/services/collective-reservations.service.js` and `pod-provider/backend/tests/collective-reservations.test.js`.
+
+### Implemented, with explicit boundaries
+
+- **Provider persistence:** Group reservations live in the Fuseki `settings` dataset. They are not persisted in Redis, sidecar state, legacy group Pods or account records.
+- **No public route and default-off:** `PROVIDER_COLLECTIVES_RESERVATIONS_ENABLED` must be `true`. Requests must carry short-lived HMAC-bound operation grants minted by a trusted issuer; the current service does **not** mint them, and it does not treat app-provided `ctx.meta` as proof of authorization.
+- **Opaque identity:** stable `cg_<32 hex>` Group ID and a proposed `https://provider.example/groups/{id}` actor URI, reserved without publishing a Group actor. Idempotency is scoped to original principal, creator app and request key, but **the creating app is provenance, not exclusive long-term group authority**.
+- **Stable identity key:** `PROVIDER_COLLECTIVES_ID_KEY` is separate from `PROVIDER_COLLECTIVES_GRANT_SECRET`. Keep the identity derivation key backed up and versioned; rotating only the short-lived authorization signing key does not rename an existing group.
+- **Conditional atomic writes:** SPARQL conditional `INSERT ... WHERE FILTER NOT EXISTS` prevents duplicate reservation records in an appropriately transactional Fuseki/TDB2 dataset. Read-back rejects mismatched payloads, app/owner or actor URI. A revision compare-and-swap stage transition writes a unique transition nonce and verifies it, so an identical concurrent losing request cannot claim a winner's success.
+- **Stages only:** `reserved -> ap-key-pending -> did-pending` with monotonically increasing revisions. There is **no active transition**, no claimed signer or DID verification, and no public Group actor. This prevents the workflow from pretending cryptographic issuance is complete.
+- **Resumption:** `get` returns persisted current stage/revision for authorized users, enabling later reconciler design without in-memory-only state; actual worker leases, scanning and external-step replay evidence remain to be implemented.
+- **Security tests:** malformed URI, missing/tampered/expired grants, disabled provider, conflicting requests, cross-user IDOR, cross-app authority, concurrent reservations and CAS, stable IDs across grant-key rotation, simulated restart using retained store, write failure and recovery.
+
+**CI:** [ActivityPods Backend checks 42445546684](https://github.com/outlaw-dame/activity-pods/actions/runs/42445546684) on commit `5fb504ddf8d9d33236b41cf72c56a9dce802491d`: **132/132 Jest suites and 1011/1011 tests passed.** All new service persistence tests use a fake SPARQL adapter that models conditional writes. CI success **does not prove live Jena/Fuseki concurrency, durability, replicated-service behavior or public authorization integration**.
+
+### Required gates before enabling the default-off service
+
+1. Wire an issuer that **independently verifies Solid-OIDC principal, SAI app registration, explicit group permissions and current provider policy**, then mints exact short-lived operation grants. A self-reported principal/app identifier or generic server bearer does not suffice.
+2. Verify conditional SPARQL UPDATE semantics against the **actual configured Fuseki/TDB2 production dataset**, with two service replicas, conflict and restart testing; test rollback under write failure and restore from backups.
+3. Implement secure persistent provider key issuance/attachment and **valid actual AT DID issuance**, with independently checked proof and durable side-effect evidence before any transition to active.
+4. Implement background reconciliation/leases and bounded retries for partial provisioning; do not repeat DID genesis or key issuance on uncertain outcome.
+5. Provide the authenticated provider collective actor lookup and real Fedify Group dispatcher and collections, without routing through `auth.account` or `Person`.
+6. Verify multi-app access and role-based per-group delegation beyond the initial owner-only restriction.
+
+**Status:** The persisted reservation and revision-fenced staging subsystem is coded and unit-tested. **Complete G1 collective issuance, app/user authorization integration, external reconciliation and group federation are NOT yet complete.** Keep ActivityPods PR #117 draft and disabled until gates pass. Neither its passing CI nor its submitted source is evidence of production Group provisioning.
