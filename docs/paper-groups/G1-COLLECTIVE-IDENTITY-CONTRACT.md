@@ -426,6 +426,10 @@ Additional secrets: `PROVIDER_COLLECTIVES_STEPUP_SECRET` signs only Group creden
 
 ## 18. Corrected G1 implementation — reuse native Solid-OIDC and SAI (2026-11-08)
 
+**Final verified refactor:** [ActivityPods PR #117](https://github.com/outlaw-dame/activity-pods/pull/117) head `99bf2e05f91555cccbcb5595d13295b8ede06f41`. [Backend CI](https://github.com/outlaw-dame/activity-pods/actions/runs/42478991706) passed **139/139 suites and 1,106/1,106 tests**; [frontend CI](https://github.com/outlaw-dame/activity-pods/actions/runs/42478991935) passed; [real Fuseki/TDB2 proof](https://github.com/outlaw-dame/activity-pods/actions/runs/42478991698) passed. The existing Solid-OIDC/Moleculer-Web HTTP test exercises real ES256 token verification and SAI deny→approve→reserve→revoke through test-backed authorization records. This is **not** a real deployed browser/Solid consent ceremony or revocation-at-commit proof. Shared passkey and OAuth files have no remaining PR changes; the former Group-only passkey/credential components were removed.
+
+
+
 The working decision is **no mandatory passkeys for Group creation**. The proposed implementation no longer creates or consumes a Group-specific WebAuthn attestation or credential, does not change the shared OAuth/DPoP or passkey services, and does not require an app to implement another login flow.
 
 The default-off `POST /api/collectives/reserve` route uses existing ActivityPods gateway authentication and authorization. It independently re-verifies the same signed Solid ID token with the established provider key, checks signed `sub`, `webid`, `azp`, issuer and audience against gateway-verified identity, then derives the exact principal and application identity server-side. The existing app SAI registration and explicit `apods:CreateGroup` rights are checked at the authoritative reservation service. Neither the client-provided JSON nor a separate passkey establishes Group ownership.
