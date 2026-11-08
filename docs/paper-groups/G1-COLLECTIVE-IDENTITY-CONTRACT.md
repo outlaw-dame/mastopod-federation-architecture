@@ -271,3 +271,41 @@ The PR adds `pod-provider/backend/services/utils/collective-identity-boundary.js
 6. Verify multi-app access and role-based per-group delegation beyond the initial owner-only restriction.
 
 **Status:** The provider-side reservation and revision-fenced staging subsystem is coded and unit-tested; its provider-origin handling accepts an optional canonical trailing slash without creating double-slash actor IDs. **Complete G1 collective issuance, app/user authorization integration, external reconciliation and group federation are NOT yet complete.** Keep ActivityPods PR #117 draft and disabled until gates pass. Neither its passing CI nor its submitted source is evidence of production Group provisioning.
+
+## 13. Provider persistence and consent integration evidence (2026-11-08)
+
+**Current draft:** [ActivityPods #117](https://github.com/outlaw-dame/activity-pods/pull/117), still disabled by default and not merged.
+
+### Verified live Fuseki test (now performed)
+
+[GitHub Actions run 42464763873](https://github.com/outlaw-dame/activity-pods/actions/runs/42464763873) uses the actual `semapps/jena-fuseki-webacl` Docker image and a TDB2 `settings` dataset. It runs the real reservation service against a direct authenticated SPARQL HTTP adapter. The proof reported:
+
+- 12 simultaneous reservation requests across separately constructed service instances → **one deterministic canonical Group ID** (all received the same outcome).
+- 12 competing CAS transitions from revision 1 → **exactly one success**, 11 rejected as stale.
+- Persisted group and revision 2 survived an actual Fuseki container restart, retaining the same mounted dataset.
+- Conflicting idempotency-key payload rejected.
+- No actual Group actor was published; no key/DID was minted.
+
+**Scope:** This proves the narrowly exercised real Fuseki/TDB2 reserve/transition/restart semantics, not broad deployment durability, full browser/OIDC integration, SAI persistence, failover to new hosting providers or arbitrary replica network partitions.
+
+### Added live SAI authorization defense
+
+`pod-provider/backend/services/utils/collective-access-policy.js` verifies, independently of a signed operation token, that:
+- the referenced WebID maps to a current local ActivityPods account;
+- the precise app URI is in the provider-configured allowlist `PROVIDER_COLLECTIVES_APPROVED_APPS`;
+- the user has an active SAI application registration for that precise app;
+- the user's present SAI AccessAuthorizations include `apods:CreateGroup` for reservation or `apods:ReadGroups` for reads.
+
+These checks are made before reserve/read actions, not supplied by the caller in `ctx.meta`. A missing registration, missing right, unavailable authority service or disallowed app must not yield access. Removing registration or withdrawing SAI permission causes subsequent reserve/read operations to fail despite an otherwise unexpired HMAC grant. The existing `advance` action is an internal provisioning-phase primitive and must be confined to a trusted provider worker issuer before enabling the service.
+
+`pod-provider/frontend/src/common/list/AccessNeedsList.js` and EN/FR localization files now label `apods:CreateGroup` and `apods:ReadGroups` as **social-group capabilities**, distinct from the older WAC/ACL permission-group right.
+
+### Still incomplete—do not enable in production
+
+1. A secure **trusted operation-grant issuer** binding actual authenticated Solid-OIDC client/principal, selected app identity, requested Group operation and live SAI consent. Merely signing a token for a client-provided app URI is not acceptable.
+2. Group-provisioning worker authorization, ephemeral stage leases and durable external side-effect evidence. In particular, no app should acquire the ability to skip key/DID verification by requesting its own advancement grant.
+3. Real AP Group key issuance, valid AT DID registration/control proof, actor lookup, signing policy, Fedify Group dispatch and interoperable collections.
+4. End-to-end SAI registration/revocation integration tests against running ActivityPods, not just mocked SAI calls. User-level and provider revocation fencing needs verification under concurrency.
+5. Service configuration/secret rotation operational runbook. No new default-on Group functionality.
+
+Do not interpret application authorization, owner status or an HMAC grant alone as sufficient authority. The publisher's authorization must survive cross-component execution without silently broadening audience or protocol scopes.
