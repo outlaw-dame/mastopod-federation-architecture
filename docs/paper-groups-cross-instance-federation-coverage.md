@@ -75,6 +75,19 @@ Track basic Bonfire ActivityPub posts separately from real Bonfire Groups
 membership/threads federation, and do not mark unsupported federation as
 failed Paper delivery or as successfully interoperable.
 
+**Inbound Group semantic gap:** the current generic
+`src/protocol-bridge/activitypub/translators/social.ts`
+`translateAnnounceActivity` projects an ordinary `Announce` to the
+canonical `ShareAdd` operation (or a quote-post when it has content).
+That is suitable for many boosts, but Lemmy's community `Announce`
+wrapping `Create/Page` is **also a community distribution and provenance
+event**. Paper must not claim it is an implemented remote Group post or
+flatten away its verified Group identity, nested author/object identity,
+moderation context and membership distinctions. Introduce a distinct,
+authenticated Group-Announce handling rule once the provider Group model
+is integrated, using the same existing ingress queue and key/signature
+authority. Do not add a parallel inbound queue.
+
 The canonical ActivityPub spec requires inbox duplicate filtering by
 Activity `id`; our sidecar still needs its own durable transport-level
 destination/intent dedup to minimize waste rather than relying solely on
