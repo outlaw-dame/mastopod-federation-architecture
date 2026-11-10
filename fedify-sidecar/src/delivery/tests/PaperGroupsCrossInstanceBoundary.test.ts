@@ -118,6 +118,23 @@ describe("Paper Groups cross-instance Fedify/APDM boundary", () => {
     expect(result.duplicateTargetCount).toBe(0);
   });
 
+  it("enforces the 5,000-target configured raw webhook bound instead of silently truncating a large Group", () => {
+    const targets = Array.from({ length: 5001 }, (_, i) => ({
+      ...remote(i % 25, i, false),
+      apdmAuthority: { schema: "ap.delivery-plan.v1", intentId: "apdm-v1-" + "a".repeat(64) },
+    }));
+    const config = {
+      maxTargetsPerRequest: 5000, maxPending: 25_000,
+      maxQueueDepth: 0, retryAfterSeconds: 5,
+    };
+    expect(() => normalizeAndDedupeOutboundTargets(targets, config))
+      .toThrowError(/exceeds the configured maximum/u);
+    expect(normalizeAndDedupeOutboundTargets(targets.slice(0, 5000), config)
+      .inputTargetCount).toBe(5000);
+    // Never solve this by dropping the 5,001st target. A complete sealed,
+    // durable and deduplicated multi-chunk handoff is required instead.
+  });
+
   it("rejects unsupported, missing and forged remote authority rather than guessing membership", () => {
     const p = plan([], [remote(1, 0, true)]);
     expect(safeParseActivityPubDeliveryPlanV1({
