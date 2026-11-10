@@ -137,6 +137,21 @@ Remote Group following/subscription is not the same as social membership.
   Add WAFRN as a **capability-discovery and live fixture target**; allow
   generic Note/Announce interoperability when supported, but do not claim
   its Groups actor/membership conformance without pinned-source/live proof.
+- **Friendica:** Its pinned 2026.08-rc `FEDERATION.md` explicitly lists
+  **FEP-1b12 partial support**: following remote Groups, `audience`, and
+  processing activities announced by Groups (including Lemmy/kbin), but
+  **not Group moderation activities**. Friendica also supports delegated
+  forum/group accounts; their legacy forum behaviors are **not** assumed
+  wire-identical to every FEP-1b12 Group implementation. Test both
+  Friendica-following-Paper-Group and Paper-following-Friendica-forum
+  directions, preserve Group actor and nested original-author provenance,
+  and label unsupported moderation explicitly rather than claiming it.
+  Primary evidence: [Friendica 2026.08-rc federation support](
+  https://github.com/friendica/friendica/blob/2026.08-rc/FEDERATION.md)
+  and [Friendica forum documentation](https://wiki.friendi.ca/docs/forums).
+  The existing real Friendica interop CI failed to persist even an ordinary
+  Follow despite HTTP 202; remote database acceptance, actor dereferencing
+  and worker processing must be corrected, not suppressed.
 - **Mastodon/GoToSocial:** Prefer standard public Group follow/distribution
   compatibility where supported; do not misrepresent those servers as
   providing full native structured Group moderation.
