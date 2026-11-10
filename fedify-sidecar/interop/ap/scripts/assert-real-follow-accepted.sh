@@ -190,6 +190,16 @@ while [ "${attempt}" -le "${ATTEMPTS}" ]; do
       "${TARGET}" "${ACTOR_URI}" "${LOCAL_USERNAME}" "${count}"
     exit 0
   fi
+  # Real Friendica performs inbound federation through scheduled workers.
+  # The fixture proof is shorter than its normal 5-10-minute cron cycle.
+  # Run the OFFICIAL worker command at bounded intervals to execute accepted
+  # work, but retain the strict remote database Follow assertion above.
+  # This does not create synthetic Follow rows or bypass signature checks.
+  if [ "${TARGET}" = friendica ] && [ $((attempt % 15)) -eq 0 ]; then
+    compose exec -T -w /var/www/html friendica-worker \
+      php bin/console.php worker >/dev/null 2>&1 || \
+      echo "Friendica official worker command failed (remote Follow still required)" >&2
+  fi
   if [ "${attempt}" -lt "${ATTEMPTS}" ]; then
     sleep "${DELAY_SECONDS}"
   fi
