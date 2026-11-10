@@ -569,13 +569,13 @@ jobs:
                 docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" exec -T "${service}" sh -lc '
                   file=/var/www/friendica.log
                   if [ ! -f "$file" ]; then
-                    printf "internal_log_present=0\\n"
+                    printf "internal_log_present=0\n"
                     exit 0
                   fi
-                  printf "internal_log_present=1\\n"
+                  printf "internal_log_present=1\n"
                   for term in "Unable to retrieve AP contact" "Could not find owner" "message is discarded" "URLVerifier" "signature" "certificate" "could not retrieve" "Could not fetch" "untrusted"; do
                     count=$(grep -iFc "$term" "$file" 2>/dev/null || true)
-                    printf "category=%s count=%s\\n" "$term" "$count"
+                    printf "category=%s count=%s\n" "$term" "$count"
                   done
                 ' 2>/dev/null || true
                 echo "::endgroup::"
