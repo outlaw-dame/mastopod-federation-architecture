@@ -567,7 +567,7 @@ jobs:
               for service in friendica-app friendica-worker; do
                 echo "::group::${service} Friendica internal error-category counts"
                 docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" exec -T "${service}" sh -lc '
-                  file=/var/www/friendica.log
+                  file=/tmp/friendica-interop.log
                   if [ ! -f "$file" ]; then
                     printf "internal_log_present=0\n"
                     exit 0
