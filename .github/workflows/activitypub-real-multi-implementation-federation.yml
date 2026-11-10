@@ -314,6 +314,21 @@ jobs:
             sleep 2
           done
           [[ "${ready}" == true ]]
+          if [[ "${TARGET}" == friendica ]]; then
+            # Friendica FEP-2677 exposes /friendica as its own application
+            # actor. Resolve it before inbound Follow so its system
+            # (uid=0) signing key/contact is materialized. This is native
+            # server provisioning, not synthetic remote Follow acceptance.
+            curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt \
+              -fsS -H 'Accept: application/activity+json' \
+              "https://friendica.test/friendica" >/dev/null
+            system_ready=$(docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" \
+              exec -T friendica-db /bin/sh -lc \
+              'MYSQL_PWD="$MARIADB_PASSWORD" mariadb --batch --skip-column-names -u friendica friendica -e "select count(*) from contact where uid=0 and self=1 and length(pubkey)>0 and length(prvkey)>0;"' \
+              | awk 'NF {v=$0} END {print v}')
+            echo "Friendica system signing contact ready=${system_ready}"
+            [[ "${system_ready}" == 1 ]]
+          fi
 
       - name: Start ActivityPods native mode
         working-directory: activitypods/pod-provider/backend
