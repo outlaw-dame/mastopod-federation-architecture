@@ -68,5 +68,16 @@ fi
 compose exec -T friendica-db /bin/sh -lc \
   "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"update user set nickname='friendica' where uid=0 and nickname='';\""
 
+# Friendica database config may override Docker logging environment.
+# This fixture uses the official CLI to verify bounded DEBUG to /tmp.
+ensure_debug_config() {
+  key="$1"; desired="$2"
+  observed=$(compose exec -T friendica-app php bin/console.php config system "$key" 2>/dev/null) || return 1
+  case "$observed" in *" => $desired") return 0 ;; esac
+  compose exec -T friendica-app php bin/console.php config system "$key" "$desired" >/dev/null
+}
+ensure_debug_config debugging 1
+ensure_debug_config logfile /tmp/friendica-interop.log
+ensure_debug_config loglevel debug
 compose up -d friendica-worker
 echo "Bootstrapped Friendica federation target ${USERNAME}"
