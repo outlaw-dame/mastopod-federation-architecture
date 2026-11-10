@@ -310,11 +310,27 @@ jobs:
             ports=(3000)
             if [[ "$replicas" -ge 2 ]]; then services+=(backend_p2_2); ports+=(3102); fi
             if [[ "$replicas" -ge 4 ]]; then services+=(backend_p2_3 backend_p2_4); ports+=(3103 3104); fi
+            # Single-writer bootstrap: the legacy SemApps ontology and
+            # controlled-container registry initialize through the first
+            # ActivityPods cell. Starting all 4 cells simultaneously causes
+            # type expansion ("as:Note") and LDP registry/bootstrap races
+            # before account provisioning can establish a real AP actor.
+            # Keep the full multi-cell delivery acceptance test unchanged:
+            # additional replicas start only after primary initialization.
             (
               cd "$compose_root"
-              docker compose $files up -d --no-deps "${services[@]}"
+              docker compose $files up -d --no-deps backend
             )
-            for port in "${ports[@]}"; do wait_http "http://127.0.0.1:${port}/" 180; done
+            wait_http "http://127.0.0.1:3000/" 180
+            if [[ "${replicas}" -ge 2 ]]; then
+              (
+                cd "$compose_root"
+                docker compose $files up -d --no-deps "${services[@]:1}"
+              )
+              for port in "${ports[@]:1}"; do
+                wait_http "http://127.0.0.1:${port}/" 180
+              done
+            fi
 
             start_sidecar "$arm_dir"
 
