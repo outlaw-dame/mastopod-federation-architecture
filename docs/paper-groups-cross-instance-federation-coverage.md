@@ -55,6 +55,31 @@ read/write requests, Redis Stream memory/decode CPU and job counts, actual
 remote HTTP requests, bytes sent and request latency by destination domain.
 No synthetic workload may be reported as externally delivered membership.
 
+## Compatibility: a Group actor is not a complete Group protocol
+
+The official [Lemmy federation documentation](https://join-lemmy.org/docs/contributors/05-federation.html)
+specifies a Community as an ActivityPub `Group` actor that forwards
+community posts and related activities as `Announce`. Interop therefore
+needs actual Follow/Accept, Group inbox and Announce/Object tests, not just
+generic Person-to-Person Create/Note delivery.
+
+Fedify supports a `Group` actor dispatcher, but ownership, membership,
+moderation, delivery authorization and ActivityPub collections must be
+implemented by ActivityPods with actual signing and remote proof.
+
+Bonfire's [August 2026 community announcement](https://bonfirenetworks.org/posts/bonfire-for-communities/)
+states that its native Groups/Topics feature is currently **instance-local**
+and cross-instance Group federation remains planned. Bonfire's general
+ActivityPub `Group` actor support does not overturn this product limitation.
+Track basic Bonfire ActivityPub posts separately from real Bonfire Groups
+membership/threads federation, and do not mark unsupported federation as
+failed Paper delivery or as successfully interoperable.
+
+The canonical ActivityPub spec requires inbox duplicate filtering by
+Activity `id`; our sidecar still needs its own durable transport-level
+destination/intent dedup to minimize waste rather than relying solely on
+remote receivers to absorb duplicate POSTs.
+
 ## Large Group transport blocker: bounded cross-page handoff
 
 The existing raw outbound webhook defaults to
