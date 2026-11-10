@@ -1,0 +1,36 @@
+name: Paper Groups — Cross-Instance Fedify Contract
+
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/src/delivery/tests/PaperGroupsCrossInstanceBoundary.test.ts'
+      - '.github/workflows/paper-groups-cross-instance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  groups-remote-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: fedify-sidecar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.0'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+      - name: Install exact sidecar dependency graph
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify sidecar TypeScript
+        run: npm run typecheck
+      - name: Run actual APDM contract and Group multi-instance regression
+        run: |
+          npx vitest run \
+            src/delivery/tests/PaperGroupsCrossInstanceBoundary.test.ts \
+            src/delivery/tests/ActivityPubDeliveryPlanContract.test.ts \
+            src/delivery/tests/OutboundWebhook.test.ts
