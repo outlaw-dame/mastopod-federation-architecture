@@ -33,7 +33,7 @@ services:
       # Keep logs outside /var/www/html and do not export raw logs/artifacts;
       # CI prints only bounded, non-secret exception type counts on failure.
       FRIENDICA_DEBUGGING: 'true'
-      FRIENDICA_LOGFILE: /var/www/friendica.log
+      FRIENDICA_LOGFILE: /tmp/friendica-interop.log
       FRIENDICA_LOGLEVEL: debug
       MYSQL_HOST: friendica-db
       MYSQL_DATABASE: friendica
