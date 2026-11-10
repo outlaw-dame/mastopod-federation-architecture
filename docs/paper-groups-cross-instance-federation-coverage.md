@@ -210,6 +210,37 @@ universal choice:
   long actor URIs. Codec migration must be versioned and measured against
   actual actor URI entropy, index build/repair overhead and p95 latency.
 
+## Intelligent caching: bounded, authority-preserving opportunities
+
+Caching **is** useful, but only behind an explicit provenance/revision rule:
+
+| Candidate | Decision | Cache invalidation and privacy |
+| --- | --- | --- |
+| Provider membership authorization, SAI grants, suspension/bans, membership epochs | **Do not cache for authorize/commit/delivery decisions.** | Current TDB2 state must be checked; TTL-only authorization is unsafe after a revoke |
+| Immutable sealed public Group metadata, unchanged JSON object and fixed-revision index page bytes | Eligible for bounded cache **after** a live current-epoch/SAI/visibility check | Key by provider, Group, exact revision and content digest; bounded bytes+entries; deny on absent/mismatched authority; measure whether caching beats the existing ~9ms TDB2 direct-page lookup |
+| Within one authenticated sealed Group delivery plan | Deduplicate normalized destination strings, inboxes and immutable activity-body encoding **only within that plan** | Rebuild when policy/epoch/recipient snapshot changes; never infer membership from domain |
+| Remote actor profiles / keys and canonical inbox descriptors | Reuse the existing verified Fedify transport discovery/caching facilities only under actor-ID, signature and TTL/ETag rules | Explicit invalidation for 404/410, key rotation, redirects, fetch error; do not dereference 100k actors for each post |
+| Failed network responses, disabled/revoked users, remote permission denials | Avoid broad negative/authorization caching | Must not turn transient errors or revocations into long-lived incorrect state |
+| Redis delivery stream payload | Keep existing versioned, gated Brotli-0 compression, bounded decode+digest and exact-payload memo only when measured | This is storage/CPU efficiency, **not** a second member/endpoint authority |
+
+**Retired sidecar cache is intentional.**
+`fedify-sidecar/src/delivery/RemoteSharedInboxCache.ts` is a
+no-I/O compatibility shim: domain-based inference can choose a remote
+endpoint that was never authorized by ActivityPods. Do not revive it.
+Only collapse explicitly supplied sharedInbox URLs for eligible public
+Group posts; members-only posts use authorized personal inboxes unless
+strict private shared-inbox semantics are independently demonstrated.
+
+**Benchmark before creating a new cache.** The real 100k-member isolated
+indexed TDB2 read measured ~9ms median; a separate distributed-cache
+request plus mandatory live SAI/current-revision query might be **slower**
+and more expensive. Prefer bounded per-operation memoization and
+transport reuse where hit rate/CPU/IO metrics justify it. Measure hit
+rate, stale denial attempts, invalidation age, Redis memory, network
+bytes, p95/p99 latency, out-of-order membership CAS and restart recovery.
+A cache miss must never trigger unbounded remote actor discovery or a
+provider-wide Fuseki membership scan.
+
 ## Merge/activation gates
 
 This test-only sidecar PR cannot activate Group delivery. The Group
