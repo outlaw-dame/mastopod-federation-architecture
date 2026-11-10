@@ -68,6 +68,18 @@ fi
 compose exec -T friendica-db /bin/sh -lc \
   "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"update user set nickname='friendica' where uid=0 and nickname='';\""
 
+# Friendica 2026.05 StreamLoggerFactory requires an EXISTING, writable
+# logfile. app and worker containers have separate /tmp filesystems.
+# Provision both with restrictive permissions in this disposable fixture.
+for service in friendica-app friendica-worker; do
+  compose up -d "$service"
+  compose exec -T "$service" /bin/sh -lc '
+    umask 077
+    touch /tmp/friendica-interop.log
+    test -w /tmp/friendica-interop.log
+    chmod 600 /tmp/friendica-interop.log
+  '
+done
 # Friendica database config may override Docker logging environment.
 # This fixture uses the official CLI to verify bounded DEBUG to /tmp.
 ensure_debug_config() {
