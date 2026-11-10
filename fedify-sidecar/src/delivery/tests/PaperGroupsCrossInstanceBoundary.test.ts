@@ -32,7 +32,11 @@ const remote = (server: number, id: number, shared: boolean) => {
     targetDomain: host,
   };
 };
-function plan(localRecipients: ReturnType<typeof local>[], remoteRecipients: ReturnType<typeof remote>[]) {
+function plan(
+  localRecipients: ReturnType<typeof local>[],
+  remoteRecipients: ReturnType<typeof remote>[],
+  visibility: "public" | "followers" = "public",
+) {
   const material = {
     schema: "ap.delivery-plan.v1",
     activityId,
@@ -51,12 +55,12 @@ function plan(localRecipients: ReturnType<typeof local>[], remoteRecipients: Ret
       id: activityId,
       actor: group,
       type: "Create",
-      to: [group + "/followers"],
+      to: visibility === "public" ? ["https://www.w3.org/ns/activitystreams#Public"] : [group + "/followers"],
       object: { id: activityId + "/object", type: "Note", content: "Public group post" },
     },
     localRecipients,
     remoteRecipients,
-    meta: { visibility: "followers", isPublicActivity: false },
+    meta: { visibility, isPublicActivity: visibility === "public" },
   };
 }
 function sidecar(planValue: ReturnType<typeof plan>) {
@@ -108,6 +112,21 @@ describe("Paper Groups cross-instance Fedify/APDM boundary", () => {
     expect(new Set(result.targets.map(t => t.deliveryUrl)).size).toBe(10);
     // No limit on member cardinality is implied: the producer/queue must
     // still enforce its own batching/backpressure and authorized snapshot.
+  });
+
+  it("keeps members-only remote recipients on personal inboxes; no private sharedInbox assumption", () => {
+    const targets = Array.from({ length: 15 }, (_, i) => remote(i % 3, i, false));
+    const p = plan([local(0)], targets, "followers");
+    expect(safeParseActivityPubDeliveryPlanV1(p).success).toBe(true);
+    expect(p.meta.visibility).toBe("followers");
+    expect(p.meta.isPublicActivity).toBe(false);
+    const routes = sidecar(p);
+    expect(routes.targets).toHaveLength(15);
+    expect(routes.duplicateTargetCount).toBe(0);
+    expect(routes.targets.every(target => target.sharedInboxUrl === undefined)).toBe(true);
+    expect(routes.targets.every(target => target.deliveryUrl === target.inboxUrl)).toBe(true);
+    // This does not prove remote member consent. ActivityPods must supply the
+    // independently authorized snapshot and sign the final immutable bytes.
   });
 
   it("does not collapse 1,000 personal inboxes just because actors share one host", () => {
