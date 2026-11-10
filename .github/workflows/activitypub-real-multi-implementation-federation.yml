@@ -558,7 +558,30 @@ jobs:
             akkoma) docker compose -f "${COMPOSE_FILE}" --profile akkoma logs --no-color akkoma-app 2>/dev/null || true ;;
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
-            friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true ;;
+            friendica)
+              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true
+              # Friendica has a distinct internal application log, NOT
+              # necessarily exported to Apache or worker stdout. Print
+              # predefined error-pattern counts only: raw logs can contain
+              # HTTP headers, actor content and test access credentials.
+              for service in friendica-app friendica-worker; do
+                echo "::group::${service} Friendica internal error-category counts"
+                docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" exec -T "${service}" sh -lc '
+                  file=/var/www/friendica.log
+                  if [ ! -f "$file" ]; then
+                    printf "internal_log_present=0\\n"
+                    exit 0
+                  fi
+                  printf "internal_log_present=1\\n"
+                  for term in "Unable to retrieve AP contact" "Could not find owner" "message is discarded" "URLVerifier" "signature" "certificate" "could not retrieve" "Could not fetch" "untrusted"; do
+                    count=$(grep -iFc "$term" "$file" 2>/dev/null || true)
+                    printf "category=%s count=%s\\n" "$term" "$count"
+                  done
+                ' 2>/dev/null || true
+                echo "::endgroup::"
+              done
+              ;;
+
             castopod)
               docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true
               # TEMP_DEBUG_REMOVE_BEFORE_MERGE: `docker compose logs` only
