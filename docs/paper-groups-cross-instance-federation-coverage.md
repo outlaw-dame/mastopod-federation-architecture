@@ -31,7 +31,7 @@ The `PaperGroupsCrossInstanceBoundary.test.ts` checks the real APDM v1
 parser and sidecar target normalization with synthetic local/remote actor
 URIs, multiple distinct server domains, mixed personal/sharedInbox targets,
 1,000 remote actors spread across 10 servers, 1,000 personal inboxes on
-one server, malicious/forged authority, blind-address leakage and overlap
+one server, an explicit 5,000-target raw webhook limit (5,001 rejects without truncation), malicious/forged authority, blind-address leakage and overlap
 between local and remote recipients. Its results count **target endpoints**,
 not successful remote HTTP deliveries.
 
@@ -54,6 +54,29 @@ Measure Node CPU/RSS and GC, ActivityPods Moleculer actions, Fuseki HTTP
 read/write requests, Redis Stream memory/decode CPU and job counts, actual
 remote HTTP requests, bytes sent and request latency by destination domain.
 No synthetic workload may be reported as externally delivered membership.
+
+## Large Group transport blocker: bounded cross-page handoff
+
+The existing raw outbound webhook defaults to
+`OUTBOUND_WEBHOOK_MAX_TARGETS=5000`; the G2 provider planning kernel uses
+at most 1,000 recipients **per page**. Neither constraint is a maximum
+Group size, and simply raising either limit to 100,000 would create a
+large in-memory envelope and excessive JSON hashing/queue overhead.
+
+For a Group with 100,000 remotely hosted members, the provider must durably
+stream verified membership pages and aggregate actual delivery destinations,
+using the exact actor set, visibility and membership epoch. No group post may
+execute until the complete snapshot has been sealed. Once sealed, each
+activity+Group actor+destination must have a single stable durable delivery
+identity, across pages and restarts; updates/retries must never replay the
+same shared inbox once per page. A sealed multi-chunk handoff requires an
+explicit mutually versioned producer/consumer protocol and ACK/replay
+protection, **not** a fabricated `ap.delivery-plan.v1` input with omitted
+actors or a sidecar-specific second queue.
+
+Until this contract and mixed local/remote fault/load proof are complete,
+the new 1k/5k synthetic tests are **not** evidence that a 100k-member Group
+can be federated successfully.
 
 ## Compression / compatibility
 
