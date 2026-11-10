@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'fedify-sidecar/src/delivery/tests/PaperGroupsCrossInstanceBoundary.test.ts'
+      - 'fedify-sidecar/src/delivery/tests/GroupAnnounceWireProfile.test.ts'
+      - 'fedify-sidecar/src/delivery/GroupAnnounceWireProfile.ts'
       - '.github/workflows/paper-groups-cross-instance.yml'
   workflow_dispatch:
 
@@ -32,5 +34,6 @@ jobs:
         run: |
           npx vitest run \
             src/delivery/tests/PaperGroupsCrossInstanceBoundary.test.ts \
+            src/delivery/tests/GroupAnnounceWireProfile.test.ts \
             src/delivery/tests/ActivityPubDeliveryPlanContract.test.ts \
             src/delivery/tests/OutboundWebhook.test.ts
