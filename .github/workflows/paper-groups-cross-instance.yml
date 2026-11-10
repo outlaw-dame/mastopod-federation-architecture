@@ -35,5 +35,6 @@ jobs:
           npx vitest run \
             src/delivery/tests/PaperGroupsCrossInstanceBoundary.test.ts \
             src/delivery/tests/GroupAnnounceWireProfile.test.ts \
+            src/delivery/tests/RemoteSharedInboxCacheRetired.test.ts \
             src/delivery/tests/ActivityPubDeliveryPlanContract.test.ts \
             src/delivery/tests/OutboundWebhook.test.ts
