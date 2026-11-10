@@ -129,6 +129,32 @@ describe("Paper Groups cross-instance Fedify/APDM boundary", () => {
     // independently authorized snapshot and sign the final immutable bytes.
   });
 
+  it("includes Friendica Group followers without assuming Friendica moderation or domain-wide delivery", () => {
+    // Friendica FEDERATION.md (2026.08-rc): FEP-1b12 partial support
+    // (Follow Group, audience, Group Announce), not Group moderation.
+    // URLs follow the pinned Friendica interop profile/inbox fixture;
+    // this is a target-contract test, not remote inbox-persistence proof.
+    const friendicaRecipients = [
+      { actorUri: "https://friendica.example/profile/alice",
+        inboxUrl: "https://friendica.example/inbox/alice",
+        targetDomain: "friendica.example" },
+      { actorUri: "https://friendica.example/profile/bob",
+        inboxUrl: "https://friendica.example/inbox/bob",
+        targetDomain: "friendica.example" },
+    ];
+    const p = plan([local(0)], friendicaRecipients, "followers");
+    expect(parseActivityPubDeliveryPlanV1(p).remoteRecipients).toHaveLength(2);
+    const routes = sidecar(p);
+    expect(routes.targets.map(target => target.deliveryUrl)).toEqual([
+      "https://friendica.example/inbox/alice",
+      "https://friendica.example/inbox/bob",
+    ]);
+    expect(routes.duplicateTargetCount).toBe(0);
+    expect(routes.targets.every(target => !target.sharedInboxUrl)).toBe(true);
+    // A same-domain cache would incorrectly merge these two distinct,
+    // consent-bound personal inboxes.
+  });
+
   it("does not collapse 1,000 personal inboxes just because actors share one host", () => {
     const p = plan([], Array.from({ length: 1000 }, (_, i) => remote(1, i, false)));
     expect(safeParseActivityPubDeliveryPlanV1(p).success).toBe(true);
