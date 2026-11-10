@@ -160,7 +160,7 @@ friendica_diagnostics() {
   # process the Follow. Report status/length, not private actor JSON.
   compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" friendica-app /bin/sh -lc '
     code=$(curl --connect-timeout 3 --max-time 12 --silent --show-error \
-      --output /dev/null --write-out "%{http_code}" \
+      --output /dev/null --write-out "%{http_code} content_type=%{content_type}" \
       --header "Accept: application/activity+json" \
       "$AP_INTEROP_ACTOR_URI") || code="TLS_OR_NETWORK_FAILURE"
     printf "friendica_actor_dereference_http_status=%s\\n" "$code"
@@ -170,6 +170,8 @@ friendica_diagnostics() {
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
     printf '%s\n' "select concat('inbox_receiver_count=', count(*)) from \`inbox-entry-receiver\` r join \`inbox-entry\` e on e.id=r.\`queue-id\` where e.signer='${actor_sql}';"
     printf '%s\n' "select concat('introduction_count=', count(*)) from intro i join contact c on c.id=i.\`contact-id\` where c.url='${actor_sql}';"
+    printf '%s\n' "select concat('system_actor_contact_count=', count(*), ',has_private_signing_key=', coalesce(sum(length(prvkey)>0),0), ',has_public_signing_key=', coalesce(sum(length(pubkey)>0),0)) from contact where uid=0 and self=1;"
+    printf '%s\n' "select concat('system_user_count=', count(*), ',nonempty_nickname=', coalesce(sum(length(nickname)>0),0)) from user where uid=0;"
     printf '%s\n' "select concat('pending_worker_count=', count(*), ',retrying_worker_count=', coalesce(sum(retrial > 0),0)) from workerqueue where done=0;"
   } | compose exec -T friendica-db /bin/sh -lc \
     'MYSQL_PWD="$MARIADB_PASSWORD" mariadb --batch --skip-column-names -u friendica friendica' \
