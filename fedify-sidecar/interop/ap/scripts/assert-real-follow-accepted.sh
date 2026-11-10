@@ -155,6 +155,16 @@ pixelfed_diagnostics() {
 
 friendica_diagnostics() {
   echo "Friendica fail-closed persistence diagnostics:" >&2
+  # Debug only: independently test whether Friendica can dereference the
+  # ACTUAL remote actor over the same trusted HTTPS route it must use to
+  # process the Follow. Report status/length, not private actor JSON.
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" friendica-app /bin/sh -lc '
+    code=$(curl --connect-timeout 3 --max-time 12 --silent --show-error \
+      --output /dev/null --write-out "%{http_code}" \
+      --header "Accept: application/activity+json" \
+      "$AP_INTEROP_ACTOR_URI") || code="TLS_OR_NETWORK_FAILURE"
+    printf "friendica_actor_dereference_http_status=%s\\n" "$code"
+  ' >&2 || echo "Friendica HTTPS actor probe unavailable" >&2
   {
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
