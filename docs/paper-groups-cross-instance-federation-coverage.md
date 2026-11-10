@@ -67,13 +67,19 @@ Fedify supports a `Group` actor dispatcher, but ownership, membership,
 moderation, delivery authorization and ActivityPub collections must be
 implemented by ActivityPods with actual signing and remote proof.
 
-Bonfire's [August 2026 community announcement](https://bonfirenetworks.org/posts/bonfire-for-communities/)
-states that its native Groups/Topics feature is currently **instance-local**
-and cross-instance Group federation remains planned. Bonfire's general
-ActivityPub `Group` actor support does not overturn this product limitation.
-Track basic Bonfire ActivityPub posts separately from real Bonfire Groups
-membership/threads federation, and do not mark unsupported federation as
-failed Paper delivery or as successfully interoperable.
+Bonfire's [August 2026 launch announcement](https://bonfirenetworks.org/posts/bonfire-for-communities/)
+described native Groups as local-only **at that time**. The newer
+[Bonfire v1.1 Community RC Groups guide](https://docs.bonfirenetworks.org/groups.html)
+now documents public **Open network** and **Announcement channel**
+federation via FEP-1b12, plus Lemmy community participation. By contrast,
+**Local community** and **Private club** presets do not federate;
+private cross-server Group federation is explicitly unsupported. The
+[upstream changelog](https://bonfirenetworks.org/docs/changelog/)
+identifies this as Bonfire 1.1 *unreleased* functionality, so a hosted
+Bonfire installation must be tested against its actual pinned flavour and
+build rather than assuming every 1.0/1.1 server supports it.
+Our interoperability target is the newer **Bonfire Group experience and
+boundaries model**, with exact FEP-1b12 wire compatibility tested separately.
 
 **Inbound Group semantic gap:** the current generic
 `src/protocol-bridge/activitypub/translators/social.ts`
@@ -92,6 +98,55 @@ The canonical ActivityPub spec requires inbox duplicate filtering by
 Activity `id`; our sidecar still needs its own durable transport-level
 destination/intent dedup to minimize waste rather than relying solely on
 remote receivers to absorb duplicate POSTs.
+
+## Paper Group interoperability profile — authoritative protocol mapping
+
+The ActivityPods provider owns the independent `Group` actor's member
+rights, privacy boundaries, role grants and ID. It is **app-neutral**:
+Paper is a client, and Fedify is the remote transport and protocol adapter.
+The user experience follows Bonfire's explicit
+**who can discover / join / read / contribute / moderate / federate**
+boundary separation, topics within Groups, and revocable moderator roles.
+Remote Group following/subscription is not the same as social membership.
+
+| Protocol | Paper behavior | Priority and verified partner evidence |
+| --- | --- | --- |
+| **ActivityPub + FEP-1b12** | Group actor, remote Follow/Accept/Undo, contributor Create/Note or Create/Page addressed to Group, Group-signed Announce of accepted activity, canonical membership/follower separation, moderation authority | **Core**, Lemmy, Mbin, PieFed, Bonfire v1.1 federating presets, NodeBB federated categories |
+| **FEP-7888** | Preserve resolvable conversation `context` for threads; do not rewrite a topic into an unrelated group context | High, NodeBB implements for its topics |
+| **FEP-7458** | Support replies collection and pagination without unbounded recursive retrieval | High, NodeBB partial |
+| **FEP-11dd** | Preserve parent/inherited conversation context when interoperating with NodeBB | Compatibility, NodeBB implemented |
+| **FEP-f228** | Authenticated bounded thread backfill, no federation-initiated amplification | Compatibility, NodeBB implemented; optional where offered |
+| **FEP-d36d** | Only negotiate cross-forum content sharing if both endpoints advertise/support it; prevent duplicate threads and loops | Optional; NodeBB defers; not a prerequisite |
+| **FEP-1a11 / FEP-400e** | No implicit multi-Announce or publicly appendable collection assumptions | Optional/not baseline; no compatibility regression |
+| **SWICG Groups draft (2026-10-20)** | Treat member, follower and subscriber as distinct; invitation consent and restrictions remain provider-governed | Design input, **not a W3C Standard** |
+
+**Platform target details**
+
+- **Bonfire Community (v1.1 RC):** Use its public/open and announcement
+  federation as a primary reference, but never publish private clubs through
+  public AP/AT feed or assume a local-only flavour federates.
+- **Lemmy, PieFed, Mbin:** Community or magazine maps to `Group`;
+  accept/forward Group `Announce` wrapping original author
+  `Create/Page` or `Create/Note`, maintain author and moderation provenance.
+  Remote Follow/Accept is subscription, not automatic Paper private membership.
+- **NodeBB:** Its federated **category** is the `Group`; a topic is the
+  resolvable `context`; `audience` can be the category; categories can
+  follow categories. Never flatten category/topic into a generic repost.
+- **WAFRN:** Its current public docs confirm generic Fediverse and ATProto
+  connectivity but do **not** establish FEP-1b12 Group actor behavior.
+  Add WAFRN as a **capability-discovery and live fixture target**; allow
+  generic Note/Announce interoperability when supported, but do not claim
+  its Groups actor/membership conformance without pinned-source/live proof.
+- **Mastodon/GoToSocial:** Prefer standard public Group follow/distribution
+  compatibility where supported; do not misrepresent those servers as
+  providing full native structured Group moderation.
+
+**Critical Group federation truth condition:** HTTP 202 or generic Announce
+translation cannot alone pass a Group semantic test. Record actor
+Follow/Accept, accepted contribution -> Group Announce, nested original
+author/object integrity, FEP-7888 context, reply threading, moderator
+authority, recipient/delivery permission, idempotent propagation and remote
+persistence. Always pin the remote implementation and capability version.
 
 ## Large Group transport blocker: bounded cross-page handoff
 
