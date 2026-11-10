@@ -588,7 +588,9 @@ jobs:
                     exit 0
                   fi
                   printf "internal_log_present=1\n"
-                  for term in "Unable to retrieve AP contact" "Could not find owner" "message is discarded" "URLVerifier" "signature" "certificate" "could not retrieve" "Could not fetch" "untrusted"; do
+                  printf "internal_log_line_count=%s\n" "$(wc -l < "$file" | tr -d "[:space:]")"
+                  printf "internal_log_bytes=%s\n" "$(wc -c < "$file" | tr -d "[:space:]")"
+                  for term in "Unexpected content type" "Invalid body" "Invalid HTTP signature" "Error fetching url" "Fetched for user" "No actor name was found" "System account not found" "Incoming message" "Message for user" "No actor" "No keyId" "Empty key" "Verification failed" "Digest does not match" "Unable to retrieve AP contact" "Could not find owner" "message is discarded" "URLVerifier" "signature" "certificate" "could not retrieve" "Could not fetch" "untrusted"; do
                     count=$(grep -iFc "$term" "$file" 2>/dev/null || true)
                     printf "category=%s count=%s\n" "$term" "$count"
                   done
