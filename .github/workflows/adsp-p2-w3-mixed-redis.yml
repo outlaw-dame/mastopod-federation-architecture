@@ -343,29 +343,29 @@ jobs:
               ADSP_P2_NAMESPACE="$namespace" \
               SEMAPPS_REDIS_TRANSPORTER_URL=redis://127.0.0.1:6379/12 \
                 node - <<'NODE'
-            const {ServiceBroker}=require('moleculer');
-            const Serializer=require('./RdfJSONSerializer');
-            const broker=new ServiceBroker({
-              namespace:process.env.ADSP_P2_NAMESPACE,
-              nodeID:'w3-required-solid-services-'+process.pid,
-              logger:false,
-              transporter:process.env.SEMAPPS_REDIS_TRANSPORTER_URL,
-              serializer:new Serializer(),
-              retryPolicy:{enabled:false},
-              registry:{preferLocal:true}
-            });
-            (async()=>{
-              await broker.start();
-              try{
-                await broker.waitForServices([
-                  'auth','activitypub.actor','activitypub.outbox',
-                  'auth-agent','agent-registry','auth-registry',
-                  'data-registry','solid-preferences-file','type-indexes'
-                ],120000);
-                process.stdout.write('W3: required Solid/ActivityPub services discovered\\n');
-              }finally{await broker.stop();}
-            })().catch(error=>{console.error('W3_REQUIRED_SERVICES_MISSING',error.message);process.exitCode=1;});
-            NODE
+          const {ServiceBroker}=require('moleculer');
+          const Serializer=require('./RdfJSONSerializer');
+          const broker=new ServiceBroker({
+            namespace:process.env.ADSP_P2_NAMESPACE,
+            nodeID:'w3-required-solid-services-'+process.pid,
+            logger:false,
+            transporter:process.env.SEMAPPS_REDIS_TRANSPORTER_URL,
+            serializer:new Serializer(),
+            retryPolicy:{enabled:false},
+            registry:{preferLocal:true}
+          });
+          (async()=>{
+            await broker.start();
+            try{
+              await broker.waitForServices([
+                'auth','activitypub.actor','activitypub.outbox',
+                'auth-agent','agent-registry','auth-registry',
+                'data-registry','solid-preferences-file','type-indexes'
+              ],120000);
+              process.stdout.write('W3: required Solid/ActivityPub services discovered\\n');
+            }finally{await broker.stop();}
+          })().catch(error=>{console.error('W3_REQUIRED_SERVICES_MISSING',error.message);process.exitCode=1;});
+          NODE
             )
             start_sidecar "$arm_dir"
 
