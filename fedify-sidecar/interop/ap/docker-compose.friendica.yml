@@ -29,6 +29,12 @@ services:
       FRIENDICA_ADMIN_MAIL: interop-admin@friendi.ca
       FRIENDICA_TZ: UTC
       FRIENDICA_LANG: en
+      # Diagnostic-only ephemeral fixture: official Friendica Docker settings.
+      # Keep logs outside /var/www/html and do not export raw logs/artifacts;
+      # CI prints only bounded, non-secret exception type counts on failure.
+      FRIENDICA_DEBUGGING: 'true'
+      FRIENDICA_LOGFILE: /var/www/friendica.log
+      FRIENDICA_LOGLEVEL: debug
       MYSQL_HOST: friendica-db
       MYSQL_DATABASE: friendica
       MYSQL_USER: friendica
