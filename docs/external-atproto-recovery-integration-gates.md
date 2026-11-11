@@ -57,6 +57,10 @@
 - [ ] Record go/no-go outcome and freeze source refs for integration; G0 closes only if provider-side provenance is resolved or a formally accepted missing-source disposition is documented.
 
 ### G1 — authority boundaries, identity and durable lifecycle
+
+> **CRITICAL TRACKED BLOCKER:** [#127 — synthetic `repoInitialized` is not a real PDS](https://github.com/outlaw-dame/mastopod-federation-architecture/issues/127). Our ActivityPods `core/atproto-provisioning.js` still records `repoInitialized:true` with default `bafyreigenesisplaceholder` / rev `0` without writing a signed repo. The mandatory account-policy and shadow PostgreSQL validation therefore need actual repository-ready proof, not just identitybinding metadata. This problem was independently found by comparing **our** current code to the recovered provider code. It is not solved by PR #134 or #138 alone.
+
+
 - [ ] Verify one local account owns its HTTPS WebID (= AP actor), managed `did:plc`, handle, initialized PDS repo and three key roles (AP signing, AT commit, PLC rotation).
 - [ ] Ensure signed PLC operation creation and verification against the PLC directory (not shape-only DID generation). Test replays, collision, key rotation and domain/handle changes.
 - [ ] Align with ActivityPods PR #134 and #138 **by exact head and latest review**, not by stale assumptions; preserve protected RDF identitybindings and nonactivated PostgreSQL candidate until explicit migration.
@@ -64,6 +68,9 @@
 - [ ] Verify multi-replica Solid bootstrap and actual OIDC/SAI readiness independently from AT account success.
 
 ### G2 — provider-owned ATProto repository
+
+- [ ] **Block release on [#127](https://github.com/outlaw-dame/mastopod-federation-architecture/issues/127):** replace placeholder repo bootstrap with actual signed version-3 commit, CID-backed MST, real CAR and verifiable PDS status. Require revision fence and durable native event outbox. Never mark `repoInitialized` from metadata alone.
+
 - [ ] Determine whether recovered provider source contains correct production record/MST/commit/CAR/PLC logic; disposition each component.
 - [ ] Establish one authoritative Tier-1 repository writer; sidecar Redis must be reconstructable cache, never sole repo state.
 - [ ] Test CID-addressed DAG-CBOR blocks, MST mutations, signed commits, real CAR full and incremental semantics, repository enumeration/status/describe, blob storage.
