@@ -174,10 +174,10 @@ friendica_diagnostics() {
     for target in actor origin; do
       if [ "$target" = actor ]; then url="$AP_INTEROP_ACTOR_URI"; else url="https://activitypods.test/"; fi
       for method in HEAD GET; do
-        status=$(curl --silent --show-error --connect-timeout 3 --max-time 8 \\
-          --output /dev/null --write-out "%{http_code}" --request "$method" \\
+        status=$(curl --silent --show-error --connect-timeout 3 --max-time 8 \
+          --output /dev/null --write-out "%{http_code}" --request "$method" \
           --header "Accept: application/activity+json" "$url") || status=TLS_OR_NETWORK_FAILURE
-        printf "friendica_probe_%s_%s_http_status=%s\\n" "$target" "$method" "$status"
+        printf "friendica_probe_%s_%s_http_status=%s\n" "$target" "$method" "$status"
       done
     done
   ' >&2 || echo "Friendica actor/origin diagnostics unavailable" >&2
