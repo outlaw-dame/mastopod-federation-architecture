@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      # Experimental exact-head W3 validation of ActivityPods PR #136 (registration context isolation).\n      # This is not a release pin; retain strict 1/2/4 acceptance and roll back on failure.\n      ACTIVITYPODS_SHA: 'b437cd22289f6a5ae8f1fd0cc83d953485949217'
+      # Experimental exact-head W3 validation of ActivityPods PR #136 (registration context isolation).\n      # This is not a release pin; retain strict 1/2/4 acceptance and roll back on failure.\n      ACTIVITYPODS_SHA: '6608dc59e421037ec94cf73ab39d981451149b11'
       FEDERATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ADSP_REMOTE_REDIS_URL: redis://127.0.0.1:6379
       ADSP_REMOTE_TARGET_STATS_URL: http://127.0.0.1:18080/stats
