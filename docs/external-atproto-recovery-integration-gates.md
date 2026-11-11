@@ -1,21 +1,22 @@
 # External ATProto recovery: investigation, disposition, and acceptance gates
 
-**State:** INVESTIGATION BLOCKED — source inventory substantially complete, provider-side review incomplete. **Created:** 2026-11-11.  
+**State:** SOURCE RECOVERED — provider-side static audit in progress; reproducible build and runtime verification pending. **Created:** 2026-11-11.  
 **Scope:** `Lawhacknifemi/mastopod-federation-architecture` branch `sh-mvp` vs our federation `master`, the ActivityPods `master`, and active identity/account PRs.  
 **Purpose:** prevent a branch-wide merge, duplicate implementation, authority drift, security regressions, and unverifiable "completed" checkmarks.
 
-> **Do not implement, cherry-pick, activate, or merge the external branch from this document alone.** The source-recovery gate (G0) is blocking. The checkboxes below are an evidence-driven integration backlog, *not* assertions that these features have been delivered.
+> **Do not implement, cherry-pick, activate, or merge the external branch from this document alone.** G0 still blocks ports while reproducible build, semantic collisions and runtime proof are pending; **the source-location subgate is now satisfied**. The checkboxes below are an evidence-driven integration backlog, *not* assertions that these features have been delivered.
 
 ## Source provenance and verified observations
 
 - External repository: https://github.com/Lawhacknifemi/mastopod-federation-architecture/tree/sh-mvp  
   Head inspected: `e4d0bb74142afbaf4573d2f93e28028479d6b52d` (2026-10-28); 30 commits ahead of that repo's `master`; 57 changed paths, approximately +10,829/-101 lines from the GitHub compare API.
-- External Git link `activitpod-aptoroto` at head points to commit `9f1c7fc3511487150ce458f025e9dc4477133221`; prior link `11108f070c7e29a4a86cff84d4f671a40bffcb46`. The accessible `.gitmodules` defines only `memory`, not `activitpod-aptoroto`. The external `Lawhacknifemi/activitypods` repository did **not** resolve either commit at review time. **Provider implementation, source repository URL, build and test coverage remain unverified**.
+- **RECOVERED 2026-11-11:** external Git link `activitpod-aptoroto` at head points to commit `9f1c7fc3511487150ce458f025e9dc4477133221`; prior link `11108f070c7e29a4a86cff84d4f671a40bffcb46`. **Both exact commits were verified in `Lawhacknifemi/activitypods-demo-bridge`**, which has a top-level `activitypods/` provider and `semapps/` implementation. The external parent `.gitmodules` still defines only `memory`; therefore a normal clean submodule checkout remains broken unless its URL is explicitly restored. **Source is located; reproducible build and acceptance tests are not yet verified.**
 - For several common files, external `master` and our federation `master` have **identical blob SHAs**; `sh-mvp` changes those files. Confirmed paths: `AtRecordReader.ts`, `AtCarExporter.ts`, `AtFirehoseEventEncoder.ts`, `AtXrpcServer.ts`, `RepoDescribeRepoRoute.ts`, `SyncGetRepoRoute.ts`.
-- No relevant GitHub Actions PR-triggered runs or commit status checks were available for the external head in the connector. **Not equivalent to a verified passing build**.
+- No relevant GitHub Actions PR-triggered runs or commit status checks were available for the external sidecar head in the connector. **Not equivalent to a verified passing build**. Provider-side repository documents mock tests but also states that real triplestore integration had been blocked; those claims and any newer tests still require exact-head execution.
 - Current architectural direction already exists in `ARCHITECTURE-BASELINE.md` and `docs/atproto-authority-convergence.md` (branch `docs/atproto-authority-convergence` at review time). This recovery work must *converge with* those decisions, not supersede them.
 - ActivityPods `identitybindings.service.js` already models account/WebID/AP actor/DID/handle/PDS/key references. Active draft PR **#134** enforces new-account mandatory WebID=AP actor plus `did:plc` and initialized repo; draft **#138** aligns the nonactivated PostgreSQL account candidate. Neither is assumed merged or deployed.
 - This is a **static source review**. No build, live PLC creation, signed-CAR verification, distributed workload, or external relay ingestion was executed in this investigation.
+- Cross-fork GitHub comparison of **our federation `master` vs `Lawhacknifemi:sh-mvp`** independently confirms **30 ahead / 282 behind, 57 changed paths** (25 added, 32 modified, 0 deleted). This is more representative of actual integration risk than comparing only the developer's own old `master`.
 
 ## Disposition matrix (preliminary until G0)
 
@@ -47,9 +48,10 @@
 - [x] Identify the external `sh-mvp` head, compare against the external base, record file inventory.
 - [x] Compare representative common-file blob SHAs with our federation `master` and identify changed vs unchanged code.
 - [x] Inspect source for DID generation, signup, signing, CAR, bridging, API authorization, PostgreSQL sync and feed paths.
-- [ ] Retrieve exact `activitpod-aptoroto` gitlink target `9f1c7fc3511487150ce458f025e9dc4477133221` **from an authenticated, verifiable repository/archive**, plus corresponding tests and parent history. Record repository URL, immutable commit and integrity evidence. If genuinely unavailable, record that and independently classify all claimed provider-side behavior **UNVERIFIED**, without inventing code.
+- [x] **Locate** exact `activitpod-aptoroto` gitlink target `9f1c7fc3511487150ce458f025e9dc4477133221` and its prior `11108f070c7e29a4a86cff84d4f671a40bffcb46` in authenticated GitHub repository `Lawhacknifemi/activitypods-demo-bridge`; commit and source paths verified. **Reproducible workspace reconstruction and execution remain separate unchecked gates.**
 - [ ] Confirm complete build graph and exact lockfiles/submodule mappings; inspect any private key, credential or user-data material accidentally present in debug artifacts *without copying secrets into the report*.
-- [ ] Audit all **57 changed paths** against current `master`, open AT-related branches/PRs and ActivityPods active identity/provisioning PRs. Produce a complete SHA/file/feature collision map, not just the representative entries above.
+- [x] Establish cross-fork 57-path delta against *our actual* federation `master`; 25 added, 32 modified, no removed, 30/282 ahead/behind. See `docs/external-atproto-provider-source-audit.md` for classification and supporting source locations.
+- [ ] Complete per-file **semantic** collision audit for all 57 changed paths against current `master`, active AT-related branches/PRs, and ActivityPods identity/provisioning PRs; do not confuse the complete path inventory with tested behavioral equivalence.
 - [ ] Capture exact-head isolated build/test results for source that can be built, with explicit environment and test logs.
 - [ ] Record go/no-go outcome and freeze source refs for integration; G0 closes only if provider-side provenance is resolved or a formally accepted missing-source disposition is documented.
 
@@ -104,8 +106,8 @@
 | Stage | Status | Evidence |
 | --- | --- | --- |
 | Initial external-sidecar survey | **Partial review complete** | External compare 30 commits/57 files and cited paths above |
-| Exact provider subproject recovery | **BLOCKED / source missing** | Inconsistent `.gitmodules`; `9f1c7fc…` not resolved in accessible developer ActivityPods repo |
-| Current-code overlap map | **Partial** | Representative blob SHA comparisons; full 57-path map pending |
+| Exact provider source identification | **COMPLETE — SHA VERIFIED** | `Lawhacknifemi/activitypods-demo-bridge` exact `9f1c7fc…` and predecessor `11108f0…`; submodule URL still missing in parent |
+| Current-code overlap map | **Inventory complete, semantic review partial** | Cross-fork compare against our `master`: 30 ahead/282 behind, 57 paths; source audit companion |
 | Production DID/PLC signing verification | **NOT TESTED** | External hash-based DID implementation invalid; provider source unavailable |
 | Integration coding | **NOT STARTED** | No external code copied |
 | Production activation | **NOT AUTHORIZED** | No migration or runtime cutover |
@@ -114,6 +116,8 @@
 
 - External branch: https://github.com/Lawhacknifemi/mastopod-federation-architecture/tree/sh-mvp
 - External head: https://github.com/Lawhacknifemi/mastopod-federation-architecture/commit/e4d0bb74142afbaf4573d2f93e28028479d6b52d
+- **Recovered provider source:** https://github.com/Lawhacknifemi/activitypods-demo-bridge/tree/9f1c7fc3511487150ce458f025e9dc4477133221
+- Provider-side preliminary code audit: `docs/external-atproto-provider-source-audit.md`
 - Current federation repo: https://github.com/outlaw-dame/mastopod-federation-architecture
 - ActivityPods identity implementation: https://github.com/outlaw-dame/activity-pods/blob/master/pod-provider/backend/services/identitybindings.service.js
 - Mandatory unified identity PR: https://github.com/outlaw-dame/activity-pods/pull/134
