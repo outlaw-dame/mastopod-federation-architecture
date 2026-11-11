@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      # P2 W3 original pin predates the verified P2 node-loss/actor-provisioning fix.\n      # PR #106 final merged commit has exact-head mixed Pub/Fuseki recovery proof.\n      ACTIVITYPODS_SHA: '0ae54f0a898df3fb4e6516504c4e649669834d69'
+      # P2 W3 original pin predates the verified P2 node-loss/actor-provisioning fix.\n      # PR #106 final merged commit has exact-head mixed Pub/Fuseki recovery proof.\n      ACTIVITYPODS_SHA: 'e528b0cd6f7526ffdf276ecb353b0dc6faf4c9e0'
       FEDERATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ADSP_REMOTE_REDIS_URL: redis://127.0.0.1:6379
       ADSP_REMOTE_TARGET_STATS_URL: http://127.0.0.1:18080/stats
