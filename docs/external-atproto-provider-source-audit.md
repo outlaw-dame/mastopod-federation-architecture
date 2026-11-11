@@ -14,7 +14,7 @@ Parent tracker: [#125](https://github.com/outlaw-dame/mastopod-federation-archit
 | Provider tree | `activitypods/pod-provider/backend/`, `semapps/src/middleware/packages/atproto/`, `demo-pds-js/`, tests/scripts |
 | Parent sidecar submodule metadata | `activitpod-aptoroto` gitlink exists, but missing associated `.gitmodules` URL. Manual source identified; clean recursive clone not automatically reproducible |
 | Cross-fork comparison | our federation `master` vs `Lawhacknifemi:sh-mvp`: **30 ahead, 282 behind, 57 changed paths (25 added / 32 modified; no removed)**; **+10,829 / -101** |
-| Validation | Static inspection and authenticated GitHub commit/hash lookups only. **No provider suite, real PLC/relay or signed CAR proof executed** |
+| Validation | Authenticated hash lookups, static inspection and **[G0 Actions #43056813618](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43056813618) successful** at workflow head `fdf5e415e53b6ba5b948d7e8fb8a157def33d385`: immutable sidecar/provider checkout, gitlink verification, 9 provider + 8 sidecar JavaScript syntax checks. **No dependency install, provider suite, live PLC/relay or signed CAR verification yet** |
 
 **Important correction from initial source review:** The external **sidecar's** `activitypods-integration/backend/services/atproto/identity.service.js` constructs fake, hex-hash-derived `did:plc` identifiers. The **recovered provider's active helper** is *different*: `activitypods/pod-provider/backend/helpers/atproto/identity.service.js` assembles and signs a PLC genesis operation and POSTs it to `plc.directory`. Do **not** conclude the developer's entire ATProto implementation uses fake PLC DIDs on the basis of the sidecar file; and do **not** conclude real network compatibility without executing independent verifiers.
 
@@ -120,6 +120,7 @@ This table is **complete at the path level**, based on cross-fork `compare_commi
 ## Remaining G0 work
 
 - [x] Recover immutable provider repository/source SHA from the otherwise broken parent Git-subproject pointer.
+- [x] Run repeatable, isolated GitHub Actions source probe on both pinned commits without untrusted script execution; **17 JavaScript files passed `node --check`**. Read-only fetch bypasses unconfigured gitlink and leaves parent source unchanged.
 - [x] Cross-compare full external branch with our actual federation `master`; enumerate and categorize all 57 changed paths.
 - [x] Verify recovered provider uses a different, signed PLC genesis implementation from the external sidecar's legacy hash-based identity file.
 - [x] Identify key existing overlaps in our ActivityPods `master` (keypair and signing APIs; protected identitybindings) to avoid redundant code.
