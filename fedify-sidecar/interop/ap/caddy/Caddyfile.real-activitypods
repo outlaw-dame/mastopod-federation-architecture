@@ -59,5 +59,12 @@ https://activitypods {
 
 https://activitypods.test {
   tls /certs/activitypods.test.crt /certs/activitypods.test.key
+  # Real remote servers commonly inspect their peer's origin before importing
+  # actors. The isolated Pod proof previously returned 404 at the host root
+  # even though its actor URI returned 200. Model a reachable homepage only
+  # for this disposable interoperability origin; keep every actor/key/outbox
+  # request proxied to the real ActivityPods backend, unchanged.
+  @homepage path /
+  respond @homepage "ActivityPods federation interop fixture" 200
   reverse_proxy host.docker.internal:3000
 }
