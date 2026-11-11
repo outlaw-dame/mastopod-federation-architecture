@@ -34,6 +34,14 @@ Parent tracker: [#125](https://github.com/outlaw-dame/mastopod-federation-archit
 | External sidecar `internal-social-api.service.js` | Supports master-token route capable of mutating arbitrary requested actor and substitutes an actor URI into Moleculer metadata. | **G5:** do not port as user delegation; require caller-scoped grants, deny-first revocation, and authenticated actor ownership. |
 | External sidecar `AtFirehoseEventEncoder.ts`, `AtRecordReader.ts`, `AtCarExporter.ts` | Candidate fixes for CID-link CBOR encoding, real provider-backed record values and non-empty CAR; our `master` retains earlier versions of these files. | **G3:** selective tests/ports only after G0; no whole-branch merge. |
 
+### NEW: our own provider G1/G2 placeholder-repository blocker
+
+**Tracked:** [#127](https://github.com/outlaw-dame/mastopod-federation-architecture/issues/127).
+
+Our current `outlaw-dame/activity-pods` `pod-provider/backend/services/core/atproto-provisioning.js` already has a real PLC submission pathway and local secp256k1 signing/key refs, but its `initializeRepoState()` only writes `repoInitialized:true`, `repoRootCid` default `bafyreigenesisplaceholder` and `repoRev` default `0`. It does not create a real signed v3 repository, and `verifyProvisionedState()` does not independently inspect the head, MST or CAR. The function is **unchanged** on draft PR #134 head. Thus our metadata-only readiness gate can report a completed AT identity while PDS storage is not real. **Neither PR #134's shape checks nor PR #138's PostgreSQL identity candidate fixes this.**
+
+This is a separate, primary G1/G2 milestone: use the recovered developer repository code only as a reviewed reference, implement one authoritative ActivityPods managed repo path, then make actual signed-repo readiness a mandatory success invariant. Current external developer helper still has unsigned fallback, incomplete atomicity and weak native-event durability; no wholesale port.
+
 ### Additional integration regressions confirmed against our current master
 
 These differences emerged from side-by-side source inspection, rather than relying on the external branch's original commit messages:
