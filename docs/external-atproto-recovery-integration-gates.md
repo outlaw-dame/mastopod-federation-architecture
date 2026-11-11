@@ -67,6 +67,12 @@
 - [ ] Implement/prove durable signup state machine: crash before/after PLC submission and PDS init, concurrent same-handle signups, immutable identity reconciliation, account disable/delete/export, no orphan DID/key.
 - [ ] Verify multi-replica Solid bootstrap and actual OIDC/SAI readiness independently from AT account success.
 
+### Incremental signed-repository integration evidence (2026-11-11)
+
+- [x] [ActivityPods draft PR #139](https://github.com/outlaw-dame/activity-pods/pull/139), exact head `7e041c4d5f339acdd7d133f50433e6b3a6a36099`: [PostgreSQL 18 signed v3 empty-repo proof #43061791942](https://github.com/outlaw-dame/activity-pods/actions/runs/43061791942) **PASSED**, including official Bluesky `@atproto/repo` independent CAR parser and empty MST root parity, real secp256k1 signature and CID validation, 8-way duplicate-safe genesis, transactional block/head/outbox persistence, crash rollback and corruption rejection. **NON-ACTIVATED candidate; no native record writes or user signup wiring.**
+- [x] [ActivityPods stacked draft PR #140](https://github.com/outlaw-dame/activity-pods/pull/140), exact head `3543a11e4321f12ab8967ae32e31bd330f5b8385`: [fail-closed proof-gate CI #43063342366](https://github.com/outlaw-dame/activity-pods/actions/runs/43063342366) **PASSED**. Production cannot accept metadata-only `repoInitialized:true`; waits on internal trusted signer/repo actions. **Not independently mergeable.**
+- [ ] Wire a trusted, capability-scoped ActivityPods `atproto-managed-repository` service to real signed repo storage and independent DID PLC key verification, reconcile SQL repository vs Jena identitybinding state after crashes and publish native outbox with retries; then add nonempty record operations, actual XRPC and relay proof. See [blocker #127](https://github.com/outlaw-dame/mastopod-federation-architecture/issues/127).
+
 ### G2 — provider-owned ATProto repository
 
 - [ ] **Block release on [#127](https://github.com/outlaw-dame/mastopod-federation-architecture/issues/127):** replace placeholder repo bootstrap with actual signed version-3 commit, CID-backed MST, real CAR and verifiable PDS status. Require revision fence and durable native event outbox. Never mark `repoInitialized` from metadata alone.
