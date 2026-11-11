@@ -165,8 +165,25 @@ friendica_diagnostics() {
       "$AP_INTEROP_ACTOR_URI") || code="TLS_OR_NETWORK_FAILURE"
     printf "friendica_actor_dereference_http_status=%s\\n" "$code"
   ' >&2 || echo "Friendica HTTPS actor probe unavailable" >&2
+  # Determine whether Friendica imported the ActivityPub actor itself before
+  # a contact/follow mutation. These are counts, not raw actor material.
+  # Compare status of the canonical actor and its origin using Friendica's
+  # container DNS/TLS path. Unlike the native application HTTP client these
+  # are unsigned probes, so they do not prove a successful signed actor fetch.
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" friendica-app /bin/sh -lc '
+    for target in actor origin; do
+      if [ "$target" = actor ]; then url="$AP_INTEROP_ACTOR_URI"; else url="https://activitypods.test/"; fi
+      for method in HEAD GET; do
+        status=$(curl --silent --show-error --connect-timeout 3 --max-time 8 \
+          --output /dev/null --write-out "%{http_code}" --request "$method" \
+          --header "Accept: application/activity+json" "$url") || status=TLS_OR_NETWORK_FAILURE
+        printf "friendica_probe_%s_%s_http_status=%s\n" "$target" "$method" "$status"
+      done
+    done
+  ' >&2 || echo "Friendica actor/origin diagnostics unavailable" >&2
   {
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
+    printf '%s\n' "select concat('apcontact_count=',count(*),',apcontact_public_key_count=',coalesce(sum(length(pubkey)>0),0),',apcontact_inbox_count=',coalesce(sum(length(inbox)>0),0)) from apcontact where url='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
     printf '%s\n' "select concat('inbox_receiver_count=', count(*)) from \`inbox-entry-receiver\` r join \`inbox-entry\` e on e.id=r.\`queue-id\` where e.signer='${actor_sql}';"
     printf '%s\n' "select concat('introduction_count=', count(*)) from intro i join contact c on c.id=i.\`contact-id\` where c.url='${actor_sql}';"
