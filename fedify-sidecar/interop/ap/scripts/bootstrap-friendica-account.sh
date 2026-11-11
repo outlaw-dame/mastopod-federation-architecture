@@ -76,10 +76,19 @@ for service in friendica-app friendica-worker; do
   compose exec -T "$service" /bin/sh -lc '
     umask 077
     touch /tmp/friendica-interop.log
-    test -w /tmp/friendica-interop.log
     chmod 600 /tmp/friendica-interop.log
   '
 done
+# The official Apache/PHP process runs as www-data, not the root user
+# executing docker compose exec. A root-owned 0600 file makes HTTP receiver
+# logging silently impossible while the CLI worker log continues working.
+# Assign ownership only in the web container, retaining private 0600 mode.
+compose exec -T friendica-app /bin/sh -lc '
+  chown www-data:www-data /tmp/friendica-interop.log
+  test "$(stat -c %a /tmp/friendica-interop.log)" = 600
+  su -s /bin/sh www-data -c "test -w /tmp/friendica-interop.log"
+'
+
 # Friendica database config may override Docker logging environment.
 # This fixture uses the official CLI to verify bounded DEBUG to /tmp.
 ensure_debug_config() {
