@@ -34,6 +34,16 @@ Parent tracker: [#125](https://github.com/outlaw-dame/mastopod-federation-archit
 | External sidecar `internal-social-api.service.js` | Supports master-token route capable of mutating arbitrary requested actor and substitutes an actor URI into Moleculer metadata. | **G5:** do not port as user delegation; require caller-scoped grants, deny-first revocation, and authenticated actor ownership. |
 | External sidecar `AtFirehoseEventEncoder.ts`, `AtRecordReader.ts`, `AtCarExporter.ts` | Candidate fixes for CID-link CBOR encoding, real provider-backed record values and non-empty CAR; our `master` retains earlier versions of these files. | **G3:** selective tests/ports only after G0; no whole-branch merge. |
 
+### Additional integration regressions confirmed against our current master
+
+These differences emerged from side-by-side source inspection, rather than relying on the external branch's original commit messages:
+
+- **APDM authorization regression:** external `fedify-sidecar/src/delivery/outbound-webhook.ts` (6,192 bytes) lacks the more recent explicit APDM `delivery_plan` / `interop_legacy` authority/provenance checks in our `master` (13,895 bytes). **Do not take the external implementation.**
+- **Durable retry regression:** external `src/delivery/outbox-intent-worker.ts` uses an ACK-then-reenqueue approach for some deferred work. Our `master` uses a persisted delayed replacement and requires a durable delay scheduler before consuming. **Do not reintroduce the older queue semantics.**
+- **Localhost boundary widening:** external `src/utils/internalAuthority.ts` includes `host.docker.internal` in loopback hostnames where our `master` does not. This may change internal API trust decisions; reject unless individually justified and tested.
+- **Development DB credentials:** external `src/config/v6-config.ts` supplies a plaintext PostgreSQL connection-string fallback containing `sidecar_user:sidecar_password`. Our `master` does not load that database. Do not carry test defaults into deployed environments.
+- **Non-AT adjacent changes:** `DirectMessageTranslator.ts`, Redpanda topic governance, OpenSearch feed/search mappings and Docker/Compose wiring are **not automatically needed** for ATProto recovery. Treat as separate change domains with dedicated acceptance.
+
 ### Priority test matrix
 
 1. **G1 identity:** same username/email simultaneous registration; synthetic PLC outage; successful genesis + crash before local binding; missing/forged rotation key; tampered PLC response; retry with same idempotency key; prove no phantom successful unified account.
