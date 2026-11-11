@@ -49,6 +49,7 @@
 - [x] Compare representative common-file blob SHAs with our federation `master` and identify changed vs unchanged code.
 - [x] Inspect source for DID generation, signup, signing, CAR, bridging, API authorization, PostgreSQL sync and feed paths.
 - [x] **Locate** exact `activitpod-aptoroto` gitlink target `9f1c7fc3511487150ce458f025e9dc4477133221` and its prior `11108f070c7e29a4a86cff84d4f671a40bffcb46` in authenticated GitHub repository `Lawhacknifemi/activitypods-demo-bridge`; commit and source paths verified. **Reproducible workspace reconstruction and execution remain separate unchecked gates.**
+- [x] Verify that both immutable external commits can be fetched without submodules; **automated GitHub Actions [G0 source probe #43056813618](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43056813618) passed at our workflow head `fdf5e415e53b6ba5b948d7e8fb8a157def33d385`**, checking gitlink pointer and parsing **9 provider + 8 sidecar JS files** without running third-party scripts. Initial probe failure [#43056657250](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43056657250) proved `actions/checkout` cannot clean up the broken parent gitlink; corrected by read-only pinned `git fetch`.
 - [ ] Confirm complete build graph and exact lockfiles/submodule mappings; inspect any private key, credential or user-data material accidentally present in debug artifacts *without copying secrets into the report*.
 - [x] Establish cross-fork 57-path delta against *our actual* federation `master`; 25 added, 32 modified, no removed, 30/282 ahead/behind. See `docs/external-atproto-provider-source-audit.md` for classification and supporting source locations.
 - [ ] Complete per-file **semantic** collision audit for all 57 changed paths against current `master`, active AT-related branches/PRs, and ActivityPods identity/provisioning PRs; do not confuse the complete path inventory with tested behavioral equivalence.
@@ -106,7 +107,7 @@
 | Stage | Status | Evidence |
 | --- | --- | --- |
 | Initial external-sidecar survey | **Partial review complete** | External compare 30 commits/57 files and cited paths above |
-| Exact provider source identification | **COMPLETE — SHA VERIFIED** | `Lawhacknifemi/activitypods-demo-bridge` exact `9f1c7fc…` and predecessor `11108f0…`; submodule URL still missing in parent |
+| Exact provider source and syntax probe | **COMPLETE — SHA VERIFIED, SYNTAX ONLY** | `activitypods-demo-bridge` `9f1c7fc…`; [Actions #43056813618](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43056813618) passed 17 JavaScript `node --check` probes; not full runtime validation |
 | Current-code overlap map | **Inventory complete, semantic review partial** | Cross-fork compare against our `master`: 30 ahead/282 behind, 57 paths; source audit companion |
 | Production DID/PLC signing verification | **NOT TESTED** | External hash-based DID implementation invalid; provider source unavailable |
 | Integration coding | **NOT STARTED** | No external code copied |
