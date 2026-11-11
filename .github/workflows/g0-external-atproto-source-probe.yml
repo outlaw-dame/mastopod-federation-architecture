@@ -21,23 +21,29 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Checkout immutable external federation branch
-        uses: actions/checkout@v4
-        with:
-          repository: Lawhacknifemi/mastopod-federation-architecture
-          ref: e4d0bb74142afbaf4573d2f93e28028479d6b52d
-          path: external-sidecar
-          persist-credentials: false
-          submodules: false
+      # The external sidecar has a gitlink absent from .gitmodules.
+      # actions/checkout fails during its internal 'git submodule foreach'
+      # cleanup even when submodules: false. Fetch the immutable public SHA
+      # without credential persistence or submodule initialization instead.
+      - name: Fetch external sidecar SHA without submodule initialization
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir external-sidecar
+          git -C external-sidecar init -q
+          git -C external-sidecar remote add origin https://github.com/Lawhacknifemi/mastopod-federation-architecture.git
+          git -C external-sidecar fetch --no-tags --depth=1 origin e4d0bb74142afbaf4573d2f93e28028479d6b52d
+          git -C external-sidecar checkout --detach --quiet FETCH_HEAD
 
-      - name: Checkout exact missing provider subproject from recovered source
-        uses: actions/checkout@v4
-        with:
-          repository: Lawhacknifemi/activitypods-demo-bridge
-          ref: 9f1c7fc3511487150ce458f025e9dc4477133221
-          path: external-provider
-          persist-credentials: false
-          submodules: false
+      - name: Fetch recovered provider SHA without executing scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir external-provider
+          git -C external-provider init -q
+          git -C external-provider remote add origin https://github.com/Lawhacknifemi/activitypods-demo-bridge.git
+          git -C external-provider fetch --no-tags --depth=1 origin 9f1c7fc3511487150ce458f025e9dc4477133221
+          git -C external-provider checkout --detach --quiet FETCH_HEAD
 
       - name: Verify immutable repository heads and recorded gitlink
         shell: bash
