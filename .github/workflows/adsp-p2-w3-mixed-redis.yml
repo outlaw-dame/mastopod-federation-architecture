@@ -172,6 +172,11 @@ jobs:
               if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then return 0; fi
               sleep 1
             done
+            # Preserve the original strict 2xx readiness gate but report which
+            # replica endpoint failed. Never convert a failed / into a pass.
+            local code
+            code="$(curl --silent --output /dev/null --max-time 2 --write-out '%{http_code}' "$url" || true)"
+            echo "::error::W3_HTTP_READINESS_FAILED url=$url status=${code:-unknown} tries=$tries" >&2
             return 1
           }
 
