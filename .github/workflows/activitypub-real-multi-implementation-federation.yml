@@ -328,6 +328,13 @@ jobs:
               | awk 'NF {v=$0} END {print v}')
             echo "Friendica system signing contact ready=${system_ready}"
             [[ "${system_ready}" == 1 ]]
+            # Friendica's HTTP client uses dns_get_record(host + ".") rather
+            # than libc/getent; an /etc/hosts-only success is not sufficient.
+            # Check DNS through the actual PHP runtime, without changing any
+            # network allowlists, request signatures, or SSRF protection.
+            docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" exec -T friendica-app \
+              php -r '$host="activitypods.test."; $r=dns_get_record($host, DNS_A | DNS_AAAA); echo "friendica_php_activitypods_dns_record_count=".count($r)."\\n";'
+
           fi
 
       - name: Start ActivityPods native mode
