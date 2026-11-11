@@ -597,9 +597,15 @@ jobs:
                   printf "internal_log_present=1\n"
                   printf "internal_log_line_count=%s\n" "$(wc -l < "$file" | tr -d "[:space:]")"
                   printf "internal_log_bytes=%s\n" "$(wc -c < "$file" | tr -d "[:space:]")"
-                  for term in "Unexpected content type" "Invalid body" "Invalid HTTP signature" "Error fetching url" "Fetched for user" "No actor name was found" "System account not found" "Incoming message" "Message for user" "No actor" "No keyId" "Empty key" "Verification failed" "Digest does not match" "Unable to retrieve AP contact" "Could not find owner" "message is discarded" "URLVerifier" "signature" "certificate" "could not retrieve" "Could not fetch" "untrusted" "Invalid URL" "Domain is blocked" "Url not reachable" "Fetching was unsuccessful" "Multiple requests for the address" "Request failed" "contact" "curl" "HTTP 503" "protocol" "inbox" "message ignored"; do
+                  for term in "Unexpected content type" "Invalid body" "Invalid HTTP signature" "Error fetching url" "Fetched for user" "No actor name was found" "System account not found" "Incoming message" "Message for user" "No actor" "No keyId" "Empty key" "Verification failed" "Digest does not match" "Unable to retrieve AP contact" "Could not find owner" "message is discarded" "URLVerifier" "signature" "certificate" "could not retrieve" "Could not fetch" "untrusted" "Invalid URL" "Domain is blocked" "Url not reachable" "Fetching was unsuccessful" "Multiple requests for the address" "Request failed" "contact" "curl" "HTTP 503" "protocol" "inbox" "message ignored" "URL cannot be resolved" "Receiver.php" "APContact.php" "HTTPSignature.php" "PHP Fatal" "Uncaught" "Invalid host"; do
                     count=$(grep -iFc "$term" "$file" 2>/dev/null || true)
                     printf "category=%s count=%s\n" "$term" "$count"
+                  done
+                  # Print only predetermined fixture-host counts from the
+                  # URL reachability warnings, never the request-bearing lines.
+                  for host in "activitypods.test" "friendica.test"; do
+                    count=$(grep -iF "Url not reachable" "$file" 2>/dev/null | grep -iFc "$host" || true)
+                    printf "unreachable_fixture_host=%s count=%s\\n" "$host" "$count"
                   done
                 ' 2>/dev/null || true
                 echo "::endgroup::"
