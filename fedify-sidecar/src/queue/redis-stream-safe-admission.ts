@@ -41,6 +41,11 @@ local function prepareAckedQueue(key, capacity, count, allowTrim)
     error('Invalid work queue batch or capacity')
   end
   if allowTrim then
+    -- With no consumer group, ACKED trimming cannot protect unread work.
+    local groups = redis.pcall('XINFO', 'GROUPS', key)
+    if type(groups) ~= 'table' or #groups == 0 then
+      error('REDIS_STREAM_NO_CONSUMER_GROUP')
+    end
     -- Redis 8.2: reclaim only work acknowledged by all groups.
     redis.call('XTRIM', key, 'MAXLEN', '=', tostring(capacity - count), 'ACKED')
   end
