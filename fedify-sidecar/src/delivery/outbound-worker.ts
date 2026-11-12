@@ -29,7 +29,7 @@ import {
 } from "../core-domain/contracts/SigningContracts.js";
 import { metrics } from "../metrics/index.js";
 import { logger } from "../utils/logger.js";
-import { isRedisStreamCapacityError } from "../queue/redis-stream-safe-admission.js";
+import { isRedisStreamAdmissionFailure } from "../queue/redis-stream-safe-admission.js";
 import type { CapabilityGateResult } from "../capabilities/gates.js";
 import type { FollowersSyncService } from "../federation/fep8fcf/FollowersSyncService.js";
 import { extractActorIdentifier } from "../federation/fep8fcf/PartialFollowersDigest.js";
@@ -642,7 +642,7 @@ export class OutboundWorker {
         await this.deliveryClaimStore.release(job.jobId, claimToken).catch(() => undefined);
         claimHeld = false;
       }
-      if (isRedisStreamCapacityError(err)) {
+      if (isRedisStreamAdmissionFailure(err)) {
         // The delivery is not permanently invalid. Keep its Redis PEL entry
         // available for claim after the admission budget recovers, without
         // consuming AP delivery retries or filling the DLQ.
