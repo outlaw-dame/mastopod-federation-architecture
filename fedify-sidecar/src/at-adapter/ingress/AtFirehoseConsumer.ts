@@ -23,7 +23,7 @@
  */
 
 import { WebSocket } from 'ws';
-import { AtFirehoseDecoder, FirehoseDecodeError } from './AtFirehoseDecoder.js';
+import { AtFirehoseDecoder } from './AtFirehoseDecoder.js';
 import { AtFirehoseCursorManager } from './AtFirehoseCursorManager.js';
 import { AtFirehoseRawEnvelope } from './AtIngressEvents.js';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
