@@ -175,6 +175,52 @@ try {
     "Delayed outbound work did not resume after ACKED reclaim");
   assert((await redis.zScore(schedule,delayedJob.jobId))===null,
     "Successfully promoted outbound work stayed in delayed schedule");
+
+  // Two orphaned schedule IDs do not consume ready-stream capacity. Without
+  // counting payload-backed entries separately, the previous #ids preflight
+  // could reject this batch forever even though there is one free slot.
+  const staleIds=[prefix+":stale-a",prefix+":stale-b"];
+  await redis.zAdd(schedule,staleIds.map(value=>({score:Date.now()-100,value})));
+  const valid=job(103);
+  valid.notBeforeMs=Date.now()-10;
+  await redis.hSet(delayedOutbound+":delayed-payload:v1",
+    valid.jobId,JSON.stringify(valid));
+  await redis.zAdd(schedule,{score:Date.now()-100,value:valid.jobId});
+  assert(await wrapper.promoteDueOutbound(Date.now())===1,
+    "Stale schedule IDs incorrectly consumed ready-stream capacity");
+  for(const id of staleIds)assert((await redis.zScore(schedule,id))===null,
+    "Stale delayed schedule record was not cleaned up");
+  assert((await redis.xLen(delayedOutbound))===2,
+    "Stale due entries caused incorrect ready-stream accounting");
+
+  // Lua errors do not roll back preceding writes. A corrupt later payload
+  // must be detected before trimming or appending an earlier valid job.
+  const allReady=await redis.xReadGroup(group,"wrapper-proof",
+    {key:delayedOutbound,id:">"},{COUNT:10});
+  const allIds=allReady?.[0]?.messages?.map(m=>m.id)??[];
+  assert(allIds.length===2,"Expected two ready entries before malformed batch");
+  await redis.xAck(delayedOutbound,group,allIds);
+  const first=job(104),bad=job(105);
+  first.notBeforeMs=Date.now()-10;
+  const dueAt=Date.now()-100;
+  const payloadKey=delayedOutbound+":delayed-payload:v1";
+  await redis.hSet(payloadKey,first.jobId,JSON.stringify(first));
+  await redis.hSet(payloadKey,bad.jobId,JSON.stringify({jobId:bad.jobId}));
+  await redis.zAdd(schedule,[
+    {score:dueAt,value:first.jobId},{score:dueAt,value:bad.jobId},
+  ]);
+  let rejectedInvalid=false;
+  try{await wrapper.promoteDueOutbound(Date.now());}
+  catch(error){
+    rejectedInvalid=String(error).includes("invalid delayed outbound payload");
+    if(!rejectedInvalid)throw error;
+  }
+  assert(rejectedInvalid,"Malformed due work was not rejected before writes");
+  assert((await redis.xLen(delayedOutbound))===2,
+    "Malformed batch mutated the ready stream before failing");
+  assert((await redis.zScore(schedule,first.jobId))!==null &&
+    (await redis.zScore(schedule,bad.jobId))!==null,
+    "Malformed batch removed scheduled work before validation");
  } finally {
   await wrapper.disconnect().catch(()=>undefined);
   process.env["NODE_ENV"]=previousNodeEnv;
