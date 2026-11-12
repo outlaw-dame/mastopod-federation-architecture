@@ -30,6 +30,34 @@ Source files:
 - The fixture already corrects an empty reserved `uid=0` system-account nickname before requiring signed actor fetch. Do not duplicate this workaround or misdiagnose its prior absence as the current failure.
 - Production signature validation, origin validation, URL checks and private-address SSRF safety must remain enabled. This is a disposable test with synthetic hostnames, not permission to disable validation in the actual product.
 
+## Latest fixture evidence and interpretation (2026-11-12)
+
+The latest pinned Friendica 2026.05 run on this diagnostic branch
+([43311520418](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43311520418))
+created a matching remote `apcontact` with a nonempty public key and inbox,
+but **did not** create the remote `contact` relationship or `inbox-entry`.
+The local Friendica target exists as a `user` and self `contact`. Its
+`apcontact` row was absent at the checkpoint, which is **not sufficient by
+itself** to prove a defect: Friendica's `Receiver::fetchObjectType()` can
+resolve the local account through `APContact::getByURL()` or by a signed
+dereference when the cached APContact does not exist. Do not insert synthetic
+`apcontact` rows to make this test pass.
+
+Because Mastodon and Friendica accept an actor URI as the Follow `object`,
+a raw Follow with that object is not malformed merely for lacking an embedded
+`Person` object. The key difference in their pipelines is *where trust and
+object classification happen*: Mastodon performs its signature prerequisite
+before its processing worker, while Friendica resolves actor information and
+may fetch the Follow's target object as part of processing. Both ultimately
+require real relationship state. The new fixture bootstrap checks the local
+target's canonical ActivityPub JSON `id`, account `type` and `inbox`
+**before** starting the real Follow test. Its status is not assumed green.
+
+The diagnostic logger contains `url_unreachable` hits; their specific URL
+and causal relevance have not been proven. A `200` raw actor GET does not
+establish a successful Friendica signed GET, nor does a `202` delivery
+establish HTTP-signature trust.
+
 ## Exact next diagnostic sequence (do not weaken pass conditions)
 
 1. Verify the disposable Friendica application config genuinely enables logging **after** installation, and read only bounded log-category counts; never upload raw signed requests, body text, credentials or private actor data.
