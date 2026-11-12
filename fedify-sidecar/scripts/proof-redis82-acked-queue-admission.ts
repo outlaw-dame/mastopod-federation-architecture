@@ -14,6 +14,7 @@ const prefix="proof:acked:"+randomUUID().replaceAll("-","");
 const group="proof-workers";
 const keys={
  inbound:prefix+":inbound",outbound:prefix+":outbound",
+ multigroup:prefix+":multigroup",concurrent:prefix+":concurrent",
  intent:prefix+":intent",origin:prefix+":origin",dlq:prefix+":dlq",
  delayed:prefix+":intent:delayed:v1",payload:prefix+":intent:delayed-payload:v1",
 };
@@ -59,6 +60,45 @@ try {
  await redis.connect();
  await requireRedis82AckedSupport(redis);
  await queue.connect();
+ // ACKED must wait for every consumer group, not just the first ACK.
+ await redis.xGroupCreate(keys.multigroup,"proof-a","0",{MKSTREAM:true});
+ await redis.xGroupCreate(keys.multigroup,"proof-b","0");
+ await appendAcknowledgedStreamBatch(redis,keys.multigroup,[{kind:"shared"}],1);
+ const firstGroupRead=await redis.xReadGroup("proof-a","consumer-a",
+   {key:keys.multigroup,id:">"},{COUNT:1});
+ const sharedId=firstGroupRead?.[0]?.messages?.[0]?.id;
+ assert(sharedId,"First consumer group did not receive shared work");
+ await redis.xAck(keys.multigroup,"proof-a",sharedId);
+ await expectCapacity(()=>appendAcknowledgedStreamBatch(
+   redis,keys.multigroup,[{kind:"replacement"}],1),
+   "One group's ACK removed work unread by a second group");
+ const secondGroupRead=await redis.xReadGroup("proof-b","consumer-b",
+   {key:keys.multigroup,id:">"},{COUNT:1});
+ assert(secondGroupRead?.[0]?.messages?.[0]?.id===sharedId,
+   "Second group lost the original work before acknowledging it");
+ await redis.xAck(keys.multigroup,"proof-b",sharedId);
+ await appendAcknowledgedStreamBatch(redis,keys.multigroup,
+   [{kind:"replacement"}],1);
+ const surviving=await redis.xRange(keys.multigroup,"-","+");
+ assert(surviving.length===1 && surviving[0]?.message["kind"]==="replacement",
+   "Fully acknowledged cross-group work was not safely reclaimed");
+
+ // Lua admission is serialized by Redis: simultaneous producers must never
+ // overfill the queue or report success for a rejected append.
+ await redis.xGroupCreate(keys.concurrent,group,"0",{MKSTREAM:true});
+ const burst=await Promise.allSettled(Array.from({length:20},(_,i)=>
+   appendAcknowledgedStreamBatch(redis,keys.concurrent,
+     [{producer:String(i)}],3)));
+ const accepted=burst.filter(result=>result.status==="fulfilled").length;
+ assert(accepted===3,"Concurrent producer admission exceeded its hard cap");
+ assert(burst.every(result=>result.status==="fulfilled" ||
+   String(result.reason).includes("REDIS_STREAM_AT_CAPACITY")),
+   "Concurrent admission returned an unexpected failure");
+ const burstRecords=await redis.xRange(keys.concurrent,"-","+");
+ assert(burstRecords.length===3 &&
+   new Set(burstRecords.map(record=>record.message["producer"])).size===3,
+   "Concurrent admission lost, duplicated or overfilled accepted work");
+
  const withoutGroup=prefix+":ungrouped";
  await redis.xAdd(withoutGroup,"*",{kind:"unread"});
  let rejectedMissingGroup=false;
@@ -239,7 +279,8 @@ try {
   mode:"opt-in-redis-8.2-acked",
   version:(await redis.info("server")).match(/^redis_version:([^\r\n]+)/m)?.[1]??"unknown",
   pendingJobSurvivedPressure:true,unreadJobSurvivedPressure:true,
-  missingGroupRejected:true,
+  missingGroupRejected:true,multigroupAckBarrier:true,
+  concurrentAdmissionBound:true,
   producerBackpressure:true,ackedWorkReclaimed:true,
   fanoutCapacity:true,delayedPromotionPreservesWork:true,
   dlqRetainsUnreviewedEntries:true,delayedOutboundPromotionPreservesWork:true,
