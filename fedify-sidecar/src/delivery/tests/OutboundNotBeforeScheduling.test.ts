@@ -106,7 +106,9 @@ describe("outbound not-before scheduling", () => {
     q.enqueueOutbound.mockRejectedValue(Error("REDIS_STREAM_AT_CAPACITY"));
     const claims=new ClaimStore();
     const worker=new BackpressuredRetryWorker(q,{} as any,{} as any,config(claims));
-    await worker.run("pending-outbound",job(0));
+    const durableJob=job(0);
+    durableJob.meta={apdmFirstQueuedAtMs:Date.now()-500};
+    await worker.run("pending-outbound",durableJob);
     expect(q.enqueueOutbound).toHaveBeenCalled();
     expect(q.ack).not.toHaveBeenCalled();
     expect(q.moveToDlq).not.toHaveBeenCalled();
