@@ -13,7 +13,11 @@ function consumer() {
     concurrency: 2,
     notifyTimeoutMs: 1000,
   };
-  return new CanonicalNotificationConsumer(config);
+  const subject = new CanonicalNotificationConsumer(config);
+  (subject as unknown as { consumer: unknown }).consumer = {
+    commitOffsets: vi.fn(async () => undefined)
+  };
+  return subject;
 }
 function payload() {
   const item = JSON.stringify({
@@ -22,12 +26,18 @@ function payload() {
     createdAt: "2026-11-11T00:00:00.000Z",
   });
   return {
-    batch: { messages: [{ offset: "1", value: Buffer.from(item) }] },
+    batch: { topic: "canonical.v1", partition: 0, messages: [{ offset: "1", value: Buffer.from(item) }] },
     resolveOffset: vi.fn(),
     commitOffsetsIfNecessary: vi.fn(async () => undefined),
     heartbeat: vi.fn(async () => undefined),
     isRunning: () => true, isStale: () => false,
   };
+}
+
+function committed(subject: unknown) {
+  return (subject as {
+    consumer: { commitOffsets: ReturnType<typeof vi.fn> };
+  }).consumer.commitOffsets;
 }
 
 describe("canonical notification Kafka acceptance", () => {
@@ -40,7 +50,7 @@ describe("canonical notification Kafka acceptance", () => {
     const batch = payload();
     await expect(subject.processBatch(batch)).rejects.toThrow("pod unavailable");
     expect(batch.resolveOffset).not.toHaveBeenCalled();
-    expect(batch.commitOffsetsIfNecessary).not.toHaveBeenCalled();
+    expect(committed(subject)).not.toHaveBeenCalled();
   });
 
   it("advances offsets only after downstream resolves", async () => {
@@ -52,7 +62,7 @@ describe("canonical notification Kafka acceptance", () => {
     const batch = payload();
     await subject.processBatch(batch);
     expect(batch.resolveOffset).toHaveBeenCalledWith("1");
-    expect(batch.commitOffsetsIfNecessary).toHaveBeenCalledTimes(1);
+    expect(committed(subject)).toHaveBeenCalledTimes(1);
   });
 
   it("rejects unbounded concurrency and timeout configuration", () => {
@@ -70,7 +80,7 @@ describe("canonical notification Kafka acceptance", () => {
 
 describe("canonical notification durable quarantine and ordered Kafka offsets", () => {
   function makeConsumer(publish: (key: string, value: Buffer) => Promise<void>) {
-    return new CanonicalNotificationConsumer({
+    const subject = new CanonicalNotificationConsumer({
       brokers: ["127.0.0.1:9092"], clientId: "dlq-test",
       consumerGroupId: "dlq-test-group", canonicalTopic: "canonical.v1",
       activityPodsBaseUrl: "http://127.0.0.1:3000",
@@ -78,7 +88,11 @@ describe("canonical notification durable quarantine and ordered Kafka offsets", 
       enableDeadLetter: true,
       deadLetterTopic: CANONICAL_NOTIFICATION_DEAD_LETTER_TOPIC,
       concurrency: 2,
-    }, undefined, { publish }) as unknown as {
+    }, undefined, { publish });
+    (subject as unknown as { consumer: unknown }).consumer = {
+      commitOffsets: vi.fn(async () => undefined)
+    };
+    return subject as unknown as {
       processBatch: (batch: unknown) => Promise<void>;
       fanOut: (event: unknown) => Promise<void>;
     };
@@ -101,7 +115,7 @@ describe("canonical notification durable quarantine and ordered Kafka offsets", 
     expect(Buffer.from(record.rawBase64, "base64").toString("utf8")).toBe("{bad-json");
     expect(record.payloadSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(batch.resolveOffset).toHaveBeenCalledWith("1");
-    expect(batch.commitOffsetsIfNecessary).toHaveBeenCalledTimes(1);
+    expect(committed(subject)).toHaveBeenCalledTimes(1);
   });
 
   it("never skips earlier in-flight delivery when later malformed data is quarantined", async () => {
@@ -117,12 +131,12 @@ describe("canonical notification durable quarantine and ordered Kafka offsets", 
     await Promise.resolve();
     expect(publish).toHaveBeenCalledTimes(1);
     expect(batch.resolveOffset).not.toHaveBeenCalled();
-    expect(batch.commitOffsetsIfNecessary).not.toHaveBeenCalled();
+    expect(committed(subject)).not.toHaveBeenCalled();
     release!();
     await running;
     expect(batch.resolveOffset).toHaveBeenNthCalledWith(1, "1");
     expect(batch.resolveOffset).toHaveBeenNthCalledWith(2, "2");
-    expect(batch.commitOffsetsIfNecessary).toHaveBeenCalledTimes(1);
+    expect(committed(subject)).toHaveBeenCalledTimes(1);
   });
 
   it("failed DLQ persistence leaves all Kafka offsets uncommitted", async () => {
@@ -133,7 +147,7 @@ describe("canonical notification durable quarantine and ordered Kafka offsets", 
     batch.batch.messages.push({ offset: "2", value: Buffer.from("{invalid") });
     await expect(subject.processBatch(batch)).rejects.toThrow(/redpanda unavailable/);
     expect(batch.resolveOffset).not.toHaveBeenCalled();
-    expect(batch.commitOffsetsIfNecessary).not.toHaveBeenCalled();
+    expect(committed(subject)).not.toHaveBeenCalled();
   });
 
   it("rejects oversized records without copying private data into the quarantine topic", async () => {
@@ -195,5 +209,40 @@ describe("durable PostgreSQL acknowledgment contract", () => {
     expect(validateDurableCanonicalReceipt(202,{...accepted,queuedRecipients:65})).toBe(false);
     expect(validateDurableCanonicalReceipt(202,{...accepted,delivered:true})).toBe(false);
     expect(validateDurableCanonicalReceipt(202,null)).toBe(false);
+  });
+});
+
+describe("explicit Kafka offsets with autoCommit disabled", () => {
+  it("commits last offset plus one only after contiguous persisted outcomes",async()=>{
+    const subject=consumer() as unknown as {
+      processBatch: (payload: unknown)=>Promise<void>;
+      fanOut: (event: unknown)=>Promise<void>;
+    };
+    subject.fanOut=vi.fn(async()=>undefined);
+    const batch=payload();
+    batch.batch.messages.push({
+      offset:"2",
+      value:Buffer.from(JSON.stringify({
+        kind:"PostEdit",canonicalIntentId:"valid-non-notification",
+        actor:{webId:"https://remote.example/alice"},
+        sourceProtocol:"activitypub",createdAt:"2026-11-12T00:00:00Z",
+      })),
+    });
+    await subject.processBatch(batch);
+    expect(committed(subject)).toHaveBeenCalledWith([
+      { topic:"canonical.v1",partition:0,offset:"3" }
+    ]);
+  });
+  it("does not claim success if the broker rejects the explicit commit",async()=>{
+    const subject=consumer() as unknown as {
+      processBatch:(payload:unknown)=>Promise<void>;
+      fanOut:(event:unknown)=>Promise<void>;
+    };
+    subject.fanOut=vi.fn(async()=>undefined);
+    committed(subject).mockRejectedValueOnce(new Error("broker unavailable"));
+    await expect(subject.processBatch(payload())).rejects.toThrow("broker unavailable");
+    expect(committed(subject)).toHaveBeenCalledWith([
+      { topic:"canonical.v1",partition:0,offset:"2" }
+    ]);
   });
 });

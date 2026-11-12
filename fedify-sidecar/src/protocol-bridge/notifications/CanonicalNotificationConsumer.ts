@@ -251,8 +251,7 @@ export class CanonicalNotificationConsumer {
 
   private async processBatch(payload: EachBatchPayload): Promise<void> {
     const {
-      batch, resolveOffset, heartbeat, commitOffsetsIfNecessary,
-      isRunning, isStale,
+      batch, resolveOffset, heartbeat, isRunning, isStale,
     } = payload;
     const pending: Array<{ offset: string; promise: Promise<void> }> = [];
     const drain = async (): Promise<void> => {
@@ -269,7 +268,20 @@ export class CanonicalNotificationConsumer {
       }
       if (!isRunning() || isStale()) return;
       for (const item of pending) resolveOffset(item.offset);
-      await commitOffsetsIfNecessary();
+      // KafkaJS with autoCommit:false does NOT persist progress through
+      // commitOffsetsIfNecessary(). Commit the next offset explicitly only
+      // after every webhook/DLQ write in this contiguous window has succeeded.
+      const lastOffset = pending[pending.length - 1]?.offset;
+      if (typeof lastOffset !== "string" || !/^(0|[1-9][0-9]{0,18})$/u.test(lastOffset)) {
+        throw new Error("Invalid Kafka notification offset");
+      }
+      const consumer = this.consumer;
+      if (!consumer) throw new Error("Canonical notification consumer unavailable during commit");
+      await consumer.commitOffsets([{
+        topic: batch.topic,
+        partition: batch.partition,
+        offset: (BigInt(lastOffset) + 1n).toString(),
+      }]);
       await heartbeat();
       pending.length = 0;
     };
