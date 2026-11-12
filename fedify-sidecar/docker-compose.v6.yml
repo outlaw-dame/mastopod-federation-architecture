@@ -124,7 +124,7 @@ services:
 
       REDPANDA_BROKERS: 'redpanda:9092'
       REDPANDA_CLIENT_ID: 'fedify-sidecar-v6'
-      REDPANDA_COMPRESSION: 'zstd'
+      REDPANDA_COMPRESSION: 'gzip'
 
       STREAM1_TOPIC: 'ap.stream1.local-public.v1'
       STREAM2_TOPIC: 'ap.stream2.remote-public.v1'
