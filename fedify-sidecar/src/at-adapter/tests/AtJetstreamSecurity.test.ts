@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AtJetstreamService, parseJetstreamUrl, UNVERIFIED_JETSTREAM_TOPIC,
+  safeJetstreamEndpointLabel, isTrustedAtToApBridgeExplicitlyEnabled,
 } from "../jetstream/AtJetstreamService.js";
 
 const url="wss://jetstream1.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post&token=private";
@@ -30,6 +31,25 @@ async function feed(service:AtJetstreamService,payload:string) {
 }
 
 describe("Jetstream unverified WebSocket boundary",()=>{
+  it("never logs the sensitive Jetstream subscription query",()=>{
+    expect(safeJetstreamEndpointLabel(
+      "wss://jetstream.example.test/subscribe?token=private&cursor=123"
+    )).toBe("wss://jetstream.example.test/subscribe");
+    expect(safeJetstreamEndpointLabel(
+      "wss://jetstream.example.test/xrpc/network.bsky.jetstream.subscribeEvents?api_key=hidden"
+    )).not.toContain("api_key");
+  });
+  it("does not auto-enable the verified AT-to-AP bridge from unverified Jetstream",()=>{
+    expect(isTrustedAtToApBridgeExplicitlyEnabled({
+      ENABLE_AT_JETSTREAM:"true" } as {ENABLE_PROTOCOL_BRIDGE_AT_TO_AP?:string})).toBe(false);
+    expect(isTrustedAtToApBridgeExplicitlyEnabled({
+      ENABLE_PROTOCOL_BRIDGE_AT_TO_AP:"false",
+      ENABLE_AT_JETSTREAM:"true"
+    } as {ENABLE_PROTOCOL_BRIDGE_AT_TO_AP?:string})).toBe(false);
+    expect(isTrustedAtToApBridgeExplicitlyEnabled({
+      ENABLE_PROTOCOL_BRIDGE_AT_TO_AP:"true"
+    })).toBe(true);
+  });
   it("refuses to publish a decoded stream directly to trusted ATProto ingress",()=>{
     const service=new AtJetstreamService({publish:vi.fn(async()=>undefined)},{
       url,publishTopic:"at.ingress.v1"

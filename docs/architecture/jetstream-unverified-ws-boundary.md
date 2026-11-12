@@ -52,6 +52,18 @@ WebSocket close reason, per-event account DID or untrusted publisher
 error messages. Messages missing a valid endpoint-specific cursor or a known operation
 are ignored.
 
+## Startup isolation
+
+`ENABLE_AT_JETSTREAM=true` enables only the low-trust subscriber. It does
+**not** implicitly enable the separate verified ATProto-to-ActivityPub bridge.
+The trusted bridge requires its own explicit
+`ENABLE_PROTOCOL_BRIDGE_AT_TO_AP=true` setting and continues consuming the
+verified ingress path, not the Jetstream staging topic.
+
+Startup logs contain only the endpoint origin and pathname, never a
+subscription URL's query parameters (which may include private tokens or
+cursor values). These boundaries have focused regression tests.
+
 ## Deployment gates
 
 Provision `at.jetstream.unverified.v1` with limited write access,

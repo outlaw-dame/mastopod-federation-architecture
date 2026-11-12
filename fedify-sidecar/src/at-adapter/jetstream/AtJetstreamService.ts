@@ -107,16 +107,20 @@ export class AtJetstreamService {
   private processing: Promise<void> = Promise.resolve();
   private pendingFrames = 0;
   private pendingBytes = 0;
-  // This is an in-memory v1 cursor. Restart durability still requires a
-  // persistent cursor store and at-least-once consumer deduplication.
+  // This is an in-memory endpoint-specific cursor. Restart durability still
+  // requires a persistent checkpoint and at-least-once deduplication.
   private lastCommittedCursor: { value: number; type: "seq" | "time_us" } | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private readonly endpointLabel: string;
 
   constructor(
     private readonly publisher: AtJetstreamPublisher,
     private readonly config: AtJetstreamConfig,
     private readonly logger: AtJetstreamLogger = NOOP_LOGGER,
-  ) {}
+  ) {
+    // Avoid allocating and parsing an upstream URL for every event.
+    this.endpointLabel = safeJetstreamEndpointLabel(config.url);
+  }
 
   /**
    * Register a callback invoked when maxEvents is reached.
@@ -332,7 +336,6 @@ export class AtJetstreamService {
         : null;
     const operation = normalizeOperation(c["operation"]);
     if (!operation) return;
-    const endpoint = new URL(this.config.url);
     const event: UnverifiedJetstreamCommit = {
       kind: "jetstream.commit",
       verified: false,
@@ -340,7 +343,7 @@ export class AtJetstreamService {
       cursorType,
       did,
       receivedAt: new Date().toISOString(),
-      source: endpoint.origin + endpoint.pathname,
+      source: this.endpointLabel,
       commit: {
         rev,
         operation,
@@ -387,6 +390,19 @@ export class AtJetstreamService {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** A low-trust subscriber cannot implicitly activate a trusted bridge. */
+export function isTrustedAtToApBridgeExplicitlyEnabled(
+  env: { ENABLE_PROTOCOL_BRIDGE_AT_TO_AP?: string },
+): boolean {
+  return env.ENABLE_PROTOCOL_BRIDGE_AT_TO_AP === "true";
+}
+
+/** Never expose query values, bearer tokens, or credentials in startup logs. */
+export function safeJetstreamEndpointLabel(source: string): string {
+  const uri = new URL(source);
+  return uri.origin + uri.pathname;
+}
 
 function normalizeOperation(raw: unknown): "create" | "update" | "delete" | null {
   if (raw === "create" || raw === "update" || raw === "delete") return raw;
