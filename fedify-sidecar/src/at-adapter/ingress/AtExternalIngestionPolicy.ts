@@ -35,3 +35,21 @@ export function requireVerifiedExternalFirehoseReady(
     );
   }
 }
+
+/**
+ * A production verified source cannot bypass the only broker/topic size
+ * and durability verifier. Disposable fixtures may disable governance.
+ */
+export function requireVerifiedExternalTopicGovernance(options: {
+  verifiedExternalFirehose: boolean;
+  environment: string;
+  governanceEnabled: boolean;
+}): void {
+  if (options.verifiedExternalFirehose &&
+      options.environment === "production" &&
+      !options.governanceEnabled) {
+    throw new Error(
+      "Production verified AT firehose requires Redpanda topic governance",
+    );
+  }
+}
