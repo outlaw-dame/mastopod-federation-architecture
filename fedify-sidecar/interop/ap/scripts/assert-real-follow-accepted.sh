@@ -162,6 +162,42 @@ friendica_diagnostics() {
   compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" friendica-app /bin/sh -lc \
     'curl --cacert /interop/runtime/certs/rootCA.crt --connect-timeout 5 --max-time 15 -sS -o /dev/null -w "actor_fetch_http=%{http_code} type=%{content_type}\\n" -H "Accept: application/activity+json" "$AP_INTEROP_ACTOR_URI"' >&2 \
     || echo "Friendica container actor-fetch diagnostic failed" >&2
+  # Friendica writes application logs to a file, not Apache stdout.
+  # Report bounded diagnostic categories only: logs can contain signed
+  # requests, actors and other sensitive ActivityPub data.
+  friendica_log_summary() {
+    service="$1"
+    printf 'Friendica %s application-log summary:\n' "${service}" >&2
+    compose exec -T "${service}" /bin/sh -s <<'FRIENDICA_LOG_SUMMARY' >&2 \
+      || echo "Friendica application-log metrics unavailable" >&2
+log=/var/www/friendica.log
+if [ ! -r "$log" ]; then
+  echo "friendica_app_log=unavailable"
+else
+  tail -n 2000 "$log" | awk '
+    {
+      line = tolower($0)
+      lines++
+      if (index(line, "activitypub")) ap++
+      if (index(line, "inbox")) inbox++
+      if (index(line, "urlverifier") || index(line, "url verifier")) urlverifier++
+      if (index(line, "signature") && (index(line, "invalid") ||
+          index(line, "failed") || index(line, "rejected"))) badsig++
+      if (index(line, "fetch") && (index(line, "failed") ||
+          index(line, "error"))) badfetch++
+      if (index(line, "follow")) follows++
+      if (index(line, "503")) unavailable++
+    }
+    END {
+      printf "recent_lines=%d activitypub=%d inbox=%d follow=%d url_verifier=%d invalid_signature=%d failed_fetch=%d http_503_mentions=%d\n",
+        lines, ap, inbox, follows, urlverifier, badsig, badfetch, unavailable
+    }
+  '
+fi
+FRIENDICA_LOG_SUMMARY
+  }
+  friendica_log_summary friendica-app
+  friendica_log_summary friendica-worker
   {
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
