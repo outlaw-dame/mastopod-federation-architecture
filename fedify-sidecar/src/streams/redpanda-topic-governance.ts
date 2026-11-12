@@ -1,5 +1,6 @@
 import { Kafka, logLevel } from "kafkajs";
 import { V6_TOPICS } from "./v6-topology.js";
+import { AT_SYNC_RAW_TOPIC_MAX_MESSAGE_BYTES } from "../at-adapter/ingress/AtExternalFirehosePayloadLimits.js";
 
 export type DurabilityProfile = "development" | "staging" | "production";
 
@@ -12,6 +13,7 @@ export interface TopicGovernanceOptions {
   /** Optional topics are required only when their producers are enabled. */
   enableUnverifiedJetstream?: boolean;
   enableNotificationDlq?: boolean;
+  enableVerifiedExternalFirehose?: boolean;
 }
 
 interface TopicDefinition {
@@ -20,6 +22,7 @@ interface TopicDefinition {
   replicationFactor: number;
   cleanupPolicy: "delete" | "compact,delete";
   retentionMs: number;
+  maxMessageBytes?: number;
 }
 
 interface ProfileSettings {
@@ -54,6 +57,7 @@ export function resolveTopicGovernanceOptionsFromEnv(): TopicGovernanceOptions {
     retryBaseMs: sanitizeInt(process.env["REDPANDA_TOPIC_BOOTSTRAP_RETRY_BASE_MS"], 250, 50, 15_000),
     enableUnverifiedJetstream: process.env["ENABLE_AT_JETSTREAM"] === "true",
     enableNotificationDlq: process.env["ENABLE_CANONICAL_NOTIFICATION_DLQ"] === "true",
+    enableVerifiedExternalFirehose: process.env["ENABLE_AT_EXTERNAL_FIREHOSE"] === "true",
   };
 }
 
@@ -238,6 +242,15 @@ export async function verifyRedpandaTopics(options: TopicGovernanceOptions): Pro
         );
       }
 
+      if (topic.maxMessageBytes !== undefined) {
+        const found = Number(configEntries.get("max.message.bytes"));
+        if (!Number.isSafeInteger(found) || found < topic.maxMessageBytes) {
+          failures.push(
+            `${topic.topic}: max.message.bytes must be >= ${topic.maxMessageBytes} (found ${configEntries.get("max.message.bytes") ?? "unset"})`,
+          );
+        }
+      }
+
       const retentionRaw = configEntries.get("retention.ms");
       const retentionMs = Number.parseInt(retentionRaw ?? "", 10);
       if (!Number.isFinite(retentionMs) || retentionMs < topic.retentionMs) {
@@ -283,6 +296,7 @@ async function fetchTopicConfigEntries(
           "retention.ms",
           "compression.type",
           "min.insync.replicas",
+          "max.message.bytes",
         ],
       })),
     }),
@@ -314,6 +328,10 @@ function buildConfigEntries(
     { name: "min.insync.replicas", value: String(profileSettings.minInSyncReplicas) },
   ];
 
+  if (topic.maxMessageBytes !== undefined) {
+    entries.push({ name: "max.message.bytes", value: String(topic.maxMessageBytes) });
+  }
+
   if (topic.cleanupPolicy.includes("compact")) {
     entries.push({ name: "delete.retention.ms", value: String(24 * 60 * 60 * 1000) });
     entries.push({ name: "min.cleanable.dirty.ratio", value: "0.5" });
@@ -324,7 +342,7 @@ function buildConfigEntries(
 
 export function buildTopicDefinitions(
   profile: DurabilityProfile,
-  options: Pick<TopicGovernanceOptions,"enableUnverifiedJetstream"|"enableNotificationDlq"> = {},
+  options: Pick<TopicGovernanceOptions,"enableUnverifiedJetstream"|"enableNotificationDlq"|"enableVerifiedExternalFirehose"> = {},
 ): TopicDefinition[] {
   const profileSettings = PROFILE_SETTINGS[profile];
   // Production prestart verifies these topics. Do not fail deployment for
@@ -376,6 +394,9 @@ export function buildTopicDefinitions(
       replicationFactor: profileSettings.replicationFactor,
       cleanupPolicy: "delete",
       retentionMs: 3 * 24 * 60 * 60 * 1000,
+      ...(options.enableVerifiedExternalFirehose === true ? {
+        maxMessageBytes: AT_SYNC_RAW_TOPIC_MAX_MESSAGE_BYTES,
+      } : {}),
     },
     {
       topic: sanitizeTopicName(process.env["PROTOCOL_BRIDGE_AP_INGRESS_TOPIC"] || "ap.atproto-ingress.v1"),
