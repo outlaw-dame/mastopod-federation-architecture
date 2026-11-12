@@ -27,8 +27,11 @@
   has its own client-side retry and inflight trade-offs. A successful broker
   acknowledgment by itself is not end-to-end exactly-once delivery.
 - Several older docker-compose and CI fixtures use EOL Redpanda 24.1
-  images. A supported 26.2.6 broker is being validated in a separate
-  disposable CI lane; no production broker upgrade has been made.
+  images. PR #145 successfully verified a supported 26.2.6 broker in the
+  disposable AP stream and large raw-frame CI lane. The real-broker proof
+  reproduced a 5,242,880-byte frame round-trip with matching digest in
+  502 ms (one disposable observation, not a production SLA). No production
+  broker upgrade has been made.
 
 ## Redis authority, security and availability
 
