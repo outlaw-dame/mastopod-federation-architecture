@@ -1,0 +1,42 @@
+# Friendica ↔ Mastodon: real ActivityPub Follow acceptance
+
+This is a source-based diagnostic and acceptance note for pinned Friendica 2026.05 and Mastodon v4.5.8. **An HTTP 202 is not proof of a persisted follow** for either implementation.
+
+## Incoming Follow pipeline: source comparison
+
+| Stage | Mastodon v4.5.8 | Friendica 2026.05 |
+| --- | --- | --- |
+| Inbox entry | `ActivityPub::InboxesController#create` checks request and actor signature, schedules `ActivityPub::ProcessingWorker`, returns 202 | `Module/ActivityPub/Inbox::post` checks content type and body, invokes `Receiver::processInbox`, then throws `AcceptedException` (202) |
+| Remote actor | Signed request account and actor are resolved ahead of queue handoff | `Receiver::processInbox` runs `APContact::getByURL(actor)` **before HTTP signature verification**; failure logs a notice and returns without persisting |
+| HTTP signature | `require_actor_signature!` precondition before processing queue | `HTTPSignature::getSigner` and `getKeyIdContact` after actor lookup; an unverifiable signer is not trusted |
+| Actor dereference | Request account/actor resolution and background processing | `APContact::getByURL` fetches WebFinger and, if needed, `HTTPSignature::fetchRaw` (signed GET using Friendica's system account), validates content type and JSON-LD compaction, requires recognized account type and nonempty inbox |
+| Follow | `ActivityPub::Activity::Follow#perform`: resolve local target, verify blocks, create/update `FollowRequest`, run `AuthorizeFollowService` or leave pending if locked | `Receiver::processActivity` dispatches account Follow to `Processor::followUser`; accepting `as:Follow` depends on proper target object typing and permission/relationship state |
+| Persisted acceptance | DB `follows` or `follow_requests` (pending), local target; signer/transport evidence | DB `apcontact` discovery, `contact` relationship and pending/intro state, `inbox-entry` and receiver as applicable; verified signer/transport evidence |
+
+Source files:
+- https://github.com/mastodon/mastodon/blob/v4.5.8/app/controllers/activitypub/inboxes_controller.rb
+- https://github.com/mastodon/mastodon/blob/v4.5.8/app/lib/activitypub/activity/follow.rb
+- https://github.com/friendica/friendica/blob/2026.05/src/Module/ActivityPub/Inbox.php
+- https://github.com/friendica/friendica/blob/2026.05/src/Protocol/ActivityPub/Receiver.php
+- https://github.com/friendica/friendica/blob/2026.05/src/Model/APContact.php
+- https://github.com/friendica/friendica/blob/2026.05/src/Util/HTTPSignature.php
+
+## What the fixture has actually demonstrated
+
+- Both ActivityPods native and sidecar Follow deliveries reached Friendica with HTTP 202.
+- The same actor URL was fetchable using an ordinary in-container curl with `Accept: application/activity+json` and the disposable root CA. **This is not the same as Friendica's own `HTTPSignature::fetchRaw` signed fetch and JSON-LD compaction**.
+- The Friendica DB still showed zero persisted remote contacts, zero matching inbox entries and no matching relationship. The worker queue was empty at the failure checkpoint.
+- Earlier logs showed Friendica's URL verifier receiving 503 from its own site root. Treat this as a lead, not an independently proven cause.
+- The fixture already corrects an empty reserved `uid=0` system-account nickname before requiring signed actor fetch. Do not duplicate this workaround or misdiagnose its prior absence as the current failure.
+- Production signature validation, origin validation, URL checks and private-address SSRF safety must remain enabled. This is a disposable test with synthetic hostnames, not permission to disable validation in the actual product.
+
+## Exact next diagnostic sequence (do not weaken pass conditions)
+
+1. Verify the disposable Friendica application config genuinely enables logging **after** installation, and read only bounded log-category counts; never upload raw signed requests, body text, credentials or private actor data.
+2. Verify `apcontact` has the exact canonical ActivityPods actor URI, public key, type and inbox. If missing, the failure precedes HTTP signature processing. Investigate Friendica's **signed** actor GET, JSON-LD context resolution, WebFinger handling, URL/SSRF verifier, and origin certificate trust. Do not infer success from raw curl GET.
+3. If `apcontact` exists, check signing principal: the received `actor`, `Signature keyId`/actor URI, digest, host, path and Date must agree under Friendica's own signature verification. Keep negative-signer tests.
+4. If signatures verify, trace `Receiver::processActivity` object type, recipient, local target ID and the `Processor::followUser` path; assert actual SQL accepted or pending state.
+5. Check that both native and sidecar modes produce verified remote state, real ActivityPods signer evidence and no cross-pod authorization regression; then run the complete seven-target protected matrix on the *exact head*.
+6. Repeat the test with a disposable Mastodon-style actor fixture that exercises `application/activity+json`, canonical actor ID, public key ownership, `inbox`, `outbox`, `followers` and optional `endpoints.sharedInbox`. A passing Mastodon lane is a comparison, not a reason to skip Friendica.
+
+The release gate remains closed while either native or sidecar Friendica persistence is absent. See issue #149 and PR #153.
