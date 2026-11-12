@@ -419,6 +419,10 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
         local promoted = 0
         local safeAcked = ARGV[4] == '1'
         if safeAcked and #ids > 0 then
+        local groups = redis.pcall('XINFO', 'GROUPS', KEYS[3])
+        if type(groups) ~= 'table' or #groups == 0 then
+          return redis.error_reply('REDIS_STREAM_NO_CONSUMER_GROUP')
+        end
           local capacity = tonumber(ARGV[3])
           if #ids > capacity then
             return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
