@@ -247,18 +247,28 @@ export class RedisStreamsQueue {
   async connect(): Promise<void> {
     if (this.isConnected) return;
 
-    await Promise.all([
-      this.redis.connect(),
-      this.inboundConsumerRedis.connect(),
-      this.outboundConsumerRedis.connect(),
-      this.outboxIntentConsumerRedis.connect(),
-      this.originReconcileConsumerRedis.connect(),
-    ]);
-
-    if (this.safeAckedRetention) {
-      await requireRedis82AckedSupport(this.redis);
+    const clients = [
+      this.redis,
+      this.inboundConsumerRedis,
+      this.outboundConsumerRedis,
+      this.outboxIntentConsumerRedis,
+      this.originReconcileConsumerRedis,
+    ];
+    try {
+      await Promise.all(clients.map(client => client.connect()));
+      if (this.safeAckedRetention) {
+        await requireRedis82AckedSupport(this.redis);
+      }
+      await this.ensureConsumerGroups();
+    } catch (error) {
+      // A failed version check/group initialization must not strand five
+      // connected clients or a partially started queue.
+      await Promise.allSettled(
+        clients.map(client => client.isOpen
+          ? client.quit() : Promise.resolve()),
+      );
+      throw error;
     }
-    await this.ensureConsumerGroups();
 
     this.isConnected = true;
     logger.info("Redis Streams Queue connected", {
