@@ -94,11 +94,16 @@ export class DefaultAtFirehoseCursorManager implements AtFirehoseCursorManager {
     try {
       const raw = await this.redis.get(hotCursorKey(sourceId));
       if (raw === null || raw === undefined) return null;
-      const parsed = parseInt(raw, 10);
-      return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-    } catch (err) {
-      console.error(`[CursorManager] Failed to get hot cursor for ${sourceId}:`, err);
-      return null;
+      if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
+        throw new CursorError('Corrupt hot firehose cursor');
+      }
+      const parsed = Number(raw);
+      if (!Number.isSafeInteger(parsed)) throw new CursorError('Unsafe hot firehose cursor');
+      return parsed;
+    } catch (error) {
+      // A store outage or malformed cursor is not the same as a fresh account.
+      // Returning null here would silently switch to a live-only tail.
+      throw new CursorError('Unable to load hot firehose cursor', error);
     }
   }
 
@@ -111,13 +116,9 @@ export class DefaultAtFirehoseCursorManager implements AtFirehoseCursorManager {
     try {
       await this.redis.set(hotCursorKey(sourceId), seq.toString());
       await this.redis.set(lastEventAtKey(sourceId), new Date().toISOString());
-    } catch (err) {
-      // Hot cursor failure is non-fatal; the consumer continues processing.
-      // The durable cursor will catch up on the next commit interval.
-      console.error(
-        `[CursorManager] Failed to set hot cursor for ${sourceId} at seq ${seq}:`,
-        err,
-      );
+    } catch (error) {
+      // Do not continue consuming without an acknowledged replay fence.
+      throw new CursorError('Unable to advance acknowledged firehose cursor', error);
     }
   }
 
@@ -173,7 +174,7 @@ export class InMemoryAtFirehoseCursorManager implements AtFirehoseCursorManager 
 // ---------------------------------------------------------------------------
 
 function validateSeq(seq: number, sourceId: string): void {
-  if (!Number.isFinite(seq) || seq < 0 || !Number.isInteger(seq)) {
+  if (!Number.isSafeInteger(seq) || seq < 0) {
     throw new CursorError(`Invalid seq value ${seq} for source ${sourceId}`);
   }
 }
