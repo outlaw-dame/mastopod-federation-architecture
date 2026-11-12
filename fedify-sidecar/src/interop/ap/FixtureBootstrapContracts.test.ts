@@ -278,6 +278,10 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(pathOrder).toBeGreaterThan(-1);
     expect(script).toContain("friendica_app_log_source=pinned_image");
     expect(script).toContain("friendica_app_log_source=legacy_fallback");
+    expect(script).toContain("levels_debug=");
+    expect(script).toContain("signer_tombstone=");
+    expect(script).toContain("missing_follow_object=");
+    expect(script).not.toContain('printf "%s" "$log"');
     expect(script).toContain('tail -n 2000 "$log" | awk');
     expect(script).not.toContain('cat "$log"');
   });
