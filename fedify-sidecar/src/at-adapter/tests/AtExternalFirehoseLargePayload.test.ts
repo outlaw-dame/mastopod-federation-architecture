@@ -9,7 +9,7 @@ import {
   AT_SYNC_RAW_FETCH_BYTES_PER_PARTITION,
   AT_SYNC_RAW_FETCH_BYTES,
 } from "../ingress/AtExternalFirehosePayloadLimits.js";
-import { buildTopicDefinitions } from "../../streams/redpanda-topic-governance.js";
+import { buildTopicDefinitions, buildConfigEntries } from "../../streams/redpanda-topic-governance.js";
 
 const rawTopic = "at.firehose.raw.v1";
 function mockProducer(): KafkaProducerLike {
@@ -77,6 +77,12 @@ describe("external Sync full-frame Redpanda payload limits", () => {
     expect(raw?.maxMessageBytes).toBe(AT_SYNC_RAW_TOPIC_MAX_MESSAGE_BYTES);
     expect(enabled.filter(t => t.maxMessageBytes !== undefined))
       .toHaveLength(1);
+    expect(buildConfigEntries(raw!, "production"))
+      .toContainEqual({name:"max.message.bytes",value:String(AT_SYNC_RAW_TOPIC_MAX_MESSAGE_BYTES)});
+    const trusted = enabled.find(t => t.topic === "at.ingress.v1");
+    expect(trusted).toBeDefined();
+    expect(buildConfigEntries(trusted!, "production")
+      .some(entry => entry.name === "max.message.bytes")).toBe(false);
     expect(buildTopicDefinitions("production")
       .find(t => t.topic === rawTopic)?.maxMessageBytes).toBeUndefined();
   });
