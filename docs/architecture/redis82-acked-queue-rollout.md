@@ -28,6 +28,11 @@ When enabled:
   the original source must remain pending and must not be acknowledged.
 - A Redis 7 endpoint with the opt-in flag fails the server-version gate
   instead of executing Redis 8.2-only commands.
+- Authenticated outbox and observation HTTP endpoints return `503 Service
+  Unavailable` with `Retry-After: 5` if atomic admission refuses work.
+  The source request remains unaccepted. Internal outbound and outbox-intent
+  workers leave the source in the PEL without consuming business retries.
+  Do not interpret a retrying HTTP client as proof of end-to-end delivery.
 
 ## Zero-loss rollout and rollback
 
