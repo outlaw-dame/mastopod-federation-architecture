@@ -38,6 +38,22 @@ describe("AtExternalFirehoseBootstrap", () => {
     );
   });
 
+  it("rejects excessive, malformed, and insecure source lists without echoing secrets", () => {
+    expect(() => parseAtExternalFirehoseSources("relay|ws://relay.example.test"))
+      .toThrow(/requires WSS/);
+    expect(() => parseAtExternalFirehoseSources("unknown|wss://relay.example.test"))
+      .toThrow(/source type/);
+    expect(() => parseAtExternalFirehoseSources("relay|wss://relay.example.test/unknown"))
+      .toThrow(/subscribeRepos/);
+    expect(() => parseAtExternalFirehoseSources("relay|wss://relay.example.test/?token=hidden-secret"))
+      .toThrow(/credentials, query or fragment/);
+    const excessive=Array.from({length:9},(_,i)=>
+      `relay|wss://relay${i}.example.test`).join(",");
+    expect(() => parseAtExternalFirehoseSources(excessive)).toThrow(/maximum eight/);
+    try {parseAtExternalFirehoseSources("relay|wss://user:hidden-secret@relay.example.test");}
+    catch(error){expect(String(error)).not.toContain("hidden-secret");}
+  });
+
   it("returns a disabled bootstrap result when commit verification is missing", () => {
     const bootstrap = buildAtExternalFirehoseBootstrap({
       runtimeConfig: {

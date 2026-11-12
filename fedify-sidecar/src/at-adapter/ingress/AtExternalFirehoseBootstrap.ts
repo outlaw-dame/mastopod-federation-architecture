@@ -80,6 +80,7 @@ export function buildAtExternalFirehoseBootstrap(
     decoder,
     cursorManager,
     options.eventPublisher,
+    options.runtimeConfig.rawTopic,
   );
   const classifier = new Phase55AEventClassifier(options.redis);
   const auditPublisher = new DefaultAtIngressAuditPublisher(options.eventPublisher);
@@ -121,20 +122,22 @@ export function parseAtExternalFirehoseSources(raw: string | null | undefined): 
     return [];
   }
 
+  if (raw.length > 8192) throw new Error("External AT source list exceeds 8 KiB");
   const entries = raw
     .split(/[\n,]/g)
     .map((entry) => entry.trim())
     .filter(Boolean);
+  if (entries.length > 8) throw new Error("Too many external firehose sources (maximum eight)");
 
   const seen = new Set<string>();
   const sources: AtFirehoseSource[] = [];
 
   for (const entry of entries) {
     const source = parseAtExternalFirehoseSourceEntry(entry);
-    if (seen.has(source.url)) {
+    if (seen.has(source.id)) {
       continue;
     }
-    seen.add(source.url);
+    seen.add(source.id);
     sources.push(source);
   }
 
@@ -145,6 +148,10 @@ function parseAtExternalFirehoseSourceEntry(entry: string): AtFirehoseSource {
   const pipeIndex = entry.indexOf("|");
   const sourceTypeCandidate = pipeIndex >= 0 ? entry.slice(0, pipeIndex).trim().toLowerCase() : "";
   const rawUrl = pipeIndex >= 0 ? entry.slice(pipeIndex + 1).trim() : entry;
+  if (pipeIndex >= 0 && sourceTypeCandidate !== "pds" &&
+      sourceTypeCandidate !== "relay") {
+    throw new Error("External firehose source type must be relay or pds");
+  }
   const sourceType = sourceTypeCandidate === "pds" ? "pds" : "relay";
   const normalizedUrl = normalizeExternalFirehoseSourceUrl(rawUrl);
 
@@ -157,24 +164,21 @@ function parseAtExternalFirehoseSourceEntry(entry: string): AtFirehoseSource {
 
 function normalizeExternalFirehoseSourceUrl(rawUrl: string): string {
   let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw new Error(`Invalid external AT firehose source URL: ${rawUrl}`);
-  }
-
+  try { parsed = new URL(rawUrl); }
+  catch { throw new Error("Invalid external AT firehose source URL"); }
   if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-    throw new Error(`External AT firehose sources must use ws:// or wss://: ${rawUrl}`);
+    throw new Error("External AT firehose sources must use ws:// or wss://");
   }
-
-  if (parsed.username || parsed.password) {
-    throw new Error(`External AT firehose source URLs must not include credentials: ${rawUrl}`);
+  const loopback = ["127.0.0.1","localhost","[::1]"].includes(parsed.hostname);
+  if (parsed.protocol === "ws:" && !(loopback && process.env["NODE_ENV"] === "test")) {
+    throw new Error("External AT firehose requires WSS outside disposable loopback tests");
   }
-
-  if (parsed.search || parsed.hash) {
-    throw new Error(`External AT firehose source URLs must not include query or hash components: ${rawUrl}`);
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("External firehose URL must not include credentials, query or fragment");
   }
-
+  if (!["/", "/xrpc/com.atproto.sync.subscribeRepos"].includes(parsed.pathname)) {
+    throw new Error("External firehose URL must target subscribeRepos");
+  }
   return parsed.toString();
 }
 

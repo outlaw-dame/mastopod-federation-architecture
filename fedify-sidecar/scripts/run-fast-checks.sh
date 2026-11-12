@@ -45,6 +45,10 @@ npm exec -- vitest run \
   src/protocol-bridge/identity/ObservedAtIdentityStore.scalability.test.ts \
   src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerReliability.test.ts \
   src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerHttpGate.test.ts \
+  src/at-adapter/tests/AtFirehoseWebSocketSafety.test.ts \
+  src/at-adapter/tests/AtFirehoseCursorFailure.test.ts \
+  src/at-adapter/tests/AtExternalFirehoseBootstrap.test.ts \
+  src/at-adapter/tests/AtIngressRuntime.test.ts \
   src/at-adapter/tests/AtExternalIngestionPolicy.test.ts \
   src/at-adapter/tests/AtJetstreamSecurity.test.ts \
   src/at-adapter/tests/AtJetstreamWebSocketBackpressure.test.ts \

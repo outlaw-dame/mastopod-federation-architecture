@@ -41,6 +41,35 @@ describe("AtIngressRuntime", () => {
     });
   });
 
+  it("releases previously started source sockets after a later source fails",async()=>{
+    const broker=createMockConsumer();
+    const firehoseConsumer={
+      start:vi.fn(async(source:{id:string})=>{
+        if(source.id==="second")throw new Error("second source unavailable");
+      }),
+      stop:vi.fn(async()=>undefined),
+    };
+    const runtime=new AtIngressRuntime({
+      config:{
+        brokers:["localhost:9092"],clientId:"test",
+        consumerGroupId:"test",rawTopic:"at.firehose.raw.v1",
+        sources:[
+          {id:"first",url:"wss://one.example.test",sourceType:"relay"},
+          {id:"second",url:"wss://two.example.test",sourceType:"relay"},
+        ],
+      },
+      firehoseConsumer,
+      verifier:{handleRawEvent:vi.fn().mockResolvedValue(true)},
+      consumerFactory:()=>broker,
+    });
+    await expect(runtime.start()).rejects.toThrow(/second source/);
+    expect(firehoseConsumer.stop).toHaveBeenCalledExactlyOnceWith("first");
+    expect(broker.stop).toHaveBeenCalledTimes(1);
+    expect(broker.disconnect).toHaveBeenCalledTimes(1);
+    await runtime.stop();
+    expect(firehoseConsumer.stop).toHaveBeenCalledTimes(1);
+  });
+
   it("returns verifier decisions for raw envelopes and drops malformed payloads safely", async () => {
     const verifier = {
       handleRawEvent: vi.fn().mockResolvedValue(false),

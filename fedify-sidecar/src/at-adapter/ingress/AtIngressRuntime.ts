@@ -78,6 +78,12 @@ export class AtIngressRuntime {
         this.startedSourceIds.add(source.id);
       }
     } catch (error) {
+      // Partially started source sockets must not survive a failed startup.
+      // Otherwise later retries run duplicate consumers for the same stream.
+      for (const sourceId of this.startedSourceIds) {
+        await this.options.firehoseConsumer.stop(sourceId).catch(() => undefined);
+      }
+      this.startedSourceIds.clear();
       await consumer.stop().catch(() => undefined);
       await consumer.disconnect().catch(() => undefined);
       this.consumer = null;

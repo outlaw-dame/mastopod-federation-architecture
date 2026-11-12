@@ -77,21 +77,22 @@ export class RedisAtIngressCheckpointStore implements AtIngressCheckpointStore {
     try {
       const raw = await this.redis.get(committedCursorKey(sourceId));
       if (raw === null || raw === undefined) return null;
-      const parsed = parseInt(raw, 10);
-      if (!Number.isFinite(parsed) || parsed < 0) return null;
+      if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
+        throw new CheckpointError('Committed cursor has invalid encoding');
+      }
+      const parsed = Number(raw);
+      if (!Number.isSafeInteger(parsed)) {
+        throw new CheckpointError('Committed cursor exceeds safe integer bounds');
+      }
       return parsed;
-    } catch (err) {
-      // Redis failure on cold start: log and return null to replay from beginning.
-      console.error(
-        `[AtIngressCheckpointStore] Failed to load committed cursor for ${sourceId}:`,
-        err,
-      );
-      return null;
+    } catch (error) {
+      // Never treat a failed database read as a fresh live subscription.
+      throw new CheckpointError('Unable to load committed firehose checkpoint', error);
     }
   }
 
   async saveCommittedCursor(sourceId: string, seq: number): Promise<void> {
-    if (!Number.isFinite(seq) || seq < 0) {
+    if (!Number.isSafeInteger(seq) || seq < 0) {
       throw new CheckpointError(`Invalid seq value: ${seq}`);
     }
 
