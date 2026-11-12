@@ -416,7 +416,8 @@ export class CanonicalNotificationConsumer {
         headersTimeout: this.notifyTimeoutMs,
       });
       statusCode = res.statusCode;
-      if (this.config.requireDurablePgAck === true) {
+      if (this.config.requireDurablePgAck === true &&
+          (statusCode === 202 || statusCode === 409)) {
         durableReceipt = await readBoundedCanonicalReceipt(res.body);
       } else {
         await res.body.dump({ limit: 262144 });
