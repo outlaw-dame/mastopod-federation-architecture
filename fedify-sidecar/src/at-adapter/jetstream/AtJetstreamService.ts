@@ -332,7 +332,6 @@ export class AtJetstreamService {
         : null;
     const operation = normalizeOperation(c["operation"]);
     if (!operation) return;
-    const endpoint = new URL(this.config.url);
     const event: UnverifiedJetstreamCommit = {
       kind: "jetstream.commit",
       verified: false,
@@ -340,7 +339,7 @@ export class AtJetstreamService {
       cursorType,
       did,
       receivedAt: new Date().toISOString(),
-      source: endpoint.origin + endpoint.pathname,
+      source: safeJetstreamEndpointLabel(this.config.url),
       commit: {
         rev,
         operation,
@@ -387,6 +386,12 @@ export class AtJetstreamService {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Never expose query values, bearer tokens, or credentials in startup logs. */
+export function safeJetstreamEndpointLabel(source: string): string {
+  const uri = new URL(source);
+  return uri.origin + uri.pathname;
+}
 
 function normalizeOperation(raw: unknown): "create" | "update" | "delete" | null {
   if (raw === "create" || raw === "update" || raw === "delete") return raw;
