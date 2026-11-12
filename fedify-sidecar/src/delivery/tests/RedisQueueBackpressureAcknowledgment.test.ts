@@ -7,7 +7,7 @@ vi.mock("../../utils/logger.js", () => {
 });
 vi.mock("undici",()=>({request:vi.fn()}));
 
-import { isRedisStreamCapacityError } from "../../queue/redis-stream-safe-admission.js";
+import { isRedisStreamCapacityError, isRedisStreamAdmissionFailure } from "../../queue/redis-stream-safe-admission.js";
 import { InboundWorker } from "../inbound-worker.js";
 import {
   OriginReconciliationWorker,
@@ -77,6 +77,9 @@ describe("ack after durable Redis replacement",()=>{
     expect(isRedisStreamCapacityError(new Error("ERR REDIS_STREAM_AT_CAPACITY"))).toBe(true);
     expect(isRedisStreamCapacityError(new Error("Redis disconnected"))).toBe(false);
     expect(isRedisStreamCapacityError(new Error("Invalid consumer group"))).toBe(false);
+    expect(isRedisStreamAdmissionFailure(new Error("ERR REDIS_STREAM_AT_CAPACITY"))).toBe(true);
+    expect(isRedisStreamAdmissionFailure(new Error("ERR REDIS_STREAM_NO_CONSUMER_GROUP"))).toBe(true);
+    expect(isRedisStreamAdmissionFailure(new Error("Redis disconnected"))).toBe(false);
   });
 
   it("does not ACK an inbound source when its DLQ is full",async()=>{
