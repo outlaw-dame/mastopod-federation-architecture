@@ -107,6 +107,7 @@ import {
   selectExternalAtIngestionSource,
   requireVerifiedExternalFirehoseReady,
 } from "./at-adapter/ingress/AtExternalIngestionPolicy.js";
+import { RedisExternalAtModeGate } from "./at-adapter/ingress/RedisExternalAtModeGate.js";
 import { DefaultAtRepoDiffBuilder } from "./at-adapter/repo/AtRepoDiffBuilder.js";
 // AT adapter — auth / session
 import { DefaultAtSessionTokenService } from "./at-adapter/auth/DefaultAtSessionTokenService.js";
@@ -773,6 +774,7 @@ let outboxIntentWorker: OutboxIntentWorker | null = null;
 let originReconciliationWorker: OriginReconciliationWorker | null = null;
 let opensearchIndexer: SearchIndexerService | null = null;
 let atRedisClient: Redis | null = null;
+let externalAtModeGate: RedisExternalAtModeGate | null = null;
 let writeResultStore: AtWriteResultStore | null = null;
 let identityWarmupService: IdentityWarmupService | null = null;
 let atEventPublisher: RedpandaEventPublisher | null = null;
@@ -890,6 +892,9 @@ async function main() {
     enableVerifiedFirehose: config.enableAtExternalFirehose,
     enableJetstream: config.enableAtJetstream,
   });
+  if (externalAtIngestionSource !== "disabled" && !config.enableXrpcServer) {
+    throw new Error("External AT ingress requires the AT runtime; ENABLE_XRPC_SERVER cannot be false");
+  }
   if (externalAtIngestionSource === "verified") {
     const configuredSources = parseAtExternalFirehoseSources(
       process.env["AT_EXTERNAL_FIREHOSE_SOURCES"],
@@ -2950,6 +2955,17 @@ async function main() {
           logger.error("AT Redis client error", { error: err.message }),
         );
 
+        if (externalAtIngestionSource !== "disabled") {
+          externalAtModeGate = new RedisExternalAtModeGate(atRedis);
+          await externalAtModeGate.start(externalAtIngestionSource, () => {
+            logger.error("External AT ingestion mode authority was lost");
+            void shutdown("external-ingestion-mode-lost");
+          });
+          logger.info("External AT ingestion mode admitted", {
+            mode: externalAtIngestionSource,
+          });
+        }
+
         // ---- Identity binding repository ----
         identityRepo = new RedisIdentityBindingRepository(atRedis);
         const observedAtIdentityStore = new RedisObservedAtIdentityStore(atRedis);
@@ -3869,6 +3885,9 @@ async function main() {
           error: err.message,
           stack: err.stack,
         }, "Failed to initialise AT XRPC server");
+        // An externally requested Sync/Jetstream source cannot silently
+        // disappear behind a partially initialized HTTP sidecar.
+        if (externalAtIngestionSource !== "disabled") throw err;
       }
     }
 
@@ -3921,6 +3940,9 @@ async function main() {
             },
             "Background startup failed",
           );
+          if (externalAtIngestionSource !== "disabled") {
+            await shutdown("external-ingestion-startup-failed");
+          }
         }
       })();
     } else {
@@ -4109,6 +4131,13 @@ async function shutdown(signal: string): Promise<void> {
       await moderationBridgeRedisClient.quit().catch(() => moderationBridgeRedisClient!.disconnect());
       moderationBridgeRedisClient = null;
       logger.info("Moderation bridge Redis client disconnected");
+    }
+
+    // Keep the fleet-mode heartbeat until both external subscribers have
+    // stopped, then allow the shared admission marker to expire by TTL.
+    if (externalAtModeGate) {
+      externalAtModeGate.stop();
+      externalAtModeGate = null;
     }
 
     // Quit shared AT Redis client
