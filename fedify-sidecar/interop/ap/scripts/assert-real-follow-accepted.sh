@@ -212,12 +212,26 @@ else
       if (index(line, "url not reachable")) unreachable++
       if (index(line, "error fetching url")) fetch_error++
       if (index(line, "could not find owner")) no_owner++
+      if (index(line, "verification failed")) rsa_failed++
+      if (index(line, "digest does not match")) digest_failed++
+      if (index(line, "requested header field not found")) missing_signed_header++
+      if (index(line, "empty key")) missing_key++
+      if (index(line, "empty pubkey")) missing_pubkey++
+      if (index(line, "no http_signature header")) no_http_signature++
+      if (index(line, "no good signed content")) missing_digest_or_date++
+      if (index(line, "activity trust could not be achieved")) untrusted++
+      if (index(line, "processing") && index(line, "object_type")) receiver_processing++
+      if (index(line, "unhandled activity")) unhandled++
+      if (index(line, "follow user")) follow_committed++
+      if (index(line, "activity could not been fetched")) activity_fetch_failed++
     }
     END {
       printf "recent_lines=%d activitypub=%d inbox=%d follow=%d url_verifier=%d invalid_signature=%d failed_fetch=%d http_503_mentions=%d\n",
         lines, ap, inbox, follows, urlverifier, badsig, badfetch, unavailable
       printf "actor_lookup_failed=%d valid_http_signature=%d invalid_http_signature=%d missing_signature=%d actor_messages=%d no_object_data=%d empty_type=%d empty_object=%d actor_mismatch=%d url_unreachable=%d url_fetch_error=%d missing_system_owner=%d\n",
         missing_actor, valid_sig, invalid_sig, absent_sig, actor_msg, no_object, empty_type, empty_object, actor_mismatch, unreachable, fetch_error, no_owner
+      printf "rsa_failed=%d digest_failed=%d missing_signed_header=%d missing_key=%d missing_pubkey=%d no_http_signature=%d missing_digest_or_date=%d untrusted_activity=%d receiver_processing=%d unhandled_activity=%d follow_committed=%d activity_fetch_failed=%d\n",
+        rsa_failed, digest_failed, missing_signed_header, missing_key, missing_pubkey, no_http_signature, missing_digest_or_date, untrusted, receiver_processing, unhandled, follow_committed, activity_fetch_failed
     }
   '
 fi
@@ -226,6 +240,8 @@ FRIENDICA_LOG_SUMMARY
   friendica_log_summary friendica-app
   friendica_log_summary friendica-worker
   {
+    printf '%s\n' "select concat('friendica_local_self_count=', count(*), ',matching_actor_url_count=', coalesce(sum(c.url=concat('https://friendica.test/profile/',u.nickname)),0), ',matching_target_nickname_count=', coalesce(sum(u.nickname='${username_sql}'),0)) from contact c join user u on u.uid=c.uid where c.self=1 and u.nickname='${username_sql}';"
+    printf '%s\n' "select concat('local_target_apcontact_count=',count(*), ',local_target_ap_type=',coalesce(max(type),'none')) from apcontact where url=concat('https://friendica.test/profile/','${username_sql}');"
     printf '%s\n' "select concat('apcontact_count=', count(*), ',actor_pubkey_count=', coalesce(sum(pubkey is not null and pubkey <> ''),0), ',actor_inbox_count=', coalesce(sum(inbox is not null and inbox <> ''),0)) from apcontact where url='${actor_sql}';"
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
