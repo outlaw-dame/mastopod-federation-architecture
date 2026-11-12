@@ -25,6 +25,7 @@ import {
   createOutboxIntent,
   createVerifiedInboundEnvelope,
 } from "./queue/sidecar-redis-queue.js";
+import { isRedisStreamCapacityError } from "./queue/redis-stream-safe-admission.js";
 import { createSigningClient } from "./signing/signing-client.js";
 import { createRedPandaProducer } from "./streams/redpanda-producer.js";
 import { createSearchIndexerService, SearchIndexerService } from "./search/service/SearchIndexerService.js";
@@ -2687,7 +2688,18 @@ async function main() {
         ...(normalizedMeta ? { meta: normalizedMeta } : {}),
         bridgeHints: { observationOnly: true },
       });
-      await queue.enqueueOutboxIntent(intent);
+      try {
+        await queue.enqueueOutboxIntent(intent);
+      } catch (error) {
+        if (!isRedisStreamCapacityError(error)) throw error;
+        reply.header("retry-after", "5");
+        reply.status(503).send({
+          error: "Outbox observation queue is under backpressure",
+          code: "QUEUE_BACKPRESSURE",
+          retryAfterSeconds: 5,
+        });
+        return;
+      }
       reply.status(202).send({
         accepted: true,
         intentId: intent.intentId,
@@ -2851,6 +2863,17 @@ async function main() {
           queueingLatencyMs: Math.round(queueingLatencySeconds * 1000),
         });
       } catch (error) {
+        if (isRedisStreamCapacityError(error)) {
+          promMetrics.outboundWebhookRequestsTotal.inc({ status: "backpressure" });
+          promMetrics.outboundWebhookBackpressureRejectionsTotal.inc({ reason: "capacity" });
+          reply.header("retry-after", "5");
+          reply.status(503).send({
+            error: "Outbound delivery queue is under backpressure",
+            code: "QUEUE_BACKPRESSURE",
+            retryAfterSeconds: 5,
+          });
+          return;
+        }
         if (error instanceof OutboundWebhookValidationError) {
           promMetrics.outboundWebhookRequestsTotal.inc({ status: "invalid" });
           reply.status(error.statusCode).send({
