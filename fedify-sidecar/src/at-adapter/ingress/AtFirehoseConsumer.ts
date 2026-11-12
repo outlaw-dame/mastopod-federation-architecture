@@ -137,6 +137,7 @@ class FirehoseConnection {
   private isRunning = false;
   private reconnectAttempts = 0;
   private pingInterval: NodeJS.Timeout | null = null;
+  private heartbeatSocket: WebSocket | null = null;
   private commitInterval: NodeJS.Timeout | null = null;
   private lastAckedSeq: number | null = null;
   private lastCommittedSeq: number | null = null;
@@ -260,8 +261,10 @@ class FirehoseConnection {
       let draining = false;
       let pongReceived = true;
       const stopPing = () => {
+        if (this.heartbeatSocket !== ws) return;
         if (this.pingInterval) clearInterval(this.pingInterval);
         this.pingInterval = null;
+        this.heartbeatSocket = null;
       };
       const drain = async (): Promise<void> => {
         if (draining) return;
@@ -300,7 +303,8 @@ class FirehoseConnection {
         }
         this.signalFirstConnection();
         pongReceived = true;
-        stopPing();
+        this.cleanupSocket();
+        this.heartbeatSocket = ws;
         this.pingInterval = setInterval(() => {
           if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
           if (!pongReceived) {
@@ -410,6 +414,7 @@ class FirehoseConnection {
   private cleanupSocket(): void {
     if (this.pingInterval) clearInterval(this.pingInterval);
     this.pingInterval = null;
+    this.heartbeatSocket = null;
   }
 }
 
