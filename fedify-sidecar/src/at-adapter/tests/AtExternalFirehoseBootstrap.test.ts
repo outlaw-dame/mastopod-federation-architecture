@@ -117,6 +117,7 @@ describe("AtExternalFirehoseBootstrap", () => {
 function buildMockRedis() {
   const values = new Map<string, string>();
   return {
+    async eval() { throw new Error("Unexpected source-fence command in bootstrap-only fixture"); },
     async get(key: string) {
       return values.get(key) ?? null;
     },

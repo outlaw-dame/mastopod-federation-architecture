@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { AtprotoRepoRegistry } from "../../atproto/repo/AtprotoRepoRegistry.js";
 import type { EventPublisher } from "../../core-domain/events/CoreIdentityEvents.js";
 import { DefaultAtFirehoseConsumer, type AtFirehoseSource } from "./AtFirehoseConsumer.js";
+import { RedisAtFirehoseSourceFence, type FirehoseFenceRedis } from "./RedisAtFirehoseSourceFence.js";
 import { DefaultAtFirehoseCursorManager, type RedisCursorClient } from "./AtFirehoseCursorManager.js";
 import { DefaultAtFirehoseDecoder } from "./AtFirehoseDecoder.js";
 import { DefaultAtIngressAuditPublisher } from "./AtIngressAuditPublisher.js";
@@ -19,7 +20,8 @@ import { HttpAtSyncRebuilder, type HttpAtSyncRebuilderOptions } from "./HttpAtSy
 type AtIngressRedisClient =
   & CheckpointRedisClient
   & RedisCursorClient
-  & RedisClassifierClient;
+  & RedisClassifierClient
+  & FirehoseFenceRedis;
 
 export interface AtExternalFirehoseBootstrapOptions {
   runtimeConfig: AtIngressRuntimeConfig;
@@ -81,6 +83,7 @@ export function buildAtExternalFirehoseBootstrap(
     cursorManager,
     options.eventPublisher,
     options.runtimeConfig.rawTopic,
+    new RedisAtFirehoseSourceFence(options.redis),
   );
   const classifier = new Phase55AEventClassifier(options.redis);
   const auditPublisher = new DefaultAtIngressAuditPublisher(options.eventPublisher);

@@ -25,6 +25,7 @@
 import { WebSocket } from 'ws';
 import { AtFirehoseDecoder } from './AtFirehoseDecoder.js';
 import { AtFirehoseCursorManager } from './AtFirehoseCursorManager.js';
+import type { FirehoseLease, FirehoseSourceFence } from './RedisAtFirehoseSourceFence.js';
 import { AtFirehoseRawEnvelope } from './AtIngressEvents.js';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 
@@ -87,6 +88,7 @@ export class DefaultAtFirehoseConsumer implements AtFirehoseConsumer {
     private readonly cursorManager: AtFirehoseCursorManager,
     private readonly eventPublisher: EventPublisher,
     private readonly rawTopic = RAW_FIREHOSE_TOPIC,
+    private readonly sourceFence?: FirehoseSourceFence,
   ) {}
 
   async start(source: AtFirehoseSource): Promise<void> {
@@ -99,7 +101,8 @@ export class DefaultAtFirehoseConsumer implements AtFirehoseConsumer {
     }
 
     const connection = new FirehoseConnection(
-      source, this.decoder, this.cursorManager, this.eventPublisher, this.rawTopic,
+      source, this.decoder, this.cursorManager, this.eventPublisher,
+      this.rawTopic, this.sourceFence,
     );
     this.activeConnections.set(source.id, connection);
     void connection.startLoop().catch((error: unknown) => {
@@ -146,6 +149,10 @@ class FirehoseConnection {
   private resolveInitial: (() => void) | null = null;
   private rejectInitial: ((error: Error) => void) | null = null;
   private readonly initialConnection: Promise<void>;
+  private activeLease: FirehoseLease | null = null;
+  private leaseTimer: NodeJS.Timeout | null = null;
+  private renewingLease = false;
+  private leaseReleasePromise: Promise<void> | null = null;
 
   constructor(
     private readonly source: AtFirehoseSource,
@@ -153,6 +160,7 @@ class FirehoseConnection {
     private readonly cursorManager: AtFirehoseCursorManager,
     private readonly eventPublisher: EventPublisher,
     private readonly rawTopic: string,
+    private readonly sourceFence?: FirehoseSourceFence,
   ) {
     this.initialConnection = new Promise<void>((resolve, reject) => {
       this.resolveInitial = resolve;
@@ -196,7 +204,20 @@ class FirehoseConnection {
     try {
       while (this.isRunning) {
         try {
-          await this.connectAndWait();
+          if (this.sourceFence && !this.activeLease) {
+            const lease = await this.sourceFence.tryAcquire(this.source.id);
+            if (!lease) {
+              // A different live replica owns the upstream. Stay an idle
+              // standby and retry; never open a second stream.
+              this.signalFirstConnection();
+            } else {
+              this.activeLease = lease;
+              this.startLeaseRenewal();
+            }
+          }
+          if (!this.sourceFence || this.activeLease) {
+            await this.connectAndWait();
+          }
         } catch (error) {
           if (!this.isRunning) break;
           this.signalFirstConnection(new Error("External verified firehose connection unavailable"));
@@ -205,12 +226,14 @@ class FirehoseConnection {
             code: error instanceof Error ? error.name : "UNKNOWN",
           });
         }
+        await this.releaseLeaseSafely();
         if (!this.isRunning) break;
         this.reconnectAttempts = Math.min(16, this.reconnectAttempts + 1);
         await this.waitForReconnect();
       }
     } finally {
       this.cleanupSocket();
+      await this.releaseLeaseSafely();
       if (this.commitInterval) clearInterval(this.commitInterval);
       this.commitInterval = null;
     }
@@ -229,10 +252,79 @@ class FirehoseConnection {
     // operation is deliberately not awaited: it cannot advance a closed
     // session's cursor and will be replayed after restart.
     await this.commitCursorSafely();
+    await this.releaseLeaseSafely();
+  }
+
+  private startLeaseRenewal(): void {
+    if (!this.sourceFence || !this.activeLease) return;
+    if (this.leaseTimer) clearInterval(this.leaseTimer);
+    const interval = Math.max(150, Math.floor(
+      // The fence's TTL is server-side; implementations without an exposed
+      // TTL use a conservative default.
+      ("leaseTtlMs" in this.sourceFence &&
+        typeof this.sourceFence.leaseTtlMs === "number"
+          ? this.sourceFence.leaseTtlMs : 15000) / 3,
+    ));
+    this.leaseTimer = setInterval(() => { void this.renewLeaseSafely(); }, interval);
+    this.leaseTimer.unref?.();
+  }
+
+  private async renewLeaseSafely(): Promise<void> {
+    if (!this.sourceFence || !this.activeLease || this.renewingLease) return;
+    const lease = this.activeLease;
+    this.renewingLease = true;
+    try {
+      const valid = await this.sourceFence.renew(this.source.id, lease);
+      if (!valid) this.dropLease(lease);
+    } catch {
+      // Unavailable Redis is a lost safety boundary, not a reason to
+      // continue optimistic publishing.
+      this.dropLease(lease);
+    } finally {
+      this.renewingLease = false;
+    }
+  }
+
+  private dropLease(lease: FirehoseLease): void {
+    if (this.activeLease !== lease) return;
+    this.activeLease = null;
+    this.lastAckedSeq = null;
+    this.lastCommittedSeq = null;
+    if (this.leaseTimer) clearInterval(this.leaseTimer);
+    this.leaseTimer = null;
+    // Inflight broker writes may complete later, but fenced cursor writes
+    // will then reject the old token.
+    this.ws?.terminate();
+  }
+
+  private async releaseLeaseSafely(): Promise<void> {
+    if (!this.sourceFence) return;
+    if (this.leaseReleasePromise) return this.leaseReleasePromise;
+    this.leaseReleasePromise = (async () => {
+      if (this.leaseTimer) clearInterval(this.leaseTimer);
+      this.leaseTimer = null;
+      const lease = this.activeLease;
+      if (!lease) return;
+      await this.commitCursorSafely();
+      this.activeLease = null;
+      this.lastAckedSeq = null;
+      this.lastCommittedSeq = null;
+      try {
+        await this.sourceFence!.release(this.source.id, lease);
+      } catch {
+        // TTL-based expiry is the fail-safe; never reuse a lease after
+        // its release result is uncertain.
+      }
+    })();
+    try { await this.leaseReleasePromise; }
+    finally { this.leaseReleasePromise = null; }
   }
 
   private async connectAndWait(): Promise<void> {
-    const cursor = await this.cursorManager.getResumeCursor(this.source.id);
+    const cursor = this.sourceFence
+      ? await this.sourceFence.getResumeCursor(
+          this.source.id, this.requireLease())
+      : await this.cursorManager.getResumeCursor(this.source.id);
     if (!this.isRunning) return;
     const url = new URL(this.source.url);
     if (url.pathname === "/") url.pathname = "/xrpc/com.atproto.sync.subscribeRepos";
@@ -351,6 +443,11 @@ class FirehoseConnection {
     });
   }
 
+  private requireLease(): FirehoseLease {
+    if (!this.activeLease) throw new Error("External firehose source lease unavailable");
+    return this.activeLease;
+  }
+
   private async handleFrame(frame: Uint8Array, socket: WebSocket): Promise<void> {
     const header = this.decoder.decodeHeader(frame);
     if (header.seq > 0 && this.lastAckedSeq !== null &&
@@ -365,11 +462,17 @@ class FirehoseConnection {
     };
     // Strictly serial: a later sequence must never overtake an unacknowledged
     // frame during broker congestion or a partial network failure.
+    const lease = this.sourceFence ? this.requireLease() : null;
     await this.eventPublisher.publish(this.rawTopic, envelope as any);
     if (!this.isRunning || this.ws !== socket ||
         socket.readyState !== WebSocket.OPEN) return;
     if (header.seq > 0) {
-      await this.cursorManager.setHotCursor(this.source.id, header.seq);
+      if (this.sourceFence) {
+        await this.sourceFence.markAcknowledged(
+          this.source.id, lease!, header.seq);
+      } else {
+        await this.cursorManager.setHotCursor(this.source.id, header.seq);
+      }
       this.lastAckedSeq = header.seq;
     }
     this.reconnectAttempts = 0;
@@ -383,7 +486,13 @@ class FirehoseConnection {
     // never overwrite a newer one on this single source.
     this.checkpointChain = this.checkpointChain.catch(() => undefined).then(async () => {
       if (this.lastCommittedSeq !== null && seq <= this.lastCommittedSeq) return;
-      await this.cursorManager.commitCursor(this.source.id, seq);
+      if (this.sourceFence) {
+        const lease = this.activeLease;
+        if (!lease) return; // lost-owner writes are never allowed
+        await this.sourceFence.commit(this.source.id, lease, seq);
+      } else {
+        await this.cursorManager.commitCursor(this.source.id, seq);
+      }
       this.lastCommittedSeq = seq;
     });
     try {
