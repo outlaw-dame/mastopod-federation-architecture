@@ -85,9 +85,13 @@ compose exec -T friendica-app php bin/console.php config system loglevel debug >
 # This check never prints actor JSON, keys or personal profile fields.
 compose exec -T -e AP_INTEROP_LOCAL_ACTOR="https://friendica.test/profile/${USERNAME}" \
   friendica-app /bin/sh -ec '
-    curl --fail --silent --show-error --cacert /interop/runtime/certs/rootCA.crt \
+    # The proxy aliases are not installed on this bootstrap container yet.
+    # Test the local Apache origin, still requiring the canonical HTTPS actor
+    # ID in JSON; later wire tests verify real TLS and signed delivery.
+    curl --fail --silent --show-error \
       --connect-timeout 5 --max-time 20 \
-      -H "Accept: application/activity+json" "$AP_INTEROP_LOCAL_ACTOR" |
+      -H "Accept: application/activity+json" \
+      http://127.0.0.1/profile/interop |
     php -r '\''$body = stream_get_contents(STDIN);
       $actor = json_decode($body, true);
       $expected = getenv("AP_INTEROP_LOCAL_ACTOR");
