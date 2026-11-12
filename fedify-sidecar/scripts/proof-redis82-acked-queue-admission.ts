@@ -2,6 +2,7 @@ import { createClient } from "redis";
 import { randomUUID } from "node:crypto";
 import { RedisStreamsQueue, type InboundEnvelope, type OutboundJob, type OutboxIntent } from "../src/queue/sidecar-redis-queue-core.js";
 import { RedisOutboxIntentDelayScheduler } from "../src/delivery/outbox-intent-delay-scheduler.js";
+import { RedisStreamsQueue as DurableRedisStreamsQueue } from "../src/queue/sidecar-redis-queue.js";
 import { requireRedis82AckedSupport } from "../src/queue/redis-stream-safe-admission.js";
 
 const url=process.env["REDIS_URL"]||"redis://127.0.0.1:6379";
@@ -116,13 +117,63 @@ try {
   "DLQ discarded unreviewed work");
  assert((await redis.xLen(keys.dlq))===2,"DLQ capacity exceeded");
 
+ // The outbound delayed wrapper has its own Lua promotion path and must
+ // obey the same cap as the core stream writers.
+ const previousNodeEnv=process.env["NODE_ENV"];
+ process.env["NODE_ENV"]="production";
+ const delayedOutbound=prefix+":delayed-outbound";
+ const wrapper=new DurableRedisStreamsQueue({
+  redisUrl:url,consumerGroup:group,consumerId:"wrapper-proof",
+  inboundStreamKey:prefix+":wrapper-in",outboundStreamKey:delayedOutbound,
+  outboxIntentStreamKey:prefix+":wrapper-intent",
+  originReconcileStreamKey:prefix+":wrapper-origin",
+  inboundDlqStreamKey:prefix+":wrapper-in-dlq",
+  outboundDlqStreamKey:prefix+":wrapper-out-dlq",
+  outboxIntentDlqStreamKey:prefix+":wrapper-intent-dlq",
+  originReconcileDlqStreamKey:prefix+":wrapper-origin-dlq",
+  maxStreamLength:2,maxDlqLength:2,safeAckedRetention:true,
+ });
+ try {
+  await wrapper.connect();
+  const delayedJob=job(100);
+  delayedJob.notBeforeMs=Date.now()+30_000;
+  await wrapper.enqueueOutboundBatch([delayedJob]);
+  await wrapper.enqueueOutboundBatch([job(101),job(102)]);
+  const schedule=delayedOutbound+":delayed:v1";
+  await redis.zAdd(schedule,{score:Date.now()-100,value:delayedJob.jobId});
+  await expectCapacity(()=>wrapper.promoteDueOutbound(Date.now()),
+    "Delayed outbound promotion discarded unread ready work");
+  assert((await redis.zScore(schedule,delayedJob.jobId))!==null,
+    "Rejected outbound promotion lost its delayed source");
+  const readyBatch=await redis.xReadGroup(group,"wrapper-proof",
+    {key:delayedOutbound,id:">"},{COUNT:10});
+  const readyIds=readyBatch?.[0]?.messages?.map(m=>m.id)??[];
+  assert(readyIds.length===2,"Delayed outbound setup did not fill ready queue");
+  await redis.xAck(delayedOutbound,group,readyIds);
+  assert(await wrapper.promoteDueOutbound(Date.now())===1,
+    "Delayed outbound work did not resume after ACKED reclaim");
+  assert((await redis.zScore(schedule,delayedJob.jobId))===null,
+    "Successfully promoted outbound work stayed in delayed schedule");
+ } finally {
+  await wrapper.disconnect().catch(()=>undefined);
+  process.env["NODE_ENV"]=previousNodeEnv;
+  await redis.del([
+    delayedOutbound,delayedOutbound+":delayed:v1",
+    delayedOutbound+":delayed-payload:v1",prefix+":wrapper-in",
+    prefix+":wrapper-intent",prefix+":wrapper-origin",
+    prefix+":wrapper-in-dlq",prefix+":wrapper-out-dlq",
+    prefix+":wrapper-intent-dlq",prefix+":wrapper-origin-dlq",
+  ]).catch(()=>undefined);
+ }
+
  console.log("REDIS_ACKED_QUEUE_ADMISSION_PROOF "+JSON.stringify({
   mode:"opt-in-redis-8.2-acked",
   version:(await redis.info("server")).match(/^redis_version:([^\r\n]+)/m)?.[1]??"unknown",
   pendingJobSurvivedPressure:true,unreadJobSurvivedPressure:true,
   producerBackpressure:true,ackedWorkReclaimed:true,
   fanoutCapacity:true,delayedPromotionPreservesWork:true,
-  dlqRetainsUnreviewedEntries:true,elapsedMs:Date.now()-started,
+  dlqRetainsUnreviewedEntries:true,delayedOutboundPromotionPreservesWork:true,
+  elapsedMs:Date.now()-started,
  }));
 } finally {
  await queue.disconnect().catch(()=>undefined);
