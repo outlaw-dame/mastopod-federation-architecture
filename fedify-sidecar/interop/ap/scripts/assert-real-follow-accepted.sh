@@ -284,6 +284,7 @@ FRIENDICA_LOG_SUMMARY
   friendica_log_summary friendica-app
   friendica_log_summary friendica-worker
   {
+    printf '%s\n' "select concat('friendica_apub_inbound_counter=',coalesce((select v from \`key-value\` where k='stats_packets_inbound_apub' limit 1),'absent'));"
     printf '%s\n' "select concat('friendica_local_self_count=', count(*), ',matching_actor_url_count=', coalesce(sum(c.url=concat('https://friendica.test/profile/',u.nickname)),0), ',matching_target_nickname_count=', coalesce(sum(u.nickname='${username_sql}'),0)) from contact c join user u on u.uid=c.uid where c.self=1 and u.nickname='${username_sql}';"
     printf '%s\n' "select concat('local_target_apcontact_count=',count(*), ',local_target_ap_type=',coalesce(max(type),'none')) from apcontact where url=concat('https://friendica.test/profile/','${username_sql}');"
     printf '%s\n' "select concat('apcontact_count=', count(*), ',actor_pubkey_count=', coalesce(sum(pubkey is not null and pubkey <> ''),0), ',actor_inbox_count=', coalesce(sum(inbox is not null and inbox <> ''),0)) from apcontact where url='${actor_sql}';"
