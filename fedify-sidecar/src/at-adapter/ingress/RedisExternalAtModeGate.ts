@@ -6,6 +6,7 @@
  * Redis failover and divergent Redis deployments remain rollout gates.
  */
 import type { ExternalAtIngestionSource } from "./AtExternalIngestionPolicy.js";
+import { withRedisFenceDeadline } from "./RedisFenceDeadline.js";
 
 export interface ExternalModeRedis {
   eval(script: string, numKeys: number, ...args: (string | number)[]): Promise<unknown>;
@@ -63,8 +64,11 @@ export class RedisExternalAtModeGate {
   }
 
   private async checkMode(mode: ExternalAtIngestionSource): Promise<boolean> {
-    const result = await this.redis.eval(MATCH_MODE, 1, this.key,
-      mode, String(this.ttlMs));
+    const result = await withRedisFenceDeadline(
+      this.redis.eval(MATCH_MODE, 1, this.key,
+        mode, String(this.ttlMs)),
+      Math.max(200, Math.min(4000, Math.floor(this.ttlMs / 3))),
+    );
     if (result !== 0 && result !== 1) {
       throw new Error("Unexpected external ingestion mode response");
     }
