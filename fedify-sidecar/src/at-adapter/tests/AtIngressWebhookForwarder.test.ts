@@ -88,3 +88,25 @@ describe("AT ingress endpoint webhook performance and isolation", () => {
     }
   });
 });
+
+describe("webhook secret-safe diagnostics", () => {
+  it("does not log webhook URL credentials or echo them in errors", () => {
+    const fwd = new AtIngressWebhookForwarder();
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const url = "https://endpoint.example.test/hook?key=private-secret";
+    fwd.registerEndpoint({ id: "safe-id", url, secret: "another-private-secret" });
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private-secret");
+    expect(() => fwd.registerEndpoint({
+      id: "bad", url: "http://remote.example.test/path?token=private-secret",
+      secret: "private"
+    })).toThrow(/Invalid webhook URL:/);
+    try {
+      fwd.registerEndpoint({
+        id: "bad-again", url: "http://remote.example.test/path?token=private-secret",
+        secret: "private"
+      });
+    } catch (error) {
+      expect(String(error)).not.toContain("private-secret");
+    }
+  });
+});

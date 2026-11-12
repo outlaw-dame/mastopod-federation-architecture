@@ -79,7 +79,8 @@ export class AtIngressWebhookForwarder {
   registerEndpoint(endpoint: WebhookEndpoint): void {
     validateWebhookUrl(endpoint.url);
     this.endpoints.set(endpoint.id, endpoint);
-    console.log(`[WebhookForwarder] Registered endpoint: ${endpoint.id} → ${endpoint.url}`);
+    // Never log webhook URL paths or queries: these may contain credentials.
+    console.log(`[WebhookForwarder] Registered endpoint: ${endpoint.id}`);
   }
 
   /**
@@ -172,7 +173,9 @@ export class AtIngressWebhookForwarder {
         lastError = `HTTP ${statusCode}`;
 
       } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
+        // Avoid exposing endpoint URL query strings or response contents
+        // embedded in lower-level errors. Emit a bounded error category only.
+        lastError = err instanceof Error ? err.name : "UnknownTransportError";
         console.error(
           `[WebhookForwarder] Delivery attempt ${attempt + 1}/${MAX_RETRIES + 1} ` +
           `to ${endpoint.id} failed:`,
@@ -232,7 +235,7 @@ function validateWebhookUrl(url: string): void {
     }
   } catch (err) {
     throw new Error(
-      `Invalid webhook URL "${url}": ${err instanceof Error ? err.message : String(err)}`,
+      `Invalid webhook URL: ${err instanceof Error ? err.name : "UnknownUrlError"}`,
     );
   }
 }
