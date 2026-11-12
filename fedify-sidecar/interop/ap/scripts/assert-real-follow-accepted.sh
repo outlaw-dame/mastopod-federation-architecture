@@ -178,7 +178,9 @@ friendica_diagnostics() {
 # 2026.05 Apache image sets /var/www/html/friendica.log in
 # config/zz-docker.config.php. Never print either raw application log.
 log=
-for candidate in /var/www/friendica.log /var/www/html/friendica.log; do
+# The pinned 2026.05 image actively configures the HTML-volume path;
+# prefer it over the older README fallback if both happen to exist.
+for candidate in /var/www/html/friendica.log /var/www/friendica.log; do
   if [ -r "$candidate" ]; then
     log=$candidate
     break
@@ -187,6 +189,11 @@ done
 if [ -z "$log" ]; then
   echo "friendica_app_log=unavailable"
 else
+  if [ "$log" = /var/www/html/friendica.log ]; then
+    echo "friendica_app_log_source=pinned_image"
+  else
+    echo "friendica_app_log_source=legacy_fallback"
+  fi
   tail -n 2000 "$log" | awk '
     {
       line = tolower($0)
