@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   selectExternalAtIngestionSource,
   requireVerifiedExternalFirehoseReady,
+  requireVerifiedExternalTopicGovernance,
 } from "../ingress/AtExternalIngestionPolicy.js";
 
 describe("external ATProto ingestion policy", () => {
@@ -27,6 +28,21 @@ describe("external ATProto ingestion policy", () => {
     expect(() => selectExternalAtIngestionSource({
       enableVerifiedFirehose: true, enableJetstream: true,
     })).toThrow(/mutually exclusive/);
+  });
+
+  it("requires actual raw topic governance for production verified firehose",()=>{
+    expect(()=>requireVerifiedExternalTopicGovernance({
+      verifiedExternalFirehose:true,environment:"production",governanceEnabled:false,
+    })).toThrow(/topic governance/);
+    expect(()=>requireVerifiedExternalTopicGovernance({
+      verifiedExternalFirehose:true,environment:"production",governanceEnabled:true,
+    })).not.toThrow();
+    expect(()=>requireVerifiedExternalTopicGovernance({
+      verifiedExternalFirehose:false,environment:"production",governanceEnabled:false,
+    })).not.toThrow();
+    expect(()=>requireVerifiedExternalTopicGovernance({
+      verifiedExternalFirehose:true,environment:"test",governanceEnabled:false,
+    })).not.toThrow();
   });
 
   it("never reports the requested verified source as ready without a verifier/runtime", () => {
