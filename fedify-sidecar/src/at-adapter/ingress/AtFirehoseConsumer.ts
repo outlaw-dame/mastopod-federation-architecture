@@ -288,6 +288,8 @@ class FirehoseConnection {
   private dropLease(lease: FirehoseLease): void {
     if (this.activeLease !== lease) return;
     this.activeLease = null;
+    this.lastAckedSeq = null;
+    this.lastCommittedSeq = null;
     if (this.leaseTimer) clearInterval(this.leaseTimer);
     this.leaseTimer = null;
     // Inflight broker writes may complete later, but fenced cursor writes
