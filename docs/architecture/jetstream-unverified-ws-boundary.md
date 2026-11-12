@@ -32,8 +32,16 @@ instead of allowing unbounded retained Promises or silently continuing
 past an unacknowledged event.
 
 After each acknowledged publish, the process retains the last observed
-v1 timestamp cursor. Reconnects rewind that cursor by five seconds and
-use capped exponential backoff with jitter. Replayed records must be
+cursor with its endpoint-specific protocol type. Legacy v1
+`/subscribe` frames use `kind: "commit"` and Unix-microsecond
+`time_us`; they rewind five seconds on reconnect. V2
+`/xrpc/network.bsky.jetstream.subscribeEvents` uses the
+`xrpc.v1.json` WebSocket subprotocol and a typed `$type: "message"`
+envelope with `payload.$type` identifying a commit and a monotonic
+`payload.seq`. Its `cursor` is inclusive and must not be treated as
+a v1 timestamp. Both implementations keep decoded data **unverified**.
+Reconnects use capped exponential backoff with jitter and heartbeat
+liveness checks. Replayed records must be
 deduplicated by any downstream consumer. This is a **process-local**
 recovery measure and **not** a durable cursor. Restarting the process
 still needs a persistent cursor checkpoint and an explicit backfill
@@ -41,7 +49,7 @@ policy before this can be called a lossless production ingest.
 
 The service no longer logs the complete subscription URL, remote
 WebSocket close reason, per-event account DID or untrusted publisher
-error messages. Messages missing a safe timestamp or a known operation
+error messages. Messages missing a valid endpoint-specific cursor or a known operation
 are ignored.
 
 ## Deployment gates
@@ -60,6 +68,7 @@ path. Changing WebSocket libraries does not create missing verification
 or persistence guarantees.
 
 References:
+- https://bsky.network/docs/jetstream/
 - https://github.com/websockets/ws/blob/master/doc/ws.md
 - https://github.com/bluesky-social/jetstream/blob/main/docs/README.md
 - https://github.com/bluesky-social/bsky/blob/main/packages/jetstream/README.md
