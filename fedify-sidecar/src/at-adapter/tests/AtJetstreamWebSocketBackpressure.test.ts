@@ -53,7 +53,7 @@ describe("Jetstream real WebSocket backpressure and cursor recovery",()=>{
     const {server:wss,url}=await listen();
     let release: (()=>void)|undefined;
     const blocked=new Promise<void>(resolve=>{release=resolve;});
-    const publish=vi.fn(async()=>{await blocked;});
+    const publish=vi.fn(async(_topic:string,_event:unknown)=>{await blocked;});
     service=new AtJetstreamService({publish},{
       url,publishTopic:UNVERIFIED_JETSTREAM_TOPIC,maxEvents:1
     },logger);
