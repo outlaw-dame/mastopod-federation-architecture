@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CanonicalNotificationConsumer, CANONICAL_NOTIFICATION_DEAD_LETTER_TOPIC } from "../CanonicalNotificationConsumer.js";
+import { CanonicalNotificationConsumer, CANONICAL_NOTIFICATION_DEAD_LETTER_TOPIC, validateDurableCanonicalReceipt } from "../CanonicalNotificationConsumer.js";
 import type { CanonicalNotificationConsumerConfig } from "../CanonicalNotificationConsumer.js";
 
 function consumer() {
