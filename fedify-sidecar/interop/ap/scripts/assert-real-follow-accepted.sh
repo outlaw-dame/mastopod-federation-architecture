@@ -248,7 +248,7 @@ else
         missing_actor, valid_sig, invalid_sig, absent_sig, actor_msg, no_object, empty_type, empty_object, actor_mismatch, unreachable, fetch_error, no_owner
       printf "rsa_failed=%d digest_failed=%d missing_signed_header=%d missing_key=%d missing_pubkey=%d no_http_signature=%d missing_digest_or_date=%d untrusted_activity=%d receiver_processing=%d unhandled_activity=%d follow_committed=%d activity_fetch_failed=%d\n",
         rsa_failed, digest_failed, missing_signed_header, missing_key, missing_pubkey, no_http_signature, missing_digest_or_date, untrusted, receiver_processing, unhandled, follow_committed, activity_fetch_failed
-      printf "levels_debug=%d levels_info=%d levels_notice=%d levels_warning=%d invalid_body=%d signer_tombstone=%d empty_actor=%d missing_follow_object=%d invalid_object_id=%d\\n",
+      printf "levels_debug=%d levels_info=%d levels_notice=%d levels_warning=%d invalid_body=%d signer_tombstone=%d empty_actor=%d missing_follow_object=%d invalid_object_id=%d\n",
         debug_count, info_count, notice_count, warning_count, invalid_body, tombstone_signer, empty_actor, object_missing, object_id_invalid
     }
   '
