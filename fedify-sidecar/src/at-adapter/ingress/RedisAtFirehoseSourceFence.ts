@@ -44,7 +44,9 @@ const NOTE_ACK = [
   "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return -1 end",
   "local prev = redis.call('GET', KEYS[2])",
   "local next = ARGV[2]",
-  "if prev and (#prev > #next or (#prev == #next and prev > next)) then return -2 end",
+  // Inclusive relay replay is expected. Never move the hot cursor backward,
+  // but do not reject a harmless duplicate after the broker acknowledged it.
+  "if prev and (#prev > #next or (#prev == #next and prev >= next)) then return 1 end",
   "if not prev or prev ~= next then redis.call('SET', KEYS[2], next) end",
   "return 1",
 ].join("\n");
