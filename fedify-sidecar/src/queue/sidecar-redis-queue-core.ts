@@ -1263,22 +1263,17 @@ export class RedisStreamsQueue {
           table.insert(args, maxLen)
         end
         table.insert(args, '*')
-        redis.call(
-          unpack(args),
-          'jobId', ARGV[index],
-          'activityId', ARGV[index + 1],
-          'actorUri', ARGV[index + 2],
-          'activity', ARGV[index + 3],
-          'targetInbox', ARGV[index + 4],
-          'targetDomain', ARGV[index + 5],
-          'attempt', ARGV[index + 6],
-          'maxAttempts', ARGV[index + 7],
-          'notBeforeMs', ARGV[index + 8],
-          'deferCount', ARGV[index + 9],
-          'lastError', ARGV[index + 10],
-          'meta', ARGV[index + 11]
-        )
-        index = index + 12
+        local names = {
+          'jobId', 'activityId', 'actorUri', 'activity',
+          'targetInbox', 'targetDomain', 'attempt', 'maxAttempts',
+          'notBeforeMs', 'deferCount', 'lastError', 'meta'
+        }
+        for j = 1, #names do
+          table.insert(args, names[j])
+          table.insert(args, ARGV[index])
+          index = index + 1
+        end
+        redis.call(unpack(args))
       end
       redis.call('HSET', stateKey, 'outboundEnqueuedAt', outboundEnqueuedAt, 'jobCount', tostring(jobCount))
       redis.call('EXPIRE', stateKey, 604800)
