@@ -198,17 +198,22 @@ describe("canonical notification durable quarantine and ordered Kafka offsets", 
 describe("durable PostgreSQL acknowledgment contract", () => {
   const accepted = {
     ok:true,durable:true,duplicate:false,delivered:false,queuedRecipients:4,
+    canonicalIntentId:"intent-a",
   };
   it("accepts only a genuine 202 PG commit or 409 PG duplicate", () => {
-    expect(validateDurableCanonicalReceipt(202,accepted)).toBe(true);
-    expect(validateDurableCanonicalReceipt(409,{...accepted,duplicate:true})).toBe(true);
-    expect(validateDurableCanonicalReceipt(200,accepted)).toBe(false);
-    expect(validateDurableCanonicalReceipt(202,{...accepted,durable:false})).toBe(false);
-    expect(validateDurableCanonicalReceipt(202,{...accepted,duplicate:true})).toBe(false);
-    expect(validateDurableCanonicalReceipt(409,{...accepted,duplicate:false})).toBe(false);
-    expect(validateDurableCanonicalReceipt(202,{...accepted,queuedRecipients:65})).toBe(false);
-    expect(validateDurableCanonicalReceipt(202,{...accepted,delivered:true})).toBe(false);
-    expect(validateDurableCanonicalReceipt(202,null)).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,accepted,'intent-a')).toBe(true);
+    expect(validateDurableCanonicalReceipt(409,{...accepted,duplicate:true},'intent-a')).toBe(true);
+    expect(validateDurableCanonicalReceipt(200,accepted,'intent-a')).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,{...accepted,durable:false},'intent-a')).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,{...accepted,duplicate:true},'intent-a')).toBe(false);
+    expect(validateDurableCanonicalReceipt(409,{...accepted,duplicate:false},'intent-a')).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,{...accepted,queuedRecipients:65},'intent-a')).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,{...accepted,delivered:true},'intent-a')).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,null,'intent-a')).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,accepted,'other')).toBe(false);
+    expect(validateDurableCanonicalReceipt(409,{...accepted,duplicate:true,
+      canonicalIntentId:'other'},'intent-a')).toBe(false);
+
   });
 });
 
@@ -244,5 +249,42 @@ describe("explicit Kafka offsets with autoCommit disabled", () => {
     expect(committed(subject)).toHaveBeenCalledWith([
       { topic:"canonical.v1",partition:0,offset:"2" }
     ]);
+  });
+});
+
+describe("canonical poison-event classifier",()=>{
+  it("does not lose a recognized ActivityPods-origin event",async()=>{
+    const subject=consumer() as unknown as {
+      processBatch:(payload:unknown)=>Promise<void>;
+      fanOut:(event:unknown)=>Promise<void>;
+    };
+    subject.fanOut=vi.fn(async()=>undefined);
+    const batch=payload();
+    batch.batch.messages[0]={
+      offset:"1",value:Buffer.from(JSON.stringify({
+        kind:"FollowAdd",canonicalIntentId:"internal-1",
+        sourceProtocol:"activitypods",
+        actor:{webId:"https://paper.example.test/alice"},
+        createdAt:"2026-11-12T00:00:00.000Z"
+      }))
+    };
+    await subject.processBatch(batch);
+    expect(subject.fanOut).toHaveBeenCalledTimes(1);
+    expect(committed(subject)).toHaveBeenCalledTimes(1);
+  });
+  it("does not silently accept unexpected kinds without quarantine",async()=>{
+    const subject=consumer() as unknown as {
+      processBatch:(payload:unknown)=>Promise<void>;
+    };
+    const batch=payload();
+    batch.batch.messages[0]={
+      offset:"1",value:Buffer.from(JSON.stringify({
+        kind:"SurpriseOperation",canonicalIntentId:"unknown-intent",
+        sourceProtocol:"activitypub",actor:{webId:"https://remote.example.test/alice"},
+        createdAt:"2026-11-12T00:00:00.000Z"
+      }))
+    };
+    await expect(subject.processBatch(batch)).rejects.toThrow(/quarantine not enabled/);
+    expect(committed(subject)).not.toHaveBeenCalled();
   });
 });

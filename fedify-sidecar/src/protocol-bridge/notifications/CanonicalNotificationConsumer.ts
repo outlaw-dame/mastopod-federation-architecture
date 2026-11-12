@@ -80,6 +80,13 @@ const DEAD_LETTER_REASON = new Set([
   "EMPTY_RECORD", "INVALID_JSON", "INVALID_EVENT",
   "INVALID_PAYLOAD", "PERMANENT_HTTP_REJECTION"
 ]);
+const CANONICAL_KINDS = new Set<CanonicalV1Event["kind"]>([
+  "PostCreate", "PostEdit", "PostDelete", "PostInteractionPolicyUpdate",
+  "PollCreate", "PollEdit", "PollDelete", "PollVoteAdd",
+  "ReactionAdd", "ReactionRemove", "ShareAdd", "ShareRemove",
+  "FollowAdd", "FollowRemove", "ProfileUpdate", "AccountState",
+  "ReportCreate", "DirectMessage",
+]);
 const NOTIFICATION_KINDS = new Set<CanonicalV1Event["kind"]>([
   "ReactionAdd",
   "ShareAdd",
@@ -337,15 +344,25 @@ export class CanonicalNotificationConsumer {
       await this.quarantine(key, raw, "INVALID_EVENT", sourceTopic, sourcePartition, sourceOffset);
       return;
     }
-    // Non-notification canonical events never enter the notification
-    // delivery route and do not need per-recipient processing.
+    if (!CANONICAL_KINDS.has(value["kind"] as CanonicalV1Event["kind"])) {
+      await this.quarantine(key, raw, "INVALID_EVENT",
+        sourceTopic, sourcePartition, sourceOffset);
+      return;
+    }
+    // Known non-notification canonical events never enter this route.
     if (!NOTIFICATION_KINDS.has(value["kind"] as CanonicalV1Event["kind"])) return;
     if (typeof value["canonicalIntentId"] !== "string" ||
         value["canonicalIntentId"].length < 1 ||
         value["canonicalIntentId"].length > 512 ||
         typeof value["createdAt"] !== "string" ||
         !Number.isFinite(Date.parse(value["createdAt"])) ||
-        (value["sourceProtocol"] !== "activitypub" && value["sourceProtocol"] !== "atproto") ||
+        (value["sourceProtocol"] !== "activitypub" &&
+         value["sourceProtocol"] !== "atproto" &&
+         value["sourceProtocol"] !== "activitypods") ||
+        (value["mentions"] !== undefined &&
+         (!Array.isArray(value["mentions"]) || value["mentions"].length > 64 ||
+           !value["mentions"].every((x: unknown) =>
+             typeof x === "string" && x.length > 0 && x.length <= 2048))) ||
         !value["actor"] || typeof value["actor"] !== "object" ||
         Array.isArray(value["actor"])) {
       await this.quarantine(key, raw, "INVALID_PAYLOAD", sourceTopic, sourcePartition, sourceOffset);
@@ -428,8 +445,8 @@ export class CanonicalNotificationConsumer {
         headersTimeout: this.notifyTimeoutMs,
       });
       statusCode = res.statusCode;
-      if (this.config.requireDurablePgAck === true &&
-          (statusCode === 202 || statusCode === 409)) {
+      if (statusCode === 409 ||
+          (this.config.requireDurablePgAck === true && statusCode === 202)) {
         durableReceipt = await readBoundedCanonicalReceipt(res.body);
       } else {
         await res.body.dump({ limit: 262144 });
@@ -445,11 +462,21 @@ export class CanonicalNotificationConsumer {
 
     if (this.config.requireDurablePgAck === true &&
         (statusCode === 202 || statusCode === 409) &&
-        !validateDurableCanonicalReceipt(statusCode, durableReceipt)) {
+        !validateDurableCanonicalReceipt(statusCode, durableReceipt, payload.canonicalIntentId)) {
       throw new Error("ActivityPods response does not prove committed PostgreSQL notification");
     }
 
     if (statusCode === 409) {
+      const receipt = durableReceipt && typeof durableReceipt === "object" &&
+        !Array.isArray(durableReceipt)
+        ? durableReceipt as Record<string, unknown> : null;
+      // 409 is also used for conflicting manifests. Do not silently
+      // commit the Kafka offset for one of those conflicts.
+      if (receipt?.["ok"] !== true || receipt["duplicate"] !== true ||
+          (receipt["canonicalIntentId"] !== undefined &&
+           receipt["canonicalIntentId"] !== payload.canonicalIntentId)) {
+        throw new CanonicalPermanentNotificationError(409);
+      }
       this.logger.info("Canonical notification already delivered (idempotent)", {
         canonicalIntentId: payload.canonicalIntentId,
       });
@@ -483,11 +510,15 @@ export class CanonicalNotificationConsumer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-export function validateDurableCanonicalReceipt(status: number, raw: unknown): boolean {
+export function validateDurableCanonicalReceipt(
+  status: number, raw: unknown, expectedIntentId: string,
+): boolean {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
   const r = raw as Record<string, unknown>;
   return (status === 202 || status === 409) &&
     r["ok"] === true && r["durable"] === true &&
+    typeof expectedIntentId === "string" &&
+    r["canonicalIntentId"] === expectedIntentId &&
     r["duplicate"] === (status === 409) && r["delivered"] === false &&
     Number.isSafeInteger(r["queuedRecipients"]) &&
     (r["queuedRecipients"] as number) >= 0 &&
