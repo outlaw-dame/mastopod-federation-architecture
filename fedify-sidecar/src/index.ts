@@ -233,6 +233,7 @@ import {
   AtJetstreamService,
   parseJetstreamUrl,
   safeJetstreamEndpointLabel,
+  isTrustedAtToApBridgeExplicitlyEnabled,
   UNVERIFIED_JETSTREAM_TOPIC,
 } from "./at-adapter/jetstream/AtJetstreamService.js";
 import { Client as OpenSearchNativeClient } from "@opensearch-project/opensearch";
@@ -479,7 +480,7 @@ const config = {
   // Trusted canonical bridge activation must be explicit. The unverified
   // Jetstream subscriber never turns on an independent protocol bridge.
   enableProtocolBridgeAtToAp:
-    process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true",
+    isTrustedAtToApBridgeExplicitlyEnabled(process.env),
   enableMrfAdminApi: process.env["ENABLE_MRF_ADMIN_API"] === "true",
   enableApInteropMediaFixtures: isApInteropMediaFixtureEnabled(),
   mrfAdminToken: process.env["MRF_ADMIN_TOKEN"] || "",
