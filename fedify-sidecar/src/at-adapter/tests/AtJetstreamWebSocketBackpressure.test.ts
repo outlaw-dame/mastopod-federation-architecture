@@ -131,8 +131,9 @@ describe("Jetstream real WebSocket backpressure and cursor recovery",()=>{
     await until(()=>urls.length>=2,5500);
     expect(publish).toHaveBeenCalledTimes(1);
     expect(new URL(urls[1]!,url).searchParams.get("cursor")).toBe("24664288881");
-    expect(publish.mock.calls[0]?.[0]).toBe(UNVERIFIED_JETSTREAM_TOPIC);
-    expect(publish.mock.calls[0]?.[1]).toMatchObject({
+    const [topic,event] = publish.mock.calls[0] as unknown as [string,Record<string,unknown>];
+    expect(topic).toBe(UNVERIFIED_JETSTREAM_TOPIC);
+    expect(event).toMatchObject({
       verified:false,cursorType:"seq",cursor:24664288881
     });
   });
