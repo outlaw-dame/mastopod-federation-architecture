@@ -21,7 +21,25 @@
  */
 
 import { WebSocket } from "ws";
-import type { AtIngressEvent } from "../ingress/AtIngressEvents.js";
+// Jetstream JSON is transport data, not cryptographically verified ingress.
+export const UNVERIFIED_JETSTREAM_TOPIC = "at.jetstream.unverified.v1";
+export interface UnverifiedJetstreamCommit {
+  kind: "jetstream.commit";
+  verified: false;
+  source: string;
+  receivedAt: string;
+  cursor: number;
+  cursorType: "seq" | "time_us";
+  did: string;
+  commit: {
+    rev: string;
+    operation: "create" | "update" | "delete";
+    collection: string;
+    rkey: string;
+    cid: string | null;
+    record: Record<string, unknown> | null;
+  };
+}
 
 /**
  * Minimal publisher interface satisfied by RedpandaEventPublisher.
@@ -36,7 +54,10 @@ export interface AtJetstreamPublisher {
 // Constants
 // ---------------------------------------------------------------------------
 
-const MAX_FRAME_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_FRAME_SIZE_BYTES = 1024 * 1024;
+const MAX_PENDING_FRAMES = 8;
+const MAX_PENDING_BYTES = 2 * 1024 * 1024;
+const REWIND_MICROSECONDS = 5_000_000;
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -83,6 +104,13 @@ export class AtJetstreamService {
   private reconnectAttempts = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private onMaxEventsReached: (() => void) | null = null;
+  private processing: Promise<void> = Promise.resolve();
+  private pendingFrames = 0;
+  private pendingBytes = 0;
+  // This is an in-memory v1 cursor. Restart durability still requires a
+  // persistent cursor store and at-least-once consumer deduplication.
+  private lastCommittedCursor: { value: number; type: "seq" | "time_us" } | null = null;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly publisher: AtJetstreamPublisher,
@@ -102,9 +130,13 @@ export class AtJetstreamService {
   /** Start the connection loop. Returns immediately. */
   start(): void {
     if (this.isRunning) return;
+    if (this.config.publishTopic !== UNVERIFIED_JETSTREAM_TOPIC) {
+      throw new Error("Unverified Jetstream events cannot be published to trusted ingress");
+    }
+    parseJetstreamUrl(this.config.url);
     this.isRunning = true;
     this.logger.info("AtJetstreamService starting", {
-      url: this.config.url,
+      host: new URL(this.config.url).host,
       publishTopic: this.config.publishTopic,
       maxEvents: this.config.maxEvents ?? null,
     });
@@ -121,12 +153,17 @@ export class AtJetstreamService {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
 
     if (this.ws) {
       try {
-        this.ws.close(1000, "shutdown");
+        if (this.ws.readyState === WebSocket.CONNECTING) this.ws.terminate();
+        else this.ws.close(1000, "shutdown");
       } catch {
-        // ignore
+        this.ws.terminate();
       }
       this.ws = null;
     }
@@ -139,41 +176,101 @@ export class AtJetstreamService {
   private connect(): void {
     if (!this.isRunning) return;
 
-    this.logger.info("Connecting to Jetstream", { url: this.config.url });
-
-    const ws = new WebSocket(this.config.url, {
+    const connectUrl = new URL(this.config.url);
+    const v2 = isV2JetstreamUrl(connectUrl);
+    if (this.lastCommittedCursor) {
+      if (this.lastCommittedCursor.type !== (v2 ? "seq" : "time_us")) {
+        throw new Error("Jetstream cursor version does not match endpoint");
+      }
+      // V2 sequences replay inclusively. V1 timestamps need a small rewind.
+      const cursor = v2 ? this.lastCommittedCursor.value :
+        Math.max(0, this.lastCommittedCursor.value - REWIND_MICROSECONDS);
+      connectUrl.searchParams.set("cursor", String(cursor));
+    }
+    this.logger.info("Connecting to Jetstream", { host: connectUrl.host });
+    const ws = new WebSocket(connectUrl.toString(), v2 ? "xrpc.v1.json" : undefined, {
       maxPayload: MAX_FRAME_SIZE_BYTES,
+      perMessageDeflate: false,
+      maxRedirects: 0,
+      handshakeTimeout: 10000,
     });
     this.ws = ws;
 
+    let heartbeatAlive = true;
+    const stopHeartbeat = () => {
+      if (!this.heartbeatTimer || ws !== this.ws) return;
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    };
     ws.on("open", () => {
-      this.reconnectAttempts = 0;
-      this.logger.info("Jetstream connected", { url: this.config.url });
+      this.logger.info("Jetstream connected", { host: new URL(this.config.url).host });
+      heartbeatAlive = true;
+      stopHeartbeat();
+      this.heartbeatTimer = setInterval(() => {
+        if (ws !== this.ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!heartbeatAlive) {
+          ws.terminate();
+          return;
+        }
+        heartbeatAlive = false;
+        try { ws.ping(); } catch { ws.terminate(); }
+      }, 30000);
+      this.heartbeatTimer.unref?.();
     });
+    ws.on("pong", () => { heartbeatAlive = true; });
 
     ws.on("message", (data, isBinary) => {
-      if (isBinary) return;
-      const text = typeof data === "string" ? data : (data as Buffer).toString("utf8");
-      this.handleMessage(text).catch((err) => {
-        this.logger.error("Unhandled error in Jetstream message handler", {
-          error: err instanceof Error ? err.message : String(err),
+      if (isBinary || ws !== this.ws || !this.isRunning) return;
+      const bytes = typeof data === "string" ? Buffer.byteLength(data)
+        : Array.isArray(data) ? data.reduce((sum,chunk) => sum + chunk.byteLength, 0)
+        : data.byteLength;
+      if (bytes > MAX_FRAME_SIZE_BYTES ||
+          this.pendingFrames >= MAX_PENDING_FRAMES ||
+          this.pendingBytes + bytes > MAX_PENDING_BYTES) {
+        this.logger.warn("Jetstream publisher backlog exceeded budget");
+        ws.terminate();
+        return;
+      }
+      const message = typeof data === "string" ? data
+        : Buffer.isBuffer(data) ? data.toString("utf8")
+        : Array.isArray(data) ? Buffer.concat(data).toString("utf8")
+        : Buffer.from(data).toString("utf8");
+      this.pendingFrames++;
+      this.pendingBytes += bytes;
+      ws.pause();
+      this.processing = this.processing.then(async () => {
+        if (!this.isRunning || ws !== this.ws) return;
+        await this.handleMessage(message);
+      }).catch(error => {
+        this.logger.error("Jetstream publishing failed", {
+          error: error instanceof Error ? error.name : "UNKNOWN",
         });
+        if (ws.readyState === WebSocket.OPEN) ws.terminate();
+      }).finally(() => {
+        this.pendingFrames--;
+        this.pendingBytes -= bytes;
+        if (this.pendingFrames === 0 && this.isRunning &&
+            ws === this.ws && ws.readyState === WebSocket.OPEN) ws.resume();
       });
     });
 
-    ws.on("close", (code, reason) => {
+    ws.on("close", (code) => {
+      // An older socket may close after a replacement is already active.
+      // It must never clear or reschedule the new healthy connection.
+      if (ws !== this.ws) return;
+      stopHeartbeat();
       this.ws = null;
       if (!this.isRunning) return;
       this.logger.warn("Jetstream connection closed, will reconnect", {
         code,
-        reason: reason.toString(),
+        // Remote WebSocket close reasons are untrusted; log the code only.
       });
       this.scheduleReconnect();
     });
 
     ws.on("error", (err) => {
       this.logger.error("Jetstream WebSocket error", {
-        error: err.message,
+        error: err.name,
       });
       // The 'close' event fires after 'error', so reconnect happens there.
     });
@@ -181,9 +278,9 @@ export class AtJetstreamService {
 
   private scheduleReconnect(): void {
     if (!this.isRunning) return;
-    this.reconnectAttempts++;
-    // Exponential backoff: 500ms, 1s, 2s … 30s max
-    const delay = Math.min(500 * Math.pow(2, this.reconnectAttempts - 1), 30_000);
+    this.reconnectAttempts = Math.min(this.reconnectAttempts + 1, 12);
+    const ceiling = Math.min(500 * Math.pow(2, this.reconnectAttempts - 1), 30_000);
+    const delay = Math.max(250, Math.round(ceiling * (0.5 + Math.random() * 0.5)));
     this.logger.info("Scheduling Jetstream reconnect", {
       attempt: this.reconnectAttempts,
       delayMs: delay,
@@ -206,67 +303,73 @@ export class AtJetstreamService {
       return; // malformed JSON — skip silently
     }
 
-    if (
-      !payload ||
-      typeof payload !== "object" ||
-      (payload as Record<string, unknown>)["kind"] !== "commit"
-    ) {
-      return; // identity / account / info frames — not yet consumed
-    }
-
-    const p = payload as Record<string, unknown>;
-    const commit = p["commit"];
+    if (!payload || typeof payload !== "object") return;
+    const outer = payload as Record<string, unknown>;
+    const isV2 = isV2JetstreamUrl(new URL(this.config.url));
+    // V2 is a typed XRPC JSON envelope; v1 has kind/commit/time_us.
+    // Never infer a cursor protocol from attacker-controlled event fields.
+    const p = isV2 ? outer["payload"] as Record<string, unknown> : outer;
+    if (!p || typeof p !== "object" ||
+        (isV2
+          ? outer["$type"] !== "message" ||
+            p["$type"] !== "network.bsky.jetstream.subscribeEvents#commit"
+          : p["kind"] !== "commit")) return;
+    const c = isV2 ? p : p["commit"] as Record<string, unknown>;
     const did = typeof p["did"] === "string" ? p["did"] : null;
-
-    if (!did || !commit || typeof commit !== "object") return;
-
-    const c = commit as Record<string, unknown>;
+    if (!did || !c || typeof c !== "object") return;
     const collection = typeof c["collection"] === "string" ? c["collection"] : null;
     const rkey = typeof c["rkey"] === "string" ? c["rkey"] : null;
-
     if (!collection || !rkey) return;
 
-    const timeUs = typeof p["time_us"] === "number" ? p["time_us"] : Date.now() * 1000;
-    const rev =
-      typeof c["rev"] === "string" ? c["rev"] : `jetstream-${timeUs}`;
+    const cursorType = isV2 ? "seq" : "time_us";
+    const cursor = isV2 ? p["seq"] : p["time_us"];
+    if (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor <= 0) return;
+    const rev = typeof c["rev"] === "string" ? c["rev"] : `jetstream-${cursor}`;
     const cid = typeof c["cid"] === "string" ? c["cid"] : null;
     const record =
       c["record"] && typeof c["record"] === "object" && !Array.isArray(c["record"])
         ? (c["record"] as Record<string, unknown>)
         : null;
-
-    const event: AtIngressEvent = {
-      seq: timeUs,
+    const operation = normalizeOperation(c["operation"]);
+    if (!operation) return;
+    const endpoint = new URL(this.config.url);
+    const event: UnverifiedJetstreamCommit = {
+      kind: "jetstream.commit",
+      verified: false,
+      cursor,
+      cursorType,
       did,
-      eventType: "#commit",
-      verifiedAt: new Date().toISOString(),
-      source: this.config.url,
+      receivedAt: new Date().toISOString(),
+      source: endpoint.origin + endpoint.pathname,
       commit: {
         rev,
-        operation: normalizeOperation(c["operation"]),
+        operation,
         collection,
         rkey,
         cid,
         record,
-        signatureValid: true,
+        // No ATProto signature or repository chain verification occurred.
       },
     };
 
     try {
       await this.publisher.publish(this.config.publishTopic, event);
       this.forwarded++;
-
-      this.logger.info("Jetstream event published", {
-        collection,
-        operation: event.commit!.operation,
-        did,
-        forwarded: this.forwarded,
-      });
+      if (!this.lastCommittedCursor || cursor > this.lastCommittedCursor.value) {
+        this.lastCommittedCursor = {value: cursor, type: cursorType};
+      }
+      this.reconnectAttempts = 0;
+      // Avoid per-event user identifiers and hot-path logging overhead.
+      if (this.forwarded % 1000 === 0) {
+        this.logger.info("Unverified Jetstream records published", {
+          forwarded: this.forwarded,
+        });
+      }
     } catch (err) {
       this.logger.error("Failed to publish Jetstream event", {
-        error: err instanceof Error ? err.message : String(err),
+        error: err instanceof Error ? err.name : "UNKNOWN",
       });
-      return;
+      throw err;
     }
 
     if (this.config.maxEvents && this.forwarded >= this.config.maxEvents) {
@@ -285,9 +388,9 @@ export class AtJetstreamService {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function normalizeOperation(raw: unknown): "create" | "update" | "delete" {
+function normalizeOperation(raw: unknown): "create" | "update" | "delete" | null {
   if (raw === "create" || raw === "update" || raw === "delete") return raw;
-  return "create";
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,13 +408,30 @@ export function parseJetstreamUrl(raw: string | undefined): string {
   if (!raw) return DEFAULT_JETSTREAM_URL;
   try {
     const u = new URL(raw);
-    if (u.protocol !== "wss:" && u.protocol !== "ws:") {
-      throw new Error("must use ws:// or wss://");
+    const loopback = process.env["NODE_ENV"] === "test" &&
+      u.protocol === "ws:" &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+    if ((!loopback && u.protocol !== "wss:") ||
+        u.username || u.password || u.hash ||
+        (u.pathname !== "/subscribe" &&
+         u.pathname !== "/xrpc/network.bsky.jetstream.subscribeEvents")) {
+      throw new Error("Expected canonical secure Jetstream subscribe URL");
+    }
+    // A v1 timestamp and a v2 sequence are different cursor namespaces.
+    // Reject ambiguous/foreign versions rather than silently skipping events.
+    const cursor = u.searchParams.get("cursor");
+    if (cursor !== null && !/^(0|[1-9][0-9]{0,15})$/.test(cursor)) {
+      throw new Error("Jetstream cursor must be a bounded decimal integer");
     }
     return u.toString();
   } catch (err) {
     throw new Error(
-      `Invalid JETSTREAM_URL "${raw}": ${err instanceof Error ? err.message : String(err)}`,
+      "Invalid JETSTREAM_URL: expected a secure Jetstream /subscribe endpoint",
     );
   }
+}
+
+/** V2 frames use typed XRPC envelopes; legacy v1 uses bare commit frames. */
+export function isV2JetstreamUrl(url: URL): boolean {
+  return url.pathname === "/xrpc/network.bsky.jetstream.subscribeEvents";
 }

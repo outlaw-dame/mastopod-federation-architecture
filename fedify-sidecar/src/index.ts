@@ -232,6 +232,7 @@ import {
 import {
   AtJetstreamService,
   parseJetstreamUrl,
+  UNVERIFIED_JETSTREAM_TOPIC,
 } from "./at-adapter/jetstream/AtJetstreamService.js";
 import { Client as OpenSearchNativeClient } from "@opensearch-project/opensearch";
 import { DefaultFeedCandidateService } from "./search/queries/FeedCandidateService.js";
@@ -614,10 +615,10 @@ const config = {
   // JETSTREAM_MAX_EVENTS: if set, service exits cleanly after N published events (useful for smoke tests).
   enableAtJetstream: process.env["ENABLE_AT_JETSTREAM"] === "true",
   atJetstreamUrl: parseJetstreamUrl(process.env["JETSTREAM_URL"]),
+  // Unverified Jetstream JSON must never flow directly into the
+  // signature-verified ATProto ingress or canonical protocol bridge.
   atJetstreamPublishTopic:
-    process.env["AT_JETSTREAM_PUBLISH_TOPIC"] ||
-    process.env["PROTOCOL_BRIDGE_AT_VERIFIED_INGRESS_TOPIC"] ||
-    "at.ingress.v1",
+    process.env["AT_JETSTREAM_PUBLISH_TOPIC"] || UNVERIFIED_JETSTREAM_TOPIC,
   atJetstreamMaxEvents: process.env["JETSTREAM_MAX_EVENTS"]
     ? Number.parseInt(process.env["JETSTREAM_MAX_EVENTS"], 10)
     : undefined,
