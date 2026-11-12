@@ -267,6 +267,21 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).not.toContain("LRANGE");
   });
 
+  it("prefers the pinned Friendica application log and keeps its diagnostic output bounded", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+    const pathOrder = script.indexOf(
+      "for candidate in /var/www/html/friendica.log /var/www/friendica.log; do",
+    );
+    expect(pathOrder).toBeGreaterThan(-1);
+    expect(script).toContain("friendica_app_log_source=pinned_image");
+    expect(script).toContain("friendica_app_log_source=legacy_fallback");
+    expect(script).toContain('tail -n 2000 "$log" | awk');
+    expect(script).not.toContain('cat "$log"');
+  });
+
   it("records Friendica inbox and relationship state without exposing queued payloads", () => {
     const script = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
