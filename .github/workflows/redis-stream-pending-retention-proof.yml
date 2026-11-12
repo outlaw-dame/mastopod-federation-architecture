@@ -1,0 +1,74 @@
+name: Redis Streams pending-retention proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/redis-stream-pending-retention-proof.yml'
+      - 'fedify-sidecar/scripts/proof-redis-stream-trim-acknowledgment.ts'
+      - 'fedify-sidecar/package.json'
+      - 'fedify-sidecar/package-lock.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redis-stream-retention-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prove-retention:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Redis 7 legacy MAXLEN behavior
+            image: redis:7-alpine
+            mode: legacy
+            evidence: redis7
+          - label: Redis 8.2 ACKED retention
+            image: redis:8.2.11-alpine
+            mode: acked
+            evidence: redis82
+    services:
+      redis:
+        image: ${{ matrix.image }}
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+      - name: Install pinned dependencies
+        run: npm ci --prefix fedify-sidecar
+      - name: Prove actual pending and undelivered job retention
+        working-directory: fedify-sidecar
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          REDIS_STREAM_ACKED_PROOF_MODE: ${{ matrix.mode }}
+          REDIS_STREAM_TRIM_PROOF_OUTPUT: ../measurements/redis-stream-retention/${{ matrix.evidence }}.json
+        run: |
+          mkdir -p ../measurements/redis-stream-retention
+          npm exec -- tsx scripts/proof-redis-stream-trim-acknowledgment.ts
+      - name: Upload retention evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-stream-retention-${{ matrix.evidence }}-${{ github.run_id }}
+          path: measurements/redis-stream-retention/
+          if-no-files-found: warn
+          retention-days: 30
