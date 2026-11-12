@@ -97,6 +97,16 @@ export const V6_TOPICS: Record<string, TopicSchema> = {
     description: 'Tombstone events (delete notifications; separate from AP firehose)',
   },
 
+  // Decoded Jetstream JSON is a LOW-TRUST feed, not signature-verified.
+  // No canonical or permission-sensitive consumer may treat it as verified.
+  'at.jetstream.unverified.v1': {
+    name: 'at.jetstream.unverified.v1',
+    partitions: 3,
+    replicationFactor: 3,
+    retentionMs: 24 * 60 * 60 * 1000,
+    description: 'Unverified upstream Jetstream telemetry; never a trusted ATProto ingress topic',
+  },
+
   // Protocol-neutral canonical intent log (from both AT and AP bridge)
   'canonical.v1': {
     name: 'canonical.v1',
