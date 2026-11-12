@@ -28,6 +28,7 @@ import { AtFirehoseCursorManager } from './AtFirehoseCursorManager.js';
 import type { FirehoseLease, FirehoseSourceFence } from './RedisAtFirehoseSourceFence.js';
 import { AtFirehoseRawEnvelope } from './AtIngressEvents.js';
 import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
+import { AT_SYNC_MAX_FRAME_BYTES } from './AtExternalFirehosePayloadLimits.js';
 
 // ---------------------------------------------------------------------------
 // Constants & Configuration
@@ -36,7 +37,7 @@ import { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
 const RAW_FIREHOSE_TOPIC = 'at.firehose.raw.v1';
 
 /** Maximum allowed size for a single CBOR frame (5MB). Prevents OOM. */
-const MAX_FRAME_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_FRAME_SIZE_BYTES = AT_SYNC_MAX_FRAME_BYTES;
 
 /** Interval to flush the hot cursor to the durable store. */
 const CURSOR_COMMIT_INTERVAL_MS = 10_000;
