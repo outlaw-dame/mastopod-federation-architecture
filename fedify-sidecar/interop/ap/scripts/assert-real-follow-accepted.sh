@@ -207,7 +207,7 @@ for candidate in /var/www/html/friendica.log /var/www/friendica.log; do
       if (index(line, "follow user")) follow++
     }
     END {
-      printf "friendica_log_compare_source=%s recent_lines=%d valid_signature=%d invalid_signature=%d actor_lookup_failed=%d receiver_messages=%d committed_follows=%d\\n",
+      printf "friendica_log_compare_source=%s recent_lines=%d valid_signature=%d invalid_signature=%d actor_lookup_failed=%d receiver_messages=%d committed_follows=%d\n",
         source, n, good, bad, missing, receiver, follow
     }
   '
