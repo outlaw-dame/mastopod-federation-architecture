@@ -190,7 +190,9 @@ export class AtJetstreamService {
 
     ws.on("message", (data, isBinary) => {
       if (isBinary || ws !== this.ws || !this.isRunning) return;
-      const bytes = typeof data === "string" ? Buffer.byteLength(data) : data.byteLength;
+      const bytes = typeof data === "string" ? Buffer.byteLength(data)
+        : Array.isArray(data) ? data.reduce((sum,chunk) => sum + chunk.byteLength, 0)
+        : data.byteLength;
       if (bytes > MAX_FRAME_SIZE_BYTES ||
           this.pendingFrames >= MAX_PENDING_FRAMES ||
           this.pendingBytes + bytes > MAX_PENDING_BYTES) {
@@ -198,7 +200,10 @@ export class AtJetstreamService {
         ws.terminate();
         return;
       }
-      const message = typeof data === "string" ? data : data.toString("utf8");
+      const message = typeof data === "string" ? data
+        : Buffer.isBuffer(data) ? data.toString("utf8")
+        : Array.isArray(data) ? Buffer.concat(data).toString("utf8")
+        : Buffer.from(data).toString("utf8");
       this.pendingFrames++;
       this.pendingBytes += bytes;
       ws.pause();
