@@ -232,6 +232,7 @@ import {
 import {
   AtJetstreamService,
   parseJetstreamUrl,
+  safeJetstreamEndpointLabel,
   UNVERIFIED_JETSTREAM_TOPIC,
 } from "./at-adapter/jetstream/AtJetstreamService.js";
 import { Client as OpenSearchNativeClient } from "@opensearch-project/opensearch";
@@ -475,12 +476,10 @@ const config = {
     process.env["ENABLE_FEDIFY_RUNTIME_INTEGRATION"] === "true",
   enableFollowersSync: process.env["ENABLE_FOLLOWERS_SYNC"] === "true",
   enableProtocolBridgeApToAt: process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true",
-  // AT→AP is auto-enabled when Jetstream is on, so Bluesky content reaches the AP timeline.
-  // Can be explicitly set to "false" to disable even when ENABLE_AT_JETSTREAM=true.
+  // Trusted canonical bridge activation must be explicit. The unverified
+  // Jetstream subscriber never turns on an independent protocol bridge.
   enableProtocolBridgeAtToAp:
-    process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true" ||
-    (process.env["ENABLE_AT_JETSTREAM"] === "true" &&
-      process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] !== "false"),
+    process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true",
   enableMrfAdminApi: process.env["ENABLE_MRF_ADMIN_API"] === "true",
   enableApInteropMediaFixtures: isApInteropMediaFixtureEnabled(),
   mrfAdminToken: process.env["MRF_ADMIN_TOKEN"] || "",
@@ -3824,7 +3823,7 @@ async function main() {
               atJetstreamService.start();
 
               logger.info("AT Jetstream intake started", {
-                url: config.atJetstreamUrl,
+                endpoint: safeJetstreamEndpointLabel(config.atJetstreamUrl),
                 publishTopic: config.atJetstreamPublishTopic,
                 maxEvents: config.atJetstreamMaxEvents ?? null,
               });
