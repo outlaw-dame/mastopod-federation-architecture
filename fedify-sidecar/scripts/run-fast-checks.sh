@@ -43,6 +43,9 @@ npm exec -- vitest run \
   src/atproto/repo/AtprotoRepoRegistry.collection-index.test.ts \
   src/atproto/repo/AtprotoRepoRegistry.exec-errors.test.ts \
   src/protocol-bridge/identity/ObservedAtIdentityStore.scalability.test.ts \
+  src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerReliability.test.ts \
+  src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerHttpGate.test.ts \
+  src/at-adapter/tests/AtIngressWebhookForwarder.test.ts \
   src/admin/mrf/routes.registry.test.ts \
   src/fep3ab2/tests/Fep3ab2ClientIpBoundary.test.ts \
   src/federation/FedifyKvAdapter.test.ts \
