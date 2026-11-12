@@ -82,8 +82,14 @@ jobs:
           }
           const fallback = decision.comparisons.find(x => x.arm === 'gzip');
           if (!fallback?.eligible || !Array.isArray(fallback.reasons) ||
-              fallback.reasons.length !== 0 || decision.selectedArm !== 'gzip') {
-            throw new Error('Configured Gzip fallback was not selected by actual RF3 evidence');
+              fallback.reasons.length !== 0) {
+            throw new Error('Configured Gzip baseline is invalid under measured RF3 evidence');
+          }
+          // A single hosted-runner result may suggest an eligible Zstd codec.
+          // Keep that recommendation as evidence, not an automatic promotion.
+          const selected = decision.comparisons.find(x => x.arm === decision.selectedArm);
+          if (!selected?.eligible || selected.reasons.length !== 0) {
+            throw new Error('RF3 analyzer selected an ineligible candidate');
           }
           const files = {
             'fedify-sidecar/Dockerfile': /^ENV REDPANDA_COMPRESSION=gzip$/m,
