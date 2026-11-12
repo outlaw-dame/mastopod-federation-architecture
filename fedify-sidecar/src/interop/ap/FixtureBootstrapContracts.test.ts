@@ -279,6 +279,8 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).toContain("friendica_app_log_source=pinned_image");
     expect(script).toContain("friendica_app_log_source=legacy_fallback");
     expect(script).toContain("friendica_log_compare_source=%s");
+    expect(script).toContain("stats_packets_inbound_apub");
+    expect(script).toContain("friendica_apub_inbound_counter=");
     expect(script).toContain('tail -n 2000 "$candidate" | awk -v source="$source"');
     expect(script).toContain("levels_debug=");
     expect(script).toContain("signer_tombstone=");
