@@ -200,10 +200,24 @@ else
           index(line, "error"))) badfetch++
       if (index(line, "follow")) follows++
       if (index(line, "503")) unavailable++
+      if (index(line, "unable to retrieve ap contact for actor")) missing_actor++
+      if (index(line, "valid http signature")) valid_sig++
+      if (index(line, "invalid http signature")) invalid_sig++
+      if (index(line, "no signature provided")) absent_sig++
+      if (index(line, "message for user") && index(line, "is from actor")) actor_msg++
+      if (index(line, "no object data found")) no_object++
+      if (index(line, "empty type")) empty_type++
+      if (index(line, "empty object")) empty_object++
+      if (index(line, "actor missmatch")) actor_mismatch++
+      if (index(line, "url not reachable")) unreachable++
+      if (index(line, "error fetching url")) fetch_error++
+      if (index(line, "could not find owner")) no_owner++
     }
     END {
       printf "recent_lines=%d activitypub=%d inbox=%d follow=%d url_verifier=%d invalid_signature=%d failed_fetch=%d http_503_mentions=%d\n",
         lines, ap, inbox, follows, urlverifier, badsig, badfetch, unavailable
+      printf "actor_lookup_failed=%d valid_http_signature=%d invalid_http_signature=%d missing_signature=%d actor_messages=%d no_object_data=%d empty_type=%d empty_object=%d actor_mismatch=%d url_unreachable=%d url_fetch_error=%d missing_system_owner=%d\n",
+        missing_actor, valid_sig, invalid_sig, absent_sig, actor_msg, no_object, empty_type, empty_object, actor_mismatch, unreachable, fetch_error, no_owner
     }
   '
 fi
@@ -212,7 +226,7 @@ FRIENDICA_LOG_SUMMARY
   friendica_log_summary friendica-app
   friendica_log_summary friendica-worker
   {
-    printf '%s\n' "select concat('apcontact_count=', count(*), ',actor_pubkey_count=', coalesce(sum(pubkey is not null and pubkey <> ''),0)) from apcontact where url='${actor_sql}';"
+    printf '%s\n' "select concat('apcontact_count=', count(*), ',actor_pubkey_count=', coalesce(sum(pubkey is not null and pubkey <> ''),0), ',actor_inbox_count=', coalesce(sum(inbox is not null and inbox <> ''),0)) from apcontact where url='${actor_sql}';"
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
     printf '%s\n' "select concat('inbox_receiver_count=', count(*)) from \`inbox-entry-receiver\` r join \`inbox-entry\` e on e.id=r.\`queue-id\` where e.signer='${actor_sql}';"
