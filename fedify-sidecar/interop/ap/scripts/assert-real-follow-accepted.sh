@@ -197,15 +197,6 @@ while [ "${attempt}" -le "${ATTEMPTS}" ]; do
       "${TARGET}" "${ACTOR_URI}" "${LOCAL_USERNAME}" "${count}"
     exit 0
   fi
-  if [ "${TARGET}" = friendica ] && [ "${attempt}" -eq 5 ]; then
-    # Probe immediate worker execution once, without ever bypassing the
-    # original exact remote-persistence check.
-    echo "Friendica one-shot inbox worker probe" >&2
-    if ! compose exec -T friendica-worker /bin/sh -lc \
-      'cd /var/www/html && timeout 25 php bin/console.php worker' >&2; then
-      echo "Friendica one-shot worker probe did not finish" >&2
-    fi
-  fi
   if [ "${attempt}" -lt "${ATTEMPTS}" ]; then
     sleep "${DELAY_SECONDS}"
   fi
