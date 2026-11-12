@@ -3,6 +3,7 @@ import type { AtFirehoseRawEnvelope } from "./AtIngressEvents.js";
 import type { AtFirehoseConsumer, AtFirehoseSource } from "./AtFirehoseConsumer.js";
 import type { AtIngressVerifier } from "./AtIngressVerifier.js";
 import { ensureRedpandaCompressionCodec } from "../../streams/kafka-compression.js";
+import { AT_SYNC_RAW_FETCH_BYTES_PER_PARTITION, AT_SYNC_RAW_FETCH_BYTES } from "./AtExternalFirehosePayloadLimits.js";
 
 export interface AtIngressRuntimeConfig {
   brokers: string[];
@@ -218,6 +219,10 @@ function buildKafkaConsumerFactory(
   return (groupId: string) => kafka.consumer({
     groupId,
     allowAutoTopicCreation: false,
+    // KafkaJS defaults to a 1 MiB partition fetch. A legitimate 5 MiB
+    // CBOR frame expands to ~6.67 MiB inside the raw JSON envelope.
+    maxBytesPerPartition: AT_SYNC_RAW_FETCH_BYTES_PER_PARTITION,
+    maxBytes: AT_SYNC_RAW_FETCH_BYTES,
   });
 }
 
