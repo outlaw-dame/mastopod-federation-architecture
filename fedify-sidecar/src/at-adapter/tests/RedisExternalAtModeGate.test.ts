@@ -51,6 +51,26 @@ describe("cross-replica ATProto ingestion mode admission", () => {
     } finally { mode.stop(); }
   });
 
+  it("withdraws fleet admission when a Redis command hangs",async()=>{
+    let count=0;
+    const hung={
+      eval: async():Promise<unknown>=>{
+        count++;
+        if(count===1)return 1;
+        return new Promise(()=>{});
+      },
+    };
+    const lost=vi.fn(), gate=new RedisExternalAtModeGate(hung,key(),600);
+    try{
+      await gate.start("verified",lost);
+      const start=Date.now();
+      while(!lost.mock.calls.length && Date.now()-start<1500){
+        await new Promise(resolve=>setTimeout(resolve,20));
+      }
+      expect(lost).toHaveBeenCalledTimes(1);
+    }finally{gate.stop();}
+  });
+
   it("fails closed when the shared Redis admission authority becomes inaccessible", async () => {
     let attempts = 0;
     const redisDown = {
