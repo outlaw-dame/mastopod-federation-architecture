@@ -78,12 +78,6 @@ compose exec -T -u root friendica-app /bin/sh -ec \
 compose exec -T friendica-app php bin/console.php config system debugging 1 >/dev/null
 compose exec -T friendica-app php bin/console.php config system logfile /var/www/html/friendica.log >/dev/null
 compose exec -T friendica-app php bin/console.php config system loglevel debug >/dev/null
-# The pinned Docker image starts its daemon as www-data but its fallback
-# PID path is /var/run/friendica.pid. Use a container-local writable PID path
-# for this disposable worker and verify daemon readiness before delivery.
-# This setting is not applied to production Friendica instances.
-compose exec -T friendica-app php bin/console.php config system pidfile /tmp/friendica-worker.pid >/dev/null
-
 # Verify that the newly created local account is actually exposed as an
 # ActivityPub actor, not merely a working HTML profile. Friendica can return
 # HTTP 202 for inbound Follow even if its target actor is not resolvable.
@@ -113,14 +107,25 @@ compose exec -T -e AP_INTEROP_LOCAL_ACTOR="https://friendica.test/profile/${USER
   '
 
 compose up -d friendica-worker
-# Do not accept a started container as evidence of an active daemon.
-# The bounded poll handles first boot and prevents a 3-minute false pass
-# when the worker exits before processing its first incoming Follow.
+# Friendica's official /cron.sh executes its PHP daemon with -f.
+# Its foreground mode DOES NOT write a PID file (src/System/Daemon.php),
+# so daemon status gives a false negative even for a healthy process.
+# Check the live foreground process without printing command lines, config,
+# credentials or signed ActivityPub request contents.
 worker_ready=false
 attempt=1
 while [ "${attempt}" -le 30 ]; do
-  if compose exec -T friendica-worker /bin/sh -lc 'cd /var/www/html && php bin/console.php daemon status' 2>/dev/null \
-    | grep -Eq '^Daemon process [0-9]+ is running \(/tmp/friendica-worker\.pid\)$'; then
+  if compose ps --status running --services | grep -qx friendica-worker &&
+    compose exec -T friendica-worker /bin/sh -ec '
+      for proc in /proc/[0-9]*/cmdline; do
+        [ -r "$proc" ] || continue
+        if tr "\000" " " < "$proc" |
+          grep -Eq "php[[:space:]]+/var/www/html/bin/console[.]php[[:space:]]+daemon[[:space:]]+start[[:space:]]+-f"; then
+          exit 0
+        fi
+      done
+      exit 1
+    ' >/dev/null 2>&1; then
     worker_ready=true
     break
   fi
@@ -128,20 +133,7 @@ while [ "${attempt}" -le 30 ]; do
   attempt=$((attempt + 1))
 done
 if [ "${worker_ready}" != true ]; then
-  echo "Friendica worker daemon was not ready (PID path /tmp/friendica-worker.pid)" >&2
-  # Only bounded status / existence probes; never expose request headers,
-  # secret-bearing config dumps, raw worker logs or signed payloads.
-  compose exec -T friendica-worker /bin/sh -ec '
-    cd /var/www/html
-    php bin/console.php config system pidfile
-    if [ -f /tmp/friendica-worker.pid ]; then
-      echo friendica_worker_pidfile=present
-    else
-      echo friendica_worker_pidfile=absent
-    fi
-    if [ -w /tmp ]; then echo friendica_worker_tmp=writable; else echo friendica_worker_tmp=not_writable; fi
-    php bin/console.php daemon status
-  ' >&2 || true
+  echo "Friendica foreground worker did not become ready" >&2
   exit 1
 fi
 echo "Bootstrapped Friendica federation target ${USERNAME}"
