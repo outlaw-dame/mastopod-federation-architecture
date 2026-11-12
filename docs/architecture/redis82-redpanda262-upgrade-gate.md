@@ -6,6 +6,27 @@
 - First-party Redpanda development/interop broker and benchmark default: **Redpanda v26.2.6**, currently supported release line. Image tags are fixed; production image digests must be resolved and pinned by the deployment manifest.
 - **Runtime versions are not proof of feature activation.** The acknowledgment-aware Streams admission path is introduced separately in PR #150. Do not treat upgrading the Redis image as protection from legacy `XADD MAXLEN ~` writers. P0 #144 remains a deployment gate.
 
+## Measured RF3 compression fallback (v26.2.6)
+
+The existing three-broker, replication-factor-three benchmark was run twice with
+Redpanda 26.2.6 and four arms (Gzip, Zstd levels 1, 2 and 3). The *unchanged*
+promotion criteria require producer singleton p99 <= 1.25x Gzip and no more
+than +0.5 ms, plus the established p95, CPU and throughput constraints.
+
+- Initial real run [43307105608](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43307105608), attempt 1: Zstd-1 throughput ~1.672x Gzip, total CPU ~0.780x, but singleton p99 ~1.672x Gzip (+0.781 ms); Zstd-1 **failed the latency policy**.
+- Retried failed job on the same head, attempt 2: Zstd-1 singleton p99 ~1.848x Gzip (+0.782 ms) and total CPU ~0.943x (required <= 0.90x); **failed again**.
+- On both trials the analyzer correctly selected **Gzip**. This is a real version-specific decision, not proof Zstd is generally slower or that Gzip is always the cost winner. Prior-version results are retained as historical evidence, not applied blindly to 26.2.
+
+The first-party Docker image, v6 environment example and Compose profile
+therefore select `REDPANDA_COMPRESSION=gzip` for **new writes**. The
+existing Node 22 Kafka codec resolver retains native Zstd *decompression*
+registration when sending Gzip, allowing the same service to consume
+historical Zstd batches. Legacy consumers without native Zstd must be
+inventoried and verified separately. Optional Zstd re-promotion requires
+representative exact-head RF3 evidence meeting the **unchanged** thresholds.
+The benchmark workflow continues testing all four arms and fail-closes when
+its analyzer does not select the configured production codec.
+
 ## Never directly upgrade an existing persisted Redpanda 24.x broker to 26.2
 
 The Compose files describe a *new-installation baseline*, not an approved data migration.
