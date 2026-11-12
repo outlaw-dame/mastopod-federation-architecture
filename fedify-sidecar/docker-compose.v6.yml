@@ -2,13 +2,13 @@ version: '3.8'
 
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:8.2.11-alpine
     container_name: fedify-redis
     ports:
       - '6379:6379'
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
@@ -18,7 +18,7 @@ services:
       - fedify
 
   redpanda:
-    image: vectorized/redpanda:latest
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.6
     container_name: fedify-redpanda
     ports:
       - '9092:9092'
@@ -33,7 +33,8 @@ services:
       - --reserve-memory=0M
       - --node-id=0
       - --check=false
-      - --advertised-kafka-api=redpanda:9092
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:29092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:29092
     volumes:
       - redpanda_data:/var/lib/redpanda/data
     healthcheck:
