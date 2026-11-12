@@ -71,6 +71,15 @@ describe("Redis-backed external Sync source ownership and monotonic cursors", ()
     await store.release(source, second!);
   });
 
+  it("bounds stalled Redis commands instead of holding the upstream forever", async()=>{
+    const hung = new RedisAtFirehoseSourceFence({
+      eval: async () => new Promise<unknown>(() => {}),
+    },600);
+    await expect(hung.tryAcquire(unique())).rejects.toThrow(/deadline/);
+    await expect(hung.markAcknowledged(unique(),{token:"stale:1"},1))
+      .rejects.toThrow(/deadline/);
+  });
+
   it("fails closed on Redis outages and rejects invalid cursor values", async () => {
     const source = unique(), store = new RedisAtFirehoseSourceFence({
       eval: async () => { throw new Error("Redis disconnected"); },
