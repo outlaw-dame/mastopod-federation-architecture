@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 import { RedisAtFirehoseSourceFence, FirehoseFenceError } from "../ingress/RedisAtFirehoseSourceFence.js";
 
