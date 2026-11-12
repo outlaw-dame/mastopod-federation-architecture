@@ -258,6 +258,7 @@ describe("durable delayed outbound queue", () => {
       String(nowMs),
       String(DELAYED_OUTBOUND_PROMOTION_BATCH_SIZE),
       "321",
+      "0", // safe ACKED mode remains opt-in on legacy Redis 7
     ]);
 
     await queue.disconnect();
