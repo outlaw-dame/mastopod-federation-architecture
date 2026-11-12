@@ -29,6 +29,10 @@ services:
       FRIENDICA_ADMIN_MAIL: interop-admin@friendi.ca
       FRIENDICA_TZ: UTC
       FRIENDICA_LANG: en
+      # Disposable CI only: inspect inbound ActivityPub rejection reasons.
+      # No production Friendica logging configuration is changed.
+      FRIENDICA_LOGLEVEL: debug
+      FRIENDICA_LOGGER: stream
       MYSQL_HOST: friendica-db
       MYSQL_DATABASE: friendica
       MYSQL_USER: friendica
