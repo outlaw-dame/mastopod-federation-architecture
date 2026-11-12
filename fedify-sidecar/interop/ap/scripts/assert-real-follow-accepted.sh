@@ -212,7 +212,7 @@ FRIENDICA_LOG_SUMMARY
   friendica_log_summary friendica-app
   friendica_log_summary friendica-worker
   {
-    printf '%s\\n' "select concat('apcontact_count=', count(*), ',actor_pubkey_count=', coalesce(sum(pubkey is not null and pubkey <> ''),0)) from apcontact where url='${actor_sql}';"
+    printf '%s\n' "select concat('apcontact_count=', count(*), ',actor_pubkey_count=', coalesce(sum(pubkey is not null and pubkey <> ''),0)) from apcontact where url='${actor_sql}';"
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
     printf '%s\n' "select concat('inbox_receiver_count=', count(*)) from \`inbox-entry-receiver\` r join \`inbox-entry\` e on e.id=r.\`queue-id\` where e.signer='${actor_sql}';"
