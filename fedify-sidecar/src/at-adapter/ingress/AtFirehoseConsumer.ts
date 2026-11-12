@@ -112,6 +112,13 @@ export class DefaultAtFirehoseConsumer implements AtFirehoseConsumer {
         this.activeConnections.delete(source.id);
       }
     });
+    try {
+      await connection.waitForInitialConnection();
+    } catch (error) {
+      await connection.stop();
+      this.activeConnections.delete(source.id);
+      throw error;
+    }
   }
 
   async stop(sourceId: string): Promise<void> {
@@ -135,6 +142,9 @@ class FirehoseConnection {
   private lastCommittedSeq: number | null = null;
   private checkpointChain: Promise<void> = Promise.resolve();
   private stopReconnectWait: (() => void) | null = null;
+  private resolveInitial: (() => void) | null = null;
+  private rejectInitial: ((error: Error) => void) | null = null;
+  private readonly initialConnection: Promise<void>;
 
   constructor(
     private readonly source: AtFirehoseSource,
@@ -142,7 +152,37 @@ class FirehoseConnection {
     private readonly cursorManager: AtFirehoseCursorManager,
     private readonly eventPublisher: EventPublisher,
     private readonly rawTopic: string,
-  ) {}
+  ) {
+    this.initialConnection = new Promise<void>((resolve, reject) => {
+      this.resolveInitial = resolve;
+      this.rejectInitial = reject;
+    });
+  }
+
+  async waitForInitialConnection(): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        this.initialConnection,
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(
+            "External verified firehose failed initial connection deadline",
+          )), 10_000);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private signalFirstConnection(error?: Error): void {
+    const resolve = this.resolveInitial;
+    const reject = this.rejectInitial;
+    this.resolveInitial = null;
+    this.rejectInitial = null;
+    if (error) reject?.(error);
+    else resolve?.();
+  }
 
   async startLoop(): Promise<void> {
     if (this.isRunning) return;
@@ -158,6 +198,7 @@ class FirehoseConnection {
           await this.connectAndWait();
         } catch (error) {
           if (!this.isRunning) break;
+          this.signalFirstConnection(new Error("External verified firehose connection unavailable"));
           console.error("[FirehoseConnection] External source disconnected", {
             sourceId: this.source.id,
             code: error instanceof Error ? error.name : "UNKNOWN",
@@ -176,6 +217,7 @@ class FirehoseConnection {
 
   async stop(): Promise<void> {
     this.isRunning = false;
+    this.signalFirstConnection(new Error("External firehose stopped before initial connection"));
     this.stopReconnectWait?.();
     this.stopReconnectWait = null;
     if (this.ws) this.ws.terminate();
@@ -256,6 +298,7 @@ class FirehoseConnection {
           ws.terminate();
           return;
         }
+        this.signalFirstConnection();
         pongReceived = true;
         stopPing();
         this.pingInterval = setInterval(() => {
@@ -289,6 +332,7 @@ class FirehoseConnection {
         void drain();
       });
       ws.once("close", () => {
+        this.signalFirstConnection(new Error("External firehose closed before first handshake"));
         stopPing();
         if (this.ws === ws) this.ws = null;
         pendingFrames = [];
