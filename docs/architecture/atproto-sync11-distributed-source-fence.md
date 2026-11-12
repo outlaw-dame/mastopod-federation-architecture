@@ -33,9 +33,14 @@ trusted ingestion.
   deployment. Use one managed Redis authority with verified persistence
   and recovery. No benchmark or source lease can substitute for validating
   the production Redis failover mode.
-- The process-local source selector does not yet prevent a separate
-  deployment from choosing unsigned Jetstream. A shared fleet-wide
-  ingestion-mode admission fence and deployment ACL proof remain required.
+- All external-ingestion-enabled sidecars using **the same Redis authority**
+  now renew a common mode marker: either verified Sync or unverified
+  Jetstream. A conflicting deployment is rejected at startup; loss of
+  the mode authority triggers fail-closed process shutdown. Mode changes
+  conservatively wait for the shared marker TTL to expire.
+- That marker does not coordinate divergent Redis clusters, cross-region
+  Redis split-brain, or a deployment with an incorrect Redis connection.
+  One fleet configuration source and broker ACLs remain required.
 - A standby reports that it is participating in the ingest runtime; it
   must not report itself as the socket-owning leader. Deployment health
   dashboards should distinguish an active source lease from standby.
