@@ -186,6 +186,7 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
             type(decoded.actorUri) == 'string' and
             type(decoded.activity) == 'string' and
             type(decoded.targets) == 'table' and
+            (decoded.lastError == nil or type(decoded.lastError) == 'string') and
             tonumber(decoded.createdAt) and tonumber(decoded.attempt) and
             tonumber(decoded.maxAttempts) and tonumber(decoded.notBeforeMs) then
             return decoded
