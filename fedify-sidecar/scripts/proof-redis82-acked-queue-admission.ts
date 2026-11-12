@@ -168,6 +168,30 @@ try {
   await scheduler.start();
   assert((await redis.zScore(keys.delayed,due.intentId))===null,
    "Promoted delayed job remains scheduled");
+
+  // A malformed optional field must be quarantined before an XADD error
+  // could occur after earlier valid work has already been appended.
+  const readyIntent=intent(11),malformedIntent=intent(12);
+  const overdue=Date.now()-100;
+  readyIntent.notBeforeMs=overdue;
+  malformedIntent.notBeforeMs=overdue;
+  await redis.zAdd(keys.delayed,[
+   {score:overdue,value:readyIntent.intentId},
+   {score:overdue,value:malformedIntent.intentId},
+  ]);
+  await redis.hSet(keys.payload,readyIntent.intentId,JSON.stringify(readyIntent));
+  await redis.hSet(keys.payload,malformedIntent.intentId,
+   JSON.stringify({...malformedIntent,lastError:{invalid:"object"}}));
+  assert(await scheduler.promoteDue(Date.now())===1,
+   "Malformed delayed intent blocked valid work or was appended");
+  assert((await redis.xLen(keys.intent))===2,
+   "Malformed delayed intent was written to ready stream");
+  assert((await redis.xLen(keys.dlq))===1,
+   "Malformed delayed intent was not quarantined");
+  assert((await redis.zScore(keys.delayed,malformedIntent.intentId))===null,
+   "Quarantined delayed intent remained scheduled");
+  // Reset this disposable proof DLQ for the separate hard-cap assertions.
+  await redis.del(keys.dlq);
  } finally {await scheduler.stop().catch(()=>undefined);}
  await queue.moveToDlq("inbound",message(11),"first");
  await queue.moveToDlq("inbound",message(12),"second");
