@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { request } from "undici";
 import {
   createVerifiedInboundEnvelope,
