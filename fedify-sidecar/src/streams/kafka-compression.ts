@@ -11,10 +11,10 @@ export interface ResolvedRedpandaCompression {
   zstdLevel?: number;
 }
 
-// Repeated live Redpanda trials and a three-broker RF3 proof select level 1 as
-// the best balanced operating point for this ActivityPub event-log workload:
-// it preserves low tail latency while materially reducing CPU and increasing
-// throughput, without increasing replicated disk/network versus GZIP.
+// Zstd level 1 remains available for explicit opt-in and historical decode.
+// Under Redpanda 26.2.6, two real three-broker RF3 trials breached the
+// singleton p99 latency gate, so new default writes use Gzip. The Zstd level
+// is retained to decode previously published batches on compatible runtimes.
 const DEFAULT_ZSTD_LEVEL = 1;
 const MIN_ZSTD_LEVEL = -131072;
 const MAX_ZSTD_LEVEL = 22;
@@ -49,11 +49,12 @@ export function hasNativeZstdSupport(version = process.versions.node): boolean {
 
 /**
  * Keep the package-level default compatible with the declared Node >=20
- * runtime. Zstd is the preferred production codec, but enabling it implicitly
+ * runtime. Zstd remains opt-in, but enabling it implicitly
  * based only on one process's runtime is unsafe during a mixed Node 20/22
  * rolling deployment: a Node 22 producer could write Zstd batches that an
  * older KafkaJS consumer cannot decode. Official Node 22 images/deployments
- * opt into Zstd explicitly with REDPANDA_COMPRESSION=zstd.
+ * opt into Zstd explicitly with REDPANDA_COMPRESSION=zstd. Current first-party
+ * releases select Gzip until multi-broker p95/p99 acceptance is re-established.
  */
 export function defaultRedpandaCompressionName(): RedpandaCompressionName {
   return "gzip";
