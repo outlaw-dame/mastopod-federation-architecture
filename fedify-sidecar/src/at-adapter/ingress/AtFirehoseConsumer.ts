@@ -256,7 +256,6 @@ class FirehoseConnection {
           ws.terminate();
           return;
         }
-        this.reconnectAttempts = 0;
         pongReceived = true;
         stopPing();
         this.pingInterval = setInterval(() => {
@@ -325,6 +324,7 @@ class FirehoseConnection {
       await this.cursorManager.setHotCursor(this.source.id, header.seq);
       this.lastAckedSeq = header.seq;
     }
+    this.reconnectAttempts = 0;
   }
 
   private async commitCursorSafely(): Promise<void> {
