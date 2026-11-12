@@ -1329,24 +1329,39 @@ export class RedisStreamsQueue {
         end
       end
       for i = 1, jobCount do
-        local args = { 'XADD', outboundStreamKey }
-        if not safeAcked then
-          table.insert(args, 'MAXLEN')
-          table.insert(args, '~')
-          table.insert(args, maxLen)
+        -- Preserve the direct-call fast path for the legacy queue benchmark.
+        -- Allocating 12 field-name/value pairs per recipient in Lua increased
+        -- cost for 1,000-target fanouts even with ACKED mode disabled.
+        if safeAcked then
+          redis.call('XADD', outboundStreamKey, '*',
+            'jobId', ARGV[index],
+          'activityId', ARGV[index + 1],
+          'actorUri', ARGV[index + 2],
+          'activity', ARGV[index + 3],
+          'targetInbox', ARGV[index + 4],
+          'targetDomain', ARGV[index + 5],
+          'attempt', ARGV[index + 6],
+          'maxAttempts', ARGV[index + 7],
+          'notBeforeMs', ARGV[index + 8],
+          'deferCount', ARGV[index + 9],
+          'lastError', ARGV[index + 10],
+          'meta', ARGV[index + 11])
+        else
+          redis.call('XADD', outboundStreamKey, 'MAXLEN', '~', maxLen, '*',
+            'jobId', ARGV[index],
+          'activityId', ARGV[index + 1],
+          'actorUri', ARGV[index + 2],
+          'activity', ARGV[index + 3],
+          'targetInbox', ARGV[index + 4],
+          'targetDomain', ARGV[index + 5],
+          'attempt', ARGV[index + 6],
+          'maxAttempts', ARGV[index + 7],
+          'notBeforeMs', ARGV[index + 8],
+          'deferCount', ARGV[index + 9],
+          'lastError', ARGV[index + 10],
+          'meta', ARGV[index + 11])
         end
-        table.insert(args, '*')
-        local names = {
-          'jobId', 'activityId', 'actorUri', 'activity',
-          'targetInbox', 'targetDomain', 'attempt', 'maxAttempts',
-          'notBeforeMs', 'deferCount', 'lastError', 'meta'
-        }
-        for j = 1, #names do
-          table.insert(args, names[j])
-          table.insert(args, ARGV[index])
-          index = index + 1
-        end
-        redis.call(unpack(args))
+        index = index + 12
       end
       redis.call('HSET', stateKey, 'outboundEnqueuedAt', outboundEnqueuedAt, 'jobCount', tostring(jobCount))
       redis.call('EXPIRE', stateKey, 604800)
