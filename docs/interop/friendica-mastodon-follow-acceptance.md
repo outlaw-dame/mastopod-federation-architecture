@@ -69,14 +69,18 @@ verified result remained `NATIVE_PROOF_OUTCOME=failure` and
 acceptance evidence stayed empty. The experiment was reverted in
 `18ad8fa`; do not present the site-root 503 as the established failure cause.
 
-The Friendica app config reports `system.debugging => true`, but the
-existing `php bin/console.php daemon status` probe in the worker container
-prints `Daemon process isn't running (/var/run/friendica.pid)`. Meanwhile
-the worker container starts `/cron.sh`, which invokes Friendica's foreground
-daemon. The status reading is actionable but **does not independently prove
-the process has terminated**: verify actual PID/process state, worker exit
-code, and `process`/workerqueue database records before changing its service
-lifecycle. No pending workerqueue rows were present at the failure checkpoint.
+The Friendica app config reports `system.debugging => true`. The
+previous `php bin/console.php daemon status` probe printed
+`Daemon process isn't running (/var/run/friendica.pid)`. **That status is a
+false-negative for the official pinned Docker image**: its `/cron.sh`
+runs `php /var/www/html/bin/console.php daemon start -f`, and Friendica
+2026.05's `src/System/Daemon.php::start` writes the PID file only in the
+`!$foreground` branch. The controller's `status` command relies on that
+file, so it cannot detect the official foreground process. A trial that
+changed the PID file location also failed this invalid check and does not
+prove the worker had exited. The fixture now uses bounded Docker process
+health, not a PID file, and leaves the upstream daemon configuration
+unchanged. **The Follow persistence defect still needs its own proof.**
 
 Next isolate the **first** Friendica receiving-side rejection in the path
 `Inbox::post → Receiver::processInbox → HTTPSignature::getSigner →
