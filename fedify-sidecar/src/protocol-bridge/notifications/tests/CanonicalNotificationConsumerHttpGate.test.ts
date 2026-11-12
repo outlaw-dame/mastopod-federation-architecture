@@ -24,9 +24,29 @@ describe("live loopback HTTP canonical PG receipt boundary", () => {
 
   beforeAll(async () => {
     server = createServer((req, res) => {
-      req.resume();
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(body));
+      const buffers: Buffer[] = [];
+      let size = 0;
+      req.on("data", chunk => {
+        size += (chunk as Buffer).byteLength;
+        if (size > 262144) { req.destroy(); return; }
+        buffers.push(Buffer.from(chunk as Buffer));
+      });
+      req.on("end", () => {
+        let intentId: unknown;
+        try {
+          intentId = (JSON.parse(Buffer.concat(buffers).toString("utf8")) as {
+            canonicalIntentId?: unknown
+          }).canonicalIntentId;
+        } catch { intentId = null; }
+        // Match the real PostgreSQL API's exact request intent even when
+        // multiple concurrent HTTP requests are in flight.
+        const reply = body && typeof body === "object" && !Array.isArray(body) &&
+          (body as Record<string, unknown>)["durable"] === true &&
+          (body as Record<string, unknown>)["canonicalIntentId"] === undefined
+          ? {...body as Record<string, unknown>, canonicalIntentId: intentId} : body;
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(reply));
+      });
     });
     await new Promise<void>(resolve => {
       server.listen(0, "127.0.0.1", resolve);
@@ -63,6 +83,8 @@ describe("live loopback HTTP canonical PG receipt boundary", () => {
     status = 409; body = { ...durableResponse, duplicate: true };
     await expect(proof.callActivityPods(validPayload)).resolves.toBeUndefined();
     body = { ok: true, duplicate: true };
+    await expect(proof.callActivityPods(validPayload)).rejects.toThrow(/does not prove committed PostgreSQL/);
+    status = 202; body = { ...durableResponse, canonicalIntentId: "another-request" };
     await expect(proof.callActivityPods(validPayload)).rejects.toThrow(/does not prove committed PostgreSQL/);
     status = 202; body = durableResponse;
   });
