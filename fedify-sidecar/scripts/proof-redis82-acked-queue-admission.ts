@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import { RedisStreamsQueue, type InboundEnvelope, type OutboundJob, type OutboxIntent } from "../src/queue/sidecar-redis-queue-core.js";
 import { RedisOutboxIntentDelayScheduler } from "../src/delivery/outbox-intent-delay-scheduler.js";
 import { RedisStreamsQueue as DurableRedisStreamsQueue } from "../src/queue/sidecar-redis-queue.js";
-import { requireRedis82AckedSupport } from "../src/queue/redis-stream-safe-admission.js";
+import {
+ appendAcknowledgedStreamBatch, requireRedis82AckedSupport,
+} from "../src/queue/redis-stream-safe-admission.js";
 
 const url=process.env["REDIS_URL"]||"redis://127.0.0.1:6379";
 const redis=createClient({url});
@@ -57,6 +59,21 @@ try {
  await redis.connect();
  await requireRedis82AckedSupport(redis);
  await queue.connect();
+ const withoutGroup=prefix+":ungrouped";
+ await redis.xAdd(withoutGroup,"*",{kind:"unread"});
+ let rejectedMissingGroup=false;
+ try {
+  await appendAcknowledgedStreamBatch(
+   redis,withoutGroup,[{kind:"another"}],2);
+ } catch(error) {
+  rejectedMissingGroup=String(error).includes("REDIS_STREAM_NO_CONSUMER_GROUP");
+ }
+ assert(rejectedMissingGroup,
+   "ACKED trimming without any consumer group must be rejected");
+ assert((await redis.xLen(withoutGroup))===1,
+   "Missing-group rejection deleted unread work");
+ await redis.del(withoutGroup);
+
  for(let i=1;i<=3;i++)await queue.enqueueInbound(message(i));
  const claimed=await redis.xReadGroup(group,"proof-consumer",
   {key:keys.inbound,id:">"},{COUNT:1});
@@ -176,6 +193,7 @@ try {
   mode:"opt-in-redis-8.2-acked",
   version:(await redis.info("server")).match(/^redis_version:([^\r\n]+)/m)?.[1]??"unknown",
   pendingJobSurvivedPressure:true,unreadJobSurvivedPressure:true,
+  missingGroupRejected:true,
   producerBackpressure:true,ackedWorkReclaimed:true,
   fanoutCapacity:true,delayedPromotionPreservesWork:true,
   dlqRetainsUnreviewedEntries:true,delayedOutboundPromotionPreservesWork:true,
