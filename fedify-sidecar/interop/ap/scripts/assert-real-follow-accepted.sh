@@ -155,6 +155,13 @@ pixelfed_diagnostics() {
 
 friendica_diagnostics() {
   echo "Friendica fail-closed persistence diagnostics:" >&2
+  # Read-only local fixture diagnostics; 202 receipt never proves Follow state.
+  compose exec -T friendica-worker /bin/sh -lc \
+    'cd /var/www/html && php bin/console.php daemon status' >&2 \
+    || echo "Friendica daemon status unavailable" >&2
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" friendica-app /bin/sh -lc \
+    'curl --cacert /interop/runtime/certs/rootCA.crt --connect-timeout 5 --max-time 15 -sS -o /dev/null -w "actor_fetch_http=%{http_code} type=%{content_type}\\n" -H "Accept: application/activity+json" "$AP_INTEROP_ACTOR_URI"' >&2 \
+    || echo "Friendica container actor-fetch diagnostic failed" >&2
   {
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
@@ -189,6 +196,15 @@ while [ "${attempt}" -le "${ATTEMPTS}" ]; do
     printf '{"ok":true,"target":"%s","actorUri":"%s","localUsername":"%s","persistedFollowCount":%s}\n' \
       "${TARGET}" "${ACTOR_URI}" "${LOCAL_USERNAME}" "${count}"
     exit 0
+  fi
+  if [ "${TARGET}" = friendica ] && [ "${attempt}" -eq 5 ]; then
+    # Probe immediate worker execution once, without ever bypassing the
+    # original exact remote-persistence check.
+    echo "Friendica one-shot inbox worker probe" >&2
+    if ! compose exec -T friendica-worker /bin/sh -lc \
+      'cd /var/www/html && timeout 25 php bin/console.php worker' >&2; then
+      echo "Friendica one-shot worker probe did not finish" >&2
+    fi
   fi
   if [ "${attempt}" -lt "${ATTEMPTS}" ]; then
     sleep "${DELAY_SECONDS}"
