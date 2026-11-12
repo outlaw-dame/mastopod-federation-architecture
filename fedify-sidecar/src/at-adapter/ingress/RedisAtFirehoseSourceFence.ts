@@ -8,6 +8,8 @@ import { withRedisFenceDeadline } from "./RedisFenceDeadline.js";
 
 export interface FirehoseFenceRedis {
   eval(script: string, numberOfKeys: number, ...args: (string | number)[]): Promise<unknown>;
+  /** The legacy namespace is probed before changing the fence key layout. */
+  get(key: string): Promise<string | null>;
 }
 export interface FirehoseLease { token: string }
 export interface FirehoseSourceFence {
@@ -62,13 +64,29 @@ const COMMIT = [
   "return 1",
 ].join("\n");
 
-function keys(sourceId: string) {
-  const digest = createHash("sha256").update(sourceId).digest("hex").slice(0, 40);
-  const base = "at:external-sync:v1:" + digest;
+function sourceDigest(sourceId: string): string {
+  if (!sourceId || sourceId.length > 2048) {
+    throw new FirehoseFenceError("Invalid external Sync source identifier");
+  }
+  return createHash("sha256").update(sourceId).digest("hex").slice(0, 40);
+}
+
+/** Multi-key Lua scripts require all keys in one Redis Cluster hash slot. */
+export function externalSyncFenceKeys(sourceId: string) {
+  const digest = sourceDigest(sourceId);
+  // The per-source tag spreads different sources across slots while putting
+  // owner, epoch, hot and committed keys for one source on the same shard.
+  const base = "at:external-sync:v2:{" + digest + "}";
   return {
     owner: base + ":owner", epoch: base + ":epoch",
     hot: base + ":hot", committed: base + ":committed",
   };
+}
+
+function legacyFenceKeys(sourceId: string) {
+  const base = "at:external-sync:v1:" + sourceDigest(sourceId);
+  return { owner: base + ":owner", hot: base + ":hot",
+    committed: base + ":committed" };
 }
 
 function canonicalSeq(value: unknown): number | null {
@@ -110,7 +128,21 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
   }
 
   async tryAcquire(sourceId: string): Promise<FirehoseLease | null> {
-    const k = keys(sourceId);
+    // Existing v1 checkpoints must not be silently abandoned when enabling
+    // Cluster-compatible v2 keys. This check intentionally fails closed until
+    // an operator drains old writers and migrates the replay checkpoint.
+    const legacy = legacyFenceKeys(sourceId);
+    const old = await Promise.all([
+      this.redis.get(legacy.owner),
+      this.redis.get(legacy.hot),
+      this.redis.get(legacy.committed),
+    ]);
+    if (old.some(value => value !== null)) {
+      throw new FirehoseFenceError(
+        "Legacy external Sync checkpoint/lease exists; drain and migrate before v2",
+      );
+    }
+    const k = externalSyncFenceKeys(sourceId);
     const token = randomUUID();
     const value = await this.evalGuarded(ACQUIRE, 2, k.owner, k.epoch,
       token, String(this.leaseTtlMs));
@@ -122,7 +154,7 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
   }
 
   async renew(sourceId: string, lease: FirehoseLease): Promise<boolean> {
-    const k = keys(sourceId);
+    const k = externalSyncFenceKeys(sourceId);
     const result = await this.evalGuarded(RENEW, 1, k.owner, lease.token,
       String(this.leaseTtlMs));
     if (result !== 0 && result !== 1) {
@@ -132,12 +164,12 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
   }
 
   async release(sourceId: string, lease: FirehoseLease): Promise<void> {
-    const k = keys(sourceId);
+    const k = externalSyncFenceKeys(sourceId);
     await this.evalGuarded(RELEASE, 1, k.owner, lease.token);
   }
 
   async getResumeCursor(sourceId: string, lease: FirehoseLease): Promise<number | null> {
-    const k = keys(sourceId);
+    const k = externalSyncFenceKeys(sourceId);
     const result = await this.evalGuarded(READ, 3, k.owner, k.committed, k.hot,
       lease.token);
     if (!Array.isArray(result) || result.length < 1) {
@@ -150,7 +182,7 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
   }
 
   async markAcknowledged(sourceId: string, lease: FirehoseLease, seq: number): Promise<void> {
-    const k = keys(sourceId);
+    const k = externalSyncFenceKeys(sourceId);
     const result = await this.evalGuarded(NOTE_ACK, 2, k.owner, k.hot,
       lease.token, validSeq(seq));
     if (result !== 1) {
@@ -161,7 +193,7 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
   }
 
   async commit(sourceId: string, lease: FirehoseLease, seq: number): Promise<void> {
-    const k = keys(sourceId);
+    const k = externalSyncFenceKeys(sourceId);
     const result = await this.evalGuarded(COMMIT, 3,
       k.owner, k.hot, k.committed, lease.token, validSeq(seq));
     if (result !== 1) {
