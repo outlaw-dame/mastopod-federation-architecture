@@ -110,15 +110,14 @@ function validateDid(value: unknown): string | null {
  * The ATProto spec uses 64-bit integers; JavaScript handles up to 2^53 safely.
  */
 function validateSeq(value: unknown): number {
+  // Never clamp a hostile oversized sequence to MAX_SAFE_INTEGER; doing so
+  // could persist a cursor for an event that never actually existed.
   if (typeof value === 'bigint') {
-    if (value < 0n) return -1;
-    if (value > BigInt(Number.MAX_SAFE_INTEGER)) return Number.MAX_SAFE_INTEGER;
-    return Number(value);
+    return value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER)
+      ? Number(value) : -1;
   }
-  if (typeof value !== 'number' || !Number.isFinite(value)) return -1;
-  if (value < 0) return -1;
-  if (value > Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER;
-  return Math.floor(value);
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value : -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +151,9 @@ export class DefaultAtFirehoseDecoder implements AtFirehoseDecoder {
 
       if (seq === -1) {
         seq = validateSeq(bodyMap['seq']);
+      }
+      if (seq <= 0 && eventType !== '#info') {
+        throw new FirehoseDecodeError('Sequenced firehose event lacked a safe positive seq');
       }
       const did = validateDid(bodyMap['did'] ?? bodyMap['repo']);
 
