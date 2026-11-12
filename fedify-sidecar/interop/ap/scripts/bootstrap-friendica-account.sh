@@ -79,5 +79,28 @@ compose exec -T friendica-app php bin/console.php config system debugging 1 >/de
 compose exec -T friendica-app php bin/console.php config system logfile /var/www/html/friendica.log >/dev/null
 compose exec -T friendica-app php bin/console.php config system loglevel debug >/dev/null
 
+# Verify that the newly created local account is actually exposed as an
+# ActivityPub actor, not merely a working HTML profile. Friendica can return
+# HTTP 202 for inbound Follow even if its target actor is not resolvable.
+# This check never prints actor JSON, keys or personal profile fields.
+compose exec -T -e AP_INTEROP_LOCAL_ACTOR="https://friendica.test/profile/${USERNAME}" \
+  friendica-app /bin/sh -ec '
+    curl --fail --silent --show-error --cacert /interop/runtime/certs/rootCA.crt \
+      --connect-timeout 5 --max-time 20 \
+      -H "Accept: application/activity+json" "$AP_INTEROP_LOCAL_ACTOR" |
+    php -r '\''$body = stream_get_contents(STDIN);
+      $actor = json_decode($body, true);
+      $expected = getenv("AP_INTEROP_LOCAL_ACTOR");
+      $type = is_array($actor) ? ($actor["type"] ?? null) : null;
+      $inbox = is_array($actor) ? ($actor["inbox"] ?? null) : null;
+      if (!is_array($actor) || ($actor["id"] ?? null) !== $expected ||
+          !in_array($type, ["Person", "Service", "Organization", "Group", "Application"], true) ||
+          !is_string($inbox) || $inbox === "") {
+        fwrite(STDERR, "Friendica local ActivityPub actor validation failed\\n");
+        exit(1);
+      }
+      echo "Friendica local ActivityPub actor validated\\n";'\''
+  '
+
 compose up -d friendica-worker
 echo "Bootstrapped Friendica federation target ${USERNAME}"
