@@ -20,9 +20,10 @@
  *   4. Optionally triggering push (WebPush / SSE)
  *
  * Design goals:
- *   - Fault-isolated: HTTP errors are logged, never crash the consumer
+ *   - Replayable: HTTP delivery errors propagate, so Kafka offsets are not
+ *     committed before ActivityPods acknowledges processing.
  *   - Protocol-neutral: no ActivityPub or ATProto parsing logic here
- *   - Idempotent: ActivityPods deduplicates by canonicalIntentId
+ *   - At-least-once: ActivityPods still needs durable per-recipient dedupe
  */
 
 import { Kafka, logLevel } from "kafkajs";
@@ -80,9 +81,8 @@ const NOTIFICATION_KINDS = new Set<CanonicalV1Event["kind"]>([
  *   - Build the in-app notification
  *   - Optionally send push
  *
- * ActivityPods MUST implement this endpoint.  If it returns 404 the consumer
- * logs a warning (not an error) so the pipeline is not interrupted during
- * incremental rollout.
+ * ActivityPods MUST implement this endpoint. A 404 or temporary outage is
+ * NOT successful delivery; keep the Kafka offset unresolved until recovered.
  */
 export interface CanonicalNotificationPayload {
   /** Unique intent ID — ActivityPods deduplicates on this. */
@@ -125,8 +125,15 @@ export class CanonicalNotificationConsumer {
     private readonly config: CanonicalNotificationConsumerConfig,
     private readonly logger: CanonicalNotificationLogger = NOOP_LOGGER,
   ) {
-    this.notifyTimeoutMs = config.notifyTimeoutMs ?? 10_000;
-    this.concurrency = config.concurrency ?? 4;
+    const requestedTimeout = config.notifyTimeoutMs ?? 10_000;
+    const requestedConcurrency = config.concurrency ?? 4;
+    if (!Number.isSafeInteger(requestedTimeout) || requestedTimeout < 500 ||
+        requestedTimeout > 30_000 || !Number.isSafeInteger(requestedConcurrency) ||
+        requestedConcurrency < 1 || requestedConcurrency > 8) {
+      throw new Error("Invalid canonical notification consumer timeout/concurrency budget");
+    }
+    this.notifyTimeoutMs = requestedTimeout;
+    this.concurrency = requestedConcurrency;
     this.endpointUrl = buildEndpointUrl(
       config.activityPodsBaseUrl,
       "/api/internal/bridge/canonical-notification",
@@ -227,14 +234,10 @@ export class CanonicalNotificationConsumer {
         continue;
       }
 
-      // Fan-out: fire the notification call fault-isolated.
-      const p = this.fanOut(event).catch((err) => {
-        this.logger.error("Canonical notification fan-out unhandled error", {
-          canonicalIntentId: event.canonicalIntentId,
-          kind: event.kind,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
+      // Never swallow a delivery failure and then resolve its Kafka offset.
+      // Promise.all below leaves the entire uncommitted batch replayable;
+      // ActivityPods must tolerate at-least-once duplicates during recovery.
+      const p = this.fanOut(event);
 
       pending.push({ offset: message.offset, promise: p });
 
@@ -283,7 +286,6 @@ export class CanonicalNotificationConsumer {
 
   private async callActivityPods(payload: CanonicalNotificationPayload): Promise<void> {
     let statusCode: number;
-    let bodyText: string;
 
     try {
       const res = await request(this.endpointUrl, {
@@ -297,41 +299,35 @@ export class CanonicalNotificationConsumer {
         headersTimeout: this.notifyTimeoutMs,
       });
       statusCode = res.statusCode;
-      bodyText = await res.body.text().catch(() => "");
+      // Drain the short internal API response for connection reuse, without
+      // using its untrusted body as proof of acceptance or logging it.
+      await res.body.dump({ limit: 262144 });
     } catch (err) {
       this.logger.error("ActivityPods canonical-notification HTTP error", {
         canonicalIntentId: payload.canonicalIntentId,
         kind: payload.kind,
-        error: err instanceof Error ? err.message : String(err),
+        error: err instanceof Error ? err.name : "UNKNOWN_HTTP_ERROR",
       });
-      return; // fault-isolated
-    }
-
-    if (statusCode === 404) {
-      // Endpoint not yet implemented — log once at warn, not error.
-      this.logger.warn(
-        "ActivityPods /api/internal/bridge/canonical-notification returned 404 — endpoint not yet implemented",
-        { canonicalIntentId: payload.canonicalIntentId },
-      );
-      return;
+      throw new Error("Canonical notification transport failed; Kafka offset remains unresolved");
     }
 
     if (statusCode === 409) {
-      // Duplicate — already processed (idempotency).
       this.logger.info("Canonical notification already delivered (idempotent)", {
         canonicalIntentId: payload.canonicalIntentId,
       });
       return;
     }
 
-    if (statusCode < 200 || statusCode >= 300) {
-      this.logger.error("ActivityPods canonical-notification returned non-2xx", {
+    if (statusCode !== 202) {
+      // The ActivityPods bridge documents durable processing acknowledgment
+      // as 202 and duplicate completion as 409. 404, 429, 500 and even a
+      // generic 200 must not be treated as a successful handoff.
+      this.logger.error("ActivityPods canonical notification not accepted", {
         canonicalIntentId: payload.canonicalIntentId,
         kind: payload.kind,
         statusCode,
-        body: bodyText.slice(0, 256),
       });
-      return;
+      throw new Error("Canonical notification not accepted; Kafka offset remains unresolved");
     }
 
     this.logger.info("Canonical notification delivered", {
