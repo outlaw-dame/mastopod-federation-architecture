@@ -870,19 +870,78 @@ export class RedisStreamsQueue {
     return claimed === "OK";
   }
 
-  async markOriginReconciliationApplied(
+  /**
+   * An origin-reconciliation idempotency claim is valid only if its synthetic
+   * inbound envelope was actually enqueued. Both must happen in one atomic
+   * Redis operation; a SET NX performed before XADD can permanently suppress
+   * updates if the destination queue is full.
+   *
+   * The Redis queue currently uses one primary. This is NOT Cluster-compatible
+   * without co-locating the stream and idempotency marker in a hash slot.
+   */
+  async enqueueOriginReconciliationUpdateOnce(
     objectKey: string,
     fingerprint: string,
+    envelope: InboundEnvelope,
     ttlSeconds: number,
   ): Promise<boolean> {
     if (!this.isConnected) throw new Error("Queue not connected");
-
-    const claimed = await this.redis.set(
-      `ap:origin-reconcile:apply:${encodeURIComponent(objectKey)}:${fingerprint}`,
-      "1",
-      { EX: ttlSeconds, NX: true },
-    );
-    return claimed === "OK";
+    if (typeof objectKey !== "string" || !objectKey ||
+        objectKey.length > 2048 || typeof fingerprint !== "string" ||
+        !/^[A-Za-z0-9_-]{16,128}$/.test(fingerprint) ||
+        !Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 ||
+        ttlSeconds > 30 * 24 * 60 * 60) {
+      throw new Error("Invalid origin reconciliation idempotency parameters");
+    }
+    const applyKey =
+      `ap:origin-reconcile:apply:${encodeURIComponent(objectKey)}:${fingerprint}`;
+    const record = {
+      envelopeId: envelope.envelopeId,
+      method: envelope.method,
+      path: envelope.path,
+      headers: JSON.stringify(envelope.headers),
+      body: envelope.body,
+      remoteIp: envelope.remoteIp,
+      receivedAt: envelope.receivedAt.toString(),
+      attempt: envelope.attempt.toString(),
+      notBeforeMs: envelope.notBeforeMs.toString(),
+      verification: envelope.verification ? JSON.stringify(envelope.verification) : "",
+    };
+    const fields = Object.entries(record).flatMap(([key, value]) => [key, value]);
+    const script = `
+      if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+      local safeAcked = ARGV[3] == '1'
+      if safeAcked then
+        local cap = tonumber(ARGV[2])
+        redis.call('XTRIM', KEYS[1], 'MAXLEN', '=',
+          tostring(cap - 1), 'ACKED')
+        if redis.call('XLEN', KEYS[1]) >= cap then
+          return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+        end
+      end
+      local args = { 'XADD', KEYS[1] }
+      if not safeAcked then
+        table.insert(args, 'MAXLEN')
+        table.insert(args, '~')
+        table.insert(args, ARGV[2])
+      end
+      table.insert(args, '*')
+      for i = 4, #ARGV do table.insert(args, ARGV[i]) end
+      redis.call(unpack(args))
+      redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
+      return 1
+    `;
+    const result = await this.redis.eval(script, {
+      keys: [this.inboundStreamKey, applyKey],
+      arguments: [
+        String(ttlSeconds), String(this.maxStreamLength),
+        this.safeAckedRetention ? "1" : "0", ...fields,
+      ],
+    });
+    if (result !== 0 && result !== 1) {
+      throw new Error("Invalid origin reconciliation enqueue outcome");
+    }
+    return result === 1;
   }
 
   async cacheActorDoc(actorUri: string, document: unknown, ttlSeconds: number = 3600): Promise<void> {
