@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
-import { RedisAtFirehoseSourceFence, FirehoseFenceError } from "../ingress/RedisAtFirehoseSourceFence.js";
+import { RedisAtFirehoseSourceFence, FirehoseFenceError, externalSyncFenceKeys } from "../ingress/RedisAtFirehoseSourceFence.js";
+import { createHash } from "node:crypto";
 
 let redis: Redis;
 beforeAll(async () => {
@@ -17,6 +18,31 @@ afterAll(async () => { if (redis) await redis.quit().catch(() => redis.disconnec
 const unique = () => "fence-test:" + randomUUID();
 
 describe("Redis-backed external Sync source ownership and monotonic cursors", () => {
+  it("co-locates lease and checkpoint keys in one Redis Cluster hash tag", () => {
+    const a = externalSyncFenceKeys("wss://one.example/xrpc/com.atproto.sync.subscribeRepos");
+    const b = externalSyncFenceKeys("wss://two.example/xrpc/com.atproto.sync.subscribeRepos");
+    const group = (key:string) => key.split("{")[1]?.split("}")[0] ?? "";
+    expect(group(a.owner)).toMatch(/^[a-f0-9]{40}$/);
+    expect(new Set(Object.values(a).map(group)).size).toBe(1);
+    expect(group(b.owner)).not.toBe(group(a.owner));
+    expect(Object.values(a).every(k => k.startsWith("at:external-sync:v2:"))).toBe(true);
+  });
+
+  it("refuses legacy v1 cursors rather than silently starting a new live-only stream",async()=>{
+    const source = unique();
+    const digest=createHash("sha256").update(source).digest("hex").slice(0,40);
+    const old="at:external-sync:v1:"+digest;
+    const store=new RedisAtFirehoseSourceFence(redis);
+    try{
+      await redis.set(old+":committed","190");
+      await expect(store.tryAcquire(source)).rejects.toThrow(/Legacy external Sync/);
+      await redis.del(old+":committed");
+      const lease=await store.tryAcquire(source);
+      expect(lease).not.toBeNull();
+      await store.release(source,lease!);
+    }finally{await redis.del(old+":owner",old+":hot",old+":committed");}
+  });
+
   it("admits exactly one of concurrent replicas and fences stale lease tokens", async () => {
     const source = unique(), a = new RedisAtFirehoseSourceFence(redis, 1500);
     const b = new RedisAtFirehoseSourceFence(redis, 1500);
@@ -73,6 +99,7 @@ describe("Redis-backed external Sync source ownership and monotonic cursors", ()
 
   it("bounds stalled Redis commands instead of holding the upstream forever", async()=>{
     const hung = new RedisAtFirehoseSourceFence({
+      get: async () => null,
       eval: async () => new Promise<unknown>(() => {}),
     },600);
     await expect(hung.tryAcquire(unique())).rejects.toThrow(/deadline/);
@@ -82,6 +109,7 @@ describe("Redis-backed external Sync source ownership and monotonic cursors", ()
 
   it("fails closed on Redis outages and rejects invalid cursor values", async () => {
     const source = unique(), store = new RedisAtFirehoseSourceFence({
+      get: async () => { throw new Error("Redis disconnected"); },
       eval: async () => { throw new Error("Redis disconnected"); },
     });
     await expect(store.tryAcquire(source)).rejects.toThrow(/Redis disconnected/);
