@@ -186,6 +186,32 @@ for candidate in /var/www/html/friendica.log /var/www/friendica.log; do
     break
   fi
 done
+# Compare both known logfile paths by *counts only*. Friendica 2026.05
+# can retain the legacy path from its image installer while the Docker config
+# points to the HTML volume. Never print raw log records.
+for candidate in /var/www/html/friendica.log /var/www/friendica.log; do
+  [ -r "$candidate" ] || continue
+  case "$candidate" in
+    /var/www/html/friendica.log) source=pinned_image ;;
+    /var/www/friendica.log) source=legacy_fallback ;;
+    *) exit 2 ;;
+  esac
+  tail -n 2000 "$candidate" | awk -v source="$source" '
+    {
+      line=tolower($0)
+      n++
+      if (index(line, "valid http signature")) good++
+      if (index(line, "invalid http signature")) bad++
+      if (index(line, "unable to retrieve ap contact for actor")) missing++
+      if (index(line, "message for user") && index(line, "is from actor")) receiver++
+      if (index(line, "follow user")) follow++
+    }
+    END {
+      printf "friendica_log_compare_source=%s recent_lines=%d valid_signature=%d invalid_signature=%d actor_lookup_failed=%d receiver_messages=%d committed_follows=%d\\n",
+        source, n, good, bad, missing, receiver, follow
+    }
+  '
+done
 if [ -z "$log" ]; then
   echo "friendica_app_log=unavailable"
 else
