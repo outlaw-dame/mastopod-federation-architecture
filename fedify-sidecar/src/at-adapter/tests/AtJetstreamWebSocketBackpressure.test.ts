@@ -95,6 +95,47 @@ describe("Jetstream real WebSocket backpressure and cursor recovery",()=>{
     expect(second.searchParams.get("cursor"))
       .toBe(String(microseconds-5_000_000));
   });
+  it("reconnects v2 with the inclusive sequence cursor and keeps events unverified",async()=>{
+    const path="/xrpc/network.bsky.jetstream.subscribeEvents";
+    const wss=new WebSocketServer({host:"127.0.0.1",port:0,path});
+    server=wss;
+    await new Promise<void>((resolve,reject)=>{
+      wss.once("listening",resolve);
+      wss.once("error",reject);
+    });
+    const address=wss.address();
+    if(!address||typeof address==="string")throw Error("Missing listener");
+    const url=`ws://127.0.0.1:${address.port}${path}`;
+    const urls:string[]=[];
+    const publish=vi.fn(async()=>undefined);
+    service=new AtJetstreamService({publish},{
+      url,publishTopic:UNVERIFIED_JETSTREAM_TOPIC
+    },logger);
+    wss.on("connection",(socket,request)=>{
+      urls.push(request.url??"");
+      expect(request.headers["sec-websocket-protocol"]).toContain("xrpc.v1.json");
+      if(urls.length===1){
+        socket.send(JSON.stringify({
+          "$type":"message",
+          payload:{
+            "$type":"network.bsky.jetstream.subscribeEvents#commit",
+            did:"did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",seq:24664288881,
+            operation:"create",collection:"app.bsky.feed.post",rkey:"3msx2",
+            rev:"3msx2",cid:"bafyreiaa",record:{text:"hello"}
+          }
+        }));
+        setTimeout(()=>socket.terminate(),100);
+      }
+    });
+    service.start();
+    await until(()=>urls.length>=2,5500);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(new URL(urls[1]!,url).searchParams.get("cursor")).toBe("24664288881");
+    expect(publish.mock.calls[0]?.[0]).toBe(UNVERIFIED_JETSTREAM_TOPIC);
+    expect(publish.mock.calls[0]?.[1]).toMatchObject({
+      verified:false,cursorType:"seq",cursor:24664288881
+    });
+  });
   it("never advances the resume cursor after Redpanda publish failure",async()=>{
     const {server:wss,url}=await listen();
     const urls:string[]=[];
@@ -110,7 +151,7 @@ describe("Jetstream real WebSocket backpressure and cursor recovery",()=>{
     await until(()=>urls.length>=2,5500);
     expect(publish).toHaveBeenCalledTimes(1);
     expect(new URL(urls[1]!,url).searchParams.has("cursor")).toBe(false);
-    expect((service as unknown as {lastPublishedTimeUs:number|null}).lastPublishedTimeUs).toBeNull();
+    expect((service as unknown as {lastCommittedCursor:{value:number;type:string}|null}).lastCommittedCursor).toBeNull();
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain("synthetic broker outage");
   });
 });
