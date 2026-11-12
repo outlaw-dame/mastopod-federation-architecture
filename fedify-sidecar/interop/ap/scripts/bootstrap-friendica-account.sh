@@ -68,5 +68,12 @@ fi
 compose exec -T friendica-db /bin/sh -lc \
   "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"update user set nickname='friendica' where uid=0 and nickname='';\""
 
+# Disposable federation fixture only. Explicitly enable application
+# diagnostics after the installation has written its persistent config.
+# Logging configuration is not used to bypass URL or signature validation.
+compose exec -T friendica-app php bin/console.php config system debugging 1 >/dev/null
+compose exec -T friendica-app php bin/console.php config system logfile /var/www/html/friendica.log >/dev/null
+compose exec -T friendica-app php bin/console.php config system loglevel debug >/dev/null
+
 compose up -d friendica-worker
 echo "Bootstrapped Friendica federation target ${USERNAME}"
