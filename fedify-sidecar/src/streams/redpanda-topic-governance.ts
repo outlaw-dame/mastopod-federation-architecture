@@ -320,7 +320,10 @@ function buildConfigEntries(
 function buildTopicDefinitions(profile: DurabilityProfile): TopicDefinition[] {
   const profileSettings = PROFILE_SETTINGS[profile];
 
-  const v6Topics = Object.values(V6_TOPICS).map<TopicDefinition>((topic) => ({
+  const v6Topics = Object.values(V6_TOPICS)
+    .filter(topic => topic.name !== "at.jetstream.unverified.v1" ||
+      process.env["ENABLE_AT_JETSTREAM"] === "true")
+    .map<TopicDefinition>((topic) => ({
     topic: sanitizeTopicName(topic.name),
     partitions: sanitizeInt(String(topic.partitions), topic.partitions, 1, 512),
     replicationFactor: Math.min(topic.replicationFactor, profileSettings.replicationFactor),

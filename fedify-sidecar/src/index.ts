@@ -614,10 +614,10 @@ const config = {
   // JETSTREAM_MAX_EVENTS: if set, service exits cleanly after N published events (useful for smoke tests).
   enableAtJetstream: process.env["ENABLE_AT_JETSTREAM"] === "true",
   atJetstreamUrl: parseJetstreamUrl(process.env["JETSTREAM_URL"]),
+  // Jetstream JSON carries no repository signature proof. Never send it to
+  // the verified AT ingress topic, even when the verified bridge is enabled.
   atJetstreamPublishTopic:
-    process.env["AT_JETSTREAM_PUBLISH_TOPIC"] ||
-    process.env["PROTOCOL_BRIDGE_AT_VERIFIED_INGRESS_TOPIC"] ||
-    "at.ingress.v1",
+    process.env["AT_JETSTREAM_PUBLISH_TOPIC"] || "at.jetstream.unverified.v1",
   atJetstreamMaxEvents: process.env["JETSTREAM_MAX_EVENTS"]
     ? Number.parseInt(process.env["JETSTREAM_MAX_EVENTS"], 10)
     : undefined,

@@ -97,6 +97,17 @@ export const V6_TOPICS: Record<string, TopicSchema> = {
     description: 'Tombstone events (delete notifications; separate from AP firehose)',
   },
 
+  // Unverified public Jetstream JSON is staged separately until a
+  // repository-DID/rev/CID verifier has explicitly established trust.
+  // Only provision this topic when ENABLE_AT_JETSTREAM=true.
+  'at.jetstream.unverified.v1': {
+    name: 'at.jetstream.unverified.v1',
+    partitions: 1,
+    replicationFactor: 3,
+    retentionMs: 3 * 24 * 60 * 60 * 1000,
+    description: 'Short-retention public AT Jetstream observations awaiting verification',
+  },
+
   // Protocol-neutral canonical intent log (from both AT and AP bridge)
   'canonical.v1': {
     name: 'canonical.v1',
