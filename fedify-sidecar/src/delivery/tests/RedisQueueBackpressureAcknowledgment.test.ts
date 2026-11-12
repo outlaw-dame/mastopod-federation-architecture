@@ -7,6 +7,7 @@ vi.mock("../../utils/logger.js", () => {
 });
 vi.mock("undici",()=>({request:vi.fn()}));
 
+import { isRedisStreamCapacityError } from "../../queue/redis-stream-safe-admission.js";
 import { InboundWorker } from "../inbound-worker.js";
 import {
   OriginReconciliationWorker,
@@ -72,6 +73,12 @@ const config:OriginReconciliationWorkerConfig={
 const signing:any={signOne:vi.fn().mockResolvedValue({ok:true,signedHeaders:{}})};
 
 describe("ack after durable Redis replacement",()=>{
+  it("distinguishes admission backpressure from unrelated Redis errors",()=>{
+    expect(isRedisStreamCapacityError(new Error("ERR REDIS_STREAM_AT_CAPACITY"))).toBe(true);
+    expect(isRedisStreamCapacityError(new Error("Redis disconnected"))).toBe(false);
+    expect(isRedisStreamCapacityError(new Error("Invalid consumer group"))).toBe(false);
+  });
+
   it("does not ACK an inbound source when its DLQ is full",async()=>{
     const queue={
       ack:vi.fn().mockResolvedValue(undefined),
