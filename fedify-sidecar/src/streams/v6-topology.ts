@@ -105,6 +105,15 @@ export const V6_TOPICS: Record<string, TopicSchema> = {
     retentionMs: 30 * 24 * 60 * 60 * 1000, // 30 days
     description: 'Durable protocol-neutral canonical intent log (AT + AP bridge, pre-projection)',
   },
+  // Private poison-event quarantine for the canonical notification consumer.
+  // Provision read/write ACLs before opt-in; never expose this topic as a feed.
+  'canonical.notifications.dlq.v1': {
+    name: 'canonical.notifications.dlq.v1',
+    partitions: 3,
+    replicationFactor: 3,
+    retentionMs: 7 * 24 * 60 * 60 * 1000,
+    description: 'Restricted replay/quarantine for malformed canonical notification records',
+  },
 };
 
 /**

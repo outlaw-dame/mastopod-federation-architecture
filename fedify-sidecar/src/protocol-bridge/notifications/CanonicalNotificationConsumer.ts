@@ -27,7 +27,8 @@
  */
 
 import { Kafka, logLevel } from "kafkajs";
-import type { Consumer, EachBatchPayload } from "kafkajs";
+import { createHash } from "node:crypto";
+import type { Consumer, EachBatchPayload, Producer } from "kafkajs";
 import { request } from "undici";
 import type { CanonicalV1Event } from "../../streams/v6-topology.js";
 import { ensureRedpandaCompressionCodec } from "../../streams/kafka-compression.js";
@@ -47,7 +48,16 @@ export interface CanonicalNotificationConsumerConfig {
   notifyTimeoutMs?: number;
   /** Maximum notification calls in parallel per batch. Default: 4. */
   concurrency?: number;
+  /** Source-controlled rollout control; default FALSE until DLQ ACLs exist. */
+  enableDeadLetter?: boolean;
+  /** Must exist in governed Redpanda topics before enableDeadLetter=true. */
+  deadLetterTopic?: string;
 }
+
+export interface CanonicalNotificationDeadLetter {
+  publish(key: string, value: Buffer): Promise<void>;
+}
+
 
 export interface CanonicalNotificationLogger {
   info(message: string, meta?: Record<string, unknown>): void;
@@ -62,6 +72,12 @@ const NOOP_LOGGER: CanonicalNotificationLogger = {
 };
 
 // The set of intent kinds that generate actionable notifications.
+export const CANONICAL_NOTIFICATION_DEAD_LETTER_TOPIC = "canonical.notifications.dlq.v1";
+const MAX_QUARANTINE_RAW_BYTES = 262144;
+const DEAD_LETTER_REASON = new Set([
+  "EMPTY_RECORD", "INVALID_JSON", "INVALID_EVENT",
+  "INVALID_PAYLOAD", "PERMANENT_HTTP_REJECTION"
+]);
 const NOTIFICATION_KINDS = new Set<CanonicalV1Event["kind"]>([
   "ReactionAdd",
   "ShareAdd",
@@ -120,11 +136,19 @@ export class CanonicalNotificationConsumer {
   private readonly notifyTimeoutMs: number;
   private readonly concurrency: number;
   private readonly endpointUrl: string;
+  private deadLetterProducer: Producer | null = null;
+  private deadLetterPublisher: CanonicalNotificationDeadLetter | null;
 
   constructor(
     private readonly config: CanonicalNotificationConsumerConfig,
     private readonly logger: CanonicalNotificationLogger = NOOP_LOGGER,
+    deadLetterPublisher: CanonicalNotificationDeadLetter | null = null,
   ) {
+    this.deadLetterPublisher = deadLetterPublisher;
+    if (config.deadLetterTopic &&
+        config.deadLetterTopic !== CANONICAL_NOTIFICATION_DEAD_LETTER_TOPIC) {
+      throw new Error("Unsupported canonical notification quarantine topic");
+    }
     const requestedTimeout = config.notifyTimeoutMs ?? 10_000;
     const requestedConcurrency = config.concurrency ?? 4;
     if (!Number.isSafeInteger(requestedTimeout) || requestedTimeout < 500 ||
@@ -161,15 +185,42 @@ export class CanonicalNotificationConsumer {
       allowAutoTopicCreation: false,
     });
 
-    await this.consumer.connect();
-    await this.consumer.subscribe({ topic: this.config.canonicalTopic });
-    await this.consumer.run({
-      autoCommit: false,
-      eachBatchAutoResolve: false,
-      eachBatch: async (payload) => {
-        await this.processBatch(payload);
-      },
-    });
+    try {
+      if (this.config.enableDeadLetter === true && !this.deadLetterPublisher) {
+        // Explicit opt-in only. The DLQ topic must be provisioned with a
+        // restricted ACL before enabling it for private notification events.
+        this.deadLetterProducer = kafka.producer({
+          allowAutoTopicCreation: false, idempotent: true,
+          maxInFlightRequests: 1,
+        });
+        await this.deadLetterProducer.connect();
+        const producer = this.deadLetterProducer;
+        this.deadLetterPublisher = {
+          publish: async (key: string, value: Buffer) => {
+            await producer.send({
+              topic: CANONICAL_NOTIFICATION_DEAD_LETTER_TOPIC,
+              acks: -1, messages: [{ key, value }],
+            });
+          },
+        };
+      }
+      await this.consumer.connect();
+      await this.consumer.subscribe({ topic: this.config.canonicalTopic });
+      await this.consumer.run({
+        autoCommit: false,
+        eachBatchAutoResolve: false,
+        eachBatch: async (payload) => {
+          await this.processBatch(payload);
+        },
+      });
+    } catch (error) {
+      await this.consumer.disconnect().catch(() => undefined);
+      await this.deadLetterProducer?.disconnect().catch(() => undefined);
+      this.consumer = null;
+      this.deadLetterProducer = null;
+      this.running = false;
+      throw error;
+    }
 
     this.logger.info("CanonicalNotificationConsumer started", {
       topic: this.config.canonicalTopic,
@@ -185,6 +236,11 @@ export class CanonicalNotificationConsumer {
       try { await this.consumer.disconnect(); } catch { /* best-effort */ }
       this.consumer = null;
     }
+    if (this.deadLetterProducer) {
+      await this.deadLetterProducer.disconnect();
+      this.deadLetterProducer = null;
+      this.deadLetterPublisher = null;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -193,75 +249,133 @@ export class CanonicalNotificationConsumer {
 
   private async processBatch(payload: EachBatchPayload): Promise<void> {
     const {
-      batch,
-      resolveOffset,
-      heartbeat,
-      commitOffsetsIfNecessary,
-      isRunning,
-      isStale,
+      batch, resolveOffset, heartbeat, commitOffsetsIfNecessary,
+      isRunning, isStale,
     } = payload;
-
     const pending: Array<{ offset: string; promise: Promise<void> }> = [];
+    const drain = async (): Promise<void> => {
+      // Wait for ALL in-flight effects before acting on one Kafka offset.
+      // Promise.all would reject early and leave unobserved in-flight calls.
+      const results = await Promise.allSettled(pending.map(item => item.promise));
+      const failure = results.find(
+        (item): item is PromiseRejectedResult => item.status === "rejected",
+      );
+      if (failure) {
+        // No offset is advanced across this window. Successful operations
+        // replay and must be idempotent at the PostgreSQL notification ledger.
+        throw failure.reason;
+      }
+      if (!isRunning() || isStale()) return;
+      for (const item of pending) resolveOffset(item.offset);
+      await commitOffsetsIfNecessary();
+      await heartbeat();
+      pending.length = 0;
+    };
 
     for (const message of batch.messages) {
       if (!isRunning() || isStale()) break;
-
-      const raw = message.value?.toString("utf8")?.trim();
-      if (!raw) {
-        resolveOffset(message.offset);
-        await commitOffsetsIfNecessary();
-        await heartbeat();
-        continue;
-      }
-
-      let event: CanonicalV1Event;
-      try {
-        event = JSON.parse(raw) as CanonicalV1Event;
-      } catch {
-        this.logger.warn("canonical.v1 message could not be parsed — skipping", {
-          offset: message.offset,
-        });
-        resolveOffset(message.offset);
-        await commitOffsetsIfNecessary();
-        await heartbeat();
-        continue;
-      }
-
-      if (!NOTIFICATION_KINDS.has(event.kind)) {
-        resolveOffset(message.offset);
-        await commitOffsetsIfNecessary();
-        await heartbeat();
-        continue;
-      }
-
-      // Never swallow a delivery failure and then resolve its Kafka offset.
-      // Promise.all below leaves the entire uncommitted batch replayable;
-      // ActivityPods must tolerate at-least-once duplicates during recovery.
-      const p = this.fanOut(event);
-
-      pending.push({ offset: message.offset, promise: p });
-
-      // Drain once we hit concurrency limit
-      if (pending.length >= this.concurrency) {
-        await Promise.all(pending.map((e) => e.promise));
-        for (const e of pending) {
-          resolveOffset(e.offset);
-        }
-        await commitOffsetsIfNecessary();
-        await heartbeat();
-        pending.length = 0;
-      }
+      const key = `${batch.topic}:${batch.partition}:${message.offset}`;
+      pending.push({
+        offset: message.offset,
+        promise: this.processRecord({
+          key, raw: message.value ? Buffer.from(message.value) : null,
+          sourceTopic: batch.topic, sourcePartition: batch.partition,
+          sourceOffset: message.offset,
+        }),
+      });
+      if (pending.length >= this.concurrency) await drain();
     }
+    if (pending.length > 0) await drain();
+  }
 
-    // Drain remaining
-    if (pending.length > 0) {
-      await Promise.all(pending.map((e) => e.promise));
-      for (const e of pending) {
-        resolveOffset(e.offset);
-      }
-      await commitOffsetsIfNecessary();
-      await heartbeat();
+  private async processRecord({
+    key, raw, sourceTopic, sourcePartition, sourceOffset,
+  }: {
+    key: string;
+    raw: Buffer | null;
+    sourceTopic: string;
+    sourcePartition: number;
+    sourceOffset: string;
+  }): Promise<void> {
+    if (!raw || raw.byteLength === 0) {
+      await this.quarantine(key, raw, "EMPTY_RECORD", sourceTopic, sourcePartition, sourceOffset);
+      return;
     }
+    if (raw.byteLength > MAX_QUARANTINE_RAW_BYTES) {
+      // Large private events cannot be safely duplicated to the DLQ.
+      // Keep the original Kafka offset open for manual remediation.
+      throw new Error("Canonical notification record exceeds the bounded quarantine size");
+    }
+    let event: unknown;
+    try {
+      event = JSON.parse(raw.toString("utf8")) as unknown;
+    } catch {
+      await this.quarantine(key, raw, "INVALID_JSON", sourceTopic, sourcePartition, sourceOffset);
+      return;
+    }
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      await this.quarantine(key, raw, "INVALID_EVENT", sourceTopic, sourcePartition, sourceOffset);
+      return;
+    }
+    const value = event as Record<string, unknown>;
+    if (typeof value["kind"] !== "string" ||
+        value["kind"].length < 1 || value["kind"].length > 64) {
+      await this.quarantine(key, raw, "INVALID_EVENT", sourceTopic, sourcePartition, sourceOffset);
+      return;
+    }
+    // Non-notification canonical events never enter the notification
+    // delivery route and do not need per-recipient processing.
+    if (!NOTIFICATION_KINDS.has(value["kind"] as CanonicalV1Event["kind"])) return;
+    if (typeof value["canonicalIntentId"] !== "string" ||
+        value["canonicalIntentId"].length < 1 ||
+        value["canonicalIntentId"].length > 512 ||
+        typeof value["createdAt"] !== "string" ||
+        !Number.isFinite(Date.parse(value["createdAt"])) ||
+        (value["sourceProtocol"] !== "activitypub" && value["sourceProtocol"] !== "atproto") ||
+        !value["actor"] || typeof value["actor"] !== "object" ||
+        Array.isArray(value["actor"])) {
+      await this.quarantine(key, raw, "INVALID_PAYLOAD", sourceTopic, sourcePartition, sourceOffset);
+      return;
+    }
+    try {
+      await this.fanOut(event as CanonicalV1Event);
+    } catch (error) {
+      // Retry dependency outages and all ambiguous responses. Only a
+      // deterministic 400/413/422 rejection is eligible for quarantine.
+      if (error instanceof CanonicalPermanentNotificationError) {
+        await this.quarantine(key, raw, "PERMANENT_HTTP_REJECTION",
+          sourceTopic, sourcePartition, sourceOffset);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private async quarantine(
+    key: string, raw: Buffer | null, reason: string,
+    sourceTopic: string, sourcePartition: number, sourceOffset: string,
+  ): Promise<void> {
+    if (!DEAD_LETTER_REASON.has(reason)) throw new Error("Invalid quarantine reason");
+    if (raw && raw.byteLength > MAX_QUARANTINE_RAW_BYTES) {
+      throw new Error("Oversized event cannot be quarantined");
+    }
+    if (this.config.enableDeadLetter !== true || !this.deadLetterPublisher) {
+      // Never silently resolve a broken canonical event merely because the
+      // quarantine producer is unavailable or disabled.
+      throw new Error("Canonical notification quarantine not enabled; Kafka offset retained");
+    }
+    const record = Buffer.from(JSON.stringify({
+      schema: "paper.canonical.notification.quarantine.v1",
+      reason, sourceTopic, sourcePartition, sourceOffset,
+      payloadSha256: createHash("sha256").update(raw || Buffer.alloc(0)).digest("hex"),
+      // DLQ topic requires restricted read ACLs and short retention: this may
+      // contain private notification payloads and must not be a public feed.
+      rawBase64: raw ? raw.toString("base64") : "",
+    }));
+    await this.deadLetterPublisher.publish(key, record);
+    this.logger.warn("Canonical notification parked in durable quarantine", {
+      reason, sourceTopic, sourcePartition, sourceOffset,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -327,6 +441,9 @@ export class CanonicalNotificationConsumer {
         kind: payload.kind,
         statusCode,
       });
+      if (statusCode === 400 || statusCode === 413 || statusCode === 422) {
+        throw new CanonicalPermanentNotificationError(statusCode);
+      }
       throw new Error("Canonical notification not accepted; Kafka offset remains unresolved");
     }
 
@@ -341,6 +458,13 @@ export class CanonicalNotificationConsumer {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+class CanonicalPermanentNotificationError extends Error {
+  constructor(public readonly statusCode: number) {
+    super("Permanent canonical notification payload rejection");
+    this.name = "CanonicalPermanentNotificationError";
+  }
+}
 
 function buildEndpointUrl(base: string, path: string): string {
   return base.replace(/\/$/, "") + path;
