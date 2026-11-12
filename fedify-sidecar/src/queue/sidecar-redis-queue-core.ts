@@ -1256,6 +1256,10 @@ export class RedisStreamsQueue {
       local safeAcked = ARGV[4] == '1'
       local index = 5
       if safeAcked then
+        local groups = redis.pcall('XINFO', 'GROUPS', outboundStreamKey)
+        if type(groups) ~= 'table' or #groups == 0 then
+          return redis.error_reply('REDIS_STREAM_NO_CONSUMER_GROUP')
+        end
         if jobCount > tonumber(maxLen) then
           return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
         end
