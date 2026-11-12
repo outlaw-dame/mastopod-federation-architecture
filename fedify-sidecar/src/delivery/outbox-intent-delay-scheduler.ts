@@ -86,6 +86,16 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
       if (!this.redis.isOpen) await this.redis.connect();
       if (this.safeAckedRetention) {
         await requireRedis82AckedSupport(this.redis);
+        // The scheduler can start before the main queue workers. Ensure
+        // ACKED trimming never runs on a stream without a consumer group.
+        try {
+          await this.redis.xGroupCreate(
+            this.readyStreamKey, this.consumerGroup, "0", { MKSTREAM: true });
+        } catch (error) {
+          if (!(error instanceof Error) || !error.message.includes("BUSYGROUP")) {
+            throw error;
+          }
+        }
       }
       await this.promoteDue();
       this.timer = setInterval(() => {
