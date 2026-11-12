@@ -137,6 +137,19 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
     await super.enqueueInbound(stripUnverifiedSyntheticVerification(envelope));
   }
 
+  override async enqueueOriginReconciliationUpdateOnce(
+    objectKey: string,
+    fingerprint: string,
+    envelope: InboundEnvelope,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    // Preserve the same provenance boundary as normal inbound enqueue.
+    return super.enqueueOriginReconciliationUpdateOnce(
+      objectKey, fingerprint,
+      stripUnverifiedSyntheticVerification(envelope), ttlSeconds,
+    );
+  }
+
   override async enqueueOutbound(job: OutboundJob): Promise<void> {
     await this.enqueueOutboundBatch([job]);
   }
