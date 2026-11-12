@@ -84,6 +84,7 @@ compose exec -T friendica-app php bin/console.php config system loglevel debug >
 # HTTP 202 for inbound Follow even if its target actor is not resolvable.
 # This check never prints actor JSON, keys or personal profile fields.
 compose exec -T -e AP_INTEROP_LOCAL_ACTOR="https://friendica.test/profile/${USERNAME}" \
+  -e AP_INTEROP_LOCAL_USERNAME="${USERNAME}" \
   friendica-app /bin/sh -ec '
     # The proxy aliases are not installed on this bootstrap container yet.
     # Test the local Apache origin, still requiring the canonical HTTPS actor
@@ -91,7 +92,7 @@ compose exec -T -e AP_INTEROP_LOCAL_ACTOR="https://friendica.test/profile/${USER
     curl --fail --silent --show-error \
       --connect-timeout 5 --max-time 20 \
       -H "Accept: application/activity+json" \
-      http://127.0.0.1/profile/interop |
+      "http://127.0.0.1/profile/$AP_INTEROP_LOCAL_USERNAME" |
     php -r '\''$body = stream_get_contents(STDIN);
       $actor = json_decode($body, true);
       $expected = getenv("AP_INTEROP_LOCAL_ACTOR");
