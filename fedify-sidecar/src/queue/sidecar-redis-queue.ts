@@ -431,27 +431,59 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
         local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
         local promoted = 0
         local safeAcked = ARGV[4] == '1'
+        local prepared = {}
         if safeAcked and #ids > 0 then
-        local groups = redis.pcall('XINFO', 'GROUPS', KEYS[3])
-        if type(groups) ~= 'table' or #groups == 0 then
-          return redis.error_reply('REDIS_STREAM_NO_CONSUMER_GROUP')
-        end
-          local capacity = tonumber(ARGV[3])
-          if #ids > capacity then
-            return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+          -- A stale schedule entry without a payload is cleanup work, not
+          -- another ready-stream slot. Validate the whole batch up front:
+          -- Redis Lua errors do not roll back earlier writes.
+          local needed = 0
+          for _, id in ipairs(ids) do
+            local payload = redis.call('HGET', KEYS[2], id)
+            if payload then
+              local ok, job = pcall(cjson.decode, payload)
+              if not ok or type(job) ~= 'table' or
+                type(job.jobId) ~= 'string' or
+                type(job.activityId) ~= 'string' or
+                type(job.actorUri) ~= 'string' or
+                type(job.activity) ~= 'string' or
+                type(job.targetInbox) ~= 'string' or
+                type(job.targetDomain) ~= 'string' or
+                not tonumber(job.attempt or 0) or
+                not tonumber(job.maxAttempts or 0) or
+                not tonumber(job.notBeforeMs or 0) or
+                not tonumber(job.deferCount or 0) then
+                return redis.error_reply('invalid delayed outbound payload for ' .. id)
+              end
+              prepared[id] = job
+              needed = needed + 1
+            end
           end
-          redis.call('XTRIM', KEYS[3], 'MAXLEN', '=',
-            tostring(capacity - #ids), 'ACKED')
-          if redis.call('XLEN', KEYS[3]) > capacity - #ids then
-            return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+          if needed > 0 then
+            local groups = redis.pcall('XINFO', 'GROUPS', KEYS[3])
+            if type(groups) ~= 'table' or #groups == 0 then
+              return redis.error_reply('REDIS_STREAM_NO_CONSUMER_GROUP')
+            end
+            local capacity = tonumber(ARGV[3])
+            if needed > capacity then
+              return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+            end
+            redis.call('XTRIM', KEYS[3], 'MAXLEN', '=',
+              tostring(capacity - needed), 'ACKED')
+            if redis.call('XLEN', KEYS[3]) > capacity - needed then
+              return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+            end
           end
         end
         for _, id in ipairs(ids) do
           local payload = redis.call('HGET', KEYS[2], id)
           if payload then
-            local ok, job = pcall(cjson.decode, payload)
-            if not ok or not job then
-              return redis.error_reply('invalid delayed outbound payload for ' .. id)
+            local job = prepared[id]
+            if not safeAcked then
+              local ok
+              ok, job = pcall(cjson.decode, payload)
+              if not ok or not job then
+                return redis.error_reply('invalid delayed outbound payload for ' .. id)
+              end
             end
             local meta = ''
             if job.meta ~= nil then meta = cjson.encode(job.meta) end
