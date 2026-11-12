@@ -116,3 +116,11 @@ export async function appendAcknowledgedStreamBatch(
   }
   return result as string[];
 }
+
+/** A queue-capacity refusal is transient infrastructure backpressure,
+ * not a business delivery failure or a reason to consume retry attempts.
+ */
+export function isRedisStreamCapacityError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes(REDIS_STREAM_BACKPRESSURE_ERROR);
+}
