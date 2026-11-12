@@ -120,7 +120,10 @@ try {
  // The outbound delayed wrapper has its own Lua promotion path and must
  // obey the same cap as the core stream writers.
  const previousNodeEnv=process.env["NODE_ENV"];
+ const previousCutover=process.env["APDM_COMPLETION_MARKER_V2_CUTOVER"];
+ // This script owns a disposable Redis instance with no legacy APDM markers.
  process.env["NODE_ENV"]="production";
+ process.env["APDM_COMPLETION_MARKER_V2_CUTOVER"]="fresh";
  const delayedOutbound=prefix+":delayed-outbound";
  const wrapper=new DurableRedisStreamsQueue({
   redisUrl:url,consumerGroup:group,consumerId:"wrapper-proof",
@@ -157,6 +160,8 @@ try {
  } finally {
   await wrapper.disconnect().catch(()=>undefined);
   process.env["NODE_ENV"]=previousNodeEnv;
+  if(previousCutover===undefined)delete process.env["APDM_COMPLETION_MARKER_V2_CUTOVER"];
+  else process.env["APDM_COMPLETION_MARKER_V2_CUTOVER"]=previousCutover;
   await redis.del([
     delayedOutbound,delayedOutbound+":delayed:v1",
     delayedOutbound+":delayed-payload:v1",prefix+":wrapper-in",
