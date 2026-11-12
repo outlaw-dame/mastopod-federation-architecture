@@ -1,0 +1,112 @@
+name: G0 external ATProto source provenance and syntax probe
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/g0-external-atproto-source-probe.yml'
+      - 'docs/external-atproto-recovery-integration-gates.md'
+      - 'docs/external-atproto-provider-source-audit.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout review branch without retained token
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The external sidecar has a gitlink absent from .gitmodules.
+      # actions/checkout fails during its internal 'git submodule foreach'
+      # cleanup even when submodules: false. Fetch the immutable public SHA
+      # without credential persistence or submodule initialization instead.
+      - name: Fetch external sidecar SHA without submodule initialization
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir external-sidecar
+          git -C external-sidecar init -q
+          git -C external-sidecar remote add origin https://github.com/Lawhacknifemi/mastopod-federation-architecture.git
+          git -C external-sidecar fetch --no-tags --depth=1 origin e4d0bb74142afbaf4573d2f93e28028479d6b52d
+          git -C external-sidecar checkout --detach --quiet FETCH_HEAD
+
+      - name: Fetch recovered provider SHA without executing scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir external-provider
+          git -C external-provider init -q
+          git -C external-provider remote add origin https://github.com/Lawhacknifemi/activitypods-demo-bridge.git
+          git -C external-provider fetch --no-tags --depth=1 origin 9f1c7fc3511487150ce458f025e9dc4477133221
+          git -C external-provider checkout --detach --quiet FETCH_HEAD
+
+      - name: Verify immutable repository heads and recorded gitlink
+        shell: bash
+        run: |
+          set -euo pipefail
+          sidecar_head="$(git -C external-sidecar rev-parse HEAD)"
+          provider_head="$(git -C external-provider rev-parse HEAD)"
+          test "$sidecar_head" = "e4d0bb74142afbaf4573d2f93e28028479d6b52d"
+          test "$provider_head" = "9f1c7fc3511487150ce458f025e9dc4477133221"
+          gitlink="$(git -C external-sidecar ls-tree HEAD activitpod-aptoroto)"
+          printf '%s\n' "$gitlink"
+          test "$gitlink" = "160000 commit 9f1c7fc3511487150ce458f025e9dc4477133221"$'\t'"activitpod-aptoroto"
+          if ! git -C external-sidecar config -f .gitmodules --get-regexp '^submodule\..*\.path$' | grep -Fq 'activitpod-aptoroto'; then
+            echo "::notice::The provider gitlink is not declared in the external parent .gitmodules; checking it out separately is necessary."
+          fi
+          {
+            echo '## G0 immutable external source provenance'
+            echo ''
+            echo "- Sidecar: \`$sidecar_head\`"
+            echo "- Provider: \`$provider_head\`"
+            echo "- Parent gitlink: \`$gitlink\`"
+            echo ''
+            echo 'Static syntax only: **does not prove production correctness, tests or integration.**'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Syntax-check recovered provider JavaScript without running untrusted code
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          files=(
+            activitypods/pod-provider/backend/services/core/auth.js
+            activitypods/pod-provider/backend/services/core/keys.js
+            activitypods/pod-provider/backend/services/identity.js
+            activitypods/pod-provider/backend/services/signing.service.js
+            activitypods/pod-provider/backend/services/api.js
+            activitypods/pod-provider/backend/services/atproto/redpanda-commit-publisher.service.js
+            activitypods/pod-provider/backend/helpers/atproto/identity.service.js
+            activitypods/pod-provider/backend/helpers/atproto/atproto.service.js
+            activitypods/pod-provider/backend/helpers/atproto/repo.js
+          )
+          for file in "${files[@]}"; do
+            test -f "external-provider/$file"
+            node --check "external-provider/$file"
+          done
+          echo "Parsed ${#files[@]} exact-SHA provider JavaScript files (no execution)."
+
+      - name: Syntax-check unmerged sidecar JavaScript integration files
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            fedify-sidecar/activitypods-integration/backend/services/api.js
+            fedify-sidecar/activitypods-integration/backend/services/core/auth.js
+            fedify-sidecar/activitypods-integration/backend/services/internal-social-api.service.js
+            fedify-sidecar/activitypods-integration/backend/services/atproto/identity.service.js
+            fedify-sidecar/activitypods-integration/backend/services/atproto/atproto.service.js
+            fedify-sidecar/activitypods-integration/backend/services/atproto/bridge.service.js
+            fedify-sidecar/activitypods-integration/backend/services/atproto/federation.service.js
+            fedify-sidecar/activitypods-integration/backend/services/atproto/utils/repo.js
+          )
+          for file in "${files[@]}"; do
+            test -f "external-sidecar/$file"
+            node --check "external-sidecar/$file"
+          done
+          echo "Parsed ${#files[@]} exact-SHA sidecar JavaScript files (no execution)."
