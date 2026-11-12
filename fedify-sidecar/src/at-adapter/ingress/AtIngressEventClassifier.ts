@@ -30,16 +30,27 @@
  * Ref: https://atproto.com/specs/event-stream (filtering strategy)
  */
 
+import { createHash } from 'node:crypto';
+
 // ---------------------------------------------------------------------------
 // Redis key helpers
 // ---------------------------------------------------------------------------
 
 const MAX_DID_LENGTH = 2048;
 const ALLOWLIST_KEY_PREFIX = 'at:ingress:allowlist:did:';
-const DEDUPE_KEY_PREFIX = 'at:firehose:dedupe:';
-
-/** TTL for dedupe keys (seconds) — 24 hours is sufficient for replay windows. */
+const DEDUPE_KEY_PREFIX = 'at:firehose:dedupe:window:v2:';
 const DEDUPE_TTL_SECONDS = 86_400;
+// Bounds Redis memory independently of upstream event rate or uptime.
+const DEFAULT_DEDUPE_WINDOW = 32_768;
+
+const REMEMBER_PROCESSED = [
+  "redis.call('ZADD', KEYS[1], ARGV[1], ARGV[1])",
+  "local n = redis.call('ZCARD', KEYS[1])",
+  "local max = tonumber(ARGV[2])",
+  "if n > max then redis.call('ZREMRANGEBYRANK', KEYS[1], 0, n - max - 1) end",
+  "redis.call('EXPIRE', KEYS[1], ARGV[3])",
+  "return 1",
+].join("\n");
 
 function sanitiseDid(did: string): string {
   // Validate DID structure before use as a key segment.
@@ -54,8 +65,54 @@ function allowlistKey(did: string): string {
   return `${ALLOWLIST_KEY_PREFIX}${sanitiseDid(did)}`;
 }
 
-function dedupeKey(sourceId: string, seq: number): string {
-  return `${DEDUPE_KEY_PREFIX}${sanitiseDid(sourceId)}:${seq}`;
+function dedupeKey(sourceId: string): string {
+  // Upstream identifiers are URLs, not DIDs. Hash the full source to avoid
+  // lossy replacement/truncation, cross-source collisions, or key injection.
+  if (typeof sourceId !== 'string' || sourceId.length > 2048) {
+    throw new ClassifierError('Invalid external firehose source identifier');
+  }
+  let parsed: URL;
+  try { parsed = new URL(sourceId); }
+  catch { throw new ClassifierError('Invalid external firehose source URL'); }
+  if (!['wss:', 'ws:'].includes(parsed.protocol) ||
+      parsed.username || parsed.password) {
+    throw new ClassifierError('Invalid external firehose source protocol');
+  }
+  return DEDUPE_KEY_PREFIX +
+    createHash('sha256').update(sourceId).digest('hex').slice(0, 40);
+}
+
+function validSeq(seq: number): string {
+  if (!Number.isSafeInteger(seq) || seq < 0) {
+    throw new ClassifierError('Invalid dedupe source sequence');
+  }
+  return String(seq);
+}
+
+function validateWindow(windowSize: number): void {
+  if (!Number.isSafeInteger(windowSize) || windowSize < 16 ||
+      windowSize > 65_536) {
+    throw new ClassifierError('Dedupe window must be 16–65536 entries');
+  }
+}
+
+async function isSourceDuplicate(
+  redis: RedisClassifierClient, source: string, seq: number,
+): Promise<boolean> {
+  const result = await redis.zscore(dedupeKey(source), validSeq(seq));
+  if (result === null) return false;
+  if (typeof result !== 'string') throw new ClassifierError('Invalid Redis dedupe lookup response');
+  return true;
+}
+
+async function rememberSourceProcessed(
+  redis: RedisClassifierClient, source: string, seq: number,
+  windowSize: number,
+): Promise<void> {
+  const result = await redis.eval(REMEMBER_PROCESSED, 1,
+    dedupeKey(source), validSeq(seq), String(windowSize),
+    String(DEDUPE_TTL_SECONDS));
+  if (result !== 1) throw new ClassifierError('Redis dedupe checkpoint failed');
 }
 
 // ---------------------------------------------------------------------------
@@ -92,33 +149,23 @@ export interface AtIngressEventClassifier {
  * Deduplication is still performed to prevent double-processing on replay.
  */
 export class Phase55AEventClassifier implements AtIngressEventClassifier {
-  constructor(private readonly redis?: RedisClassifierClient) {}
+  constructor(
+    private readonly redis?: RedisClassifierClient,
+    private readonly windowSize = DEFAULT_DEDUPE_WINDOW,
+  ) { validateWindow(windowSize); }
 
-  async isRelevantDid(_did: string): Promise<boolean> {
-    return true;
-  }
+  async isRelevantDid(_did: string): Promise<boolean> { return true; }
 
   async isDuplicate(sourceId: string, seq: number): Promise<boolean> {
-    if (!this.redis) return false;
-    try {
-      const key = dedupeKey(sourceId, seq);
-      const exists = await this.redis.exists(key);
-      return exists === 1;
-    } catch (err) {
-      console.error('[EventClassifier] Dedupe check failed, assuming not duplicate:', err);
-      return false;
-    }
+    if (!this.redis) return false; // only an isolated in-process test fixture
+    // Redis unavailable means retry, not 'new event'. This prevents silently
+    // re-emitting trusted events during broker/Redis recovery.
+    return isSourceDuplicate(this.redis, sourceId, seq);
   }
 
   async markProcessed(sourceId: string, seq: number): Promise<void> {
     if (!this.redis) return;
-    try {
-      const key = dedupeKey(sourceId, seq);
-      await this.redis.setex(key, DEDUPE_TTL_SECONDS, '1');
-    } catch (err) {
-      // Non-fatal: worst case is a duplicate processing on replay.
-      console.error('[EventClassifier] Failed to mark processed:', err);
-    }
+    await rememberSourceProcessed(this.redis, sourceId, seq, this.windowSize);
   }
 }
 
@@ -131,7 +178,10 @@ export class Phase55AEventClassifier implements AtIngressEventClassifier {
  * Falls back to accepting all DIDs if the Redis lookup fails.
  */
 export class Phase55BEventClassifier implements AtIngressEventClassifier {
-  constructor(private readonly redis: RedisClassifierClient) {}
+  constructor(
+    private readonly redis: RedisClassifierClient,
+    private readonly windowSize = DEFAULT_DEDUPE_WINDOW,
+  ) { validateWindow(windowSize); }
 
   async isRelevantDid(did: string): Promise<boolean> {
     try {
@@ -146,23 +196,11 @@ export class Phase55BEventClassifier implements AtIngressEventClassifier {
   }
 
   async isDuplicate(sourceId: string, seq: number): Promise<boolean> {
-    try {
-      const key = dedupeKey(sourceId, seq);
-      const exists = await this.redis.exists(key);
-      return exists === 1;
-    } catch (err) {
-      console.error('[EventClassifier] Dedupe check failed, assuming not duplicate:', err);
-      return false;
-    }
+    return isSourceDuplicate(this.redis, sourceId, seq);
   }
 
   async markProcessed(sourceId: string, seq: number): Promise<void> {
-    try {
-      const key = dedupeKey(sourceId, seq);
-      await this.redis.setex(key, DEDUPE_TTL_SECONDS, '1');
-    } catch (err) {
-      console.error('[EventClassifier] Failed to mark processed:', err);
-    }
+    await rememberSourceProcessed(this.redis, sourceId, seq, this.windowSize);
   }
 
   /**
@@ -239,6 +277,8 @@ export class ClassifierError extends Error {
 // ---------------------------------------------------------------------------
 
 export interface RedisClassifierClient {
+  zscore(key: string, member: string): Promise<string | null>;
+  eval(script: string, numKeys: number, ...args: (string | number)[]): Promise<unknown>;
   exists(key: string): Promise<number>;
   set(key: string, value: string): Promise<unknown>;
   setex(key: string, ttl: number, value: string): Promise<unknown>;
