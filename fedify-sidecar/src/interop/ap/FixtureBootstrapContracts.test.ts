@@ -267,6 +267,20 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).not.toContain("LRANGE");
   });
 
+  it("requires a running Friendica daemon using its isolated writable PID path", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/bootstrap-friendica-account.sh"),
+      "utf8",
+    );
+    expect(script).toContain("config system pidfile /tmp/friendica-worker.pid");
+    expect(script).toContain("compose up -d friendica-worker");
+    expect(script).toContain("daemon status");
+    expect(script).toContain("worker_ready=false");
+    expect(script).toContain("worker_ready=true");
+    expect(script).toContain("Friendica worker daemon was not ready");
+    expect(script).not.toContain("FRIENDICA_NO_VALIDATION");
+  });
+
   it("prefers the pinned Friendica application log and keeps its diagnostic output bounded", () => {
     const script = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
