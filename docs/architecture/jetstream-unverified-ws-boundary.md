@@ -63,3 +63,15 @@ References:
 - https://github.com/websockets/ws/blob/master/doc/ws.md
 - https://github.com/bluesky-social/jetstream/blob/main/docs/README.md
 - https://github.com/bluesky-social/bsky/blob/main/packages/jetstream/README.md
+
+## Optional topic startup policy
+
+The production prestart topic-governance verifier checks only the
+topics required by enabled producers. `at.jetstream.unverified.v1` is
+required if `ENABLE_AT_JETSTREAM=true`. The private
+`canonical.notifications.dlq.v1` is likewise required only if
+`ENABLE_CANONICAL_NOTIFICATION_DLQ=true`. Both are omitted when
+disabled, so deploying this code does not require provisioning an
+unused topic or disrupt unrelated sidecar startup. When enabled, the
+normal partition, replication, retention and compression checks
+remain mandatory. This is covered by four pure governance tests.

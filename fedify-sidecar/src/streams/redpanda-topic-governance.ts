@@ -9,6 +9,9 @@ export interface TopicGovernanceOptions {
   profile: DurabilityProfile;
   retryLimit: number;
   retryBaseMs: number;
+  /** Optional topics are required only when their producers are enabled. */
+  enableUnverifiedJetstream?: boolean;
+  enableNotificationDlq?: boolean;
 }
 
 interface TopicDefinition {
@@ -49,6 +52,8 @@ export function resolveTopicGovernanceOptionsFromEnv(): TopicGovernanceOptions {
     profile: resolveProfile(process.env["REDPANDA_TOPIC_BOOTSTRAP_PROFILE"]),
     retryLimit: sanitizeInt(process.env["REDPANDA_TOPIC_BOOTSTRAP_RETRIES"], 5, 1, 12),
     retryBaseMs: sanitizeInt(process.env["REDPANDA_TOPIC_BOOTSTRAP_RETRY_BASE_MS"], 250, 50, 15_000),
+    enableUnverifiedJetstream: process.env["ENABLE_AT_JETSTREAM"] === "true",
+    enableNotificationDlq: process.env["ENABLE_CANONICAL_NOTIFICATION_DLQ"] === "true",
   };
 }
 
@@ -65,7 +70,7 @@ export async function bootstrapRedpandaTopics(
 
   await withExponentialBackoff(options, "connect", () => admin.connect());
   try {
-    const topics = buildTopicDefinitions(options.profile);
+    const topics = buildTopicDefinitions(options.profile, options);
     const existingTopics = new Set(
       await withExponentialBackoff(options, "list-topics", () => admin.listTopics()),
     );
@@ -160,7 +165,7 @@ export async function verifyRedpandaTopics(options: TopicGovernanceOptions): Pro
 
   await withExponentialBackoff(options, "connect", () => admin.connect());
   try {
-    const topics = buildTopicDefinitions(options.profile);
+    const topics = buildTopicDefinitions(options.profile, options);
     const existingTopics = new Set(
       await withExponentialBackoff(options, "list-topics", () => admin.listTopics()),
     );
@@ -317,10 +322,18 @@ function buildConfigEntries(
   return entries;
 }
 
-function buildTopicDefinitions(profile: DurabilityProfile): TopicDefinition[] {
+export function buildTopicDefinitions(
+  profile: DurabilityProfile,
+  options: Pick<TopicGovernanceOptions,"enableUnverifiedJetstream"|"enableNotificationDlq"> = {},
+): TopicDefinition[] {
   const profileSettings = PROFILE_SETTINGS[profile];
-
-  const v6Topics = Object.values(V6_TOPICS).map<TopicDefinition>((topic) => ({
+  // Production prestart verifies these topics. Do not fail deployment for
+  // an optional, disabled producer. When enabled, strict durability and
+  // replication governance still applies to the required topic.
+  const v6Topics = Object.values(V6_TOPICS).filter(topic =>
+    (topic.name !== "at.jetstream.unverified.v1" || options.enableUnverifiedJetstream === true) &&
+    (topic.name !== "canonical.notifications.dlq.v1" || options.enableNotificationDlq === true)
+  ).map<TopicDefinition>((topic) => ({
     topic: sanitizeTopicName(topic.name),
     partitions: sanitizeInt(String(topic.partitions), topic.partitions, 1, 512),
     replicationFactor: Math.min(topic.replicationFactor, profileSettings.replicationFactor),
