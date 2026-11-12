@@ -184,8 +184,11 @@ try {
    JSON.stringify({...malformedIntent,lastError:{invalid:"object"}}));
   assert(await scheduler.promoteDue(Date.now())===1,
    "Malformed delayed intent blocked valid work or was appended");
-  assert((await redis.xLen(keys.intent))===2,
-   "Malformed delayed intent was written to ready stream");
+  const acceptedIntents=await redis.xRange(keys.intent,"-","+");
+  assert(acceptedIntents.length===3 &&
+   acceptedIntents.some(entry=>entry.message["intentId"]===readyIntent.intentId) &&
+   !acceptedIntents.some(entry=>entry.message["intentId"]===malformedIntent.intentId),
+   "Malformed delayed intent was written to ready stream or healthy intent was lost");
   assert((await redis.xLen(keys.dlq))===1,
    "Malformed delayed intent was not quarantined");
   assert((await redis.zScore(keys.delayed,malformedIntent.intentId))===null,
