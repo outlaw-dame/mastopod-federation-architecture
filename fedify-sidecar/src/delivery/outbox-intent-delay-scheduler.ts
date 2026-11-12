@@ -183,6 +183,10 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
           return nil
         end
         if safeAcked and #ids > 0 then
+        local groups = redis.pcall('XINFO', 'GROUPS', KEYS[3])
+        if type(groups) ~= 'table' or #groups == 0 then
+          return redis.error_reply('REDIS_STREAM_NO_CONSUMER_GROUP')
+        end
           local readyCount = 0
           local corruptCount = 0
           for _, id in ipairs(ids) do
