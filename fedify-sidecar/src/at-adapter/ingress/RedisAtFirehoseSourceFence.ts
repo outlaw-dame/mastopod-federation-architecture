@@ -4,6 +4,7 @@
  * prove durability and deduplication under failover.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { withRedisFenceDeadline } from "./RedisFenceDeadline.js";
 
 export interface FirehoseFenceRedis {
   eval(script: string, numberOfKeys: number, ...args: (string | number)[]): Promise<unknown>;
@@ -100,10 +101,18 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
     this.leaseTtlMs = leaseTtlMs;
   }
 
+  private evalGuarded(script: string, count: number,
+    ...args: (string | number)[]): Promise<unknown> {
+    const timeoutMs = Math.max(200, Math.min(4000, Math.floor(this.leaseTtlMs / 3)));
+    return withRedisFenceDeadline(
+      this.redis.eval(script, count, ...args), timeoutMs,
+    );
+  }
+
   async tryAcquire(sourceId: string): Promise<FirehoseLease | null> {
     const k = keys(sourceId);
     const token = randomUUID();
-    const value = await this.redis.eval(ACQUIRE, 2, k.owner, k.epoch,
+    const value = await this.evalGuarded(ACQUIRE, 2, k.owner, k.epoch,
       token, String(this.leaseTtlMs));
     if (value === "") return null;
     if (typeof value !== "string" || !value.startsWith(token + ":")) {
@@ -114,7 +123,7 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
 
   async renew(sourceId: string, lease: FirehoseLease): Promise<boolean> {
     const k = keys(sourceId);
-    const result = await this.redis.eval(RENEW, 1, k.owner, lease.token,
+    const result = await this.evalGuarded(RENEW, 1, k.owner, lease.token,
       String(this.leaseTtlMs));
     if (result !== 0 && result !== 1) {
       throw new FirehoseFenceError("Unexpected lease renewal result");
@@ -124,12 +133,12 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
 
   async release(sourceId: string, lease: FirehoseLease): Promise<void> {
     const k = keys(sourceId);
-    await this.redis.eval(RELEASE, 1, k.owner, lease.token);
+    await this.evalGuarded(RELEASE, 1, k.owner, lease.token);
   }
 
   async getResumeCursor(sourceId: string, lease: FirehoseLease): Promise<number | null> {
     const k = keys(sourceId);
-    const result = await this.redis.eval(READ, 3, k.owner, k.committed, k.hot,
+    const result = await this.evalGuarded(READ, 3, k.owner, k.committed, k.hot,
       lease.token);
     if (!Array.isArray(result) || result.length < 1) {
       throw new FirehoseFenceError("Invalid lease checkpoint response");
@@ -142,7 +151,7 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
 
   async markAcknowledged(sourceId: string, lease: FirehoseLease, seq: number): Promise<void> {
     const k = keys(sourceId);
-    const result = await this.redis.eval(NOTE_ACK, 2, k.owner, k.hot,
+    const result = await this.evalGuarded(NOTE_ACK, 2, k.owner, k.hot,
       lease.token, validSeq(seq));
     if (result !== 1) {
       throw new FirehoseFenceError(result === -1
@@ -153,7 +162,7 @@ export class RedisAtFirehoseSourceFence implements FirehoseSourceFence {
 
   async commit(sourceId: string, lease: FirehoseLease, seq: number): Promise<void> {
     const k = keys(sourceId);
-    const result = await this.redis.eval(COMMIT, 3,
+    const result = await this.evalGuarded(COMMIT, 3,
       k.owner, k.hot, k.committed, lease.token, validSeq(seq));
     if (result !== 1) {
       throw new FirehoseFenceError(result === -1

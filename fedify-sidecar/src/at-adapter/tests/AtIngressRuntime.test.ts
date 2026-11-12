@@ -70,6 +70,39 @@ describe("AtIngressRuntime", () => {
     expect(firehoseConsumer.stop).toHaveBeenCalledTimes(1);
   });
 
+  it("commits malformed raw JSON without trapping the Kafka partition",async()=>{
+    const consumer=createMockConsumer();
+    const verifier={handleRawEvent:vi.fn().mockResolvedValue(true)};
+    const runtime=new AtIngressRuntime({
+      config:{ brokers:["localhost:9092"],clientId:"test",
+        consumerGroupId:"test",rawTopic:"at.firehose.raw.v1",
+        sources:[{id:"configured",url:"wss://relay.example",sourceType:"relay"}],
+      },
+      firehoseConsumer:{start:vi.fn().mockResolvedValue(undefined),
+        stop:vi.fn().mockResolvedValue(undefined)},
+      verifier,
+      consumerFactory:()=>consumer,
+    });
+    await runtime.start();
+    const runConfig=consumer.run.mock.calls[0]?.[0] as {
+      eachBatch:(payload:unknown)=>Promise<void>,
+    };
+    const resolveOffset=vi.fn(),heartbeat=vi.fn(async()=>undefined),
+      commitOffsetsIfNecessary=vi.fn(async()=>undefined);
+    await runConfig.eachBatch({
+      batch:{topic:"at.firehose.raw.v1",messages:[
+        {offset:"0",value:Buffer.from("{invalid-json")},
+      ]},
+      resolveOffset,heartbeat,commitOffsetsIfNecessary,
+      isRunning:()=>true,isStale:()=>false,
+    });
+    expect(resolveOffset).toHaveBeenCalledWith("0");
+    expect(heartbeat).toHaveBeenCalledTimes(1);
+    expect(commitOffsetsIfNecessary).toHaveBeenCalledTimes(1);
+    expect(verifier.handleRawEvent).not.toHaveBeenCalled();
+    await runtime.stop();
+  });
+
   it("returns verifier decisions for raw envelopes and drops malformed payloads safely", async () => {
     const verifier = {
       handleRawEvent: vi.fn().mockResolvedValue(false),
@@ -81,7 +114,7 @@ describe("AtIngressRuntime", () => {
         clientId: "at-ingress-runtime-test",
         consumerGroupId: "at-ingress-runtime-test",
         rawTopic: "at.firehose.raw.v1",
-        sources: [],
+        sources: [{ id: "configured", url: "wss://relay.example", sourceType: "relay" }],
       },
       firehoseConsumer: {
         start: vi.fn().mockResolvedValue(undefined),
@@ -102,6 +135,21 @@ describe("AtIngressRuntime", () => {
     ).resolves.toBe(false);
 
     await expect(runtime.handleRawEnvelope({ malformed: true })).resolves.toBe(true);
+    await expect(runtime.handleRawEnvelope({
+      seq: 2, source: "wss://unauthorized.example",
+      eventType: "#commit", receivedAt: "2026-04-03T12:00:00Z",
+      rawCborBase64: "AQID",
+    })).resolves.toBe(true);
+    await expect(runtime.handleRawEnvelope({
+      seq: Number.MAX_SAFE_INTEGER + 1, source: "wss://relay.example",
+      eventType: "#commit", receivedAt: "2026-04-03T12:00:00Z",
+      rawCborBase64: "AQID",
+    })).resolves.toBe(true);
+    await expect(runtime.handleRawEnvelope({
+      seq: -1, source: "wss://relay.example",
+      eventType: "#info", receivedAt: "2026-04-03T12:00:00Z",
+      rawCborBase64: "AQID",
+    })).resolves.toBe(true);
     expect(verifier.handleRawEvent).toHaveBeenCalledTimes(1);
   });
 });

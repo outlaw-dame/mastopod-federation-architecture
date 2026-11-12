@@ -50,8 +50,12 @@ export class AtIngressRuntime {
   private consumer: AtIngressRuntimeConsumerLike | null = null;
   private started = false;
   private readonly startedSourceIds = new Set<string>();
+  private readonly acceptedSources: ReadonlySet<string>;
 
   public constructor(private readonly options: AtIngressRuntimeOptions) {
+    // The raw Kafka topic is untrusted. Only a configured upstream URL may
+    // drive Redis replay tracking or the cryptographic verification pipeline.
+    this.acceptedSources = new Set(options.config.sources.map(s => s.url));
     this.logger = options.logger ?? NOOP_LOGGER;
     this.consumerFactory = options.consumerFactory ?? buildKafkaConsumerFactory(options.config);
   }
@@ -129,6 +133,12 @@ export class AtIngressRuntime {
       return true;
     }
 
+    if (!this.acceptedSources.has(envelope.source)) {
+      // Do not log attacker-supplied URLs or create per-source Redis keys.
+      this.logger.warn("Dropping raw AT firehose envelope for unknown source");
+      return true;
+    }
+    if (envelope.eventType === "#info") return true;
     return this.options.verifier.handleRawEvent(envelope);
   }
 
@@ -155,9 +165,21 @@ export class AtIngressRuntime {
         continue;
       }
 
+      let payload: unknown;
+      try {
+        payload = JSON.parse(value);
+      } catch {
+        // Malformed raw JSON is an untrusted transport error, not a
+        // transient verifier failure. Do not strand the Kafka partition.
+        this.logger.warn("Dropping non-JSON raw AT firehose envelope");
+        resolveOffset(message.offset);
+        await commitOffsetsIfNecessary();
+        await heartbeat();
+        continue;
+      }
       let handled = true;
       try {
-        handled = await this.handleRawEnvelope(JSON.parse(value));
+        handled = await this.handleRawEnvelope(payload);
       } catch (error) {
         this.logger.error("AT ingress runtime failed while handling a raw firehose envelope", {
           topic: batch.topic,
@@ -210,17 +232,26 @@ function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function asAtFirehoseRawEnvelope(event: unknown): AtFirehoseRawEnvelope | null {
-  if (!event || typeof event !== "object" || Array.isArray(event)) {
-    return null;
-  }
+const RAW_EVENTS = new Set(["#commit", "#identity", "#account", "#sync", "#info"]);
+const MAX_RAW_CBOR_BASE64_BYTES = 7 * 1024 * 1024;
 
-  const candidate = event as Record<string, unknown>;
-  return typeof candidate["source"] === "string"
-    && typeof candidate["rawCborBase64"] === "string"
-    && typeof candidate["eventType"] === "string"
-    && typeof candidate["receivedAt"] === "string"
-    && typeof candidate["seq"] === "number"
-    ? event as AtFirehoseRawEnvelope
-    : null;
+function asAtFirehoseRawEnvelope(event: unknown): AtFirehoseRawEnvelope | null {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return null;
+
+  const e = event as Record<string, unknown>;
+  if (typeof e["source"] !== "string" ||
+      e["source"].length === 0 || e["source"].length > 2048 ||
+      typeof e["rawCborBase64"] !== "string" ||
+      e["rawCborBase64"].length === 0 ||
+      e["rawCborBase64"].length > MAX_RAW_CBOR_BASE64_BYTES ||
+      typeof e["eventType"] !== "string" || !RAW_EVENTS.has(e["eventType"]) ||
+      typeof e["receivedAt"] !== "string" ||
+      e["receivedAt"].length > 64 ||
+      !Number.isSafeInteger(e["seq"])) return null;
+  const seq = e["seq"] as number;
+  if (seq < 0 && !(e["eventType"] === "#info" && seq === -1)) return null;
+  const did = e["did"];
+  if (did !== undefined && did !== null &&
+      (typeof did !== "string" || did.length > 2048)) return null;
+  return event as AtFirehoseRawEnvelope;
 }
