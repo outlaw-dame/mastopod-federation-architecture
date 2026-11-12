@@ -103,6 +103,10 @@ import { RedisAtFirehoseCursorStore } from "./at-adapter/firehose/AtFirehoseCurs
 import { DefaultAtFirehoseEventEncoder } from "./at-adapter/firehose/AtFirehoseEventEncoder.js";
 import { DefaultAtFirehosePublisher } from "./at-adapter/firehose/AtFirehosePublisher.js";
 import { AtFirehoseRuntime } from "./at-adapter/firehose/AtFirehoseRuntime.js";
+import {
+  selectExternalAtIngestionSource,
+  requireVerifiedExternalFirehoseReady,
+} from "./at-adapter/ingress/AtExternalIngestionPolicy.js";
 import { DefaultAtRepoDiffBuilder } from "./at-adapter/repo/AtRepoDiffBuilder.js";
 // AT adapter — auth / session
 import { DefaultAtSessionTokenService } from "./at-adapter/auth/DefaultAtSessionTokenService.js";
@@ -597,7 +601,6 @@ const config = {
     process.env["ENABLE_CANONICAL_EVENT_LOG"] !== "false" &&
     (process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true" ||
       process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true" ||
-      process.env["ENABLE_AT_JETSTREAM"] === "true" ||
       process.env["ENABLE_MODERATION_BRIDGE_API"] === "true" ||
       process.env["ENABLE_MRF_ADMIN_API"] === "true" ||
       process.env["ENABLE_ACTIVITYPUB_REPORT_FORWARDER"] === "true" ||
@@ -605,12 +608,12 @@ const config = {
   enableCanonicalNotifications:
     process.env["ENABLE_CANONICAL_NOTIFICATIONS"] !== "false" &&
     (process.env["ENABLE_PROTOCOL_BRIDGE_AP_TO_AT"] === "true" ||
-      process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true" ||
-      process.env["ENABLE_AT_JETSTREAM"] === "true"),
+      process.env["ENABLE_PROTOCOL_BRIDGE_AT_TO_AP"] === "true"),
   canonicalTopic: process.env["CANONICAL_TOPIC"] || CANONICAL_V1_TOPIC,
 
-  // ATProto Jetstream (lightweight JSON firehose from Bluesky infrastructure).
-  // ENABLE_AT_JETSTREAM=true activates ingestion.
+  // ATProto Jetstream is an unsigned, optional alternative to the verified
+  // external Sync v1.1 firehose; the two sources are mutually exclusive.
+  // ENABLE_AT_JETSTREAM=true activates only unverified staging ingestion.
   // JETSTREAM_URL overrides the default endpoint (wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post).
   // JETSTREAM_MAX_EVENTS: if set, service exits cleanly after N published events (useful for smoke tests).
   enableAtJetstream: process.env["ENABLE_AT_JETSTREAM"] === "true",
@@ -882,10 +885,24 @@ function populateCapabilityHealthGauges(doc: import("./capabilities/types.js").P
 // ============================================================================
 
 async function main() {
+  // Validate before opening Redis/Kafka sockets or reporting provider readiness.
+  const externalAtIngestionSource = selectExternalAtIngestionSource({
+    enableVerifiedFirehose: config.enableAtExternalFirehose,
+    enableJetstream: config.enableAtJetstream,
+  });
+  if (externalAtIngestionSource === "verified") {
+    const configuredSources = parseAtExternalFirehoseSources(
+      process.env["AT_EXTERNAL_FIREHOSE_SOURCES"],
+    );
+    if (configuredSources.length === 0) {
+      throw new Error("Verified AT external firehose requires at least one configured source");
+    }
+  }
   logger.info("Starting Fedify Sidecar for ActivityPods", {
     version: config.version,
     nodeEnv: config.nodeEnv,
     startupMode: config.startupMode,
+    externalAtIngestionSource,
   });
 
   const activityPubOutboundDeliveryPolicy = {
@@ -3743,6 +3760,7 @@ async function main() {
                   ...(spamEvaluator ? { spamEvaluator } : {}),
                 });
 
+                requireVerifiedExternalFirehoseReady(externalIngressBootstrap);
                 if (externalIngressBootstrap.kind === "ready") {
                   await externalIngressBootstrap.runtime.start();
                   atExternalFirehoseRuntime = externalIngressBootstrap.runtime;
@@ -3769,14 +3787,14 @@ async function main() {
                     `External AT firehose intake requested but not started: ${externalIngressBootstrap.message}`,
                   );
                 }
-              } catch (error: any) {
-                logger.error(
-                  {
-                    enableAtExternalFirehose: true,
-                    error: error?.message || String(error),
-                  },
-                  "External AT firehose intake requested but configuration validation failed",
-                );
+              } catch (error: unknown) {
+                // Do not claim a healthy application when the explicitly
+                // selected authoritative source failed to start.
+                logger.error({
+                  enableAtExternalFirehose: true,
+                  errorCode: error instanceof Error ? error.name : "UNKNOWN",
+                }, "External verified AT firehose startup failed");
+                throw new Error("External verified AT firehose startup failed", {cause: error});
               }
             }
 
