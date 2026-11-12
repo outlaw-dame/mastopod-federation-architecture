@@ -1,9 +1,106 @@
 services:
+  mastodon-wire-recorder:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.interop
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment:
+      NODE_ENV: test
+      AP_WIRE_RECORDER_HOST: 0.0.0.0
+      AP_WIRE_RECORDER_PORT: "8788"
+      AP_WIRE_RECORDER_UPSTREAM: http://mastodon-web-app:3000
+      AP_WIRE_RECORDER_EVIDENCE_PATH: /evidence/mastodon.jsonl
+      AP_WIRE_RECORDER_MAX_BODY_BYTES: "2097152"
+      AP_WIRE_RECORDER_MAX_RESPONSE_BYTES: "4194304"
+    volumes:
+      - ./runtime/wire:/evidence
+    networks:
+      - ap-interop
+
+  gotosocial-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://gotosocial-app:8080", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/gotosocial.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  akkoma-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://akkoma-app:4000", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/akkoma.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  pixelfed-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://pixelfed-app:8080", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/pixelfed.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  misskey-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://misskey-app:3000", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/misskey.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  friendica-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://friendica-app:80", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/friendica.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  castopod-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://castopod-app:8000", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/castopod.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  peertube-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://peertube-app:9000", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/peertube.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  loops-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://loops-app:8080", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/loops.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
+  owncast-wire-recorder:
+    build: { context: ../.., dockerfile: Dockerfile.interop }
+    working_dir: /app
+    command: ["node", "interop/ap/scripts/activitypub-wire-recording-proxy.mjs"]
+    environment: { NODE_ENV: test, AP_WIRE_RECORDER_HOST: 0.0.0.0, AP_WIRE_RECORDER_PORT: "8788", AP_WIRE_RECORDER_UPSTREAM: "http://owncast-app:8080", AP_WIRE_RECORDER_EVIDENCE_PATH: "/evidence/owncast.jsonl" }
+    volumes: ["./runtime/wire:/evidence"]
+    networks: [ap-interop]
+
   ap-proof-router:
-    image: caddy:2.8-alpine
+    image: caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17
     profiles: ["real-activitypods"]
+    depends_on:
+      mastodon-wire-recorder:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      ACTIVITYPODS_RETURN_HOST: ${ACTIVITYPODS_RETURN_HOST:-host.docker.internal}
+      ACTIVITYPODS_RETURN_PORT: ${ACTIVITYPODS_RETURN_PORT:-3000}
     volumes:
       - ./caddy/Caddyfile.real-activitypods:/etc/caddy/Caddyfile:ro
       - ./runtime/certs:/certs:ro
@@ -11,7 +108,12 @@ services:
       - "127.0.0.1:443:443"
     networks:
       ap-interop:
+        # Keep the proof router address deterministic so the Friendica-only
+        # authoritative DNS fixture can publish a real A record. This remains
+        # inside the test network's dedicated RFC1918 subnet.
+        ipv4_address: 172.31.240.254
         aliases:
+          - sidecar
           - activitypods
           - gotosocial
           - mastodon
@@ -21,6 +123,9 @@ services:
           - misskey.test
           - friendica.test
           - castopod.test
+          - peertube.test
+          - loops.test
+          - owncast.test
           - activitypods.test
 
   # Containerized real-ActivityPods sidecar proof. Keeping this service on the
@@ -28,22 +133,33 @@ services:
   # exercise HTTPS federation without weakening the production SSRF policy.
   fedify-sidecar:
     environment:
+      # The real proof needs the debug-only post-forward receipt so evidence can
+      # bind a raw Redis envelope to successful ActivityPods forwarding without
+      # restoring high-cardinality success logs to normal production info level.
+      LOG_LEVEL: debug
       # Directional, Docker-network-only alias for the host signing recorder.
-      # The public actor/key surface remains HTTPS through ap-proof-router.
+      # The public ActivityPods actor/key surface remains HTTPS through
+      # ap-proof-router, while sidecar-owned service actors are published on the
+      # independently routed https://sidecar authority.
       ACTIVITYPODS_URL: http://activitypods-internal:3001
+      ACTIVITYPODS_PUBLIC_URL: https://activitypods
       ACTIVITYPODS_TOKEN: ${ACTIVITYPODS_TOKEN:?ACTIVITYPODS_TOKEN is required}
       ATPROTO_PASSWORD_VERIFY_TOKEN: ${ATPROTO_PASSWORD_VERIFY_TOKEN:-}
       SIDECAR_TOKEN: ${SIDECAR_TOKEN:?SIDECAR_TOKEN is required}
       SIDECAR_STARTUP_MODE: blocking
-      DOMAIN: activitypods
-      AP_RELAY_LOCAL_ACTOR_URI: https://activitypods/users/relay
+      DOMAIN: sidecar
+      AP_RELAY_LOCAL_ACTOR_URI: https://sidecar/users/relay
       REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: "true"
       REDIS_STREAM_PAYLOAD_COMPRESSION_MIN_BYTES: "1"
       REDIS_STREAM_PAYLOAD_BROTLI_QUALITY: "0"
-      ENABLE_INBOUND_WORKER: "false"
+      ENABLE_INBOUND_WORKER: ${AP_INTEROP_ENABLE_INBOUND_WORKER:-false}
       ENABLE_OUTBOUND_WORKER: "true"
       ENABLE_OUTBOX_INTENT_WORKER: "true"
-      ENABLE_FEDIFY_RUNTIME_INTEGRATION: "false"
+      # Required for the same runtime that performs outbound delivery to also
+      # publish /users/relay and its locally-managed public key. This is the
+      # production service-actor authority path under test, not a fixture-only
+      # actor document.
+      ENABLE_FEDIFY_RUNTIME_INTEGRATION: "true"
       ENABLE_FEP_3AB2_STREAMING: "false"
       ENABLE_OPENSEARCH_INDEXER: "false"
       ENABLE_XRPC_SERVER: "false"

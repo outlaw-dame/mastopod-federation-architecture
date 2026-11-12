@@ -105,6 +105,7 @@ jobs:
           NODE
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: redis-stream-brotli-queue-path-${{ github.run_id }}-${{ github.run_attempt }}
           path: measurements/redis-stream-brotli-queue-path/

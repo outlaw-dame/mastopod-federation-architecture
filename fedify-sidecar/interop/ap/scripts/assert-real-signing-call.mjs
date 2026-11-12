@@ -17,6 +17,11 @@ if (origin.ok !== true || origin.mode !== 'external' || origin.durableHandoffQue
   process.exit(1);
 }
 const { actorUri, activityId, remoteActorUri } = origin;
+const activityType = origin.activityType ?? 'Follow';
+const objectUri = activityType === 'Follow' ? remoteActorUri : origin.objectUri;
+if (!['Follow', 'Create'].includes(activityType) || typeof objectUri !== 'string' || !objectUri) {
+  throw new Error('unsupported activity type or missing object identity');
+}
 if (![actorUri, activityId, remoteActorUri].every(value => typeof value === 'string' && value.length > 0)) {
   console.error('external origin evidence is missing actorUri, activityId, or remoteActorUri');
   process.exit(1);
@@ -76,7 +81,7 @@ if (!actorUrl || actorUrl.search) {
   console.error('external origin actorUri cannot own a signing key');
   process.exit(1);
 }
-actorUrl.pathname = `${actorUrl.pathname.replace(/\/$/u, '')}/keys/main`;
+actorUrl.hash = 'main-key';
 const expectedKeyId = actorUrl.toString();
 
 const rows = fs.existsSync(evidencePath)
@@ -119,7 +124,8 @@ for (const row of rows) {
     if (requestItem.body?.encoding !== 'utf8' || typeof requestItem.body?.bytes !== 'string') return;
     let activity;
     try { activity = JSON.parse(requestItem.body.bytes); } catch { return; }
-    if (activity?.type !== 'Follow' || activity?.id !== activityId || activity?.actor !== actorUri || activity?.object !== remoteActorUri) return;
+    const signedObjectUri = typeof activity?.object === 'string' ? activity.object : activity?.object?.id;
+    if (activity?.type !== activityType || activity?.id !== activityId || activity?.actor !== actorUri || signedObjectUri !== objectUri) return;
     if (!result || result.ok !== true || result.requestId !== requestItem.requestId) return;
     const keyId = result.meta?.keyId;
     const signature = result.outHeaders?.Signature;
@@ -140,7 +146,10 @@ for (const row of rows) {
       activityId,
       bodySha256Base64,
       keyId,
-      signedHeaders: result.meta?.signedHeaders || null
+      signedHeaders: result.meta?.signedHeaders || null,
+      signature,
+      date,
+      digest
     });
   });
 }
@@ -150,20 +159,26 @@ if (matches.length !== 1 || successfulPostCalls.length !== 1) {
   process.exit(1);
 }
 
+const match = matches[0];
 const evidence = {
   schema: 'activitypods.activitypub.real-signing-proof.v1',
   ok: true,
   actorUri,
   targetHost,
   activityId,
+  activityType,
+  objectUri,
   remoteActorUri,
   remoteDeliveryTarget,
-  deliveredInboxPaths: [...new Set(matches.map(match => match.targetPath))],
-  bodySha256Base64: [...new Set(matches.map(match => match.bodySha256Base64))],
+  deliveredInboxPaths: [match.targetPath],
+  bodySha256Base64: [match.bodySha256Base64],
   successfulSigningCalls: matches.length,
   allSuccessfulPostSigningCalls: successfulPostCalls.length,
-  signerKeyIds: [...new Set(matches.map(match => match.keyId))],
-  requestIds: [...new Set(matches.map(match => match.requestId))]
+  signerKeyIds: [match.keyId],
+  requestIds: [match.requestId],
+  signature: match.signature,
+  date: match.date,
+  digest: match.digest
 };
 
 const json = `${JSON.stringify(evidence, null, 2)}\n`;

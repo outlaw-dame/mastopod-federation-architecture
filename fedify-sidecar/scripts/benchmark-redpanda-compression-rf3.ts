@@ -8,7 +8,7 @@ import { resolveRedpandaCompression } from "../src/streams/kafka-compression.js"
 const { Kafka, logLevel } = kafkaJs;
 const IMAGE = process.env["REDPANDA_RF3_IMAGE"] ?? "redpandadata/redpanda:v24.1.3";
 const OUTPUT = process.env["REDPANDA_RF3_OUTPUT"] ?? "../measurements/redpanda-compression-rf3/summary.json";
-const REPEATS = positive("REDPANDA_RF3_REPEATS", 3);
+const REPEATS = positive("REDPANDA_RF3_REPEATS", 4);
 const MESSAGE_COUNT = positive("REDPANDA_RF3_MESSAGES", 4_000);
 const LATENCY_COUNT = positive("REDPANDA_RF3_LATENCY_MESSAGES", 300);
 const BATCH = positive("REDPANDA_RF3_BATCH", 100);
@@ -47,12 +47,19 @@ type TopicSpec = {
 void main();
 
 async function main(): Promise<void> {
+  if (REPEATS !== arms.length) {
+    throw new Error(`REDPANDA_RF3_REPEATS must equal ${arms.length} for a balanced Latin-square run`);
+  }
   mkdirSync(dir(OUTPUT), { recursive: true });
   docker(["pull", IMAGE]);
   const runs: Run[] = [];
   try {
     for (let repeat = 1; repeat <= REPEATS; repeat += 1) {
-      for (const arm of arms) {
+      // A balanced Latin-square rotation prevents a fixed runner-age position
+      // from being attributed to one codec. Four arms require four repeats.
+      const offset = (repeat - 1) % arms.length;
+      const orderedArms = [...arms.slice(offset), ...arms.slice(0, offset)];
+      for (const arm of orderedArms) {
         console.log(`\n=== RF3 repeat ${repeat}/${REPEATS}; ${arm.id} ===`);
         configure(arm);
         await startCluster();
@@ -64,23 +71,9 @@ async function main(): Promise<void> {
   } finally { stopCluster(); }
 
   const medians = arms.map((arm) => medianArm(arm.id, runs));
-  const gzip = must(medians.find((entry) => entry.arm === "gzip"), "gzip");
-  const comparisons = medians.map((entry) => ({
-    arm: entry.arm,
-    ratiosToGzip: {
-      topicDisk: r(entry.totalTopicDiskBytes, gzip.totalTopicDiskBytes),
-      clusterNetwork: r(entry.cluster.producerNetworkBytes + entry.cluster.consumerNetworkBytes, gzip.cluster.producerNetworkBytes + gzip.cluster.consumerNetworkBytes),
-      producerCpu: r(entry.producer.cpuMs, gzip.producer.cpuMs),
-      consumerCpu: r(entry.consumer.cpuMs, gzip.consumer.cpuMs),
-      brokerCpu: r(entry.cluster.producerCpuMs + entry.cluster.consumerCpuMs, gzip.cluster.producerCpuMs + gzip.cluster.consumerCpuMs),
-      totalCpu: r(entry.totalCpuMsPerThousandEvents, gzip.totalCpuMsPerThousandEvents),
-      throughput: r(entry.producer.eventsPerSecond, gzip.producer.eventsPerSecond),
-      singletonP95: r(entry.producer.singletonAckMs.p95, gzip.producer.singletonAckMs.p95),
-      singletonP99: r(entry.producer.singletonAckMs.p99, gzip.producer.singletonAckMs.p99),
-    },
-  }));
+  const comparisons = arms.map((arm) => pairedComparison(arm.id, runs));
   const summary = {
-    version: 1,
+    version: 2,
     generatedAt: new Date().toISOString(),
     nodeVersion: process.versions.node,
     redpandaImage: IMAGE,
@@ -94,6 +87,8 @@ async function main(): Promise<void> {
       singletonLatencyMessages: LATENCY_COUNT,
       batchSize: BATCH,
       freshClusterPerArmPerRepeat: true,
+      latinSquareArmOrder: true,
+      pairedRatiosWithinRepeat: true,
       isolatedWarmupTopic: true,
       explicitRf3MembershipGate: true,
       storageMetric: "sum of replicated disk bytes for the measured bulk topic only; the separate singleton latency topic is excluded so storage, raw-byte, event-count, CPU, and network metrics describe the same bulk workload",
@@ -218,6 +213,43 @@ function medianArm(arm: string, runs: Run[]): Median {
   };
   const totalCpu = result.producer.cpuMs + result.consumer.cpuMs + result.cluster.producerCpuMs + result.cluster.consumerCpuMs;
   return { ...result, totalCpuMsPerThousandEvents: round(totalCpu / messages * 1000), diskBytesPerEvent: round(result.totalTopicDiskBytes / messages), clusterNetworkBytesPerEvent: round((result.cluster.producerNetworkBytes + result.cluster.consumerNetworkBytes) / messages) };
+}
+
+function pairedComparison(arm: string, runs: Run[]) {
+  const pairs = Array.from({ length: REPEATS }, (_, index) => {
+    const repeat = index + 1;
+    const candidate = must(runs.find((run) => run.repeat === repeat && run.arm === arm), `${arm} repeat ${repeat}`);
+    const gzip = must(runs.find((run) => run.repeat === repeat && run.arm === "gzip"), `gzip repeat ${repeat}`);
+    const candidateTotalCpu = candidate.producer.cpuMs + candidate.consumer.cpuMs + candidate.cluster.producerCpuMs + candidate.cluster.consumerCpuMs;
+    const gzipTotalCpu = gzip.producer.cpuMs + gzip.consumer.cpuMs + gzip.cluster.producerCpuMs + gzip.cluster.consumerCpuMs;
+    return {
+      topicDisk: r(candidate.totalTopicDiskBytes, gzip.totalTopicDiskBytes),
+      clusterNetwork: r(candidate.cluster.producerNetworkBytes + candidate.cluster.consumerNetworkBytes, gzip.cluster.producerNetworkBytes + gzip.cluster.consumerNetworkBytes),
+      producerCpu: r(candidate.producer.cpuMs, gzip.producer.cpuMs),
+      consumerCpu: r(candidate.consumer.cpuMs, gzip.consumer.cpuMs),
+      brokerCpu: r(candidate.cluster.producerCpuMs + candidate.cluster.consumerCpuMs, gzip.cluster.producerCpuMs + gzip.cluster.consumerCpuMs),
+      totalCpu: r(candidateTotalCpu, gzipTotalCpu),
+      throughput: r(candidate.producer.eventsPerSecond, gzip.producer.eventsPerSecond),
+      singletonP95: r(candidate.producer.singletonAckMs.p95, gzip.producer.singletonAckMs.p95),
+      singletonP99: r(candidate.producer.singletonAckMs.p99, gzip.producer.singletonAckMs.p99),
+      singletonP95DeltaMs: round(candidate.producer.singletonAckMs.p95 - gzip.producer.singletonAckMs.p95),
+      singletonP99DeltaMs: round(candidate.producer.singletonAckMs.p99 - gzip.producer.singletonAckMs.p99),
+    };
+  });
+  const value = (key: keyof typeof pairs[number]) => median(pairs.map((pair) => pair[key]));
+  return {
+    arm,
+    ratiosToGzip: {
+      topicDisk: value("topicDisk"), clusterNetwork: value("clusterNetwork"),
+      producerCpu: value("producerCpu"), consumerCpu: value("consumerCpu"), brokerCpu: value("brokerCpu"),
+      totalCpu: value("totalCpu"), throughput: value("throughput"),
+      singletonP95: value("singletonP95"), singletonP99: value("singletonP99"),
+    },
+    absoluteTailDeltaMs: {
+      p95: value("singletonP95DeltaMs"),
+      p99: value("singletonP99DeltaMs"),
+    },
+  };
 }
 
 function mixedMessages(count: number, forcedBytes?: number) {

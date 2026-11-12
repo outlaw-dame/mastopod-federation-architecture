@@ -1,0 +1,118 @@
+services:
+  loops-db:
+    image: mysql:8.4@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+    environment:
+      MYSQL_DATABASE: loops
+      MYSQL_USER: loops
+      MYSQL_PASSWORD: ${LOOPS_DB_PASSWORD:?LOOPS_DB_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${LOOPS_DB_ROOT_PASSWORD:?LOOPS_DB_ROOT_PASSWORD is required}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - ap_interop_loops_db:/var/lib/mysql
+    networks:
+      - ap-interop
+
+  loops-redis:
+    image: redis:8-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${LOOPS_REDIS_PASSWORD:?LOOPS_REDIS_PASSWORD is required}"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$LOOPS_REDIS_PASSWORD\" --no-auth-warning ping | grep -qx PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    environment:
+      LOOPS_REDIS_PASSWORD: ${LOOPS_REDIS_PASSWORD:?LOOPS_REDIS_PASSWORD is required}
+    volumes:
+      - ap_interop_loops_redis:/data
+    networks:
+      - ap-interop
+
+  loops-app:
+    image: ap-loops:b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
+    build:
+      context: ${LOOPS_SOURCE_DIR:-../../../loops}
+      dockerfile: Dockerfile
+    depends_on:
+      loops-db:
+        condition: service_healthy
+      loops-redis:
+        condition: service_healthy
+    environment: &loops-environment
+      APP_URL: https://loops.test
+      APP_NAME: Loops Interop
+      APP_ENV: production
+      APP_KEY: ${LOOPS_APP_KEY:?LOOPS_APP_KEY is required}
+      APP_DEBUG: "false"
+      DB_CONNECTION: mysql
+      DB_HOST: loops-db
+      DB_PORT: "3306"
+      DB_DATABASE: loops
+      DB_USERNAME: loops
+      DB_PASSWORD: ${LOOPS_DB_PASSWORD:?LOOPS_DB_PASSWORD is required}
+      REDIS_CLIENT: phpredis
+      REDIS_HOST: loops-redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${LOOPS_REDIS_PASSWORD:?LOOPS_REDIS_PASSWORD is required}
+      QUEUE_CONNECTION: redis
+      CACHE_STORE: redis
+      SESSION_DRIVER: database
+      FILESYSTEM_DISK: local
+      MAIL_MAILER: log
+      MAIL_FROM_ADDRESS: interop@loops.invalid
+      MAIL_FROM_NAME: Loops Interop
+      LOOPS_CAPTCHA: "false"
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: info
+      SSL_MODE: "off"
+      AUTORUN_ENABLED: "true"
+      AUTORUN_LARAVEL_MIGRATION: "true"
+      AUTORUN_LARAVEL_MIGRATION_ISOLATION: "true"
+      AUTORUN_LARAVEL_STORAGE_LINK: "true"
+      AUTORUN_LARAVEL_EVENT_CACHE: "true"
+      AUTORUN_LARAVEL_ROUTE_CACHE: "true"
+      AUTORUN_LARAVEL_VIEW_CACHE: "true"
+      AUTORUN_LARAVEL_CONFIG_CACHE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+    volumes:
+      - ap_interop_loops_storage:/var/www/html/storage
+      - ./runtime/certs:/interop/runtime/certs:ro
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+    networks:
+      - ap-interop
+
+  loops-horizon:
+    image: ap-loops:b01ed9d9b8b49571c7cc50e4dce985dcb1869cb3
+    command: ["php", "artisan", "horizon"]
+    depends_on:
+      loops-app:
+        condition: service_healthy
+    environment:
+      <<: *loops-environment
+      AUTORUN_ENABLED: "false"
+      AUTORUN_LARAVEL_MIGRATION: "false"
+      AUTORUN_LARAVEL_CONFIG_CACHE: "true"
+    healthcheck:
+      test: ["CMD", "php", "artisan", "horizon:status"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - ap_interop_loops_storage:/var/www/html/storage
+      - ./runtime/certs:/interop/runtime/certs:ro
+      - ./fixtures/php/interop-ca.ini:/usr/local/etc/php/conf.d/zz-interop-ca.ini:ro
+    networks:
+      - ap-interop
+
+volumes:
+  ap_interop_loops_db:
+  ap_interop_loops_redis:
+  ap_interop_loops_storage:

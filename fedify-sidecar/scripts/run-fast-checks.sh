@@ -37,6 +37,8 @@ npm exec -- vitest run \
   src/security/tests/ActivityPubEgressPolicy.test.ts \
   src/security/tests/ActivityPubEgressPolicyPhase5Regression.test.ts \
   src/security/tests/ActivityPubPinnedDns.test.ts \
+  src/utils/tests/searchConsent.test.ts \
+  src/search/tests/SearchIndexerService.test.ts \
   src/at-adapter/external/ExternalAtSessionStore.test.ts \
   src/at-adapter/oauth/OAuthRefreshTokenStore.scalability.test.ts \
   src/atproto/repo/AtprotoRepoRegistry.scalability.test.ts \
@@ -62,6 +64,7 @@ npm exec -- vitest run \
   src/at-adapter/tests/AtIngressWebhookForwarder.test.ts \
   src/admin/mrf/routes.registry.test.ts \
   src/fep3ab2/tests/Fep3ab2ClientIpBoundary.test.ts \
+  src/fep3ab2/tests/Fep3ab2Dispatcher.test.ts \
   src/federation/FedifyKvAdapter.test.ts \
   src/federation/fep8fcf/FedifyFollowersSyncSender.test.ts \
   src/federation/fep8fcf/FollowersSyncService.singleflight.test.ts \
@@ -73,4 +76,9 @@ npm exec -- vitest run \
   src/core-domain/identity/RedisIdentityBindingRepository.test.ts \
   src/interop/ap/FixtureMetadata.test.ts \
   src/interop/ap/FixtureBoundaryRunner.test.ts \
+  src/interop/ap/RealWireSignatureAssertion.test.ts \
+  src/interop/ap/WireRsaVerification.test.ts \
+  src/interop/ap/RealContentExchange.test.ts \
+  src/interop/ap/NativeIsolation.test.ts \
+  src/interop/ap/RealSigningCallAssertion.test.ts \
   src/interop/ap/FixtureCorpus.test.ts
