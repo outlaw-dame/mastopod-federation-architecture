@@ -58,6 +58,35 @@ and causal relevance have not been proven. A `200` raw actor GET does not
 establish a successful Friendica signed GET, nor does a `202` delivery
 establish HTTP-signature trust.
 
+## False-lead isolation and worker status (2026-11-12)
+
+A disposable test-router experiment redirected only `https://friendica.test/`
+to the valid local actor profile. The exact-head multi-implementation run
+[43317124844](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43317124844)
+removed the earlier 503 mentions from the bounded log counters, **but the
+verified result remained `NATIVE_PROOF_OUTCOME=failure` and
+`EXTERNAL_PROOF_OUTCOME=failure`**. Both `contact` and `inbox-entry`
+acceptance evidence stayed empty. The experiment was reverted in
+`18ad8fa`; do not present the site-root 503 as the established failure cause.
+
+The Friendica app config reports `system.debugging => true`, but the
+existing `php bin/console.php daemon status` probe in the worker container
+prints `Daemon process isn't running (/var/run/friendica.pid)`. Meanwhile
+the worker container starts `/cron.sh`, which invokes Friendica's foreground
+daemon. The status reading is actionable but **does not independently prove
+the process has terminated**: verify actual PID/process state, worker exit
+code, and `process`/workerqueue database records before changing its service
+lifecycle. No pending workerqueue rows were present at the failure checkpoint.
+
+Next isolate the **first** Friendica receiving-side rejection in the path
+`Inbox::post → Receiver::processInbox → HTTPSignature::getSigner →
+Receiver::prepareObjectData/fetchObjectType → Processor::followUser`.
+Capture bounded stage presence/absence, signed actor GET outcomes, object
+type, local-user target resolution, and queue processing without dumping raw
+signed payloads or disabling URL/SSRF protection. The existing remote actor
+`apcontact` and local actor JSON success do not establish these downstream
+stages.
+
 ## Exact next diagnostic sequence (do not weaken pass conditions)
 
 1. Verify the disposable Friendica application config genuinely enables logging **after** installation, and read only bounded log-category counts; never upload raw signed requests, body text, credentials or private actor data.
