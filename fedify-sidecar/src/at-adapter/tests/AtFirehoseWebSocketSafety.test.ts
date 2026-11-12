@@ -141,6 +141,42 @@ describe("verified Sync firehose WebSocket resource and cursor safety",()=>{
     expect(await cursor.getCommittedCursor("fixture")).toBeNull();
   });
 
+  it("ignores a stale socket error after the replacement heartbeat becomes active",async()=>{
+    let connections=0;
+    const url=await serve(socket=>{
+      connections++;
+      if(connections===1) {
+        setTimeout(()=>socket.terminate(),100);
+      }
+    });
+    const cursor=new InMemoryAtFirehoseCursorManager();
+    const consumer=new DefaultAtFirehoseConsumer(decoder,cursor,publishAdapter(async()=>undefined));
+    consumers.push(consumer);
+    await consumer.start({id:"fixture",url,sourceType:"relay"});
+    const holder=consumer as unknown as {activeConnections:Map<string,{
+      ws: import("ws").WebSocket|null;
+      heartbeatSocket:import("ws").WebSocket|null;
+      pingInterval:NodeJS.Timeout|null;
+    }>};
+    const connection=holder.activeConnections.get("fixture");
+    expect(connection).toBeDefined();
+    const previousSocket=connection!.ws;
+    expect(previousSocket).not.toBeNull();
+    await until(()=>connections>=2,6500);
+    await until(()=>connection!.heartbeatSocket!==null &&
+      connection!.heartbeatSocket!==previousSocket && connection!.pingInterval!==null,2000);
+    const currentSocket=connection!.heartbeatSocket;
+    const heartbeat=connection!.pingInterval;
+    // The old once(error) listener is still installed after a clean close.
+    // It must never cancel the replacement connection's heartbeat.
+    previousSocket!.emit("error",new Error("late error from previous connection"));
+    expect(connection!.heartbeatSocket).toBe(currentSocket);
+    expect(connection!.pingInterval).toBe(heartbeat);
+    await consumer.stop("fixture");
+    expect(connection!.pingInterval).toBeNull();
+    expect(connection!.heartbeatSocket).toBeNull();
+  },10000);
+
   it("refuses trusted topics and unencrypted non-loopback upstreams",async()=>{
     const cursor=new InMemoryAtFirehoseCursorManager();
     const publisher=publishAdapter(async()=>undefined);
