@@ -15,14 +15,15 @@
  *
  * Security:
  *   - Webhook URLs are validated before registration.
- *   - The HMAC-SHA256 signature is included in X-Bridge-Secret header.
- *   - TLS is required for all webhook endpoints (wss:// or https://).
+ *   - Legacy X-Bridge-Secret is a raw shared secret, NOT an HMAC signature.
+ *     Replacing it requires coordinated downstream signature verification.
+ *   - HTTPS is required except explicit loopback-only development.
  *   - Request timeouts prevent slow consumers from blocking the pipeline.
  *
  * Ref: Phase 5.5 spec — downstream integration
  */
 
-import { AtIngressEvent } from './AtIngressEvents.js';
+import type { AtIngressEvent } from './AtIngressEvents.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -30,6 +31,9 @@ import { AtIngressEvent } from './AtIngressEvents.js';
 
 /** Maximum events per webhook delivery batch. */
 const BATCH_SIZE = 50;
+
+/** Independent endpoints are processed concurrently, never more than four. */
+const MAX_ENDPOINT_CONCURRENCY = 4;
 
 /** Maximum time to wait for a webhook response (ms). */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -92,18 +96,34 @@ export class AtIngressWebhookForwarder {
   async forwardBatch(events: AtIngressEvent[]): Promise<ForwarderResult[]> {
     if (events.length === 0) return [];
 
-    const results: ForwarderResult[] = [];
+    const endpoints = [...this.endpoints.values()];
+    if (endpoints.length === 0) return [];
 
-    for (const endpoint of this.endpoints.values()) {
-      // Process in chunks of BATCH_SIZE
-      for (let i = 0; i < events.length; i += BATCH_SIZE) {
-        const chunk = events.slice(i, i + BATCH_SIZE);
-        const result = await this.deliverWithRetry(endpoint, chunk);
-        results.push(result);
+    // Distinct endpoints must not block each other. Keep chunks serialized
+    // *within* each endpoint, preserve deterministic result order, and bound
+    // live HTTP requests/serialized bodies regardless of endpoint count.
+    const orderedResults: ForwarderResult[][] = new Array(endpoints.length);
+    let nextEndpoint = 0;
+    const worker = async (): Promise<void> => {
+      while (nextEndpoint < endpoints.length) {
+        const index = nextEndpoint++;
+        const endpoint = endpoints[index]!;
+        const endpointResults: ForwarderResult[] = [];
+        for (let offset = 0; offset < events.length; offset += BATCH_SIZE) {
+          const chunk = events.slice(offset, offset + BATCH_SIZE);
+          // Serialize once per chunk/endpoint, not once per retry. Retain only
+          // the active chunk rather than all serialized batches in memory.
+          const body = JSON.stringify(chunk);
+          endpointResults.push(await this.deliverWithRetry(endpoint, body, chunk.length));
+        }
+        orderedResults[index] = endpointResults;
       }
-    }
-
-    return results;
+    };
+    await Promise.all(Array.from(
+      { length: Math.min(MAX_ENDPOINT_CONCURRENCY, endpoints.length) },
+      () => worker(),
+    ));
+    return orderedResults.flat();
   }
 
   // -------------------------------------------------------------------------
@@ -112,7 +132,8 @@ export class AtIngressWebhookForwarder {
 
   private async deliverWithRetry(
     endpoint: WebhookEndpoint,
-    events: AtIngressEvent[],
+    body: string,
+    eventCount: number,
   ): Promise<ForwarderResult> {
     let lastError: string | undefined;
     let lastStatusCode: number | undefined;
@@ -124,7 +145,7 @@ export class AtIngressWebhookForwarder {
       }
 
       try {
-        const statusCode = await this.deliver(endpoint, events);
+        const statusCode = await this.deliver(endpoint, body, eventCount);
         
         if (statusCode >= 200 && statusCode < 300) {
           return {
@@ -135,8 +156,9 @@ export class AtIngressWebhookForwarder {
           };
         }
 
-        // Non-retryable errors (4xx)
-        if (statusCode >= 400 && statusCode < 500) {
+        // HTTP 429 is transient backpressure; the retry budget is bounded.
+        // Other 4xx responses are permanent and should not amplify load.
+        if (statusCode >= 400 && statusCode < 500 && statusCode !== 429) {
           return {
             endpointId: endpoint.id,
             success: false,
@@ -170,29 +192,26 @@ export class AtIngressWebhookForwarder {
 
   private async deliver(
     endpoint: WebhookEndpoint,
-    events: AtIngressEvent[],
+    body: string,
+    eventCount: number,
   ): Promise<number> {
-    const body = JSON.stringify(events);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-    try {
-      const response = await fetch(endpoint.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Bridge-Secret': endpoint.secret,
-          'X-Event-Count': events.length.toString(),
-          'X-Forwarded-By': 'mastopod-at-ingress/5.5',
-        },
-        body,
-        signal: controller.signal,
-      });
-
-      return response.status;
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    const response = await fetch(endpoint.url, {
+      method: 'POST',
+      redirect: 'error', // Never forward credentials to a redirect target.
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Bridge-Secret': endpoint.secret, // legacy downstream contract
+        'X-Event-Count': eventCount.toString(),
+        'X-Forwarded-By': 'mastopod-at-ingress/5.5',
+      },
+      body,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    // The response body is not part of this legacy contract. Explicitly
+    // cancel it so an untrusted endpoint cannot hold a connection open by
+    // streaming an unbounded response while keeping its content out of RAM.
+    await response.body?.cancel();
+    return response.status;
   }
 }
 
@@ -203,8 +222,13 @@ export class AtIngressWebhookForwarder {
 function validateWebhookUrl(url: string): void {
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      throw new Error('Webhook URL must use https:// or http:// protocol');
+    const loopback = process.env.NODE_ENV !== 'production' &&
+      parsed.protocol === 'http:' &&
+      ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+    if ((!loopback && parsed.protocol !== 'https:') ||
+        parsed.username || parsed.password || parsed.hash ||
+        parsed.href !== url) {
+      throw new Error('Webhook URL must be canonical HTTPS (HTTP allowed for local tests only)');
     }
   } catch (err) {
     throw new Error(

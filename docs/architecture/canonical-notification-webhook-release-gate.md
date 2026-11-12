@@ -39,3 +39,27 @@ A focused Vitest regression asserts failed delivery does not resolve or
 commit the Kafka offset, and successful delivery does. Complete sidecar CI,
 real Redis/Redpanda integration, HTTP 202/409/503 and worker-kill proofs on
 the exact final commit are needed before promotion.
+
+## AT ingress forwarder: bounded webhook delivery work
+
+The separate `AtIngressWebhookForwarder` previously processed every endpoint
+and 50-event chunk sequentially, allowing a slow endpoint to stall all others
+for multiple per-request timeouts and retries. It now runs at most four
+independent endpoint workers, maintains chunk order within each endpoint,
+and retains output order by endpoint. Each live chunk is JSON-serialized
+once before retries, instead of repeatedly allocating large JSON strings.
+HTTP 429 is treated as retryable backpressure within the existing bounded
+retry budget, and redirects are rejected rather than forwarding credentials.
+
+URL registration now rejects non-TLS remote destinations, embedded
+credentials, and URL fragments (only non-production HTTP loopback remains).
+The inherited `X-Bridge-Secret` header is a **raw shared secret**, not the
+HMAC-SHA256 signature claimed by old comments. It remains temporarily for
+the existing downstream contract. Replacing it requires a versioned signed
+header and coordinated downstream verification; this change deliberately
+does not invent a breaking signature scheme.
+
+These optimizations are static-code and unit-test improvements only. They
+are not evidence of deployed webhook p95, downstream readiness, or end-to-end
+durability. A later capacity gate should measure response times, upstream
+retries, memory/RSS, and per-endpoint backlog under controlled loss.
