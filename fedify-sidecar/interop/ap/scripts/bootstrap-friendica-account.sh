@@ -120,8 +120,7 @@ worker_ready=false
 attempt=1
 while [ "${attempt}" -le 30 ]; do
   if compose exec -T friendica-worker php /var/www/html/bin/console.php daemon status 2>/dev/null \
-    | grep -Eq '^Daemon process [0-9]+ is running \(/tmp/friendica-worker\.pid\)
-; then
+    | grep -Eq '^Daemon process [0-9]+ is running \(/tmp/friendica-worker\.pid\)$'; then
     worker_ready=true
     break
   fi
