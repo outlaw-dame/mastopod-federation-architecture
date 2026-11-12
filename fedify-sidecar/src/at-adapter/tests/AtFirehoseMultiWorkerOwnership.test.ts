@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import { WebSocketServer } from "ws";
 import { DefaultAtFirehoseConsumer } from "../ingress/AtFirehoseConsumer.js";
 import { RedisAtFirehoseSourceFence } from "../ingress/RedisAtFirehoseSourceFence.js";
