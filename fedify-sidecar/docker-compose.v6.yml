@@ -2,10 +2,11 @@ version: '3.8'
 
 services:
   redis:
+    # Existing persisted Redis 7 datasets require the staged migration runbook.
     image: redis:8.2.11-alpine
     container_name: fedify-redis
     ports:
-      - '6379:6379'
+      - '127.0.0.1:6379:6379'
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction
@@ -18,11 +19,12 @@ services:
       - fedify
 
   redpanda:
+    # Fresh-install baseline; preserve and migrate older persistent broker volumes.
     image: docker.redpanda.com/redpandadata/redpanda:v26.2.6
     container_name: fedify-redpanda
     ports:
-      - '9092:9092'
-      - '29092:29092'
+      - '127.0.0.1:9092:9092'
+      - '127.0.0.1:29092:29092'
     environment:
       REDPANDA_BROKERS: redpanda:9092
     command:
