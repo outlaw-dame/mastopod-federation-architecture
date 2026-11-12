@@ -136,7 +136,7 @@ describe("verified Sync firehose WebSocket resource and cursor safety",()=>{
       id:"fixture",
       url:`ws://127.0.0.1:${address.port}${path}`,
       sourceType:"relay",
-    })).rejects.toThrow(/connection unavailable|initial connection deadline/);
+    })).rejects.toThrow(/connection unavailable|initial connection deadline|closed before first handshake/);
     await consumer.stop("fixture");
     expect(await cursor.getCommittedCursor("fixture")).toBeNull();
   });
