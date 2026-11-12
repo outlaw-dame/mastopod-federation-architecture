@@ -38,14 +38,14 @@ export async function requireRedis82AckedSupport(
 export const REDIS_ACKED_PREPARE_LUA = String.raw`
 local function prepareAckedQueue(key, capacity, count, allowTrim)
   if capacity < 1 or count < 1 or count > capacity then
-    return redis.error_reply('Invalid work queue batch or capacity')
+    error('Invalid work queue batch or capacity')
   end
   if allowTrim then
     -- Redis 8.2: reclaim only work acknowledged by all groups.
     redis.call('XTRIM', key, 'MAXLEN', '=', tostring(capacity - count), 'ACKED')
   end
   if redis.call('XLEN', key) > capacity - count then
-    return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+    error('REDIS_STREAM_AT_CAPACITY')
   end
   return 1
 end
@@ -61,7 +61,7 @@ local ids = {}
 for i = 1, count do
   local fieldCount = tonumber(ARGV[offset])
   if not fieldCount or fieldCount < 1 or fieldCount > 64 then
-    return redis.error_reply('Invalid Redis Stream field count')
+    error('Invalid Redis Stream field count')
   end
   offset = offset + 1
   local args = { KEYS[1], '*' }
