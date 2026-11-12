@@ -3940,6 +3940,9 @@ async function main() {
             },
             "Background startup failed",
           );
+          if (externalAtIngestionSource !== "disabled") {
+            await shutdown("external-ingestion-startup-failed");
+          }
         }
       })();
     } else {
