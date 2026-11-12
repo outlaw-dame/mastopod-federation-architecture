@@ -90,7 +90,28 @@ function job(notBeforeMs: number): OutboundJob {
   };
 }
 
+class BackpressuredRetryWorker extends OutboundWorker {
+  async run(messageId:string, job:OutboundJob):Promise<void> {
+    return this.processJob(messageId,job);
+  }
+  protected override async deliver(job:OutboundJob):Promise<DeliveryResult> {
+    return { jobId:job.jobId, success:false, permanent:false,
+      statusCode:503, error:"Remote server unavailable" };
+  }
+}
+
 describe("outbound not-before scheduling", () => {
+  it("does not DLQ or ACK an outbound message when Redis cannot accept its retry",async()=>{
+    const q=queue();
+    q.enqueueOutbound.mockRejectedValue(Error("REDIS_STREAM_AT_CAPACITY"));
+    const claims=new ClaimStore();
+    const worker=new BackpressuredRetryWorker(q,{} as any,{} as any,config(claims));
+    await worker.run("pending-outbound",job(0));
+    expect(q.enqueueOutbound).toHaveBeenCalled();
+    expect(q.ack).not.toHaveBeenCalled();
+    expect(q.moveToDlq).not.toHaveBeenCalled();
+  });
+
   it("waits briefly on the original Stream entry without consuming the deferral budget", async () => {
     const q = queue();
     const claims = new ClaimStore();
