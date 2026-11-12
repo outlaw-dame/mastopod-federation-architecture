@@ -57,7 +57,9 @@ export function stripUnverifiedSyntheticVerification(envelope: InboundEnvelope):
 /**
  * Durability wrapper around the core Redis Streams queue.
  *
- * The ready outbound Stream is intentionally MAXLEN-trimmed. Future-dated
+ * Legacy ready outbound Streams are MAXLEN-trimmed; opt-in Redis 8.2
+ * ACKED mode retains unacknowledged records with atomic admission.
+ * Future-dated
  * retries therefore bypass that Stream and are written directly to a durable
  * ZSET + payload hash. Legacy/fresh ready entries that are discovered with a
  * long not-before are atomically moved to the same delayed store and ACKed.
@@ -415,6 +417,18 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
       const script = `
         local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
         local promoted = 0
+        local safeAcked = ARGV[4] == '1'
+        if safeAcked and #ids > 0 then
+          local capacity = tonumber(ARGV[3])
+          if #ids > capacity then
+            return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+          end
+          redis.call('XTRIM', KEYS[3], 'MAXLEN', '=',
+            tostring(capacity - #ids), 'ACKED')
+          if redis.call('XLEN', KEYS[3]) > capacity - #ids then
+            return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+          end
+        end
         for _, id in ipairs(ids) do
           local payload = redis.call('HGET', KEYS[2], id)
           if payload then
@@ -424,8 +438,14 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
             end
             local meta = ''
             if job.meta ~= nil then meta = cjson.encode(job.meta) end
-            redis.call(
-              'XADD', KEYS[3], 'MAXLEN', '~', ARGV[3], '*',
+            local args = { 'XADD', KEYS[3] }
+            if not safeAcked then
+              table.insert(args, 'MAXLEN')
+              table.insert(args, '~')
+              table.insert(args, ARGV[3])
+            end
+            table.insert(args, '*')
+            local fields = {
               'jobId', job.jobId,
               'activityId', job.activityId,
               'actorUri', job.actorUri,
@@ -438,7 +458,9 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
               'deferCount', tostring(job.deferCount or 0),
               'lastError', job.lastError or '',
               'meta', meta
-            )
+            }
+            for _, field in ipairs(fields) do table.insert(args, field) end
+            redis.call(unpack(args))
             promoted = promoted + 1
           end
           redis.call('ZREM', KEYS[1], id)
@@ -453,6 +475,7 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
           String(nowMs),
           String(DELAYED_OUTBOUND_PROMOTION_BATCH_SIZE),
           String(this.maxStreamLengthForDelay),
+          this.safeAckedRetention ? "1" : "0",
         ],
       });
       return typeof promoted === "number" ? promoted : Number(promoted ?? 0);
