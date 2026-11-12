@@ -26,6 +26,11 @@ import {
   createRedisStreamPayloadCodecFromEnv,
   type RedisStreamPayloadCodecConfig,
 } from "./redis-stream-payload-codec.js";
+import {
+  ackedStreamRetentionRequested,
+  appendAcknowledgedStreamBatch,
+  requireRedis82AckedSupport,
+} from "./redis-stream-safe-admission.js";
 
 // ============================================================================
 // Configuration
@@ -49,6 +54,8 @@ export interface QueueConfig {
   maxStreamLength?: number;
   readBatchCount?: number;
   claimBatchCount?: number;
+  /** Opt-in: Redis >=8.2, acknowledgment-safe trimming with hard admission. */
+  safeAckedRetention?: boolean;
   /** Optional override used by tests and staged rollouts. Env defaults remain write-disabled. */
   payloadCompression?: RedisStreamPayloadCodecConfig;
 }
@@ -175,6 +182,7 @@ export class RedisStreamsQueue {
   private readonly blockTimeoutMs: number;
   private readonly claimIdleTimeMs: number;
   private readonly maxStreamLength: number;
+  protected readonly safeAckedRetention: boolean;
   private readonly readBatchCount: number;
   private readonly claimBatchCount: number;
   private readonly payloadCodec: RedisStreamPayloadCodec;
@@ -207,6 +215,7 @@ export class RedisStreamsQueue {
     this.blockTimeoutMs = config.blockTimeoutMs ?? 5000;
     this.claimIdleTimeMs = config.claimIdleTimeMs ?? 60000;
     this.maxStreamLength = config.maxStreamLength ?? 100000;
+    this.safeAckedRetention = config.safeAckedRetention ?? ackedStreamRetentionRequested();
     this.readBatchCount = normalizeQueueBatchCount(config.readBatchCount, process.env["QUEUE_READ_BATCH_COUNT"], 10);
     this.claimBatchCount = normalizeQueueBatchCount(config.claimBatchCount, process.env["QUEUE_CLAIM_BATCH_COUNT"], 10);
 
@@ -246,6 +255,9 @@ export class RedisStreamsQueue {
       this.originReconcileConsumerRedis.connect(),
     ]);
 
+    if (this.safeAckedRetention) {
+      await requireRedis82AckedSupport(this.redis);
+    }
     await this.ensureConsumerGroups();
 
     this.isConnected = true;
@@ -279,23 +291,24 @@ export class RedisStreamsQueue {
   async enqueueInbound(envelope: InboundEnvelope): Promise<void> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
-    const messageId = await this.redis.xAdd(
-      this.inboundStreamKey,
-      "*",
-      {
-        envelopeId: envelope.envelopeId,
-        method: envelope.method,
-        path: envelope.path,
-        headers: JSON.stringify(envelope.headers),
-        body: envelope.body,
-        remoteIp: envelope.remoteIp,
-        receivedAt: envelope.receivedAt.toString(),
-        attempt: envelope.attempt.toString(),
-        notBeforeMs: envelope.notBeforeMs.toString(),
-        verification: envelope.verification ? JSON.stringify(envelope.verification) : "",
-      },
-      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxStreamLength } }
-    );
+    const record = {
+      envelopeId: envelope.envelopeId,
+      method: envelope.method,
+      path: envelope.path,
+      headers: JSON.stringify(envelope.headers),
+      body: envelope.body,
+      remoteIp: envelope.remoteIp,
+      receivedAt: envelope.receivedAt.toString(),
+      attempt: envelope.attempt.toString(),
+      notBeforeMs: envelope.notBeforeMs.toString(),
+      verification: envelope.verification ? JSON.stringify(envelope.verification) : "",
+    };
+    const messageId = this.safeAckedRetention
+      ? (await appendAcknowledgedStreamBatch(this.redis, this.inboundStreamKey,
+          [record], this.maxStreamLength))[0]!
+      : await this.redis.xAdd(this.inboundStreamKey, "*", record,
+          { TRIM: { strategy: "MAXLEN", strategyModifier: "~",
+            threshold: this.maxStreamLength } });
 
     logger.debug("Enqueued inbound envelope", { envelopeId: envelope.envelopeId, messageId });
   }
@@ -407,6 +420,14 @@ export class RedisStreamsQueue {
 
     for (let index = 0; index < jobs.length; index += chunkSize) {
       const chunk = jobs.slice(index, index + chunkSize);
+      if (this.safeAckedRetention) {
+        const records = chunk.map(job => this.serializeOutboundJob(
+          job, this.encodeActivityCached(job.activity, encodedActivityCache)));
+        const ids = await appendAcknowledgedStreamBatch(
+          this.redis, this.outboundStreamKey, records, this.maxStreamLength);
+        messageIds.push(...ids);
+        continue;
+      }
       const multi = this.redis.multi();
 
       for (const job of chunk) {
@@ -503,12 +524,13 @@ export class RedisStreamsQueue {
   async enqueueOutboxIntent(intent: OutboxIntent): Promise<string> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
-    const messageId = await this.redis.xAdd(
-      this.outboxIntentStreamKey,
-      "*",
-      this.serializeOutboxIntent(intent),
-      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxStreamLength } },
-    );
+    const record = this.serializeOutboxIntent(intent);
+    const messageId = this.safeAckedRetention
+      ? (await appendAcknowledgedStreamBatch(
+          this.redis, this.outboxIntentStreamKey, [record], this.maxStreamLength))[0]!
+      : await this.redis.xAdd(this.outboxIntentStreamKey, "*", record,
+          { TRIM: { strategy: "MAXLEN", strategyModifier: "~",
+            threshold: this.maxStreamLength } });
 
     logger.debug("Enqueued outbox intent", {
       intentId: intent.intentId,
@@ -581,12 +603,13 @@ export class RedisStreamsQueue {
   async enqueueOriginReconciliation(job: OriginReconciliationJob): Promise<string> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
-    const messageId = await this.redis.xAdd(
-      this.originReconcileStreamKey,
-      "*",
-      this.serializeOriginReconciliationJob(job),
-      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxStreamLength } },
-    );
+    const record = this.serializeOriginReconciliationJob(job);
+    const messageId = this.safeAckedRetention
+      ? (await appendAcknowledgedStreamBatch(
+          this.redis, this.originReconcileStreamKey, [record], this.maxStreamLength))[0]!
+      : await this.redis.xAdd(this.originReconcileStreamKey, "*", record,
+          { TRIM: { strategy: "MAXLEN", strategyModifier: "~",
+            threshold: this.maxStreamLength } });
 
     logger.debug("Enqueued origin reconciliation job", {
       jobId: job.jobId,
@@ -1019,18 +1042,23 @@ export class RedisStreamsQueue {
             ? this.outboxIntentDlqStreamKey
             : this.originReconcileDlqStreamKey;
 
-    await this.redis.xAdd(
-      dlqKey,
-      "*",
-      {
-        type,
-        id: entry.id,
-        reason: entry.reason,
-        timestamp: entry.timestamp.toString(),
-        data: JSON.stringify(entry.data),
-      },
-      { TRIM: { strategy: "MAXLEN", strategyModifier: "~", threshold: this.maxDlqLength } }
-    );
+    const dlqRecord = {
+      type,
+      id: entry.id,
+      reason: entry.reason,
+      timestamp: entry.timestamp.toString(),
+      data: JSON.stringify(entry.data),
+    };
+    if (this.safeAckedRetention) {
+      // DLQ entries are for operator review, not a live consumer group.
+      // No trimming until an explicit reviewed-deletion workflow exists.
+      await appendAcknowledgedStreamBatch(
+        this.redis, dlqKey, [dlqRecord], this.maxDlqLength, false);
+    } else {
+      await this.redis.xAdd(dlqKey, "*", dlqRecord,
+        { TRIM: { strategy: "MAXLEN", strategyModifier: "~",
+          threshold: this.maxDlqLength } });
+    }
 
     logger.warn("Message moved to DLQ", { type, id: entry.id, reason });
   }
@@ -1215,13 +1243,28 @@ export class RedisStreamsQueue {
         local existingCount = redis.call('HGET', stateKey, 'jobCount')
         return { '0', existingCount or tostring(jobCount) }
       end
-      local index = 4
+      local safeAcked = ARGV[4] == '1'
+      local index = 5
+      if safeAcked then
+        if jobCount > tonumber(maxLen) then
+          return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+        end
+        redis.call('XTRIM', outboundStreamKey,
+          'MAXLEN', '=', tostring(tonumber(maxLen) - jobCount), 'ACKED')
+        if redis.call('XLEN', outboundStreamKey) > tonumber(maxLen) - jobCount then
+          return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+        end
+      end
       for i = 1, jobCount do
+        local args = { 'XADD', outboundStreamKey }
+        if not safeAcked then
+          table.insert(args, 'MAXLEN')
+          table.insert(args, '~')
+          table.insert(args, maxLen)
+        end
+        table.insert(args, '*')
         redis.call(
-          'XADD',
-          outboundStreamKey,
-          'MAXLEN', '~', maxLen,
-          '*',
+          unpack(args),
           'jobId', ARGV[index],
           'activityId', ARGV[index + 1],
           'actorUri', ARGV[index + 2],
@@ -1247,6 +1290,7 @@ export class RedisStreamsQueue {
       this.maxStreamLength.toString(),
       Date.now().toString(),
       jobs.length.toString(),
+      this.safeAckedRetention ? "1" : "0",
       ...jobs.flatMap((job) => {
         const serialized = this.serializeOutboundJob(
           job,
