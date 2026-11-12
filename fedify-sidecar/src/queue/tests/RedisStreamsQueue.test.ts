@@ -28,7 +28,7 @@ vi.mock("redis", () => ({
   }),
 }));
 
-import { RedisStreamsQueue } from "../sidecar-redis-queue.js";
+import { RedisStreamsQueue, nextAutoClaimCursor } from "../sidecar-redis-queue.js";
 
 function makeClient(overrides: Partial<FakeRedisClient> = {}): FakeRedisClient {
   return {
@@ -46,6 +46,42 @@ function makeClient(overrides: Partial<FakeRedisClient> = {}): FakeRedisClient {
 describe("RedisStreamsQueue", () => {
   beforeEach(() => {
     fakeClients.length = 0;
+  });
+
+  it("validates XAUTOCLAIM continuation rather than trusting an invalid cursor",()=>{
+    expect(nextAutoClaimCursor({nextId:"12-3",messages:[]})).toBe("12-3");
+    expect(nextAutoClaimCursor({nextId:"0-0",messages:[]})).toBe("0-0");
+    expect(nextAutoClaimCursor({messages:[]})).toBe("0-0");
+    expect(()=>nextAutoClaimCursor({nextId:"invalid"})).toThrow(/continuation/);
+    expect(()=>nextAutoClaimCursor({nextId:42})).toThrow(/continuation/);
+  });
+
+  it("advances across bounded pending pages rather than repeatedly starting at 0-0",async()=>{
+    const admin=makeClient();
+    const inbound=makeClient({
+      xAutoClaim:vi.fn()
+        .mockResolvedValueOnce({nextId:"50-0",messages:[]})
+        .mockResolvedValueOnce({nextId:"0-0",messages:[[
+          "51-0",{
+            envelopeId:"envelope-51",method:"POST",path:"/inbox",
+            headers:"{}",body:"{\"type\":\"Create\"}",
+            remoteIp:"127.0.0.1",receivedAt:"1",
+            attempt:"0",notBeforeMs:"0",verification:"",
+          },
+        ]]}),
+      xReadGroup:vi.fn().mockResolvedValue([]),
+    });
+    fakeClients.push(admin,inbound,makeClient(),makeClient(),makeClient());
+    const queue=new RedisStreamsQueue({claimBatchCount:10,blockTimeoutMs:10});
+    await queue.connect();
+    const iterator=queue.consumeInbound()[Symbol.asyncIterator]();
+    const result=await iterator.next();
+    expect(result.value?.envelope.envelopeId).toBe("envelope-51");
+    expect(inbound.xAutoClaim).toHaveBeenCalledTimes(2);
+    expect(inbound.xAutoClaim.mock.calls[0]?.[4]).toBe("0-0");
+    expect(inbound.xAutoClaim.mock.calls[1]?.[4]).toBe("50-0");
+    await iterator.return?.();
+    await queue.disconnect();
   });
 
   it("recreates the inbound consumer group after Redis loses stream groups", async () => {
