@@ -201,7 +201,7 @@ else
       if (index(line, "follow")) follows++
       if (index(line, "503")) unavailable++
       if (index(line, "unable to retrieve ap contact for actor")) missing_actor++
-      if (index(line, "valid http signature")) valid_sig++
+      if (index(line, "valid http signature") && !index(line, "invalid http signature")) valid_sig++
       if (index(line, "invalid http signature")) invalid_sig++
       if (index(line, "no signature provided")) absent_sig++
       if (index(line, "message for user") && index(line, "is from actor")) actor_msg++
