@@ -222,7 +222,7 @@ export class AtIngressWebhookForwarder {
 function validateWebhookUrl(url: string): void {
   try {
     const parsed = new URL(url);
-    const loopback = process.env.NODE_ENV !== 'production' &&
+    const loopback = process.env["NODE_ENV"] !== 'production' &&
       parsed.protocol === 'http:' &&
       ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
     if ((!loopback && parsed.protocol !== 'https:') ||
