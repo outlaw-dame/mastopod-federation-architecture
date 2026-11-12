@@ -3130,6 +3130,9 @@ async function main() {
             10,
           ),
           source: "fedify-sidecar.at-native",
+          ...(config.enableAtExternalFirehose ? {
+            largeRawFirehoseTopic: config.atExternalFirehoseRawTopic,
+          } : {}),
         });
         const eventPublisherAdapter: EventPublisher = atEventPublisher;
 
