@@ -40,6 +40,12 @@ https://misskey.test {
 
 https://friendica.test {
   tls /certs/friendica.test.crt /certs/friendica.test.key
+  # The disposable Friendica instance has no configured site homepage and
+  # returns 503 for HEAD/GET /. Its own URLVerifier probes that path.
+  # Redirect only the exact homepage to the existing public local profile;
+  # keep all ActivityPub inbox/actor routes and signature checks unchanged.
+  @friendica_home path /
+  redir @friendica_home /profile/interop 302
   reverse_proxy friendica-app:80
 }
 
