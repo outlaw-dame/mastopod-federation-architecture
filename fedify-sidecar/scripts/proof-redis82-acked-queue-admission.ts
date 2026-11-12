@@ -78,10 +78,10 @@ try {
  assert(outbound.length===3,"Outbound work not delivered");
  const fanout=await queue.enqueueOutboundBatchForIntent("fanout-"+prefix,[job(4),job(5)]);
  assert(fanout.enqueued&&fanout.jobCount===2,"Fanout ACKED reclamation failed");
- assert((await redis.xLen(keys.outbound))===2,"Fanout kept too many entries");
+ assert((await redis.xLen(keys.outbound))===3,"Fanout did not preserve its bounded retention reserve");
  await expectCapacity(()=>queue.enqueueOutboundBatchForIntent("overflow-"+prefix,[job(6),job(7)]),
    "Fanout exceeded capacity");
- assert((await redis.xLen(keys.outbound))===2,"Rejected fanout partially enqueued");
+ assert((await redis.xLen(keys.outbound))===3,"Rejected fanout partially enqueued");
 
  for(let i=1;i<=3;i++)await queue.enqueueOutboxIntent(intent(i));
  const scheduler=new RedisOutboxIntentDelayScheduler({
