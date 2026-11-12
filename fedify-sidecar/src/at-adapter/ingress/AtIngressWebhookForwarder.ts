@@ -234,8 +234,10 @@ function validateWebhookUrl(url: string): void {
       throw new Error('Webhook URL must be canonical HTTPS (HTTP allowed for local tests only)');
     }
   } catch (err) {
+    // Never echo the supplied URL or an exception containing credentials.
+    // Give callers a stable, actionable reason regardless of parse failure.
     throw new Error(
-      `Invalid webhook URL: ${err instanceof Error ? err.name : "UnknownUrlError"}`,
+      "Invalid webhook URL: expected canonical HTTPS (loopback HTTP allowed in tests)",
     );
   }
 }
