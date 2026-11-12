@@ -90,8 +90,8 @@ export class OriginReconciliationWorker {
       originHost = new URL(job.originObjectUrl).host;
 
       if (job.notBeforeMs > 0 && Date.now() < job.notBeforeMs) {
-        await this.queue.ack("origin_reconcile", messageId);
         await this.queue.enqueueOriginReconciliation(job);
+        await this.queue.ack("origin_reconcile", messageId);
         metrics.queueMessagesProcessed.inc({ topic: "origin_reconcile", status: "deferred" });
         return;
       }
@@ -230,12 +230,12 @@ export class OriginReconciliationWorker {
       return;
     }
 
-    await this.queue.ack("origin_reconcile", messageId);
     await this.queue.moveToDlq("origin_reconcile", {
       ...job,
       attempt: job.attempt + 1,
       lastError: result.error ?? result.classification,
     }, result.error ?? result.classification);
+    await this.queue.ack("origin_reconcile", messageId);
     metrics.queueMessagesProcessed.inc({ topic: "origin_reconcile", status: "dlq" });
     metrics.originReconciliationJobsTotal.inc({ result: "dlq", reason: job.reason });
     metrics.originReconciliationHostBackoffTotal.inc({ origin_host: originHost, reason: result.classification });
@@ -302,8 +302,8 @@ export class OriginReconciliationWorker {
     job: OriginReconciliationJob,
     status: "retry" | "deferred" = "retry",
   ): Promise<void> {
-    await this.queue.ack("origin_reconcile", messageId);
     await this.queue.enqueueOriginReconciliation(job);
+    await this.queue.ack("origin_reconcile", messageId);
     metrics.queueMessagesProcessed.inc({ topic: "origin_reconcile", status });
   }
 
