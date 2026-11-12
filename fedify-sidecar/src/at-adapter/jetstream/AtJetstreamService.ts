@@ -223,7 +223,10 @@ export class AtJetstreamService {
       });
     });
 
-    ws.on("close", (code, reason) => {
+    ws.on("close", (code) => {
+      // An older socket may close after a replacement is already active.
+      // It must never clear or reschedule the new healthy connection.
+      if (ws !== this.ws) return;
       this.ws = null;
       if (!this.isRunning) return;
       this.logger.warn("Jetstream connection closed, will reconnect", {
@@ -235,7 +238,7 @@ export class AtJetstreamService {
 
     ws.on("error", (err) => {
       this.logger.error("Jetstream WebSocket error", {
-        error: err.message,
+        error: err.name,
       });
       // The 'close' event fires after 'error', so reconnect happens there.
     });
