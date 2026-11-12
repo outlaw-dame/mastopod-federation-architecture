@@ -68,9 +68,13 @@ fi
 compose exec -T friendica-db /bin/sh -lc \
   "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"update user set nickname='friendica' where uid=0 and nickname='';\""
 
-# Disposable federation fixture only. Explicitly enable application
-# diagnostics after the installation has written its persistent config.
-# Logging configuration is not used to bypass URL or signature validation.
+# Disposable federation fixture only. Friendica 2026.05's stream
+# logger refuses to start unless the logfile already exists and is writable
+# by the Apache/worker www-data account. Keep private wire records out of CI.
+compose exec -T -u root friendica-app /bin/sh -ec \
+  'test -e /var/www/html/friendica.log || install -o www-data -g www-data -m 0600 /dev/null /var/www/html/friendica.log'
+# Explicitly enable diagnostics *after* installation wrote persistent config.
+# Logging never bypasses URL validation or HTTP-signature verification.
 compose exec -T friendica-app php bin/console.php config system debugging 1 >/dev/null
 compose exec -T friendica-app php bin/console.php config system logfile /var/www/html/friendica.log >/dev/null
 compose exec -T friendica-app php bin/console.php config system loglevel debug >/dev/null
