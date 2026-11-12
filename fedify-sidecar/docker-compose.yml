@@ -42,11 +42,12 @@ services:
   # Redis - Work queues (inbound/outbound), idempotency, rate limiting
   # ==========================================================================
   redis:
+    # Existing persisted Redis 7 datasets require the staged migration runbook.
     image: redis:8.2.11-alpine
     container_name: redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     command: redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction
@@ -215,6 +216,8 @@ services:
   # NOT used for work queues - Redis Streams handles that
   # ==========================================================================
   redpanda:
+    # Fresh-install baseline; never start this on a 24.x persisted data volume.
+    # See docs/architecture/redis82-redpanda262-upgrade-gate.md.
     image: docker.redpanda.com/redpandadata/redpanda:v26.2.6
     container_name: redpanda
     restart: unless-stopped
@@ -233,9 +236,9 @@ services:
       - --mode dev-container
       - --default-log-level=warn
     ports:
-      - "19092:19092"  # Kafka API (external)
-      - "18082:18082"  # Pandaproxy (external)
-      - "18081:18081"  # Schema Registry (external)
+      - "127.0.0.1:19092:19092"  # Kafka API (external)
+      - "127.0.0.1:18082:18082"  # Pandaproxy (external)
+      - "127.0.0.1:18081:18081"  # Schema Registry (external)
     volumes:
       - redpanda-data:/var/lib/redpanda/data
     networks:
