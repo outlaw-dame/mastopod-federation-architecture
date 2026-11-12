@@ -161,7 +161,7 @@ npm run topics:verify
 Recommended profile and defaults:
 
 - `REDPANDA_TOPIC_BOOTSTRAP_PROFILE=development|staging|production`
-- `REDPANDA_COMPRESSION=zstd`
+- `REDPANDA_COMPRESSION=gzip` (v26.2 RF3 p99-safe baseline; Zstd remains opt-in after representative load evidence)
 - `REDPANDA_TOPIC_BOOTSTRAP_RETRIES=5`
 - `REDPANDA_TOPIC_BOOTSTRAP_RETRY_BASE_MS=250`
 - `REDPANDA_ENFORCE_TOPIC_GOVERNANCE=true`
