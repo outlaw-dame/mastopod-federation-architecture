@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
+import net from "node:net";
 import type { EventPublisher } from "../../core-domain/events/CoreIdentityEvents.js";
 import type { AtFirehoseDecoder } from "../ingress/AtFirehoseDecoder.js";
 import { DefaultAtFirehoseConsumer } from "../ingress/AtFirehoseConsumer.js";
@@ -120,6 +121,24 @@ describe("verified Sync firehose WebSocket resource and cursor safety",()=>{
     release?.();
     await new Promise(resolve=>setTimeout(resolve,40));
     expect(await cursor.getHotCursor("fixture")).toBeNull();
+  });
+
+  it("rejects startup if the selected verified upstream cannot complete a handshake",async()=>{
+    const listener=net.createServer();
+    await new Promise<void>(resolve=>listener.listen(0,"127.0.0.1",resolve));
+    const address=listener.address();
+    if(!address||typeof address==="string")throw Error("Missing ephemeral port");
+    await new Promise<void>(resolve=>listener.close(()=>resolve()));
+    const cursor=new InMemoryAtFirehoseCursorManager();
+    const consumer=new DefaultAtFirehoseConsumer(decoder,cursor,
+      publishAdapter(async()=>undefined));
+    await expect(consumer.start({
+      id:"fixture",
+      url:`ws://127.0.0.1:${address.port}${path}`,
+      sourceType:"relay",
+    })).rejects.toThrow(/connection unavailable|initial connection deadline/);
+    await consumer.stop("fixture");
+    expect(await cursor.getCommittedCursor("fixture")).toBeNull();
   });
 
   it("refuses trusted topics and unencrypted non-loopback upstreams",async()=>{
