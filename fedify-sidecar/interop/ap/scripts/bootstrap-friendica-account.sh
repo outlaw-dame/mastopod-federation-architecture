@@ -119,7 +119,7 @@ compose up -d friendica-worker
 worker_ready=false
 attempt=1
 while [ "${attempt}" -le 30 ]; do
-  if compose exec -T friendica-worker php /var/www/html/bin/console.php daemon status 2>/dev/null \
+  if compose exec -T friendica-worker /bin/sh -lc 'cd /var/www/html && php bin/console.php daemon status' 2>/dev/null \
     | grep -Eq '^Daemon process [0-9]+ is running \(/tmp/friendica-worker\.pid\)$'; then
     worker_ready=true
     break
@@ -129,6 +129,19 @@ while [ "${attempt}" -le 30 ]; do
 done
 if [ "${worker_ready}" != true ]; then
   echo "Friendica worker daemon was not ready (PID path /tmp/friendica-worker.pid)" >&2
+  # Only bounded status / existence probes; never expose request headers,
+  # secret-bearing config dumps, raw worker logs or signed payloads.
+  compose exec -T friendica-worker /bin/sh -ec '
+    cd /var/www/html
+    php bin/console.php config system pidfile
+    if [ -f /tmp/friendica-worker.pid ]; then
+      echo friendica_worker_pidfile=present
+    else
+      echo friendica_worker_pidfile=absent
+    fi
+    if [ -w /tmp ]; then echo friendica_worker_tmp=writable; else echo friendica_worker_tmp=not_writable; fi
+    php bin/console.php daemon status
+  ' >&2 || true
   exit 1
 fi
 echo "Bootstrapped Friendica federation target ${USERNAME}"
