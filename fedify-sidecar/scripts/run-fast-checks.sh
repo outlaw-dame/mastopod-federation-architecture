@@ -45,6 +45,7 @@ npm exec -- vitest run \
   src/protocol-bridge/identity/ObservedAtIdentityStore.scalability.test.ts \
   src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerReliability.test.ts \
   src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerHttpGate.test.ts \
+  src/at-adapter/tests/AtExternalIngestionPolicy.test.ts \
   src/at-adapter/tests/AtJetstreamSecurity.test.ts \
   src/at-adapter/tests/AtJetstreamWebSocketBackpressure.test.ts \
   src/streams/tests/RedpandaOptionalTopicGovernance.test.ts \
