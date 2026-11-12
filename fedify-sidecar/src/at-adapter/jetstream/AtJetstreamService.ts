@@ -28,7 +28,8 @@ export interface UnverifiedJetstreamCommit {
   verified: false;
   source: string;
   receivedAt: string;
-  timeUs: number;
+  cursor: number;
+  cursorType: "seq" | "time_us";
   did: string;
   commit: {
     rev: string;
@@ -108,7 +109,8 @@ export class AtJetstreamService {
   private pendingBytes = 0;
   // This is an in-memory v1 cursor. Restart durability still requires a
   // persistent cursor store and at-least-once consumer deduplication.
-  private lastPublishedTimeUs: number | null = null;
+  private lastCommittedCursor: { value: number; type: "seq" | "time_us" } | null = null;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly publisher: AtJetstreamPublisher,
@@ -151,12 +153,17 @@ export class AtJetstreamService {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
 
     if (this.ws) {
       try {
-        this.ws.close(1000, "shutdown");
+        if (this.ws.readyState === WebSocket.CONNECTING) this.ws.terminate();
+        else this.ws.close(1000, "shutdown");
       } catch {
-        // ignore
+        this.ws.terminate();
       }
       this.ws = null;
     }
@@ -170,12 +177,18 @@ export class AtJetstreamService {
     if (!this.isRunning) return;
 
     const connectUrl = new URL(this.config.url);
-    if (this.lastPublishedTimeUs !== null) {
-      connectUrl.searchParams.set("cursor",
-        String(Math.max(0, this.lastPublishedTimeUs - REWIND_MICROSECONDS)));
+    const v2 = isV2JetstreamUrl(connectUrl);
+    if (this.lastCommittedCursor) {
+      if (this.lastCommittedCursor.type !== (v2 ? "seq" : "time_us")) {
+        throw new Error("Jetstream cursor version does not match endpoint");
+      }
+      // V2 sequences replay inclusively. V1 timestamps need a small rewind.
+      const cursor = v2 ? this.lastCommittedCursor.value :
+        Math.max(0, this.lastCommittedCursor.value - REWIND_MICROSECONDS);
+      connectUrl.searchParams.set("cursor", String(cursor));
     }
     this.logger.info("Connecting to Jetstream", { host: connectUrl.host });
-    const ws = new WebSocket(connectUrl.toString(), {
+    const ws = new WebSocket(connectUrl.toString(), v2 ? "xrpc.v1.json" : undefined, {
       maxPayload: MAX_FRAME_SIZE_BYTES,
       perMessageDeflate: false,
       maxRedirects: 0,
@@ -183,10 +196,28 @@ export class AtJetstreamService {
     });
     this.ws = ws;
 
+    let heartbeatAlive = true;
+    const stopHeartbeat = () => {
+      if (!this.heartbeatTimer || ws !== this.ws) return;
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    };
     ws.on("open", () => {
-      this.reconnectAttempts = 0;
       this.logger.info("Jetstream connected", { host: new URL(this.config.url).host });
+      heartbeatAlive = true;
+      stopHeartbeat();
+      this.heartbeatTimer = setInterval(() => {
+        if (ws !== this.ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!heartbeatAlive) {
+          ws.terminate();
+          return;
+        }
+        heartbeatAlive = false;
+        try { ws.ping(); } catch { ws.terminate(); }
+      }, 30000);
+      this.heartbeatTimer.unref?.();
     });
+    ws.on("pong", () => { heartbeatAlive = true; });
 
     ws.on("message", (data, isBinary) => {
       if (isBinary || ws !== this.ws || !this.isRunning) return;
@@ -227,6 +258,7 @@ export class AtJetstreamService {
       // An older socket may close after a replacement is already active.
       // It must never clear or reschedule the new healthy connection.
       if (ws !== this.ws) return;
+      stopHeartbeat();
       this.ws = null;
       if (!this.isRunning) return;
       this.logger.warn("Jetstream connection closed, will reconnect", {
@@ -271,43 +303,41 @@ export class AtJetstreamService {
       return; // malformed JSON — skip silently
     }
 
-    if (
-      !payload ||
-      typeof payload !== "object" ||
-      (payload as Record<string, unknown>)["kind"] !== "commit"
-    ) {
-      return; // identity / account / info frames — not yet consumed
-    }
-
-    const p = payload as Record<string, unknown>;
-    const commit = p["commit"];
+    if (!payload || typeof payload !== "object") return;
+    const outer = payload as Record<string, unknown>;
+    const isV2 = isV2JetstreamUrl(new URL(this.config.url));
+    // V2 is a typed XRPC JSON envelope; v1 has kind/commit/time_us.
+    // Never infer a cursor protocol from attacker-controlled event fields.
+    const p = isV2 ? outer["payload"] as Record<string, unknown> : outer;
+    if (!p || typeof p !== "object" ||
+        (isV2
+          ? outer["$type"] !== "message" ||
+            p["$type"] !== "network.bsky.jetstream.subscribeEvents#commit"
+          : p["kind"] !== "commit")) return;
+    const c = isV2 ? p : p["commit"] as Record<string, unknown>;
     const did = typeof p["did"] === "string" ? p["did"] : null;
-
-    if (!did || !commit || typeof commit !== "object") return;
-
-    const c = commit as Record<string, unknown>;
+    if (!did || !c || typeof c !== "object") return;
     const collection = typeof c["collection"] === "string" ? c["collection"] : null;
     const rkey = typeof c["rkey"] === "string" ? c["rkey"] : null;
-
     if (!collection || !rkey) return;
 
-    const timeUs = p["time_us"];
-    if (typeof timeUs !== "number" || !Number.isSafeInteger(timeUs) || timeUs <= 0) return;
-    const rev =
-      typeof c["rev"] === "string" ? c["rev"] : `jetstream-${timeUs}`;
+    const cursorType = isV2 ? "seq" : "time_us";
+    const cursor = isV2 ? p["seq"] : p["time_us"];
+    if (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor <= 0) return;
+    const rev = typeof c["rev"] === "string" ? c["rev"] : `jetstream-${cursor}`;
     const cid = typeof c["cid"] === "string" ? c["cid"] : null;
     const record =
       c["record"] && typeof c["record"] === "object" && !Array.isArray(c["record"])
         ? (c["record"] as Record<string, unknown>)
         : null;
-
     const operation = normalizeOperation(c["operation"]);
     if (!operation) return;
     const endpoint = new URL(this.config.url);
     const event: UnverifiedJetstreamCommit = {
       kind: "jetstream.commit",
       verified: false,
-      timeUs,
+      cursor,
+      cursorType,
       did,
       receivedAt: new Date().toISOString(),
       source: endpoint.origin + endpoint.pathname,
@@ -325,7 +355,10 @@ export class AtJetstreamService {
     try {
       await this.publisher.publish(this.config.publishTopic, event);
       this.forwarded++;
-      this.lastPublishedTimeUs = Math.max(this.lastPublishedTimeUs ?? 0, timeUs);
+      if (!this.lastCommittedCursor || cursor > this.lastCommittedCursor.value) {
+        this.lastCommittedCursor = {value: cursor, type: cursorType};
+      }
+      this.reconnectAttempts = 0;
       // Avoid per-event user identifiers and hot-path logging overhead.
       if (this.forwarded % 1000 === 0) {
         this.logger.info("Unverified Jetstream records published", {
@@ -380,8 +413,15 @@ export function parseJetstreamUrl(raw: string | undefined): string {
       ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
     if ((!loopback && u.protocol !== "wss:") ||
         u.username || u.password || u.hash ||
-        (u.pathname !== "/subscribe" && u.pathname !== "/subscribe/")) {
-      throw new Error("Expected canonical secure Jetstream /subscribe URL");
+        (u.pathname !== "/subscribe" &&
+         u.pathname !== "/xrpc/network.bsky.jetstream.subscribeEvents")) {
+      throw new Error("Expected canonical secure Jetstream subscribe URL");
+    }
+    // A v1 timestamp and a v2 sequence are different cursor namespaces.
+    // Reject ambiguous/foreign versions rather than silently skipping events.
+    const cursor = u.searchParams.get("cursor");
+    if (cursor !== null && !/^(0|[1-9][0-9]{0,15})$/.test(cursor)) {
+      throw new Error("Jetstream cursor must be a bounded decimal integer");
     }
     return u.toString();
   } catch (err) {
@@ -389,4 +429,9 @@ export function parseJetstreamUrl(raw: string | undefined): string {
       "Invalid JETSTREAM_URL: expected a secure Jetstream /subscribe endpoint",
     );
   }
+}
+
+/** V2 frames use typed XRPC envelopes; legacy v1 uses bare commit frames. */
+export function isV2JetstreamUrl(url: URL): boolean {
+  return url.pathname === "/xrpc/network.bsky.jetstream.subscribeEvents";
 }
