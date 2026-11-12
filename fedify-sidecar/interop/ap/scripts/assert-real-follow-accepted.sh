@@ -170,8 +170,17 @@ friendica_diagnostics() {
     printf 'Friendica %s application-log summary:\n' "${service}" >&2
     compose exec -T "${service}" /bin/sh -s <<'FRIENDICA_LOG_SUMMARY' >&2 \
       || echo "Friendica application-log metrics unavailable" >&2
-log=/var/www/friendica.log
-if [ ! -r "$log" ]; then
+# The README documents /var/www/friendica.log, while the pinned
+# 2026.05 Apache image sets /var/www/html/friendica.log in
+# config/zz-docker.config.php. Never print either raw application log.
+log=
+for candidate in /var/www/friendica.log /var/www/html/friendica.log; do
+  if [ -r "$candidate" ]; then
+    log=$candidate
+    break
+  fi
+done
+if [ -z "$log" ]; then
   echo "friendica_app_log=unavailable"
 else
   tail -n 2000 "$log" | awk '
