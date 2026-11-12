@@ -46,6 +46,7 @@ npm exec -- vitest run \
   src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerReliability.test.ts \
   src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerHttpGate.test.ts \
   src/at-adapter/tests/RedisAtFirehoseSourceFence.test.ts \
+  src/at-adapter/tests/AtFirehoseMultiWorkerOwnership.test.ts \
   src/at-adapter/tests/AtFirehoseWebSocketSafety.test.ts \
   src/at-adapter/tests/AtFirehoseCursorFailure.test.ts \
   src/at-adapter/tests/AtExternalFirehoseBootstrap.test.ts \
