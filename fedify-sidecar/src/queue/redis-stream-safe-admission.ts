@@ -124,3 +124,13 @@ export function isRedisStreamCapacityError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes(REDIS_STREAM_BACKPRESSURE_ERROR);
 }
+
+/** Missing consumer groups are also infrastructure admission failures.
+ * They must not become business delivery retries or permanently dead-lettered
+ * records. Restore the group and reclaim the original pending item instead.
+ */
+export function isRedisStreamAdmissionFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return isRedisStreamCapacityError(error) ||
+    message.includes("REDIS_STREAM_NO_CONSUMER_GROUP");
+}
