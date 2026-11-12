@@ -31,6 +31,7 @@ services:
       FRIENDICA_LANG: en
       # Disposable CI only: inspect inbound ActivityPub rejection reasons.
       # No production Friendica logging configuration is changed.
+      FRIENDICA_DEBUGGING: "true"
       FRIENDICA_LOGLEVEL: debug
       FRIENDICA_LOGGER: stream
       MYSQL_HOST: friendica-db
