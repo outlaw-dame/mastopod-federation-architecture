@@ -80,21 +80,31 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
   }
 
   async start(): Promise<void> {
-    if (!this.redis.isOpen) await this.redis.connect();
-    if (this.safeAckedRetention) {
-      await requireRedis82AckedSupport(this.redis);
-    }
-    await this.promoteDue();
     if (this.timer) return;
-    this.timer = setInterval(() => {
-      void this.promoteDue().catch(error => {
-        logger.error(
-          { error: error instanceof Error ? error.message : String(error) },
-          "Failed to promote delayed outbox intents",
-        );
-      });
-    }, this.promotionIntervalMs);
-    this.timer.unref?.();
+    const wasConnected = this.redis.isOpen;
+    try {
+      if (!this.redis.isOpen) await this.redis.connect();
+      if (this.safeAckedRetention) {
+        await requireRedis82AckedSupport(this.redis);
+      }
+      await this.promoteDue();
+      this.timer = setInterval(() => {
+        void this.promoteDue().catch(error => {
+          logger.error(
+            { error: error instanceof Error ? error.message : String(error) },
+            "Failed to promote delayed outbox intents",
+          );
+        });
+      }, this.promotionIntervalMs);
+      this.timer.unref?.();
+    } catch (error) {
+      // Startup may reject because the ready/DLQ budget is exhausted.
+      // Do not leak a connected client when no scheduler was started.
+      if (!wasConnected && this.redis.isOpen) {
+        await this.redis.quit().catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {
