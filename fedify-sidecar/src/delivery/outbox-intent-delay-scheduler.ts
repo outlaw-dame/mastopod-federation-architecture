@@ -1,6 +1,10 @@
 import { createClient } from "redis";
 import type { OutboxIntent } from "../queue/sidecar-redis-queue.js";
 import { logger } from "../utils/logger.js";
+import {
+  ackedStreamRetentionRequested,
+  requireRedis82AckedSupport,
+} from "../queue/redis-stream-safe-admission.js";
 
 export const OUTBOX_INTENT_DELAY_PROMOTION_INTERVAL_MS = 250;
 export const OUTBOX_INTENT_DELAY_PROMOTION_BATCH_SIZE = 100;
@@ -21,6 +25,7 @@ export interface RedisOutboxIntentDelaySchedulerConfig {
   maxDlqLength: number;
   promotionIntervalMs?: number;
   promotionBatchSize?: number;
+  safeAckedRetention?: boolean;
 }
 
 type RedisClient = ReturnType<typeof createClient>;
@@ -48,6 +53,7 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
   private readonly consumerGroup: string;
   private readonly maxStreamLength: number;
   private readonly maxDlqLength: number;
+  private readonly safeAckedRetention: boolean;
   private readonly scheduleKey: string;
   private readonly payloadKey: string;
   private readonly promotionIntervalMs: number;
@@ -62,6 +68,7 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
     this.consumerGroup = config.consumerGroup;
     this.maxStreamLength = config.maxStreamLength;
     this.maxDlqLength = config.maxDlqLength;
+    this.safeAckedRetention = config.safeAckedRetention ?? ackedStreamRetentionRequested();
     this.scheduleKey = `${config.readyStreamKey}:delayed:v1`;
     this.payloadKey = `${config.readyStreamKey}:delayed-payload:v1`;
     this.promotionIntervalMs = config.promotionIntervalMs ?? OUTBOX_INTENT_DELAY_PROMOTION_INTERVAL_MS;
@@ -74,6 +81,9 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
 
   async start(): Promise<void> {
     if (!this.redis.isOpen) await this.redis.connect();
+    if (this.safeAckedRetention) {
+      await requireRedis82AckedSupport(this.redis);
+    }
     await this.promoteDue();
     if (this.timer) return;
     this.timer = setInterval(() => {
@@ -147,28 +157,64 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
       const script = `
         local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
         local promoted = 0
-        for _, id in ipairs(ids) do
-          local payload = redis.call('HGET', KEYS[2], id)
-          local valid = false
-          local intent = nil
-          if payload then
-            local ok, decoded = pcall(cjson.decode, payload)
-            if ok and decoded and decoded.intentId == id and type(decoded.activityId) == 'string' and
-              type(decoded.actorUri) == 'string' and type(decoded.activity) == 'string' and
-              type(decoded.targets) == 'table' and tonumber(decoded.createdAt) and
-              tonumber(decoded.attempt) and tonumber(decoded.maxAttempts) and tonumber(decoded.notBeforeMs) then
-              valid = true
-              intent = decoded
+        local safeAcked = ARGV[5] == '1'
+        local function validIntent(id, payload)
+          if not payload then return nil end
+          local ok, decoded = pcall(cjson.decode, payload)
+          if ok and decoded and decoded.intentId == id and
+            type(decoded.activityId) == 'string' and
+            type(decoded.actorUri) == 'string' and
+            type(decoded.activity) == 'string' and
+            type(decoded.targets) == 'table' and
+            tonumber(decoded.createdAt) and tonumber(decoded.attempt) and
+            tonumber(decoded.maxAttempts) and tonumber(decoded.notBeforeMs) then
+            return decoded
+          end
+          return nil
+        end
+        if safeAcked and #ids > 0 then
+          local readyCount = 0
+          local corruptCount = 0
+          for _, id in ipairs(ids) do
+            local payload = redis.call('HGET', KEYS[2], id)
+            if validIntent(id, payload) then
+              readyCount = readyCount + 1
+            else
+              corruptCount = corruptCount + 1
             end
           end
-
-          if valid then
+          local maxReady = tonumber(ARGV[3])
+          local maxDlq = tonumber(ARGV[4])
+          if readyCount > maxReady or corruptCount > maxDlq then
+            return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+          end
+          if readyCount > 0 then
+            redis.call('XTRIM', KEYS[3], 'MAXLEN', '=',
+              tostring(maxReady - readyCount), 'ACKED')
+            if redis.call('XLEN', KEYS[3]) > maxReady - readyCount then
+              return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+            end
+          end
+          if redis.call('XLEN', KEYS[4]) > maxDlq - corruptCount then
+            return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+          end
+        end
+        for _, id in ipairs(ids) do
+          local payload = redis.call('HGET', KEYS[2], id)
+          local intent = validIntent(id, payload)
+          if intent then
             local meta = ''
             if intent.meta ~= nil then meta = cjson.encode(intent.meta) end
             local bridgeHints = ''
             if intent.bridgeHints ~= nil then bridgeHints = cjson.encode(intent.bridgeHints) end
-            redis.call(
-              'XADD', KEYS[3], 'MAXLEN', '~', ARGV[3], '*',
+            local command = { 'XADD', KEYS[3] }
+            if not safeAcked then
+              table.insert(command, 'MAXLEN')
+              table.insert(command, '~')
+              table.insert(command, ARGV[3])
+            end
+            table.insert(command, '*')
+            local fields = {
               'intentId', intent.intentId,
               'activityId', intent.activityId,
               'actorUri', intent.actorUri,
@@ -181,7 +227,9 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
               'lastError', intent.lastError or '',
               'meta', meta,
               'bridgeHints', bridgeHints
-            )
+            }
+            for _, field in ipairs(fields) do table.insert(command, field) end
+            redis.call(unpack(command))
             promoted = promoted + 1
           else
             local reason = payload and 'Corrupt delayed outbox-intent payload' or 'Orphaned delayed outbox-intent schedule entry'
@@ -190,14 +238,19 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
               delayedPayload = payload or cjson.null,
               scheduler = 'outbox-intent-delayed-v1'
             })
-            redis.call(
-              'XADD', KEYS[4], 'MAXLEN', '~', ARGV[4], '*',
-              'type', 'outbox_intent',
-              'id', id,
-              'reason', reason,
-              'timestamp', ARGV[1],
-              'data', diagnostic
-            )
+            local command = { 'XADD', KEYS[4] }
+            if not safeAcked then
+              table.insert(command, 'MAXLEN')
+              table.insert(command, '~')
+              table.insert(command, ARGV[4])
+            end
+            table.insert(command, '*')
+            local fields = {
+              'type', 'outbox_intent', 'id', id, 'reason', reason,
+              'timestamp', ARGV[1], 'data', diagnostic
+            }
+            for _, field in ipairs(fields) do table.insert(command, field) end
+            redis.call(unpack(command))
           end
           redis.call('ZREM', KEYS[1], id)
           redis.call('HDEL', KEYS[2], id)
@@ -212,6 +265,7 @@ export class RedisOutboxIntentDelayScheduler implements OutboxIntentDelaySchedul
           String(this.promotionBatchSize),
           String(this.maxStreamLength),
           String(this.maxDlqLength),
+          this.safeAckedRetention ? "1" : "0",
         ],
       });
       return typeof result === "number" ? result : Number(result ?? 0);
