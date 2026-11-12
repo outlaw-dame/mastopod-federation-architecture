@@ -387,6 +387,13 @@ export class AtJetstreamService {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** A low-trust subscriber cannot implicitly activate a trusted bridge. */
+export function isTrustedAtToApBridgeExplicitlyEnabled(
+  env: { ENABLE_PROTOCOL_BRIDGE_AT_TO_AP?: string },
+): boolean {
+  return env.ENABLE_PROTOCOL_BRIDGE_AT_TO_AP === "true";
+}
+
 /** Never expose query values, bearer tokens, or credentials in startup logs. */
 export function safeJetstreamEndpointLabel(source: string): string {
   const uri = new URL(source);
