@@ -42,14 +42,14 @@ services:
   # Redis - Work queues (inbound/outbound), idempotency, rate limiting
   # ==========================================================================
   redis:
-    image: redis:7-alpine
+    image: redis:8.2.11-alpine
     container_name: redis
     restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction
     networks:
       - activitypods-network
     healthcheck:
@@ -215,7 +215,7 @@ services:
   # NOT used for work queues - Redis Streams handles that
   # ==========================================================================
   redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.1.1
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.6
     container_name: redpanda
     restart: unless-stopped
     command:
