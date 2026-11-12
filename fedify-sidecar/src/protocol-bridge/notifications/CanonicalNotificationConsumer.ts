@@ -50,6 +50,8 @@ export interface CanonicalNotificationConsumerConfig {
   concurrency?: number;
   /** Source-controlled rollout control; default FALSE until DLQ ACLs exist. */
   enableDeadLetter?: boolean;
+  /** Verify the ActivityPods ledger committed before acknowledging Kafka. */
+  requireDurablePgAck?: boolean;
   /** Must exist in governed Redpanda topics before enableDeadLetter=true. */
   deadLetterTopic?: string;
 }
@@ -400,6 +402,7 @@ export class CanonicalNotificationConsumer {
 
   private async callActivityPods(payload: CanonicalNotificationPayload): Promise<void> {
     let statusCode: number;
+    let durableReceipt: unknown = null;
 
     try {
       const res = await request(this.endpointUrl, {
@@ -413,9 +416,11 @@ export class CanonicalNotificationConsumer {
         headersTimeout: this.notifyTimeoutMs,
       });
       statusCode = res.statusCode;
-      // Drain the short internal API response for connection reuse, without
-      // using its untrusted body as proof of acceptance or logging it.
-      await res.body.dump({ limit: 262144 });
+      if (this.config.requireDurablePgAck === true) {
+        durableReceipt = await readBoundedCanonicalReceipt(res.body);
+      } else {
+        await res.body.dump({ limit: 262144 });
+      }
     } catch (err) {
       this.logger.error("ActivityPods canonical-notification HTTP error", {
         canonicalIntentId: payload.canonicalIntentId,
@@ -423,6 +428,12 @@ export class CanonicalNotificationConsumer {
         error: err instanceof Error ? err.name : "UNKNOWN_HTTP_ERROR",
       });
       throw new Error("Canonical notification transport failed; Kafka offset remains unresolved");
+    }
+
+    if (this.config.requireDurablePgAck === true &&
+        (statusCode === 202 || statusCode === 409) &&
+        !validateDurableCanonicalReceipt(statusCode, durableReceipt)) {
+      throw new Error("ActivityPods response does not prove committed PostgreSQL notification");
     }
 
     if (statusCode === 409) {
@@ -458,6 +469,38 @@ export class CanonicalNotificationConsumer {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+export function validateDurableCanonicalReceipt(status: number, raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const r = raw as Record<string, unknown>;
+  return (status === 202 || status === 409) &&
+    r["ok"] === true && r["durable"] === true &&
+    r["duplicate"] === (status === 409) && r["delivered"] === false &&
+    Number.isSafeInteger(r["queuedRecipients"]) &&
+    (r["queuedRecipients"] as number) >= 0 &&
+    (r["queuedRecipients"] as number) <= 64;
+}
+
+async function readBoundedCanonicalReceipt(
+  body: AsyncIterable<Uint8Array> & { destroy?: () => unknown },
+): Promise<unknown> {
+  const buffers: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of body) {
+    total += chunk.byteLength;
+    if (total > 4096) {
+      body.destroy?.();
+      throw new Error("Canonical notification receipt exceeded 4 KiB");
+    }
+    buffers.push(Buffer.from(chunk));
+  }
+  try {
+    return JSON.parse(Buffer.concat(buffers, total).toString("utf8")) as unknown;
+  } catch {
+    throw new Error("Invalid canonical notification JSON receipt");
+  }
+}
+
 
 class CanonicalPermanentNotificationError extends Error {
   constructor(public readonly statusCode: number) {

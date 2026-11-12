@@ -3299,6 +3299,16 @@ async function main() {
             ? new CanonicalIntentPublisher(atEventPublisher, config.canonicalTopic)
             : undefined;
 
+          // Test-only opt-in until the restricted Redpanda DLQ topic and PG
+          // durable-ack end-to-end acceptance are approved for production.
+          const canonicalPreviewDisposable = process.env["NODE_ENV"] === "test" &&
+            process.env["PAPER_CANONICAL_NOTIFY_DISPOSABLE"] === "confirmed";
+          const enableCanonicalDlq = process.env["ENABLE_CANONICAL_NOTIFICATION_DLQ"] === "true";
+          const requireCanonicalPgAck = process.env["REQUIRE_CANONICAL_NOTIFICATION_PG_ACK"] === "true";
+          if ((enableCanonicalDlq || requireCanonicalPgAck) && !canonicalPreviewDisposable) {
+            throw new Error("Canonical notification durable rollout not released");
+          }
+
           const canonicalNotificationConsumer = config.enableCanonicalNotifications && atEventPublisher
             ? new CanonicalNotificationConsumer(
                 {
@@ -3311,6 +3321,8 @@ async function main() {
                   canonicalTopic: config.canonicalTopic,
                   activityPodsBaseUrl: process.env["ACTIVITYPODS_URL"] || "http://localhost:3000",
                   activityPodsBearerToken: process.env["ACTIVITYPODS_TOKEN"] || "",
+                  enableDeadLetter: enableCanonicalDlq,
+                  requireDurablePgAck: requireCanonicalPgAck,
                 },
                 {
                   info: (message, meta) => logger.info(meta || {}, message),

@@ -180,3 +180,20 @@ describe("canonical notification durable quarantine and ordered Kafka offsets", 
     expect(batch.resolveOffset).toHaveBeenCalledWith("1");
   });
 });
+
+describe("durable PostgreSQL acknowledgment contract", () => {
+  const accepted = {
+    ok:true,durable:true,duplicate:false,delivered:false,queuedRecipients:4,
+  };
+  it("accepts only a genuine 202 PG commit or 409 PG duplicate", () => {
+    expect(validateDurableCanonicalReceipt(202,accepted)).toBe(true);
+    expect(validateDurableCanonicalReceipt(409,{...accepted,duplicate:true})).toBe(true);
+    expect(validateDurableCanonicalReceipt(200,accepted)).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,{...accepted,durable:false})).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,{...accepted,duplicate:true})).toBe(false);
+    expect(validateDurableCanonicalReceipt(409,{...accepted,duplicate:false})).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,{...accepted,queuedRecipients:65})).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,{...accepted,delivered:true})).toBe(false);
+    expect(validateDurableCanonicalReceipt(202,null)).toBe(false);
+  });
+});
