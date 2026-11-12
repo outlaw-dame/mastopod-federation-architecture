@@ -15,7 +15,8 @@ than +0.5 ms, plus the established p95, CPU and throughput constraints.
 
 - Initial real run [43307105608](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43307105608), attempt 1: Zstd-1 throughput ~1.672x Gzip, total CPU ~0.780x, but singleton p99 ~1.672x Gzip (+0.781 ms); Zstd-1 **failed the latency policy**.
 - Retried failed job on the same head, attempt 2: Zstd-1 singleton p99 ~1.848x Gzip (+0.782 ms) and total CPU ~0.943x (required <= 0.90x); **failed again**.
-- On both trials the analyzer correctly selected **Gzip**. This is a real version-specific decision, not proof Zstd is generally slower or that Gzip is always the cost winner. Prior-version results are retained as historical evidence, not applied blindly to 26.2.
+- In the **third** v26.2.6 run [43310514311](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43310514311), Zstd-2 **was eligible** and selected: ~1.753x throughput, ~0.815x total CPU, ~0.732x singleton p99, and ~0.971x cluster-network bytes compared with Gzip. Zstd-1 was also eligible. Thus the winner varied across runs under the unchanged policy, and one favorable hosted-runner result is insufficient for a fleet-wide automatic switch.
+- The first two trials selected **Gzip**, while the third selected **Zstd-2**. This is version-specific, workload- and runner-sensitive evidence, not proof that either codec always wins. Prior-version results are historical evidence, not automatically applicable to 26.2.
 
 The first-party Docker image, v6 environment example and Compose profile
 therefore select `REDPANDA_COMPRESSION=gzip` for **new writes**. The
@@ -24,8 +25,12 @@ registration when sending Gzip, allowing the same service to consume
 historical Zstd batches. Legacy consumers without native Zstd must be
 inventoried and verified separately. Optional Zstd re-promotion requires
 representative exact-head RF3 evidence meeting the **unchanged** thresholds.
-The benchmark workflow continues testing all four arms and fail-closes when
-its analyzer does not select the configured production codec.
+The benchmark workflow continues testing all four arms, verifies the
+unchanged Zstd promotion policy, and rejects malformed evidence or an ineligible
+optimizer recommendation. A benchmark preference is **not a mandate** to
+change the safe, already-supported Gzip producer baseline; production codec
+promotion requires repeated comparable results and representative fleet p95/p99
+and memory/cost acceptance.
 
 ## Never directly upgrade an existing persisted Redpanda 24.x broker to 26.2
 
