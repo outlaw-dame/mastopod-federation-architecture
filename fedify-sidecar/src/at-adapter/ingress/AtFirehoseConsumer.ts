@@ -44,7 +44,7 @@ const CURSOR_COMMIT_INTERVAL_MS = 10_000;
 const WS_PING_INTERVAL_MS = 30_000;
 
 /** Maximum time to wait for a pong before terminating the connection. */
-const WS_PONG_TIMEOUT_MS = 10_000;
+// Heartbeat liveness is tracked with a single interval, avoiding per-ping timers.
 
 // ---------------------------------------------------------------------------
 // Interfaces
@@ -73,6 +73,12 @@ export interface AtFirehoseConsumer {
 // Implementation
 // ---------------------------------------------------------------------------
 
+// A slow broker cannot cause overlapping frame handlers or unbounded process
+// memory. A single source has one active publish and at most two queued frames.
+const MAX_PENDING_FRAMES = 2;
+const MAX_PENDING_BYTES = 10 * 1024 * 1024;
+const WS_RECONNECT_CEILING_MS = 30_000;
+
 export class DefaultAtFirehoseConsumer implements AtFirehoseConsumer {
   private readonly activeConnections = new Map<string, FirehoseConnection>();
 
@@ -80,27 +86,27 @@ export class DefaultAtFirehoseConsumer implements AtFirehoseConsumer {
     private readonly decoder: AtFirehoseDecoder,
     private readonly cursorManager: AtFirehoseCursorManager,
     private readonly eventPublisher: EventPublisher,
+    private readonly rawTopic = RAW_FIREHOSE_TOPIC,
   ) {}
 
   async start(source: AtFirehoseSource): Promise<void> {
     if (this.activeConnections.has(source.id)) {
-      throw new Error(`Consumer for source ${source.id} is already running`);
+      throw new Error("External firehose source already running");
+    }
+    validateSourceUrl(source.url);
+    if (!/^at\.firehose\.raw(?:\.[a-z0-9_-]+)*\.v[0-9]+$/.test(this.rawTopic)) {
+      throw new Error("External firehose raw topic must remain in the untrusted raw namespace");
     }
 
-    validateSourceUrl(source.url);
-
     const connection = new FirehoseConnection(
-      source,
-      this.decoder,
-      this.cursorManager,
-      this.eventPublisher,
+      source, this.decoder, this.cursorManager, this.eventPublisher, this.rawTopic,
     );
-
     this.activeConnections.set(source.id, connection);
-    
-    // Fire and forget the connection loop
-    connection.startLoop().catch((err) => {
-      console.error(`[AtFirehoseConsumer] Fatal error in connection loop for ${source.id}:`, err);
+    void connection.startLoop().catch((error: unknown) => {
+      console.error("[AtFirehoseConsumer] Source loop failed", {
+        sourceId: source.id,
+        code: error instanceof Error ? error.name : "UNKNOWN",
+      });
     }).finally(() => {
       if (this.activeConnections.get(source.id) === connection) {
         this.activeConnections.delete(source.id);
@@ -110,230 +116,256 @@ export class DefaultAtFirehoseConsumer implements AtFirehoseConsumer {
 
   async stop(sourceId: string): Promise<void> {
     const connection = this.activeConnections.get(sourceId);
-    if (!connection) {
-      return;
+    if (!connection) return;
+    try {
+      await connection.stop();
+    } finally {
+      this.activeConnections.delete(sourceId);
     }
-
-    await connection.stop();
-    this.activeConnections.delete(sourceId);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Connection Loop Management
-// ---------------------------------------------------------------------------
 
 class FirehoseConnection {
   private ws: WebSocket | null = null;
   private isRunning = false;
   private reconnectAttempts = 0;
   private pingInterval: NodeJS.Timeout | null = null;
-  private pongTimeout: NodeJS.Timeout | null = null;
   private commitInterval: NodeJS.Timeout | null = null;
   private lastAckedSeq: number | null = null;
+  private lastCommittedSeq: number | null = null;
+  private checkpointChain: Promise<void> = Promise.resolve();
+  private stopReconnectWait: (() => void) | null = null;
 
   constructor(
     private readonly source: AtFirehoseSource,
     private readonly decoder: AtFirehoseDecoder,
     private readonly cursorManager: AtFirehoseCursorManager,
     private readonly eventPublisher: EventPublisher,
+    private readonly rawTopic: string,
   ) {}
 
   async startLoop(): Promise<void> {
+    if (this.isRunning) return;
     this.isRunning = true;
-
-    // Start the periodic cursor commit loop
-    this.commitInterval = setInterval(() => {
-      this.commitCursorSafely();
-    }, CURSOR_COMMIT_INTERVAL_MS);
-
+    // Cursor flushing must persist across reconnects, not be accidentally
+    // destroyed by the socket's close handler.
+    this.commitInterval = setInterval(() => { void this.commitCursorSafely(); },
+      CURSOR_COMMIT_INTERVAL_MS);
+    this.commitInterval.unref?.();
     try {
       while (this.isRunning) {
         try {
           await this.connectAndWait();
-          // If connectAndWait returns normally, it means the socket closed cleanly.
-          // We reset reconnect attempts and loop around to reconnect.
-          this.reconnectAttempts = 0;
-        } catch (err) {
+        } catch (error) {
           if (!this.isRunning) break;
-
-          this.reconnectAttempts++;
-          const delay = this.calculateBackoff();
-          
-          console.error(
-            `[FirehoseConnection] Connection to ${this.source.id} failed. ` +
-            `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}). Error:`,
-            err instanceof Error ? err.message : String(err),
-          );
-
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          console.error("[FirehoseConnection] External source disconnected", {
+            sourceId: this.source.id,
+            code: error instanceof Error ? error.name : "UNKNOWN",
+          });
         }
+        if (!this.isRunning) break;
+        this.reconnectAttempts = Math.min(16, this.reconnectAttempts + 1);
+        await this.waitForReconnect();
       }
     } finally {
-      this.cleanupTimers();
+      this.cleanupSocket();
+      if (this.commitInterval) clearInterval(this.commitInterval);
+      this.commitInterval = null;
     }
   }
 
   async stop(): Promise<void> {
     this.isRunning = false;
-    this.cleanupTimers();
-
-    if (this.ws) {
-      this.ws.close(1000, 'Consumer shutting down');
-      this.ws = null;
-    }
-
-    // Perform a final synchronous flush of the cursor
+    this.stopReconnectWait?.();
+    this.stopReconnectWait = null;
+    if (this.ws) this.ws.terminate();
+    this.cleanupSocket();
+    if (this.commitInterval) clearInterval(this.commitInterval);
+    this.commitInterval = null;
+    // Drain only completed, acknowledged messages. An outstanding broker
+    // operation is deliberately not awaited: it cannot advance a closed
+    // session's cursor and will be replayed after restart.
     await this.commitCursorSafely();
   }
 
   private async connectAndWait(): Promise<void> {
-    return new Promise(async (resolve, reject) => {
+    const cursor = await this.cursorManager.getResumeCursor(this.source.id);
+    if (!this.isRunning) return;
+    const url = new URL(this.source.url);
+    if (url.pathname === "/") url.pathname = "/xrpc/com.atproto.sync.subscribeRepos";
+    if (cursor !== null) {
+      url.searchParams.set("cursor", String(cursor));
+      // Inclusive cursors must not replay already broker-acknowledged frames
+      // as new work during reconnects within this process.
+      if (this.lastAckedSeq === null) this.lastAckedSeq = cursor;
+    }
+    return new Promise<void>((resolve, reject) => {
+      let ws: WebSocket;
       try {
-        // 1. Load resume cursor (prefers durable over hot)
-        const cursor = await this.cursorManager.getResumeCursor(this.source.id);
-        
-        // 2. Construct WebSocket URL
-        const url = new URL(this.source.url);
-        if (url.pathname === '/') {
-          url.pathname = '/xrpc/com.atproto.sync.subscribeRepos';
-        }
-        if (cursor !== null) {
-          url.searchParams.set('cursor', cursor.toString());
-        }
-
-        console.log(`[FirehoseConnection] Connecting to ${this.source.id} at ${url.toString()}`);
-
-        // 3. Connect
-        this.ws = new WebSocket(url.toString(), {
+        ws = new WebSocket(url.toString(), {
           maxPayload: MAX_FRAME_SIZE_BYTES,
+          perMessageDeflate: false,
+          maxRedirects: 0,
+          handshakeTimeout: 10_000,
         });
-
-        this.ws.on('open', () => {
-          console.log(`[FirehoseConnection] Connected to ${this.source.id}`);
-          this.reconnectAttempts = 0;
-          this.setupPingPong();
-        });
-
-        this.ws.on('message', async (data: Buffer, isBinary: boolean) => {
-          if (!isBinary) {
-            console.warn(`[FirehoseConnection] Received non-binary frame from ${this.source.id}`);
-            return;
-          }
-          await this.handleFrame(new Uint8Array(data));
-        });
-
-        this.ws.on('close', (code, reason) => {
-          console.log(`[FirehoseConnection] Closed connection to ${this.source.id}: ${code} ${reason}`);
-          this.cleanupTimers();
-          resolve();
-        });
-
-        this.ws.on('error', (err) => {
-          this.cleanupTimers();
-          reject(err);
-        });
-
-      } catch (err) {
-        reject(err);
+      } catch (error) {
+        reject(error);
+        return;
       }
-    });
-  }
-
-  private async handleFrame(frame: Uint8Array): Promise<void> {
-    try {
-      // 1. Decode header cheaply
-      const header = this.decoder.decodeHeader(frame);
-
-      // 2. Build raw envelope
-      const envelope: AtFirehoseRawEnvelope = {
-        seq: header.seq,
-        source: this.source.url,
-        receivedAt: new Date().toISOString(),
-        eventType: header.eventType,
-        did: header.did,
-        // Convert the raw bytes to base64 for safe transport via JSON
-        rawCborBase64: Buffer.from(frame).toString('base64'),
+      this.ws = ws;
+      let pendingFrames: Buffer[] = [];
+      let pendingBytes = 0;
+      let draining = false;
+      let pongReceived = true;
+      const stopPing = () => {
+        if (this.pingInterval) clearInterval(this.pingInterval);
+        this.pingInterval = null;
+      };
+      const drain = async (): Promise<void> => {
+        if (draining) return;
+        draining = true;
+        try {
+          while (this.isRunning && this.ws === ws &&
+                 ws.readyState === WebSocket.OPEN && pendingFrames.length) {
+            const frame = pendingFrames.shift()!;
+            pendingBytes -= frame.byteLength;
+            await this.handleFrame(frame, ws);
+          }
+        } catch (error) {
+          console.error("[FirehoseConnection] Frame processing failed", {
+            sourceId: this.source.id,
+            code: error instanceof Error ? error.name : "UNKNOWN",
+          });
+          ws.terminate();
+        } finally {
+          draining = false;
+          if (!this.isRunning || this.ws !== ws ||
+              ws.readyState !== WebSocket.OPEN) {
+            pendingFrames = [];
+            pendingBytes = 0;
+          } else if (pendingFrames.length) {
+            void drain();
+          } else {
+            ws.resume();
+          }
+        }
       };
 
-      // 3. Publish to RedPanda (wait for ack)
-      await this.eventPublisher.publish(RAW_FIREHOSE_TOPIC, envelope as any);
-
-      // 4. Only after ack, advance the hot cursor
-      if (header.seq >= 0) {
-        await this.cursorManager.setHotCursor(this.source.id, header.seq);
-        this.lastAckedSeq = header.seq;
-      }
-
-    } catch (err) {
-      if (err instanceof FirehoseDecodeError) {
-        // Invalid firehose framing is a connection-level error per spec.
-        // Tear down the socket so we replay from the last acked cursor.
-        console.error(`[FirehoseConnection] Invalid frame from ${this.source.id}; reconnecting:`, err.message);
-        this.ws?.terminate();
-      } else {
-        // Publish failures or Redis failures.
-        // We throw here to force a reconnect and replay from the last acked cursor.
-        console.error(`[FirehoseConnection] Fatal error handling frame from ${this.source.id}:`, err);
-        this.ws?.terminate();
-      }
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Lifecycle & Timers
-  // -------------------------------------------------------------------------
-
-  private setupPingPong(): void {
-    if (!this.ws) return;
-
-    this.ws.on('pong', () => {
-      if (this.pongTimeout) {
-        clearTimeout(this.pongTimeout);
-        this.pongTimeout = null;
-      }
+      ws.on("open", () => {
+        if (!this.isRunning || this.ws !== ws) {
+          ws.terminate();
+          return;
+        }
+        this.reconnectAttempts = 0;
+        pongReceived = true;
+        stopPing();
+        this.pingInterval = setInterval(() => {
+          if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+          if (!pongReceived) {
+            ws.terminate();
+            return;
+          }
+          pongReceived = false;
+          try { ws.ping(); } catch { ws.terminate(); }
+        }, WS_PING_INTERVAL_MS);
+        this.pingInterval.unref?.();
+      });
+      ws.on("pong", () => { pongReceived = true; });
+      ws.on("message", (data, isBinary) => {
+        if (!this.isRunning || this.ws !== ws || !isBinary) {
+          ws.terminate();
+          return;
+        }
+        const frame = Buffer.isBuffer(data) ? data :
+          Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+        if (pendingFrames.length >= MAX_PENDING_FRAMES ||
+            frame.byteLength > MAX_FRAME_SIZE_BYTES ||
+            frame.byteLength + pendingBytes > MAX_PENDING_BYTES) {
+          ws.terminate();
+          return;
+        }
+        pendingFrames.push(frame);
+        pendingBytes += frame.byteLength;
+        ws.pause();
+        void drain();
+      });
+      ws.once("close", () => {
+        stopPing();
+        if (this.ws === ws) this.ws = null;
+        pendingFrames = [];
+        pendingBytes = 0;
+        resolve();
+      });
+      ws.once("error", (error) => {
+        stopPing();
+        ws.terminate();
+        reject(error);
+      });
     });
-
-    this.pingInterval = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.ping();
-        
-        this.pongTimeout = setTimeout(() => {
-          console.warn(`[FirehoseConnection] Pong timeout for ${this.source.id}, terminating connection`);
-          this.ws?.terminate();
-        }, WS_PONG_TIMEOUT_MS);
-      }
-    }, WS_PING_INTERVAL_MS);
   }
 
-  private cleanupTimers(): void {
-    if (this.pingInterval) clearInterval(this.pingInterval);
-    if (this.pongTimeout) clearTimeout(this.pongTimeout);
-    if (this.commitInterval) clearInterval(this.commitInterval);
-    this.pingInterval = null;
-    this.pongTimeout = null;
-    this.commitInterval = null;
+  private async handleFrame(frame: Uint8Array, socket: WebSocket): Promise<void> {
+    const header = this.decoder.decodeHeader(frame);
+    if (header.seq > 0 && this.lastAckedSeq !== null &&
+        header.seq <= this.lastAckedSeq) return;
+    const envelope: AtFirehoseRawEnvelope = {
+      seq: header.seq,
+      source: this.source.url,
+      receivedAt: new Date().toISOString(),
+      eventType: header.eventType,
+      did: header.did,
+      rawCborBase64: Buffer.from(frame).toString("base64"),
+    };
+    // Strictly serial: a later sequence must never overtake an unacknowledged
+    // frame during broker congestion or a partial network failure.
+    await this.eventPublisher.publish(this.rawTopic, envelope as any);
+    if (!this.isRunning || this.ws !== socket ||
+        socket.readyState !== WebSocket.OPEN) return;
+    if (header.seq > 0) {
+      await this.cursorManager.setHotCursor(this.source.id, header.seq);
+      this.lastAckedSeq = header.seq;
+    }
   }
 
   private async commitCursorSafely(): Promise<void> {
-    if (this.lastAckedSeq === null) return;
+    const seq = this.lastAckedSeq;
+    if (seq === null || (this.lastCommittedSeq !== null &&
+        seq <= this.lastCommittedSeq)) return this.checkpointChain;
+    // Serialize concurrent timer/shutdown flushes; an older checkpoint must
+    // never overwrite a newer one on this single source.
+    this.checkpointChain = this.checkpointChain.catch(() => undefined).then(async () => {
+      if (this.lastCommittedSeq !== null && seq <= this.lastCommittedSeq) return;
+      await this.cursorManager.commitCursor(this.source.id, seq);
+      this.lastCommittedSeq = seq;
+    });
     try {
-      await this.cursorManager.commitCursor(this.source.id, this.lastAckedSeq);
-    } catch (err) {
-      console.error(`[FirehoseConnection] Failed to commit cursor for ${this.source.id}:`, err);
+      await this.checkpointChain;
+    } catch (error) {
+      console.error("[FirehoseConnection] Checkpoint save failed", {
+        sourceId: this.source.id,
+        code: error instanceof Error ? error.name : "UNKNOWN",
+      });
     }
   }
 
-  private calculateBackoff(): number {
-    // Exponential backoff: 100ms, 200ms, 400ms, 800ms... max 30s
-    const baseDelay = 100;
-    const maxDelay = 30_000;
-    const exp = Math.min(this.reconnectAttempts - 1, 10); // cap exponent
-    const delay = baseDelay * Math.pow(2, exp);
-    
-    // Add ±20% jitter
-    const jitter = 1 + (Math.random() * 0.4 - 0.2);
-    return Math.min(delay * jitter, maxDelay);
+  private async waitForReconnect(): Promise<void> {
+    const max = Math.min(WS_RECONNECT_CEILING_MS,
+      500 * 2 ** Math.min(10, this.reconnectAttempts - 1));
+    const delay = Math.max(250, Math.floor(Math.random() * max));
+    await new Promise<void>(resolve => {
+      const done = () => {
+        clearTimeout(timer);
+        this.stopReconnectWait = null;
+        resolve();
+      };
+      const timer = setTimeout(done, delay);
+      this.stopReconnectWait = done;
+    });
+  }
+
+  private cleanupSocket(): void {
+    if (this.pingInterval) clearInterval(this.pingInterval);
+    this.pingInterval = null;
   }
 }
 
@@ -341,13 +373,17 @@ class FirehoseConnection {
 // Validation Helpers
 // ---------------------------------------------------------------------------
 
-function validateSourceUrl(urlStr: string): void {
-  try {
-    const url = new URL(urlStr);
-    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
-      throw new Error('URL must use ws:// or wss:// protocol');
-    }
-  } catch (err) {
-    throw new Error(`Invalid source URL "${urlStr}": ${err instanceof Error ? err.message : String(err)}`);
+function validateSourceUrl(source: string): void {
+  let url: URL;
+  try { url = new URL(source); }
+  catch { throw new Error("External firehose source is not a valid URL"); }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "wss:" &&
+      !(url.protocol === "ws:" && loopback && process.env["NODE_ENV"] === "test")) {
+    throw new Error("External firehose requires WSS outside disposable loopback tests");
+  }
+  if (url.username || url.password || url.search || url.hash ||
+      !["/", "/xrpc/com.atproto.sync.subscribeRepos"].includes(url.pathname)) {
+    throw new Error("External firehose URL must have no credentials, query or non-sync path");
   }
 }
