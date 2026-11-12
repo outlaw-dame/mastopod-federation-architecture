@@ -80,6 +80,7 @@ export function buildAtExternalFirehoseBootstrap(
     decoder,
     cursorManager,
     options.eventPublisher,
+    options.runtimeConfig.rawTopic,
   );
   const classifier = new Phase55AEventClassifier(options.redis);
   const auditPublisher = new DefaultAtIngressAuditPublisher(options.eventPublisher);
