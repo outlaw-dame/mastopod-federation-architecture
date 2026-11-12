@@ -109,7 +109,7 @@ describe("Jetstream unverified WebSocket boundary",()=>{
     });
     await feed(v2,commit());
     expect(publisher).toHaveBeenCalledTimes(1);
-    const legacy=make(publisher).service;
+    const legacy=make().service;
     await feed(legacy,frame);
     expect(publisher).toHaveBeenCalledTimes(1);
     expect(()=>parseJetstreamUrl(
