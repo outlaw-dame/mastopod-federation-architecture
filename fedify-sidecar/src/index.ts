@@ -106,6 +106,7 @@ import { AtFirehoseRuntime } from "./at-adapter/firehose/AtFirehoseRuntime.js";
 import {
   selectExternalAtIngestionSource,
   requireVerifiedExternalFirehoseReady,
+  requireVerifiedExternalTopicGovernance,
 } from "./at-adapter/ingress/AtExternalIngestionPolicy.js";
 import { RedisExternalAtModeGate } from "./at-adapter/ingress/RedisExternalAtModeGate.js";
 import { DefaultAtRepoDiffBuilder } from "./at-adapter/repo/AtRepoDiffBuilder.js";
@@ -1003,6 +1004,11 @@ async function main() {
   const startupTasks: StartupTask[] = [];
 
   const enforceTopicGovernance = process.env["REDPANDA_ENFORCE_TOPIC_GOVERNANCE"] !== "false";
+  requireVerifiedExternalTopicGovernance({
+    verifiedExternalFirehose: config.enableAtExternalFirehose,
+    environment: config.nodeEnv,
+    governanceEnabled: enforceTopicGovernance,
+  });
 
   if (config.enableXrpcServer && !config.atLocalFixture) {
     if (!process.env["ACTIVITYPODS_URL"]) {
@@ -3130,6 +3136,9 @@ async function main() {
             10,
           ),
           source: "fedify-sidecar.at-native",
+          ...(config.enableAtExternalFirehose ? {
+            largeRawFirehoseTopic: config.atExternalFirehoseRawTopic,
+          } : {}),
         });
         const eventPublisherAdapter: EventPublisher = atEventPublisher;
 

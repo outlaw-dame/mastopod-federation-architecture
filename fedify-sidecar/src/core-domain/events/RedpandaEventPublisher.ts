@@ -7,6 +7,7 @@ import type {
 } from "./CoreIdentityEvents.js";
 import { sanitizeJsonObject } from "../../utils/safe-json.js";
 import { resolveConfiguredRedpandaCompression } from "../../streams/kafka-compression.js";
+import { AT_SYNC_RAW_MAX_EVENT_BYTES } from "../../at-adapter/ingress/AtExternalFirehosePayloadLimits.js";
 
 export interface RedpandaEventPublisherConfig {
   brokers: string[];
@@ -17,6 +18,8 @@ export interface RedpandaEventPublisherConfig {
   requestTimeoutMs?: number;
   maxEventBytes?: number;
   maxBatchSize?: number;
+  /** Only the explicitly selected external Sync raw topic may accept large frames. */
+  largeRawFirehoseTopic?: string;
 }
 
 export interface KafkaProducerLike {
@@ -40,6 +43,7 @@ export class RedpandaEventPublisher implements EventPublisher {
   private readonly source: string;
   private readonly maxEventBytes: number;
   private readonly maxBatchSize: number;
+  private readonly largeRawFirehoseTopic: string | undefined;
   private connected = false;
   private connectPromise: Promise<void> | null = null;
 
@@ -50,6 +54,12 @@ export class RedpandaEventPublisher implements EventPublisher {
     this.source = config.source ?? "fedify-sidecar";
     this.maxEventBytes = config.maxEventBytes ?? 512_000;
     this.maxBatchSize = config.maxBatchSize ?? 64;
+    if (config.largeRawFirehoseTopic !== undefined &&
+        !/^at\.firehose\.raw(?:\.[a-z0-9_-]+)*\.v[0-9]+$/.test(
+          config.largeRawFirehoseTopic)) {
+      throw new Error("Large raw firehose budget requires the isolated raw topic namespace");
+    }
+    this.largeRawFirehoseTopic = config.largeRawFirehoseTopic;
     const resolvedCompression = resolveConfiguredRedpandaCompression(config.compression);
     this.compression = resolvedCompression.name === "none" ? undefined : resolvedCompression.type;
     this.producer = producer ?? createProducer(config);
@@ -130,7 +140,8 @@ export class RedpandaEventPublisher implements EventPublisher {
       const eventRecord = event as unknown as Record<string, unknown>;
       const enrichedMetadata = buildMetadata(topic, eventRecord, metadata, this.source);
       const payload = sanitizeJsonObject(event, {
-        maxBytes: this.maxEventBytes,
+        maxBytes: topic === this.largeRawFirehoseTopic
+          ? AT_SYNC_RAW_MAX_EVENT_BYTES : this.maxEventBytes,
       });
       const serialized = JSON.stringify(payload);
       const message = {
