@@ -153,15 +153,10 @@ export class OriginReconciliationWorker {
           return;
         }
 
-        const applyKey = job.canonicalObjectId || job.originObjectUrl;
-        const shouldApply = await this.queue.markOriginReconciliationApplied(
-          applyKey,
-          result.fingerprint,
-          this.config.applyIdempotencyTtlSeconds,
+        const wasEnqueued = await this.enqueueSyntheticUpdate(
+          job, result.body, result.fingerprint,
         );
-
-        if (shouldApply) {
-          await this.enqueueSyntheticUpdate(job, result.body);
+        if (wasEnqueued) {
           metrics.originReconciliationChangedTotal.inc({ origin_host: originHost });
         } else {
           metrics.originReconciliationNoopTotal.inc({ origin_host: originHost });
@@ -244,28 +239,33 @@ export class OriginReconciliationWorker {
   private async enqueueSyntheticUpdate(
     job: OriginReconciliationJob,
     object: Record<string, unknown>,
-  ): Promise<void> {
+    fingerprint: string,
+  ): Promise<boolean> {
     const actorUri = job.actorUriHint ?? extractAttributedTo(object);
     if (!actorUri) {
       logger.debug("[origin-reconcile] changed object missing actor hint, skipping synthetic update", {
         originObjectUrl: job.originObjectUrl,
       });
-      return;
+      return false;
     }
 
+    const objectKey = job.canonicalObjectId || job.originObjectUrl;
+    const stableId = createHash("sha256")
+      .update(objectKey).update("\0").update(fingerprint)
+      .digest("hex");
     const objectType = typeof object["type"] === "string" ? object["type"] : null;
     const syntheticActivity = objectType === "Tombstone"
       ? {
           "@context": "https://www.w3.org/ns/activitystreams",
           type: "Delete",
-          id: `urn:origin-reconcile:${randomUUID()}`,
+          id: `urn:origin-reconcile:${stableId}`,
           actor: actorUri,
           object: job.originObjectUrl,
         }
       : {
           "@context": "https://www.w3.org/ns/activitystreams",
           type: "Update",
-          id: `urn:origin-reconcile:${randomUUID()}`,
+          id: `urn:origin-reconcile:${stableId}`,
           actor: actorUri,
           object,
         };
@@ -281,7 +281,9 @@ export class OriginReconciliationWorker {
       },
     });
 
-    await this.queue.enqueueInbound(envelope);
+    return this.queue.enqueueOriginReconciliationUpdateOnce(
+      objectKey, fingerprint, envelope, this.config.applyIdempotencyTtlSeconds,
+    );
   }
 
   private async deferJob(
