@@ -21,7 +21,7 @@ describe("Redis-backed external Sync source ownership and monotonic cursors", ()
   it("co-locates lease and checkpoint keys in one Redis Cluster hash tag", () => {
     const a = externalSyncFenceKeys("wss://one.example/xrpc/com.atproto.sync.subscribeRepos");
     const b = externalSyncFenceKeys("wss://two.example/xrpc/com.atproto.sync.subscribeRepos");
-    const group = (key:string) => key.match(/\\{([^}]+)\\}/)?.[1] ?? "";
+    const group = (key:string) => key.split("{")[1]?.split("}")[0] ?? "";
     expect(group(a.owner)).toMatch(/^[a-f0-9]{40}$/);
     expect(new Set(Object.values(a).map(group)).size).toBe(1);
     expect(group(b.owner)).not.toBe(group(a.owner));
