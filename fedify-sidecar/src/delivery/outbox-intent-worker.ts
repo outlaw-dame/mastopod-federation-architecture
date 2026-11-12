@@ -17,6 +17,7 @@ import type { RemoteSharedInboxCache } from "./RemoteSharedInboxCache.js";
 import { metrics } from "../metrics/index.js";
 import type { ActivityEventMeta, RedPandaProducer } from "../streams/redpanda-producer.js";
 import { logger } from "../utils/logger.js";
+import { isRedisStreamCapacityError } from "../queue/redis-stream-safe-admission.js";
 import {
   APDM_OUTBOX_INTENT_MAX_AGE_MS,
   outboxIntentAgeMs,
@@ -252,6 +253,15 @@ export class OutboxIntentWorker {
       // business retry attempt or manufacturing another replacement.
       if (parkingAlreadyFutureIntent) {
         throw error;
+      }
+      if (isRedisStreamCapacityError(error)) {
+        // Leave the source in the PEL for XAUTOCLAIM after the consumer idle
+        // threshold. Capacity is infrastructure pressure, not a failed AP
+        // delivery attempt and not grounds for DLQ escalation.
+        logger.warn("Outbox intent backpressured; original message remains pending", {
+          intentId: intent.intentId,
+        });
+        return;
       }
 
       const message = error instanceof Error ? error.message : String(error);
