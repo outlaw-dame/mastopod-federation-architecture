@@ -106,8 +106,9 @@ try {
    "Blocked due intent was removed from schedule");
   const ready=await readAndAck(keys.intent);
   assert(ready.length===3,"Could not acknowledge ready intents");
-  const promoted=await scheduler.promoteDue(Date.now());
-  assert(promoted===1,"Due intent was not retried after capacity returned");
+  // Failed admission deliberately closed the standalone scheduler client.
+  // Retrying startup must re-open it and promote the retained delayed source.
+  await scheduler.start();
   assert((await redis.zScore(keys.delayed,due.intentId))===null,
    "Promoted delayed job remains scheduled");
  } finally {await scheduler.stop().catch(()=>undefined);}
