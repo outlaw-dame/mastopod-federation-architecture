@@ -316,7 +316,7 @@ async function fetchTopicConfigEntries(
   return byTopic;
 }
 
-function buildConfigEntries(
+export function buildConfigEntries(
   topic: TopicDefinition,
   profile: DurabilityProfile,
 ): Array<{ name: string; value: string }> {
