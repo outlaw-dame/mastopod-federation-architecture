@@ -267,6 +267,45 @@ describe("real federation fixture bootstrap contracts", () => {
     expect(script).not.toContain("LRANGE");
   });
 
+  it("requires a live Friendica foreground daemon without relying on its absent PID file", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/bootstrap-friendica-account.sh"),
+      "utf8",
+    );
+    expect(script).toContain("compose up -d friendica-worker");
+    expect(script).toContain("compose ps --status running --services");
+    expect(script).toContain("/proc/[0-9]*/cmdline");
+    expect(script).toContain("daemon[[:space:]]+start[[:space:]]+-f");
+    expect(script).toContain("worker_ready=false");
+    expect(script).toContain("worker_ready=true");
+    expect(script).toContain("Friendica foreground worker did not become ready");
+    expect(script).not.toContain("config system pidfile /tmp/friendica-worker.pid");
+    expect(script).not.toContain("FRIENDICA_NO_VALIDATION");
+  });
+
+  it("prefers the pinned Friendica application log and keeps its diagnostic output bounded", () => {
+    const script = readFileSync(
+      resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
+      "utf8",
+    );
+    const pathOrder = script.indexOf(
+      "for candidate in /var/www/html/friendica.log /var/www/friendica.log; do",
+    );
+    expect(pathOrder).toBeGreaterThan(-1);
+    expect(script).toContain("friendica_app_log_source=pinned_image");
+    expect(script).toContain("friendica_app_log_source=legacy_fallback");
+    expect(script).toContain("friendica_log_compare_source=%s");
+    expect(script).toContain("stats_packets_inbound_apub");
+    expect(script).toContain("friendica_apub_inbound_counter=");
+    expect(script).toContain('tail -n 2000 "$candidate" | awk -v source="$source"');
+    expect(script).toContain("levels_debug=");
+    expect(script).toContain("signer_tombstone=");
+    expect(script).toContain("missing_follow_object=");
+    expect(script).not.toContain('printf "%s" "$log"');
+    expect(script).toContain('tail -n 2000 "$log" | awk');
+    expect(script).not.toContain('cat "$log"');
+  });
+
   it("records Friendica inbox and relationship state without exposing queued payloads", () => {
     const script = readFileSync(
       resolve(process.cwd(), "interop/ap/scripts/assert-real-follow-accepted.sh"),
