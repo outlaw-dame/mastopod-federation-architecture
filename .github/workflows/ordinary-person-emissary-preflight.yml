@@ -92,11 +92,15 @@ jobs:
               echo "::error::Emissary process exited during startup"
               exit 1
             fi
+            # Only a true HTTPS-equivalent application response proves the
+            # service route is alive. A bare 307 from HTTPS middleware is
+            # not proof that the application or its actor is initialized.
             code="$(curl --silent --output /dev/null --max-time 3 \
               --write-out '%{http_code}' -H 'Host: localhost' \
+              -H 'X-Forwarded-Proto: https' \
               http://127.0.0.1:18880/ || true)"
             case "$code" in
-              200|301|302|303|307|308)
+              200)
                 echo "emissary_boot_http_status=$code"
                 ready=true
                 break
@@ -107,6 +111,34 @@ jobs:
           test "$ready" = true
           echo 'emissary_source_boot=passed (no remote Follow attempted)'
 
+      - name: Verify the actual disposable Person actor endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only the local controlled demo user is fetched. Avoid third-party
+          # actors, network fanout, or ever treating HTTP 202 as a Follow.
+          curl --fail --silent --show-error --max-time 15 \
+            -H 'Host: localhost' -H 'X-Forwarded-Proto: https' \
+            -H 'Accept: application/activity+json' \
+            http://127.0.0.1:18880/@demo/pub > emissary-actor.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const actor = JSON.parse(fs.readFileSync('emissary-actor.json', 'utf8'));
+          const asUrl = value => typeof value === 'string'
+            ? value : value && typeof value.id === 'string' ? value.id : '';
+          const valid = actor.type === 'Person' &&
+            asUrl(actor.id).startsWith('https://') &&
+            asUrl(actor.inbox).startsWith('https://') &&
+            (typeof actor.publicKey?.publicKeyPem === 'string' ||
+              typeof actor.publicKey?.publicKeyMultibase === 'string');
+          if (!valid) {
+            console.error('Emissary demo actor is not a complete signed ActivityPub Person');
+            process.exit(1);
+          }
+          console.log('emissary_local_person_actor=validated (remote Follow persistence remains untested)');
+          NODE
+          rm -f emissary-actor.json
+
       - name: Cleanup ephemeral instance and MongoDB
         if: always()
         shell: bash
@@ -115,4 +147,4 @@ jobs:
             kill "$(cat emissary-ci.pid)" 2>/dev/null || true
           fi
           docker rm -f paper-emissary-mongo >/dev/null 2>&1 || true
-          rm -f emissary-ci-config.json emissary-ci.log emissary-ci.pid
+          rm -f emissary-ci-config.json emissary-ci.log emissary-ci.pid emissary-actor.json
