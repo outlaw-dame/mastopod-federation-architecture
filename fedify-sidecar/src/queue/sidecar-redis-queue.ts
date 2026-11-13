@@ -57,7 +57,9 @@ export function stripUnverifiedSyntheticVerification(envelope: InboundEnvelope):
 /**
  * Durability wrapper around the core Redis Streams queue.
  *
- * The ready outbound Stream is intentionally MAXLEN-trimmed. Future-dated
+ * Legacy ready outbound Streams are MAXLEN-trimmed; opt-in Redis 8.2
+ * ACKED mode retains unacknowledged records with atomic admission.
+ * Future-dated
  * retries therefore bypass that Stream and are written directly to a durable
  * ZSET + payload hash. Legacy/fresh ready entries that are discovered with a
  * long not-before are atomically moved to the same delayed store and ACKed.
@@ -133,6 +135,19 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
 
   override async enqueueInbound(envelope: InboundEnvelope): Promise<void> {
     await super.enqueueInbound(stripUnverifiedSyntheticVerification(envelope));
+  }
+
+  override async enqueueOriginReconciliationUpdateOnce(
+    objectKey: string,
+    fingerprint: string,
+    envelope: InboundEnvelope,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    // Preserve the same provenance boundary as normal inbound enqueue.
+    return super.enqueueOriginReconciliationUpdateOnce(
+      objectKey, fingerprint,
+      stripUnverifiedSyntheticVerification(envelope), ttlSeconds,
+    );
   }
 
   override async enqueueOutbound(job: OutboundJob): Promise<void> {
@@ -415,17 +430,71 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
       const script = `
         local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
         local promoted = 0
+        local safeAcked = ARGV[4] == '1'
+        local prepared = {}
+        if safeAcked and #ids > 0 then
+          -- A stale schedule entry without a payload is cleanup work, not
+          -- another ready-stream slot. Validate the whole batch up front:
+          -- Redis Lua errors do not roll back earlier writes.
+          local needed = 0
+          for _, id in ipairs(ids) do
+            local payload = redis.call('HGET', KEYS[2], id)
+            if payload then
+              local ok, job = pcall(cjson.decode, payload)
+              if not ok or type(job) ~= 'table' or
+                type(job.jobId) ~= 'string' or
+                type(job.activityId) ~= 'string' or
+                type(job.actorUri) ~= 'string' or
+                type(job.activity) ~= 'string' or
+                type(job.targetInbox) ~= 'string' or
+                type(job.targetDomain) ~= 'string' or
+                not tonumber(job.attempt or 0) or
+                not tonumber(job.maxAttempts or 0) or
+                not tonumber(job.notBeforeMs or 0) or
+                not tonumber(job.deferCount or 0) then
+                return redis.error_reply('invalid delayed outbound payload for ' .. id)
+              end
+              prepared[id] = job
+              needed = needed + 1
+            end
+          end
+          if needed > 0 then
+            local groups = redis.pcall('XINFO', 'GROUPS', KEYS[3])
+            if type(groups) ~= 'table' or #groups == 0 then
+              return redis.error_reply('REDIS_STREAM_NO_CONSUMER_GROUP')
+            end
+            local capacity = tonumber(ARGV[3])
+            if needed > capacity then
+              return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+            end
+            redis.call('XTRIM', KEYS[3], 'MAXLEN', '=',
+              tostring(capacity - needed), 'ACKED')
+            if redis.call('XLEN', KEYS[3]) > capacity - needed then
+              return redis.error_reply('REDIS_STREAM_AT_CAPACITY')
+            end
+          end
+        end
         for _, id in ipairs(ids) do
           local payload = redis.call('HGET', KEYS[2], id)
           if payload then
-            local ok, job = pcall(cjson.decode, payload)
-            if not ok or not job then
-              return redis.error_reply('invalid delayed outbound payload for ' .. id)
+            local job = prepared[id]
+            if not safeAcked then
+              local ok
+              ok, job = pcall(cjson.decode, payload)
+              if not ok or not job then
+                return redis.error_reply('invalid delayed outbound payload for ' .. id)
+              end
             end
             local meta = ''
             if job.meta ~= nil then meta = cjson.encode(job.meta) end
-            redis.call(
-              'XADD', KEYS[3], 'MAXLEN', '~', ARGV[3], '*',
+            local args = { 'XADD', KEYS[3] }
+            if not safeAcked then
+              table.insert(args, 'MAXLEN')
+              table.insert(args, '~')
+              table.insert(args, ARGV[3])
+            end
+            table.insert(args, '*')
+            local fields = {
               'jobId', job.jobId,
               'activityId', job.activityId,
               'actorUri', job.actorUri,
@@ -438,7 +507,9 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
               'deferCount', tostring(job.deferCount or 0),
               'lastError', job.lastError or '',
               'meta', meta
-            )
+            }
+            for _, field in ipairs(fields) do table.insert(args, field) end
+            redis.call(unpack(args))
             promoted = promoted + 1
           end
           redis.call('ZREM', KEYS[1], id)
@@ -453,6 +524,7 @@ export class RedisStreamsQueue extends CoreRedisStreamsQueue {
           String(nowMs),
           String(DELAYED_OUTBOUND_PROMOTION_BATCH_SIZE),
           String(this.maxStreamLengthForDelay),
+          this.safeAckedRetention ? "1" : "0",
         ],
       });
       return typeof promoted === "number" ? promoted : Number(promoted ?? 0);

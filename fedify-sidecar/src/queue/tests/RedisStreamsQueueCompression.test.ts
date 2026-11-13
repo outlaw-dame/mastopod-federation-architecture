@@ -294,8 +294,8 @@ describe("RedisStreamsQueue compression boundary", () => {
 
     const options = admin.eval.mock.calls[0]?.[1] as { arguments: string[] };
     const args = options.arguments;
-    const firstActivity = args[6];
-    const secondActivity = args[18];
+    const firstActivity = args[7];
+    const secondActivity = args[19];
     expect(firstActivity).toMatch(/^apq1:br:/u);
     expect(secondActivity).toBe(firstActivity);
     await queue.disconnect();

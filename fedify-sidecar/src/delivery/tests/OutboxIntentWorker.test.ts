@@ -108,6 +108,21 @@ function expectCalledBefore(first: ReturnType<typeof vi.fn>, second: ReturnType<
 }
 
 describe("OutboxIntentWorker", () => {
+  it("retains the original intent on downstream capacity pressure without using business retries",async()=>{
+    const queue = makeQueue({
+      enqueueOutboundBatchForIntent: vi.fn().mockRejectedValue(
+        Error("REDIS_STREAM_AT_CAPACITY")),
+    });
+    const delayScheduler=makeDelayScheduler();
+    const worker=new TestOutboxIntentWorker(queue,makeRedpanda(),
+      makeConfig({delayScheduler}));
+    await worker.runIntent("pending-intent",makeIntent({attempt:5,maxAttempts:6}));
+    expect(queue.enqueueOutboundBatchForIntent).toHaveBeenCalledTimes(1);
+    expect(queue.ack).not.toHaveBeenCalled();
+    expect(queue.moveToDlq).not.toHaveBeenCalled();
+    expect(delayScheduler.persistReplacementAndAck).not.toHaveBeenCalled();
+  });
+
   it("publishes the event log and atomically fans out outbound jobs on success", async () => {
     const queue = makeQueue();
     const redpanda = makeRedpanda();
