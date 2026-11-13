@@ -100,6 +100,7 @@ jobs:
           for key in SECRET_KEY_BASE SIGNING_SALT ENCRYPTION_SALT RELEASE_COOKIE; do
             printf '%s=%s\n' "$key" "$(openssl rand -hex 64)" >> "$env_file"
           done
+          printf 'AP_INTEROP_USER_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> "$env_file"
           chmod 600 "$env_file"
           set -a
           source "$env_file"
@@ -180,30 +181,17 @@ jobs:
           set -a
           source "$GITHUB_WORKSPACE/bonfire-rc/.env"
           set +a
-          # A disposable local account only, never a public instance.
-          password="$(openssl rand -hex 32)"
-          echo "::add-mask::$password"
+          # Use a disposable account on the isolated runner. No public traffic.
           if ! (cd bonfire-rc && bin/bonfire rpc \
-            "case Bonfire.Me.make_account_and_user(\\"interop\\", \\"interop@localhost\\", \\"$password\\") do {:ok, _} -> IO.puts(\\"AP_PERSON_CREATED\\"); other -> raise inspect(other) end") \
+            'case Bonfire.Me.make_account_and_user("interop", "interop@localhost", System.fetch_env!("AP_INTEROP_USER_PASSWORD")) do {:ok, _} -> IO.puts("AP_PERSON_CREATED"); other -> raise inspect(other) end') \
             >bonfire-actor-rpc.log 2>&1; then
             echo "::error::Bonfire disposable user creation failed"
             exit 1
           fi
-          grep -q '^AP_PERSON_CREATED
-        shell: bash
-        run: |
-          if [ -f bonfire-rc.pid ]; then
-            kill "$(cat bonfire-rc.pid)" 2>/dev/null || true
-          fi
-          docker rm -f paper-bonfire-rc-pg >/dev/null 2>&1 || true
-          rm -f bonfire-rc/.env bonfire-rc-ci.log bonfire-rc.pid bonfire-rc.tar.gz \
-            bonfire-actor-rpc.log bonfire-webfinger.json bonfire-actor-uri.txt bonfire-actor.json
- bonfire-actor-rpc.log || {
+          grep -qx 'AP_PERSON_CREATED' bonfire-actor-rpc.log || {
             echo "::error::Bonfire did not confirm disposable Person creation"
             exit 1
           }
-          # This JRD is from the isolated loopback origin. Remote federation
-          # later requires a genuine HTTPS actor and persisted Follow.
           curl --fail --silent --show-error --max-time 20 \
             -H 'Accept: application/jrd+json' \
             'http://127.0.0.1:4000/.well-known/webfinger?resource=acct:interop@localhost' \
@@ -222,25 +210,21 @@ jobs:
           const u = new URL(self.href);
           if (!['localhost','127.0.0.1'].includes(u.hostname) ||
               !['http:','https:'].includes(u.protocol) || u.username || u.password) {
-            console.error('Bonfire actor URI does not target the disposable loopback fixture');
+            console.error('Bonfire actor URI is not local to the disposable fixture');
             process.exit(1);
           }
           fs.writeFileSync('bonfire-actor-uri.txt', self.href, { mode: 0o600 });
           NODE
           actor_uri="$(cat bonfire-actor-uri.txt)"
-          # Port is fixed by the disposable Bonfire release. Never follow a
-          # redirect to a public network origin in this boot proof.
           actor_path="$(node -e 'const u=new URL(process.argv[1]); process.stdout.write(u.pathname+u.search);' "$actor_uri")"
           curl --fail --silent --show-error --max-time 20 \
-            -H 'Accept: application/activity+json' \
-            -H 'Host: localhost:4000' \
+            -H 'Accept: application/activity+json' -H 'Host: localhost:4000' \
             "http://127.0.0.1:4000$actor_path" -o bonfire-actor.json
           node <<'NODE'
           const fs = require('node:fs');
           const actor = JSON.parse(fs.readFileSync('bonfire-actor.json','utf8'));
           const value = x => typeof x === 'string' ? x : typeof x?.id === 'string' ? x.id : null;
-          if (actor.type !== 'Person' || !value(actor.id) ||
-              !value(actor.inbox) ||
+          if (actor.type !== 'Person' || !value(actor.id) || !value(actor.inbox) ||
               typeof actor.publicKey?.publicKeyPem !== 'string') {
             console.error('Bonfire disposable Person actor lacks required type, inbox or public key');
             process.exit(1);
@@ -256,4 +240,5 @@ jobs:
             kill "$(cat bonfire-rc.pid)" 2>/dev/null || true
           fi
           docker rm -f paper-bonfire-rc-pg >/dev/null 2>&1 || true
-          rm -f bonfire-rc/.env bonfire-rc-ci.log bonfire-rc.pid bonfire-rc.tar.gz
+          rm -f bonfire-rc/.env bonfire-rc-ci.log bonfire-rc.pid bonfire-rc.tar.gz \
+            bonfire-actor-rpc.log bonfire-webfinger.json bonfire-actor-uri.txt bonfire-actor.json
