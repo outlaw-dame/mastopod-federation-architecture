@@ -261,11 +261,36 @@ jobs:
             echo "::add-mask::$value"
             export "$key=$value"
           done
+          AP_INTEROP_BONFIRE_PASSWORD="$(openssl rand -hex 24)"
+          export AP_INTEROP_BONFIRE_PASSWORD
+          echo "::add-mask::${AP_INTEROP_BONFIRE_PASSWORD}"
           AP_INTEROP_COMPOSE_FILE=fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
           AP_INTEROP_BONFIRE_OVERLAY=fedify-sidecar/interop/ap/docker-compose.bonfire.yml \
           AP_INTEROP_BONFIRE_USERNAME=interop \
             sh fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
           echo 'bonfire_rc8_disposable_docker_person_ready'
+
+          # Negative control: the same read-only persisted-Follow RPC used
+          # in real federation must return a definite zero for an actor
+          # that does not exist. An RPC/Compose failure must NOT masquerade
+          # as valid zero. No Follow activity or external network fetch.
+          probe_error="$(mktemp)"
+          trap 'rm -f "$probe_error"' EXIT
+          if AP_INTEROP_COMPOSE_FILE=fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
+             AP_INTEROP_COMPOSE_OVERLAY=fedify-sidecar/interop/ap/docker-compose.bonfire.yml \
+             AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS=1 \
+             AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS=0 \
+             sh fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh \
+               bonfire https://activitypods.test/unregistered-negative-control interop \
+               >/dev/null 2>"$probe_error"; then
+            echo "::error::Bonfire negative-control actor unexpectedly has a persisted Follow"
+            exit 1
+          fi
+          if ! grep -q '^bonfire did not persist the expected Follow' "$probe_error"; then
+            echo "::error::Bonfire read-only persistence verifier did not return a determinate zero"
+            exit 1
+          fi
+          echo 'bonfire_rpc_readonly_negative_control=passed'
 
       - name: Remove disposable Bonfire server and PostgreSQL
         if: always()
