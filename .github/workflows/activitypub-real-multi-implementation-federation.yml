@@ -311,8 +311,16 @@ jobs:
                 let u;
                 try { u=new URL(self.href); }
                 catch { console.error("bonfire_webfinger_self_invalid_uri"); process.exit(1); }
+                // WebFinger is the source of the canonical Bonfire
+                // actor URL. Do not assume the obsolete /pub/actors/ route:
+                // fetch the advertised URL and verify Person identity below.
+                const safePath = u.pathname.length > 1 &&
+                  u.pathname.length <= 512 &&
+                  !u.pathname.includes("//") &&
+                  !/%2f|%5c|%2e|%00/i.test(u.pathname) &&
+                  !u.pathname.split("/").includes("..");
                 if(u.origin!=="https://bonfire.test" ||
-                   !u.pathname.startsWith("/pub/actors/") ||
+                   !safePath || u.search ||
                    u.username || u.password || u.hash) {
                   // Only bounded structural fields from this disposable
                   // actor are printed, never raw JRD, credentials, keys, URLs.
@@ -321,7 +329,7 @@ jobs:
                     https:u.protocol==="https:",
                     hostIsFixture:u.hostname==="bonfire.test",
                     noUnexpectedPort:u.port==="",
-                    actorPath:u.pathname.startsWith("/pub/actors/"),
+                    actorPathSafe:safePath,
                     hasUnsafeComponents:Boolean(u.username||u.password||u.hash)
                   }));
                   process.exit(1);
@@ -329,6 +337,32 @@ jobs:
                 process.stdout.write(self.href);
               ')"
               test -n "${TARGET_ACTOR_URI}"
+              # An actual Person JSON-LD check is necessary; mere JRD
+              # discovery cannot count as the actor acceptance gate.
+              bonfire_actor_path="$(node -e '
+                const u=new URL(process.argv[1]);
+                process.stdout.write(u.pathname);
+              ' "${TARGET_ACTOR_URI}")"
+              bonfire_actor_json="$(docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" \
+                exec -T bonfire-app curl --fail --silent --show-error \
+                --max-time 12 --max-filesize 65536 -H 'Host: bonfire.test' \
+                -H 'Accept: application/activity+json' \
+                "http://127.0.0.1:4000${bonfire_actor_path}")"
+              printf '%s' "${bonfire_actor_json}" | node -e '
+                const fs=require("node:fs");
+                const actor=JSON.parse(fs.readFileSync(0,"utf8"));
+                const intended=process.argv[1];
+                const id=typeof actor.id==="string" ? actor.id : actor.id?.id;
+                const inbox=typeof actor.inbox==="string" ? actor.inbox : actor.inbox?.id;
+                const key=actor.publicKey?.publicKeyPem;
+                let sameOrigin=false;
+                try { sameOrigin=new URL(inbox).origin==="https://bonfire.test"; } catch {}
+                if(actor.type!=="Person" || id!==intended || !sameOrigin ||
+                   typeof key!=="string" || key.length<64) {
+                  console.error("bonfire_webfinger_person_identity_mismatch");
+                  process.exit(1);
+                }
+              ' "${TARGET_ACTOR_URI}"
               export TARGET_ACTOR_URI
               echo "TARGET_ACTOR_URI=${TARGET_ACTOR_URI}" >> "${GITHUB_ENV}"
               ;;
