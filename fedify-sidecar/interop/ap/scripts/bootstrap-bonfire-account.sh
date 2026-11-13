@@ -76,10 +76,26 @@ compose exec -T bonfire-app bin/bonfire rpc \
   | grep -qx 'AP_INTEROP_USER_READY'
 
 # Public discovery is mandatory; 401/403 or bare HTTP startup is not a pass.
-status=$(compose exec -T bonfire-app curl --silent --output /dev/null \
-  --max-time 10 --write-out '%{http_code}' \
-  -H 'Host: bonfire.test' -H 'Accept: application/jrd+json' \
-  "http://127.0.0.1:4000/.well-known/webfinger?resource=acct:$USERNAME@bonfire.test")
-[ "$status" = 200 ] ||
-  { echo "Bonfire fixture WebFinger HTTP $status" >&2; exit 1; }
+# The BEAM release may have committed migrations and accepted RPCs before
+# its HTTP listener is ready. Do not treat curl's exit 7 as a federation
+# failure, nor suppress a persistent 401/403: retry the SAME local fixture
+# only for a bounded startup window, then require an actual 200.
+status=unavailable
+webfinger_ready=false
+for attempt in $(seq 1 120); do
+  status=$(compose exec -T bonfire-app curl --silent --output /dev/null \
+    --max-time 5 --write-out '%{http_code}' \
+    -H 'Host: bonfire.test' -H 'Accept: application/jrd+json' \
+    "http://127.0.0.1:4000/.well-known/webfinger?resource=acct:$USERNAME@bonfire.test" \
+    2>/dev/null) || status=unavailable
+  if [ "$status" = 200 ]; then
+    webfinger_ready=true
+    break
+  fi
+  sleep 2
+done
+if [ "$webfinger_ready" != true ]; then
+  echo "Bonfire fixture WebFinger never became public (last HTTP $status)" >&2
+  exit 1
+fi
 echo 'bonfire_rc8_person_ready'
