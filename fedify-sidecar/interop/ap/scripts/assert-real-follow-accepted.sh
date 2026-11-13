@@ -105,9 +105,18 @@ query_count() {
         "MYSQL_PWD=\"\$MYSQL_PASSWORD\" mysql --batch --skip-column-names -u pixelfed pixelfed -e \"select count(*) from followers f join profiles follower on follower.id=f.profile_id join profiles target on target.id=f.following_id where follower.remote_url='${actor_sql}' and target.username='${username_sql}' and target.domain is null;\""
       ;;
     bonfire)
-      output=$(compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" -e AP_INTEROP_TARGET_USERNAME="${LOCAL_USERNAME}" \
-        bonfire-app bin/bonfire rpc \
-        'with {:ok, follower} <- Bonfire.Federate.ActivityPub.AdapterUtils.get_character_by_ap_id(System.fetch_env!("AP_INTEROP_ACTOR_URI")), {:ok, target} <- Bonfire.Me.Users.by_username(System.fetch_env!("AP_INTEROP_TARGET_USERNAME")) do IO.puts(if Bonfire.Social.Graph.Follows.following?(follower, target), do: "1", else: "0") else _ -> IO.puts("0") end')
+      # A release RPC evaluates the expression in the running BEAM server,
+      # which does NOT inherit environment variables from docker compose
+      # exec. Embed validated Base64 constants instead (never raw URI input).
+      # This is a read-only actor lookup: fetching in the assertion itself
+      # could create remote actor state and amplify network retries.
+      actor_b64=$(printf '%s' "${ACTOR_URI}" | openssl base64 -A)
+      username_b64=$(printf '%s' "${LOCAL_USERNAME}" | openssl base64 -A)
+      case "${actor_b64}:${username_b64}" in
+        *[!A-Za-z0-9+/=:]*|'':*|*:'') return 1 ;;
+      esac
+      output=$(compose exec -T bonfire-app bin/bonfire rpc \
+        "with {:ok, follower} <- Bonfire.Federate.ActivityPub.AdapterUtils.get_character_by_ap_id(Base.decode64!(\\\"${actor_b64}\\\")), {:ok, target} <- Bonfire.Me.Users.by_username(Base.decode64!(\\\"${username_b64}\\\")) do IO.puts(if Bonfire.Social.Graph.Follows.following?(follower, target), do: \\\"1\\\", else: \\\"0\\\") else _ -> IO.puts(\\\"0\\\") end")
       value=$(printf '%s\n' "${output}" | awk '/^[01]$/{value=$0} END{print value}')
       [ -n "${value}" ] || return 1
       printf '%s\n' "${value}"
