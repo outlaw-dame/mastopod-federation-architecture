@@ -229,7 +229,18 @@ case "${TARGET}" in
     compose logs --no-color pixelfed-app pixelfed-horizon >&2 || true
     ;;
   bonfire)
-    compose logs --no-color bonfire-app >&2 || true
+    # Do not dump the whole Bonfire application log. In a failed federation
+    # fixture it can be extremely large and may contain credentials, actor
+    # payloads, signatures or other request data.
+    # Keep the persistence result above as the authoritative assertion.
+    # Only fixed, non-sensitive container state is safe to report here.
+    if compose ps --status running --services 2>/dev/null | grep -qx 'bonfire-app'; then
+      echo 'bonfire_application_running=true' >&2
+    else
+      echo 'bonfire_application_running=false' >&2
+    fi
+    echo 'bonfire_follow_persistence=not_verified' >&2
+    echo 'bonfire_fixture_logs=withheld_to_avoid_unbounded_or_sensitive_output' >&2
     ;;
   misskey)
     compose logs --no-color misskey-app >&2 || true
