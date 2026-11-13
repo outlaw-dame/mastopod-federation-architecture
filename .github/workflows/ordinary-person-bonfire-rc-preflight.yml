@@ -104,14 +104,23 @@ jobs:
           set -a
           source "$env_file"
           set +a
+          for key in SECRET_KEY_BASE SIGNING_SALT ENCRYPTION_SALT RELEASE_COOKIE; do
+            echo "::add-mask::${!key}"
+          done
           # Keep app logs out of shared artifacts: this environment can emit
           # sensitive configuration and sign-in metadata.
           ( cd bonfire-rc && bin/bonfire foreground ) >bonfire-rc-ci.log 2>&1 &
           echo "$!" > bonfire-rc.pid
           diagnose() {
             echo 'bonfire_rc8_clean_boot=failed'
-            # Only print fixed diagnostic categories, never raw config or
-            # application logs (which can include generated secrets).
+            # Generated secrets are masked above, and only limited,
+            # redacted bootstrap error lines from this fresh disposable
+            # instance may be emitted. No production/third-party data.
+            tail -n 100 bonfire-rc-ci.log \
+              | grep -Ei 'error|failed|fatal|exiting|cannot|missing|undefined|no such|not found|init terminating|permission|config|ssl' \
+              | sed -E 's/[[:xdigit:]]{48,}/[redacted-hex]/g; s/[[:alnum:]+/=]{96,}/[redacted-long-token]/g' \
+              | cut -c1-230 | tail -n 24 >&2 || true
+            # Keep fixed machine-readable categories as well.
             for category in 'Postgrex.Error' 'DBConnection.ConnectionError' \
               'UndefinedFunctionError' 'could not start application' \
               'libcrypto.so' 'libssl.so' 'libvips.so' 'no such file' \
