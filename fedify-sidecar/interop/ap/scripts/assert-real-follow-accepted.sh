@@ -166,6 +166,13 @@ friendica_diagnostics() {
   compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" friendica-app /bin/sh -lc \
     'curl --cacert /interop/runtime/certs/rootCA.crt --connect-timeout 5 --max-time 15 -sS -o /dev/null -w "actor_fetch_http=%{http_code} type=%{content_type}\\n" -H "Accept: application/activity+json" "$AP_INTEROP_ACTOR_URI"' >&2 \
     || echo "Friendica container actor-fetch diagnostic failed" >&2
+  # A Follow targeting a local actor needs Friendica's own signed-fetch
+  # fallback when its local actor has no APContact cache row. Test canonical
+  # HTTPS reachability separately from that application's signed fetch; never
+  # print the actor profile or request headers.
+  compose exec -T -e AP_INTEROP_LOCAL_USERNAME="${LOCAL_USERNAME}" friendica-app /bin/sh -lc \
+    'curl --cacert /interop/runtime/certs/rootCA.crt --connect-timeout 5 --max-time 15 -sS -o /dev/null -w "friendica_local_target_fetch_http=%{http_code} content_type=%{content_type}\\n" -H "Accept: application/activity+json" "https://friendica.test/profile/$AP_INTEROP_LOCAL_USERNAME"' >&2 \
+    || echo "Friendica local target actor HTTPS diagnostic failed" >&2
   # Friendica writes application logs to a file, not Apache stdout.
   # Report bounded diagnostic categories only: logs can contain signed
   # requests, actors and other sensitive ActivityPub data.
