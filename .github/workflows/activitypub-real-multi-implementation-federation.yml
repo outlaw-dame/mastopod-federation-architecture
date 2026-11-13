@@ -284,6 +284,29 @@ jobs:
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_BONFIRE_OVERLAY="${BONFIRE_OVERLAY}" \
               AP_INTEROP_BONFIRE_USERNAME="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
+              # Use the controlled, public WebFinger self link as the target
+              # authority; the HTML profile URL is NOT the AP actor URI.
+              bonfire_jrd="$(docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" \
+                exec -T bonfire-app curl --fail --silent --show-error \
+                --max-time 12 -H 'Host: bonfire.test' \
+                -H 'Accept: application/jrd+json' \
+                "http://127.0.0.1:4000/.well-known/webfinger?resource=acct:${TARGET_USERNAME}@bonfire.test")"
+              TARGET_ACTOR_URI="$(printf '%s' "${bonfire_jrd}" | node -e '
+                const input=require("node:fs").readFileSync(0,"utf8");
+                const j=JSON.parse(input);
+                const self=Array.isArray(j.links) ? j.links.find(link=>
+                  link.rel==="self" && typeof link.type==="string" &&
+                  (link.type.includes("activity+json")||link.type.includes("ld+json"))) : null;
+                if(!self || typeof self.href!=="string") process.exit(1);
+                const u=new URL(self.href);
+                if(u.origin!=="https://bonfire.test" ||
+                   !u.pathname.startsWith("/pub/actors/") ||
+                   u.username || u.password || u.hash) process.exit(1);
+                process.stdout.write(self.href);
+              ')"
+              test -n "${TARGET_ACTOR_URI}"
+              export TARGET_ACTOR_URI
+              echo "TARGET_ACTOR_URI=${TARGET_ACTOR_URI}" >> "${GITHUB_ENV}"
               ;;
             *) exit 2 ;;
           esac
