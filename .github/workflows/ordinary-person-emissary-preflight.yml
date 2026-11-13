@@ -127,9 +127,23 @@ jobs:
           const actor = JSON.parse(fs.readFileSync('emissary-actor.json', 'utf8'));
           const asUrl = value => typeof value === 'string'
             ? value : value && typeof value.id === 'string' ? value.id : '';
+          const fixtureUrl = text => {
+            try {
+              const u = new URL(text);
+              // Local disposable HTTP is allowed; real remote federation
+              // must still use the canonical HTTPS actor behind TLS.
+              return (u.protocol === 'https:' ||
+                (u.protocol === 'http:' && ['localhost','127.0.0.1'].includes(u.hostname))) &&
+                u.username === '' && u.password === '' && !u.hash;
+            } catch { return false; }
+          };
+          const actorId = asUrl(actor.id);
+          const inbox = asUrl(actor.inbox);
+          const sameOrigin = fixtureUrl(actorId) && fixtureUrl(inbox) &&
+            new URL(actorId).origin === new URL(inbox).origin;
           const valid = actor.type === 'Person' &&
-            asUrl(actor.id).startsWith('https://') &&
-            asUrl(actor.inbox).startsWith('https://') &&
+            sameOrigin && new URL(actorId).pathname.startsWith('/@') &&
+            new URL(inbox).pathname.endsWith('/inbox') &&
             (typeof actor.publicKey?.publicKeyPem === 'string' ||
               typeof actor.publicKey?.publicKeyMultibase === 'string');
           if (!valid) {
@@ -148,7 +162,7 @@ jobs:
             }));
             process.exit(1);
           }
-          console.log('emissary_local_person_actor=validated (remote Follow persistence remains untested)');
+          console.log('emissary_disposable_local_person_actor=validated (real HTTPS/Follow persistence remains untested)');
           NODE
           rm -f emissary-actor.json
 
