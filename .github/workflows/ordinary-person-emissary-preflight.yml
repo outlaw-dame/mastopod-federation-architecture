@@ -1,0 +1,118 @@
+name: Ordinary Person Emissary Fixture Preflight
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ordinary-person-emissary-preflight.yml'
+      - 'docs/interop/ordinary-person-federation-matrix.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  emissary-source-boot:
+    name: Pinned Emissary + MongoDB boot (NOT Follow proof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout federation acceptance candidate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact upstream Emissary source
+        uses: actions/checkout@v4
+        with:
+          repository: EmissarySocial/emissary
+          ref: 597b9b16a63b4a60db0fab096c918291335f4a16
+          path: emissary
+          persist-credentials: false
+
+      - name: Install Go version required by Emissary
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: emissary/go.mod
+          cache-dependency-path: emissary/go.sum
+
+      - name: Start disposable single-member MongoDB replica set
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --rm --network host --name paper-emissary-mongo \
+            mongo:8 --replSet rs0 --bind_ip 127.0.0.1 --port 27017
+          ready=false
+          for attempt in $(seq 1 90); do
+            if docker exec paper-emissary-mongo mongosh --quiet \
+                --host 127.0.0.1 --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null \
+                | grep -qx 1; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker exec paper-emissary-mongo mongosh --quiet --host 127.0.0.1 --eval \
+            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})' \
+            >/dev/null
+          for attempt in $(seq 1 60); do
+            if docker exec paper-emissary-mongo mongosh --quiet \
+                --host 127.0.0.1 --eval 'db.hello().isWritablePrimary' 2>/dev/null \
+                | grep -qx true; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Build exact Emissary commit
+        working-directory: emissary
+        run: |
+          set -euo pipefail
+          go build -trimpath -o ../emissary-ci ./server.go
+          test -x ../emissary-ci
+
+      - name: Generate disposable owner and boot Emissary
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const config = JSON.parse(fs.readFileSync('emissary/.docker/demo.json', 'utf8'));
+          config.domains[0].connectString = 'mongodb://127.0.0.1:27017/?directConnection=true';
+          config.activityPubCache.connectString = 'mongodb://127.0.0.1:27017/?directConnection=true';
+          config.domains[0].masterKey = crypto.randomBytes(32).toString('hex');
+          config.httpPort = 18880;
+          config.httpsPort = 0;
+          config.debugLevel = 'Error';
+          fs.writeFileSync('emissary-ci-config.json', JSON.stringify(config), {mode:0o600});
+          NODE
+          ./emissary-ci --config="file://$GITHUB_WORKSPACE/emissary-ci-config.json" \
+            >emissary-ci.log 2>&1 &
+          echo "$!" > emissary-ci.pid
+          ready=false
+          for attempt in $(seq 1 90); do
+            if ! kill -0 "$(cat emissary-ci.pid)" 2>/dev/null; then
+              echo "::error::Emissary process exited during startup"
+              exit 1
+            fi
+            code="$(curl --silent --output /dev/null --max-time 3 \
+              --write-out '%{http_code}' -H 'Host: localhost' \
+              http://127.0.0.1:18880/ || true)"
+            case "$code" in
+              200|301|302|303|307|308)
+                echo "emissary_boot_http_status=$code"
+                ready=true
+                break
+                ;;
+            esac
+            sleep 2
+          done
+          test "$ready" = true
+          echo 'emissary_source_boot=passed (no remote Follow attempted)'
+
+      - name: Cleanup ephemeral instance and MongoDB
+        if: always()
+        shell: bash
+        run: |
+          if [ -f emissary-ci.pid ]; then
+            kill "$(cat emissary-ci.pid)" 2>/dev/null || true
+          fi
+          docker rm -f paper-emissary-mongo >/dev/null 2>&1 || true
+          rm -f emissary-ci-config.json emissary-ci.log emissary-ci.pid
