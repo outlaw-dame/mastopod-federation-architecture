@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - '.github/workflows/ordinary-person-bonfire-rc-preflight.yml'
+      - 'fedify-sidecar/interop/ap/bonfire-rc8/**'
+      - 'fedify-sidecar/interop/ap/docker-compose.bonfire.yml'
+      - 'fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh'
   workflow_dispatch:
 
 permissions:
@@ -244,6 +247,26 @@ jobs:
           console.log('bonfire_disposable_local_person_actor=validated (signed remote Follow not tested)');
           NODE
 
+      - name: Verify pinned RC8 Docker fixture and private-network Person
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fedify-sidecar/interop/ap/bonfire-rc8/runtime
+          cp bonfire-rc.tar.gz \
+            fedify-sidecar/interop/ap/bonfire-rc8/runtime/bonfire-community-rc8.tar.gz
+          bash fedify-sidecar/interop/ap/scripts/generate-certs.sh
+          for key in BONFIRE_DB_PASSWORD BONFIRE_SECRET_KEY_BASE \
+            BONFIRE_SIGNING_SALT BONFIRE_ENCRYPTION_SALT BONFIRE_RELEASE_COOKIE; do
+            value="$(openssl rand -hex 48)"
+            echo "::add-mask::$value"
+            export "$key=$value"
+          done
+          AP_INTEROP_COMPOSE_FILE=fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
+          AP_INTEROP_BONFIRE_OVERLAY=fedify-sidecar/interop/ap/docker-compose.bonfire.yml \
+          AP_INTEROP_BONFIRE_USERNAME=interop \
+            sh fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
+          echo 'bonfire_rc8_disposable_docker_person_ready'
+
       - name: Remove disposable Bonfire server and PostgreSQL
         if: always()
         shell: bash
@@ -251,6 +274,7 @@ jobs:
           if [ -f bonfire-rc.pid ]; then
             kill "$(cat bonfire-rc.pid)" 2>/dev/null || true
           fi
+          docker compose             -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml             -f fedify-sidecar/interop/ap/docker-compose.bonfire.yml             down -v >/dev/null 2>&1 || true
           docker rm -f paper-bonfire-rc-pg >/dev/null 2>&1 || true
           rm -f bonfire-rc/.env bonfire-rc-ci.log bonfire-rc.pid bonfire-rc.tar.gz \
             bonfire-actor-rpc.log bonfire-webfinger.json bonfire-actor-uri.txt bonfire-actor.json
