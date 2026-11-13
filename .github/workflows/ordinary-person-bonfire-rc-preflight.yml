@@ -183,7 +183,7 @@ jobs:
           set +a
           # Use a disposable account on the isolated runner. No public traffic.
           if ! (cd bonfire-rc && bin/bonfire rpc \
-            'case Bonfire.Me.make_account_and_user("interop", "interop@localhost", System.fetch_env!("AP_INTEROP_USER_PASSWORD")) do {:ok, _} -> IO.puts("AP_PERSON_CREATED"); other -> raise inspect(other) end') \
+            'case Bonfire.Me.make_account_and_user("interop", "interop@localhost", System.fetch_env!("AP_INTEROP_USER_PASSWORD")) do {:ok, user} -> Bonfire.Federate.ActivityPub.set_federating(user, true); IO.puts("AP_PERSON_CREATED"); other -> raise inspect(other) end') \
             >bonfire-actor-rpc.log 2>&1; then
             echo "::error::Bonfire disposable user creation failed"
             exit 1
