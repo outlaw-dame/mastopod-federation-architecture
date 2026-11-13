@@ -609,12 +609,29 @@ jobs:
           const externalOrigin = readJson('external-origin.json');
           const externalAcceptance = readJson('external-acceptance.json');
           const signing = readJson('external-signing.json');
+          // The origin proof records the exact Follow.object it actually
+          // persisted. Compare against canonical WebFinger authority, not
+          // the matrix placeholder; a 2xx or other actor's Follow cannot
+          // satisfy the acceptance gate.
+          const mustResolveActor = ['bonfire', 'misskey'].includes(process.env.TARGET);
+          const canonicalRemoteActorUri = process.env.RESOLVED_TARGET_ACTOR_URI ||
+            (!mustResolveActor ? process.env.TARGET_ACTOR_URI : null);
           const nativeComplete = process.env.NATIVE_PROOF_OUTCOME === 'success' &&
-            nativeOrigin?.ok === true && nativeOrigin?.mode === 'native' && nativeAcceptance?.ok === true;
+            canonicalRemoteActorUri != null &&
+            nativeOrigin?.ok === true && nativeOrigin?.mode === 'native' &&
+            nativeOrigin?.remoteActorUri === canonicalRemoteActorUri &&
+            nativeAcceptance?.ok === true &&
+            nativeAcceptance?.actorUri === nativeOrigin?.actorUri &&
+            nativeAcceptance?.persistedFollowCount === 1;
           const externalComplete = process.env.EXTERNAL_PROOF_OUTCOME === 'success' &&
+            canonicalRemoteActorUri != null &&
             externalOrigin?.ok === true && externalOrigin?.mode === 'external' &&
+            externalOrigin?.remoteActorUri === canonicalRemoteActorUri &&
             externalOrigin?.durableHandoffQueued === true && externalOrigin?.nativeRemotePostSuppressed === true &&
-            externalAcceptance?.ok === true && signing?.ok === true &&
+            externalAcceptance?.ok === true &&
+            externalAcceptance?.actorUri === externalOrigin?.actorUri &&
+            externalAcceptance?.persistedFollowCount === 1 &&
+            signing?.ok === true &&
             signing?.activityId === externalOrigin?.activityId && signing?.actorUri === externalOrigin?.actorUri;
           const complete = nativeComplete && externalComplete;
           const summary = {
