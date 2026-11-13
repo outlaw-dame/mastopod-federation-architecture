@@ -40,7 +40,7 @@ No target below is covered just because it federates with Mastodon.
 
 | Software / exact reference | Ordinary actor expectation | Group dependency | Live status / first executable gate |
 | --- | --- | --- | --- |
-| **Bonfire Social/Community**, upstream `bonfire-networks/bonfire-app` `v1.1.0-rc.8` (2026-11-12) | Standard signed AP `Person`, Follow/Accept, Create/Note; choose Social for individual tests | None for People; Community FEP-1b12 is a separate test | **RC8 clean-bootstrap passed, Follow not tested**: official SHA-256-verified Debian Bookworm Community tarball, 169 migrations on disposable PostGIS17, and HTTP server startup passed [CI 43366013633](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43366013633). Older 1.0.6 Social fixture remains broken; still requires a local Person actor, signed Follow, Accept and durable follower query |
+| **Bonfire Social/Community**, upstream `bonfire-networks/bonfire-app` `v1.1.0-rc.8` (2026-11-12) | Standard signed AP `Person`, Follow/Accept, Create/Note; choose Social for individual tests | None for People; Community FEP-1b12 is a separate test | **Person actor discovery passed, Follow not tested**: official SHA-256-verified RC8 Community tarball, 169 migrations on disposable PostGIS17, and real disposable user registration. Both instance/user open-federation settings were confirmed, anonymous WebFinger returned 200 and a full local `Person` actor with inbox/public key validated in [CI 43367699540](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43367699540). Older 1.0.6 Social fixture remains broken; signed ActivityPods Follow, Accept and durable remote follower query remain untested |
 | **Emissary**, `EmissarySocial/emissary` `597b9b16a63b4a60db0fab096c918291335f4a16` | Upstream FEDERATION.md specifies inbound signed Follow creates a Follower row and sends Accept; requires actor-owned signature and same-origin activity ID, draft Cavage signature | None; Streams and templates can add other actor types | **Local Person preflight passed, Follow not tested**: pinned source built; disposable MongoDB 8 replica-set initialized; local `Person`, same-origin inbox and public PEM key verified in [CI 43365737504](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43365737504). Local-only HTTP is explicitly not production federation TLS. Next signed Follow/Accept + exact persisted follower query |
 | **Lemmy**, `LemmyNet/lemmy` `0.19.21` stable (Oct 2026) | Official docs explicitly allow *remote* People to follow Lemmy users; Lemmy users themselves cannot follow ordinary people | None for inbound Person Follow; Posts/Comments usually depend on a Community | **Not tested**: pin target user, Postgres and activitypub-federation worker; verify exact inbound follower state, not generic Group subscriptions |
 | **PieFed**, `karasugawasu/pyfedi` (release family 1.7+) | v1.7 adds following Mastodon people, so Person Subscribe tests are meaningful, including directionality | None for public People follow; some posts remain community-scoped | **Not tested**: pin supported release, Flask worker/DB/bootstrap and durable follower query |
@@ -69,7 +69,9 @@ No target below is covered just because it federates with Mastodon.
 
 ## Incremental rollout and affordability
 
-The Bonfire RC8/PostGIS17 and Emissary/Mongo8 disposable boot gates now pass.
+The Bonfire RC8/PostGIS17 and Emissary/Mongo8 disposable boot and
+**local Person actor** gates now pass. Neither test used real remote
+delivery; both still need valid HTTPS actors beyond loopback.
 Next execute their live Person Follow/Accept fixtures with **actual HTTPS
 and signed ActivityPods origin**, then Lemmy/PieFed/Mbin/NodeBB/Catodon
 individual Person actor checks. Each fixture needs its own authoritative
