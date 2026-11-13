@@ -22,14 +22,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Cache pinned Bonfire release archive for repeatable CI
+        uses: actions/cache@v4
+        with:
+          path: bonfire-rc.tar.gz
+          key: bonfire-v1.1.0-rc.8-bookworm-3b1630f0f59105b378d0bd47e8e096d8ac96dd58a5d758e99003e4ce7dfb5ed5
+
       - name: Download and verify immutable upstream Bonfire archive
         shell: bash
         run: |
           set -euo pipefail
           url="https://github.com/bonfire-networks/bonfire-app/releases/download/v1.1.0-rc.8/bonfire-community-amd64-debian-bookworm.tar.gz"
-          curl --fail --location --silent --show-error \
-            --retry 3 --retry-all-errors --connect-timeout 15 --max-time 900 \
-            "$url" -o bonfire-rc.tar.gz
+          if [ ! -s bonfire-rc.tar.gz ]; then
+            curl --fail --location --silent --show-error \
+              --retry 3 --retry-all-errors --connect-timeout 15 --max-time 900 \
+              "$url" -o bonfire-rc.tar.gz
+          fi
           echo '3b1630f0f59105b378d0bd47e8e096d8ac96dd58a5d758e99003e4ce7dfb5ed5  bonfire-rc.tar.gz' \
             | sha256sum --check -
           mkdir -p bonfire-rc
@@ -100,10 +108,34 @@ jobs:
           # sensitive configuration and sign-in metadata.
           ( cd bonfire-rc && bin/bonfire foreground ) >bonfire-rc-ci.log 2>&1 &
           echo "$!" > bonfire-rc.pid
+          diagnose() {
+            echo 'bonfire_rc8_clean_boot=failed'
+            # Only print fixed diagnostic categories, never raw config or
+            # application logs (which can include generated secrets).
+            for category in 'Postgrex.Error' 'DBConnection.ConnectionError' \
+              'UndefinedFunctionError' 'could not start application' \
+              'libcrypto.so' 'libssl.so' 'libvips.so' 'no such file' \
+              'permission denied' 'failed to start' 'could not load' \
+              'migration' 'timeout'; do
+              if grep -qiF "$category" bonfire-rc-ci.log; then
+                case "$category" in
+                  *postgres*|*DBConnection*) echo 'bonfire_failure=database_connection_or_query' ;;
+                  *lib*) echo 'bonfire_failure=missing_shared_library' ;;
+                  *migration*) echo 'bonfire_failure=migration' ;;
+                  *) echo 'bonfire_failure=application_bootstrap' ;;
+                esac
+              fi
+            done
+            docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+              psql -X -Atqc "SELECT CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'absent' ELSE 'present' END;" \
+              -U postgres -d bonfire_ci 2>/dev/null \
+              | sed 's/^/bonfire_schema_migrations_table=/' || true
+          }
           ready=false
           for attempt in $(seq 1 240); do
             if ! kill -0 "$(cat bonfire-rc.pid)" 2>/dev/null; then
               echo "::error::Bonfire release exited before clean migration verification"
+              diagnose
               exit 1
             fi
             if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
@@ -121,7 +153,11 @@ jobs:
             fi
             sleep 2
           done
-          test "$ready" = true
+          if [ "$ready" != true ]; then
+            diagnose
+            echo "::error::Bonfire clean bootstrap did not become ready"
+            exit 1
+          fi
           count="$(docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
             psql -X -Atqc 'SELECT count(*) FROM schema_migrations' -U postgres -d bonfire_ci)"
           test "$count" -gt 0
