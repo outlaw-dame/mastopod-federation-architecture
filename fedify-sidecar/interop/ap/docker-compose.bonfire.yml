@@ -32,6 +32,8 @@ services:
       SIGNING_SALT: ${BONFIRE_SIGNING_SALT:?BONFIRE_SIGNING_SALT is required}
       ENCRYPTION_SALT: ${BONFIRE_ENCRYPTION_SALT:?BONFIRE_ENCRYPTION_SALT is required}
       RELEASE_COOKIE: ${BONFIRE_RELEASE_COOKIE:?BONFIRE_RELEASE_COOKIE is required}
+      # Generated per ephemeral test boot. Never reuse actual user credentials.
+      AP_INTEROP_USER_PASSWORD: ${AP_INTEROP_BONFIRE_PASSWORD:?Ephemeral Bonfire password is required}
       MAIL_BACKEND: none
       SEARCH_ADAPTER: none
       # Fixture-only localhost network exemption for the exact ActivityPods actor.
@@ -44,7 +46,7 @@ services:
       bonfire-db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/ >/dev/null"]
+      test: ["CMD-SHELL", "curl --fail --silent --output /dev/null http://127.0.0.1:4000/"]
       interval: 10s
       timeout: 10s
       retries: 24
