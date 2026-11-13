@@ -107,7 +107,7 @@ query_count() {
     bonfire)
       output=$(compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" -e AP_INTEROP_TARGET_USERNAME="${LOCAL_USERNAME}" \
         bonfire-app bin/bonfire rpc \
-        'with {:ok, follower} <- Bonfire.Federate.ActivityPub.AdapterUtils.get_or_fetch_character_by_ap_id(System.fetch_env!("AP_INTEROP_ACTOR_URI")), {:ok, target} <- Bonfire.Me.Users.by_username(System.fetch_env!("AP_INTEROP_TARGET_USERNAME")) do IO.puts(if Bonfire.Social.Graph.Follows.following?(follower, target), do: "1", else: "0") else _ -> IO.puts("0") end')
+        'with {:ok, follower} <- Bonfire.Federate.ActivityPub.AdapterUtils.get_character_by_ap_id(System.fetch_env!("AP_INTEROP_ACTOR_URI")), {:ok, target} <- Bonfire.Me.Users.by_username(System.fetch_env!("AP_INTEROP_TARGET_USERNAME")) do IO.puts(if Bonfire.Social.Graph.Follows.following?(follower, target), do: "1", else: "0") else _ -> IO.puts("0") end')
       value=$(printf '%s\n' "${output}" | awk '/^[01]$/{value=$0} END{print value}')
       [ -n "${value}" ] || return 1
       printf '%s\n' "${value}"
