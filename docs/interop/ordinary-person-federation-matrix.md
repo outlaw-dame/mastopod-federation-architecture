@@ -33,7 +33,7 @@ run against a fresh, disposable local user on a pinned version:
 
 The previously verified real matrix covers Mastodon, GoToSocial, Akkoma,
 Pixelfed, Misskey, Castopod for native+Fedify **ordinary Follow**.
-Friendica remains deferred because it returns 202 without persisted Follow.
+Friendica remains deferred because its real fixture still has a native URLVerifier rejection and no persisted Follow. It is intentionally excluded from the mandatory real multi-implementation CI matrix; the dedicated [PR153](https://github.com/outlaw-dame/mastopod-federation-architecture/pull/153) keeps the strict diagnostic assertion. This does not constitute an acceptance pass.
 No target below is covered just because it federates with Mastodon.
 
 ## Additional required targets
@@ -66,6 +66,26 @@ No target below is covered just because it federates with Mastodon.
 - **PieFed**'s newer Mastodon Follow integration may not accept all
   standalone `Note` semantics, depending on its community feed rules.
   Keep Follow, Note and Page acceptance results separately labeled.
+
+### November 13 live Bonfire verification correction
+
+The RC8 release now passes the official digest, PostGIS startup, disposable
+Person creation and WebFinger actor proof. Native ActivityPods Follow
+persistence has been observed in the strict real multi-implementation job.
+The external Fedify attempt then exposed a **test-verifier defect**: Bonfire
+release `bin/bonfire rpc` evaluates Elixir inside the running BEAM server,
+which does not inherit environment variables injected into the short-lived
+Compose exec process. The persistence checker no longer attempts to read
+those variables inside BEAM. It passes canonical, prevalidated actor/target
+identifiers as safely encoded literal arguments, and uses the local
+`get_character_by_ap_id` lookup rather than calling the network-fetching
+`get_or_fetch_character_by_ap_id` on every poll.
+
+**Fedify Follow persistence is not yet accepted** until both the signed
+ActivityPods origin, remote Bonfire follower state, and recorded signer prove
+successful in the *same* exact-head CI run. The verifier failure is not
+silently labeled successful. The full matrix retains hard persistence
+assertions for its remaining targets and no synthetic result is promoted.
 
 ## Incremental rollout and affordability
 
