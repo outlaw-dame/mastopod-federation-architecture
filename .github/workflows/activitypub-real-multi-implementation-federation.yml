@@ -59,6 +59,12 @@ jobs:
             compose_overlay: fedify-sidecar/interop/ap/docker-compose.misskey.yml
             actor_uri: https://misskey.test/@interop
             remote_version: Misskey 2026.7.0@sha256:2fd5c68fb02a354979caeb37560e0dea50d8a84b78a7b0d769e4e9cf426a4b68
+          - target: bonfire
+            target_host: bonfire.test
+            activitypods_host: activitypods.test
+            compose_overlay: fedify-sidecar/interop/ap/docker-compose.bonfire.yml
+            actor_uri: https://bonfire.test/pub/actors/interop
+            remote_version: Bonfire Community v1.1.0-rc.8 official release
           - target: friendica
             target_host: friendica.test
             activitypods_host: activitypods.test
