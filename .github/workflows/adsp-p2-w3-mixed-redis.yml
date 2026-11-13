@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      ACTIVITYPODS_SHA: '893609a23a671f608341d2e8cb93de75291ea592'
+      ACTIVITYPODS_SHA: 'b02c5f44080b1014786d211ea99fde7687d1ca55'
       FEDERATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ADSP_REMOTE_REDIS_URL: redis://127.0.0.1:6379
       ADSP_REMOTE_TARGET_STATS_URL: http://127.0.0.1:18080/stats
