@@ -9,12 +9,17 @@ service.
 
 | Concern | Authoritative runtime | Status |
 |---|---|---|
-| Group identity, owner, invited/accepted/active/banned member state, SAI consent and visibility | ActivityPods settings TDB2 and provider | Group-specific live persistence/invitation acceptance incomplete |
+| Group identity, owner, invited/accepted/active/banned member state, SAI consent and visibility | ActivityPods provider remains the authority; existing protected Jena/Solid paths are not yet cut over to the planned canonical PostgreSQL Group control plane | PostgreSQL Group candidate and consent proofs are non-activated; live migration, distributed revocation and invitation acceptance remain blocked |
 | Local Pod inbox/LDP/WebACL persistence | ActivityPods/SemApps (APDM Tier 1) | Existing path; APDM Phase 11 performance remediation still open |
 | Concrete local versus remote actor membership snapshot and `ap.delivery-plan.v1` production | ActivityPods | Existing APDM architecture; no live Group producer yet |
 | Remote inbox/sharedInbox delivery URL, queue, retry, domain limits, HTTP signing request and dedup | Fedify Tier 2 | Existing general ActivityPub executor; synthetic Group boundary coverage added |
 | Remote instance's membership moderation, Group semantics and inbox processing | Actual remote server | **Not validated** by the new synthetic tests |
 | ATProto identity/protocol routing | Its separate verified authority | Not implied by Group ActivityPub delivery |
+
+
+The approved [ActivityPods PostgreSQL architecture decision](https://github.com/outlaw-dame/activity-pods/blob/master/docs/activitypods-postgres-account-and-groups-decision.md) calls for a **single canonical PostgreSQL Group control plane** after a consent-first, revocation-fenced cutover. Do not confuse that planned authority with today's active protected Jena/Solid records: component SQL proofs are not an activated group migration. Account UUID/WebID/did:plc provisioning is a separate phased migration; it cannot be inferred from a passing federation transport fixture. Neither PostgreSQL nor Redis may authorize a cached recipient list after consent revocation.
+
+The existing Redis Streams work in [#147](https://github.com/outlaw-dame/mastopod-federation-architecture/pull/147) (paged XAUTOCLAIM) and [#150](https://github.com/outlaw-dame/mastopod-federation-architecture/pull/150) (opt-in Redis 8.2 ACKED admission) is **not duplicated or activated here**. The sidecar must continue acknowledging jobs only after durable replacement/settlement; capacity rejection keeps prior work pending. [#154](https://github.com/outlaw-dame/mastopod-federation-architecture/pull/154) independently pins broker versions and requires its own upgrade acceptance. Group delivery must inherit the single existing queue and enforce bounded backpressure, without second per-member job queues or silent 5,001st-target truncation.
 
 A sharedInbox does **not** mean all accounts on a domain consent to Group
 membership. Only a remote endpoint independently known and authorized by
