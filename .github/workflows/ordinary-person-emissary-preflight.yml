@@ -133,7 +133,19 @@ jobs:
             (typeof actor.publicKey?.publicKeyPem === 'string' ||
               typeof actor.publicKey?.publicKeyMultibase === 'string');
           if (!valid) {
+            // Diagnose only the schema of this disposable actor. Never log
+            // account metadata, public keys, private fields, or raw JSON.
             console.error('Emissary demo actor is not a complete signed ActivityPub Person');
+            console.error(JSON.stringify({
+              observedType: ['Person','Service','Application','Group'].includes(actor.type) ? actor.type : 'other',
+              idHttps: asUrl(actor.id).startsWith('https://'),
+              inboxHttps: asUrl(actor.inbox).startsWith('https://'),
+              idPresent: Boolean(asUrl(actor.id)),
+              inboxPresent: Boolean(asUrl(actor.inbox)),
+              hasPem: typeof actor.publicKey?.publicKeyPem === 'string',
+              hasMultibase: typeof actor.publicKey?.publicKeyMultibase === 'string',
+              hasVerificationMethod: Boolean(actor.verificationMethod),
+            }));
             process.exit(1);
           }
           console.log('emissary_local_person_actor=validated (remote Follow persistence remains untested)');
