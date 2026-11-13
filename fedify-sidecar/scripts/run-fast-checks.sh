@@ -42,6 +42,7 @@ npm exec -- vitest run \
   src/atproto/repo/AtprotoRepoRegistry.scalability.test.ts \
   src/atproto/repo/AtprotoRepoRegistry.collection-index.test.ts \
   src/atproto/repo/AtprotoRepoRegistry.exec-errors.test.ts \
+  src/at-adapter/repo/AtprotoRepositoryReadiness.test.ts \
   src/protocol-bridge/identity/ObservedAtIdentityStore.scalability.test.ts \
   src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerReliability.test.ts \
   src/protocol-bridge/notifications/tests/CanonicalNotificationConsumerHttpGate.test.ts \

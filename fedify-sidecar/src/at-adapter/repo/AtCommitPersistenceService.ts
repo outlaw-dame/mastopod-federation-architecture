@@ -1,4 +1,5 @@
 import type { BuildCommitResult } from './AtCommitBuilder.js';
+import { assertMockRepositoryAllowed } from './AtprotoRepositoryReadiness.js';
 import type { AtAliasStore } from './AtAliasStore.js';
 import type { AtCommitV1, AtEgressV1, AtRepoOpV1 } from '../events/AtRepoEvents.js';
 import type { EventPublisher } from '../../core-domain/events/CoreIdentityEvents.js';
@@ -15,6 +16,8 @@ export class DefaultAtCommitPersistenceService implements AtCommitPersistenceSer
   ) {}
 
   async persist(result: BuildCommitResult): Promise<void> {
+    // No fake Redis head, alias write, or downstream commit event in production.
+    assertMockRepositoryAllowed();
     const now = new Date().toISOString();
 
     // 1. Write durable commit metadata to AtRepoStore (mocked for now)

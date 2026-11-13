@@ -1,4 +1,5 @@
 import type { AtRepoOpV1 } from '../events/AtRepoEvents.js';
+import { assertMockRepositoryAllowed } from './AtprotoRepositoryReadiness.js';
 import type { RepositoryState } from '../../atproto/repo/AtprotoRepoState.js';
 import type { SigningService } from '../../core-domain/contracts/SigningContracts.js';
 
@@ -26,6 +27,7 @@ export class DefaultAtCommitBuilder implements AtCommitBuilder {
     state: RepositoryState,
     ops: AtRepoOpV1[]
   ): Promise<BuildCommitResult> {
+    assertMockRepositoryAllowed();
     // 1. Validate ops
     if (ops.length === 0) {
       throw new Error('Cannot build commit with no ops');
