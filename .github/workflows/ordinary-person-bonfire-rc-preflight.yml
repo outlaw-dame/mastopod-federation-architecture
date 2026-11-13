@@ -58,18 +58,18 @@ jobs:
           ready=false
           for attempt in $(seq 1 120); do
             if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
-                psql -X -Atqc 'SELECT 1' -U postgres -d bonfire_ci 2>/dev/null \
+                psql -h 127.0.0.1 -X -Atqc 'SELECT 1' -U postgres -d bonfire_ci 2>/dev/null \
                 | grep -qx 1; then
               sleep 1
               if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
-                  psql -X -Atqc 'SELECT 1' -U postgres -d bonfire_ci 2>/dev/null \
+                  psql -h 127.0.0.1 -X -Atqc 'SELECT 1' -U postgres -d bonfire_ci 2>/dev/null \
                   | grep -qx 1; then ready=true; break; fi
             fi
             sleep 1
           done
           test "$ready" = true
           docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
-            psql -X -v ON_ERROR_STOP=1 -U postgres -d bonfire_ci -c \
+            psql -h 127.0.0.1 -X -v ON_ERROR_STOP=1 -U postgres -d bonfire_ci -c \
             'CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS postgis;' \
             >/dev/null
           echo 'bonfire_disposable_postgis=ready'
@@ -127,7 +127,7 @@ jobs:
               fi
             done
             docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
-              psql -X -Atqc "SELECT CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'absent' ELSE 'present' END;" \
+              psql -h 127.0.0.1 -X -Atqc "SELECT CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'absent' ELSE 'present' END;" \
               -U postgres -d bonfire_ci 2>/dev/null \
               | sed 's/^/bonfire_schema_migrations_table=/' || true
           }
@@ -139,7 +139,7 @@ jobs:
               exit 1
             fi
             if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
-                psql -X -Atqc 'SELECT count(*) FROM schema_migrations' \
+                psql -h 127.0.0.1 -X -Atqc 'SELECT count(*) FROM schema_migrations' \
                 -U postgres -d bonfire_ci 2>/dev/null | awk 'NF && $1+0>0 { found=1 } END { exit(!found) }'; then
               code="$(curl --silent --output /dev/null --max-time 3 \
                 --write-out '%{http_code}' -H 'Host: localhost' \
@@ -159,7 +159,7 @@ jobs:
             exit 1
           fi
           count="$(docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
-            psql -X -Atqc 'SELECT count(*) FROM schema_migrations' -U postgres -d bonfire_ci)"
+            psql -h 127.0.0.1 -X -Atqc 'SELECT count(*) FROM schema_migrations' -U postgres -d bonfire_ci)"
           test "$count" -gt 0
           echo "bonfire_rc8_schema_migrations_applied=$count"
           echo 'bonfire_rc8_clean_boot=passed (no remote Follow attempted)'
