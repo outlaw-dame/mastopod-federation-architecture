@@ -36,6 +36,63 @@ Pixelfed, Misskey, Castopod for native+Fedify **ordinary Follow**.
 Friendica remains deferred because its real fixture still has a native URLVerifier rejection and no persisted Follow. It is intentionally excluded from the mandatory real multi-implementation CI matrix; the dedicated [PR153](https://github.com/outlaw-dame/mastopod-federation-architecture/pull/153) keeps the strict diagnostic assertion. This does not constitute an acceptance pass.
 No target below is covered just because it federates with Mastodon.
 
+## Mastodon-first differential interoperability procedure
+
+Apply this procedure to every new ActivityPub implementation, and to every target
+that fails a real integration gate. Mastodon is the **comparison baseline**, not
+a substitute for target-specific conformance or proven remote persistence.
+
+1. **Pin both sides.** Record an immutable target commit/image digest and the
+   Mastodon version/commit used as baseline. Identify the smallest canonical
+   actor + activity fixture that Mastodon accepts, with real signed HTTPS
+   delivery and an observed persisted follower relationship.
+2. **Trace both receiver paths.** Compare WebFinger `acct:` discovery, the
+   returned `self` actor URI, actor `id`, `inbox` and `publicKey.owner`;
+   perform both ordinary and authorized signed GET. Compare received
+   `Follow` actor, object, `id`, `to`/`cc`, key ownership, signed
+   `(request-target)`/host/date/digest (draft Cavage) or RFC 9421 fields,
+   Content-Type and JSON-LD context. Use the actual canonical URI, never a
+   guessed profile or obsolete endpoint.
+3. **Trace processing after transport.** Compare HTTP receipt with background
+   worker ingestion, signature verification, actor refresh, moderation,
+   authorized-fetch/network restrictions, deduplication, follower row
+   commit, `Accept(Follow)` creation, outbound queue and incoming Accept
+   reconciliation. Instrument bounded, sanitized state observations rather
+   than printing signatures, private payloads or credentials.
+4. **A/B test without reducing safeguards.** Deliver the same semantic fixture
+   to pinned Mastodon and target separately in native ActivityPods and
+   Fedify modes, each from clean disposable state with unique Activity IDs.
+   Record which exact stage diverges. Do not disable HTTPS verification,
+   SSRF restrictions, authorized-fetch controls or signer ownership to make
+   a target pass.
+5. **Close with negative and lifecycle proofs.** Test wrong key/actor binding,
+   replay, duplicate IDs, invalid signatures, blocked actors, request
+   approval, `Reject`, `Undo(Follow)`, 429/503 retry and restart recovery.
+   Record both the receiving software's persisted relationship and the
+   origin's matching Accept state. Capture exact CI head/job links.
+6. **Respect semantic differences.** Separate `Person` Follow from `Group`
+   Follow/Announce and target-specific `Page`, `Note`, `Article` and
+   `Event` handling. Mastodon `Note` interoperability alone does not prove
+   more specialized federation behavior. Document unsupported directions
+   rather than treating them as transport failures.
+
+**Target investigations.** Bonfire: compare adaptive draft-Cavage/RFC 9421
+signatures, signed actor fetching, WebFinger-advertised canonical `/pub/person/`
+IDs, and the asynchronous Follow persistence path against Mastodon.
+Emissary: compare actor-owned signatures, origin-bound activity IDs, durable
+Follower records and Accept dispatch. Lemmy/PieFed: distinguish following a
+`Person` from subscribing to a `Group`; check directional follow semantics.
+Mbin/NodeBB/Catodon: first verify their Mastodon-facing `Person` actor
+discovery, signature dialect and real worker persistence, then test posts
+and platform-specific features separately. Friendica remains deferred but
+uses this exact differential diagnosis when resumed.
+
+Primary baselines:
+- <https://github.com/mastodon/mastodon/blob/main/FEDERATION.md>
+- <https://docs.joinmastodon.org/spec/activitypub/>
+- <https://docs.bonfirenetworks.org/federation.html>
+- <https://github.com/EmissarySocial/emissary/blob/main/FEDERATION.md>
+
 ## Additional required targets
 
 | Software / exact reference | Ordinary actor expectation | Group dependency | Live status / first executable gate |
