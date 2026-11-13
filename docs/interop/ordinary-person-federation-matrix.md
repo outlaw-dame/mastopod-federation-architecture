@@ -40,8 +40,8 @@ No target below is covered just because it federates with Mastodon.
 
 | Software / exact reference | Ordinary actor expectation | Group dependency | Live status / first executable gate |
 | --- | --- | --- | --- |
-| **Bonfire Social/Community**, upstream `bonfire-networks/bonfire-app` `v1.1.0-rc.8` (2026-11-12) | Standard signed AP `Person`, Follow/Accept, Create/Note; choose Social for individual tests | None for People; Community FEP-1b12 is a separate test | **Blocked**: older pinned `1.0.6-social-amd64` disposable fixture failed clean DB migration. Require supported clean-bootstrap RC image or official RC8 community release tarball and exact follower-query proof; do not relabel existing failing fixture |
-| **Emissary**, `EmissarySocial/emissary` `597b9b16a63b4a60db0fab096c918291335f4a16` | Upstream FEDERATION.md specifies inbound signed Follow creates a Follower row and sends Accept; requires actor-owned signature and same-origin activity ID, draft Cavage signature | None; Streams and templates can add other actor types | **Not tested**: source pin known, MongoDB + owner creation + exact follower query and TLS fixture needed |
+| **Bonfire Social/Community**, upstream `bonfire-networks/bonfire-app` `v1.1.0-rc.8` (2026-11-12) | Standard signed AP `Person`, Follow/Accept, Create/Note; choose Social for individual tests | None for People; Community FEP-1b12 is a separate test | **RC8 clean-bootstrap passed, Follow not tested**: official SHA-256-verified Debian Bookworm Community tarball, 169 migrations on disposable PostGIS17, and HTTP server startup passed [CI 43366013633](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43366013633). Older 1.0.6 Social fixture remains broken; still requires a local Person actor, signed Follow, Accept and durable follower query |
+| **Emissary**, `EmissarySocial/emissary` `597b9b16a63b4a60db0fab096c918291335f4a16` | Upstream FEDERATION.md specifies inbound signed Follow creates a Follower row and sends Accept; requires actor-owned signature and same-origin activity ID, draft Cavage signature | None; Streams and templates can add other actor types | **Local Person preflight passed, Follow not tested**: pinned source built; disposable MongoDB 8 replica-set initialized; local `Person`, same-origin inbox and public PEM key verified in [CI 43365737504](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/43365737504). Local-only HTTP is explicitly not production federation TLS. Next signed Follow/Accept + exact persisted follower query |
 | **Lemmy**, `LemmyNet/lemmy` `0.19.21` stable (Oct 2026) | Official docs explicitly allow *remote* People to follow Lemmy users; Lemmy users themselves cannot follow ordinary people | None for inbound Person Follow; Posts/Comments usually depend on a Community | **Not tested**: pin target user, Postgres and activitypub-federation worker; verify exact inbound follower state, not generic Group subscriptions |
 | **PieFed**, `karasugawasu/pyfedi` (release family 1.7+) | v1.7 adds following Mastodon people, so Person Subscribe tests are meaningful, including directionality | None for public People follow; some posts remain community-scoped | **Not tested**: pin supported release, Flask worker/DB/bootstrap and durable follower query |
 | **Mbin**, `MbinOrg/mbin` `v1.11.1` (2026-11-10) | Mbin supports microblogging as well as magazines, interacting with Mastodon | No for microblogs and People; magazines are Group actors | **Not tested**: pinned Symfony worker/queue + exact inbound follow state |
@@ -69,9 +69,11 @@ No target below is covered just because it federates with Mastodon.
 
 ## Incremental rollout and affordability
 
-Begin with Emissary and Lemmy Person fixtures (smallest relevant independent
-non-Mastodon implementations), then PieFed/Mbin/NodeBB/Catodon; reattempt
-Bonfire after a reproducible clean RC bootstrap. Run one isolated target per
+The Bonfire RC8/PostGIS17 and Emissary/Mongo8 disposable boot gates now pass.
+Next execute their live Person Follow/Accept fixtures with **actual HTTPS
+and signed ActivityPods origin**, then Lemmy/PieFed/Mbin/NodeBB/Catodon
+individual Person actor checks. Each fixture needs its own authoritative
+follower persistence query; a boot check is a prerequisite, not federation. Run one isolated target per
 CI job with bounded time and cleanup, no persistent shared credentials and
 no unbounded instance scraping. Select explicit versions by commit/digest;
 do not disable SSRF checks or accept 2xx in place of persisted-state proof.
