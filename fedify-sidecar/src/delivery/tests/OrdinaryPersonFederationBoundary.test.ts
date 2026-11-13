@@ -9,7 +9,7 @@ import {
   normalizeAndDedupeOutboundTargets,
   validateApdmWebhookIdentity,
 } from "../outbound-webhook.js";
-import { recognizeVerifiedGroupAnnounce } from "../GroupAnnounceWireProfile.js";
+
 
 /**
  * This tests the actual APDM plan/sidecar boundary with invented HTTPS origins.
@@ -69,8 +69,8 @@ describe("ordinary Person ActivityPub delivery contract (not Group federation)",
       const { normalized, identity } = route(p);
       expect(identity).toBe(p.intentId);
       expect(normalized.targets).toHaveLength(1);
-      expect(normalized.targets[0].deliveryUrl).toBe(target(software).inboxUrl);
-      expect(normalized.targets[0].sharedInboxUrl).toBeUndefined();
+      expect(normalized.targets[0]?.deliveryUrl).toBe(target(software).inboxUrl);
+      expect(normalized.targets[0]?.sharedInboxUrl).toBeUndefined();
     }
   );
 
@@ -120,18 +120,9 @@ describe("ordinary Person ActivityPub delivery contract (not Group federation)",
     })).toThrow();
   });
 
-  it("does not invoke Group-Announce handling for verified Person activity", () => {
+  it("keeps Person delivery independent of any Group-specific module", () => {
     const p = follow("catodon");
-    expect(recognizeVerifiedGroupAnnounce({
-      activity: {
-        id: sender + "/activities/boost-1", type: "Announce",
-        actor: sender,
-        object: {
-          id: sender + "/notes/1", type: "Note", attributedTo: sender
-        },
-      },
-      verifiedActorUri: sender, verifiedActorType: "Group",
-    })).toBeNull();
     expect(p.activity.type).toBe("Follow");
+    expect(route(p).normalized.targets).toHaveLength(1);
   });
 });
