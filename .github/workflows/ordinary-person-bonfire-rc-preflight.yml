@@ -1,0 +1,139 @@
+name: Ordinary Person Bonfire Community RC Clean Bootstrap
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ordinary-person-bonfire-rc-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bonfire-rc-clean-db:
+    name: Bonfire RC8 clean PostgreSQL migration (NOT Follow proof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BONFIRE_RELEASE: v1.1.0-rc.8
+    steps:
+      - name: Checkout test harness
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download and verify immutable upstream Bonfire archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/bonfire-networks/bonfire-app/releases/download/v1.1.0-rc.8/bonfire-community-amd64-debian-bookworm.tar.gz"
+          curl --fail --location --silent --show-error \
+            --retry 3 --retry-all-errors --connect-timeout 15 --max-time 900 \
+            "$url" -o bonfire-rc.tar.gz
+          echo '3b1630f0f59105b378d0bd47e8e096d8ac96dd58a5d758e99003e4ce7dfb5ed5  bonfire-rc.tar.gz' \
+            | sha256sum --check -
+          mkdir -p bonfire-rc
+          tar -xzf bonfire-rc.tar.gz -C bonfire-rc --strip-components=1
+          test -x bonfire-rc/bin/bonfire
+          echo 'bonfire_rc8_release_sha256=verified'
+
+      - name: Start disposable PostgreSQL 17 with PostGIS
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --rm --name paper-bonfire-rc-pg \
+            --network host \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=disposable-bonfire-db-only \
+            -e POSTGRES_DB=bonfire_ci \
+            postgis/postgis:17-3.5
+          ready=false
+          for attempt in $(seq 1 120); do
+            if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+                psql -X -Atqc 'SELECT 1' -U postgres -d bonfire_ci 2>/dev/null \
+                | grep -qx 1; then
+              sleep 1
+              if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+                  psql -X -Atqc 'SELECT 1' -U postgres -d bonfire_ci 2>/dev/null \
+                  | grep -qx 1; then ready=true; break; fi
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+            psql -X -v ON_ERROR_STOP=1 -U postgres -d bonfire_ci -c \
+            'CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS postgis;' \
+            >/dev/null
+          echo 'bonfire_disposable_postgis=ready'
+
+      - name: Configure isolated Bonfire release and prove clean migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bonfire's upstream release installation guide describes these
+          # non-production template variables. Do not write credentials to CI
+          # logs, repository files or persistent deployment environments.
+          env_file="$GITHUB_WORKSPACE/bonfire-rc/.env"
+          cat > "$env_file" <<'EOF'
+          FLAVOUR=community
+          HOSTNAME=localhost
+          SERVER_PORT=4000
+          PUBLIC_PORT=4000
+          SERVER_IP=127.0.0.1
+          POSTGRES_HOST=127.0.0.1
+          POSTGRES_USER=postgres
+          POSTGRES_PASSWORD=disposable-bonfire-db-only
+          POSTGRES_DB=bonfire_ci
+          MAIL_BACKEND=none
+          OTEL_ENABLED=0
+          REPLACE_OS_VARS=true
+          DB_MIGRATE_INDEXES_CONCURRENTLY=false
+          EOF
+          for key in SECRET_KEY_BASE SIGNING_SALT ENCRYPTION_SALT RELEASE_COOKIE; do
+            printf '%s=%s\n' "$key" "$(openssl rand -hex 64)" >> "$env_file"
+          done
+          chmod 600 "$env_file"
+          set -a
+          source "$env_file"
+          set +a
+          # Keep app logs out of shared artifacts: this environment can emit
+          # sensitive configuration and sign-in metadata.
+          ( cd bonfire-rc && bin/bonfire foreground ) >bonfire-rc-ci.log 2>&1 &
+          echo "$!" > bonfire-rc.pid
+          ready=false
+          for attempt in $(seq 1 240); do
+            if ! kill -0 "$(cat bonfire-rc.pid)" 2>/dev/null; then
+              echo "::error::Bonfire release exited before clean migration verification"
+              exit 1
+            fi
+            if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+                psql -X -Atqc 'SELECT count(*) FROM schema_migrations' \
+                -U postgres -d bonfire_ci 2>/dev/null | awk 'NF && $1+0>0 { found=1 } END { exit(!found) }'; then
+              code="$(curl --silent --output /dev/null --max-time 3 \
+                --write-out '%{http_code}' -H 'Host: localhost' \
+                http://127.0.0.1:4000/ || true)"
+              case "$code" in
+                200|301|302|303|307|308)
+                  ready=true
+                  break
+                  ;;
+              esac
+            fi
+            sleep 2
+          done
+          test "$ready" = true
+          count="$(docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+            psql -X -Atqc 'SELECT count(*) FROM schema_migrations' -U postgres -d bonfire_ci)"
+          test "$count" -gt 0
+          echo "bonfire_rc8_schema_migrations_applied=$count"
+          echo 'bonfire_rc8_clean_boot=passed (no remote Follow attempted)'
+
+      - name: Remove disposable Bonfire server and PostgreSQL
+        if: always()
+        shell: bash
+        run: |
+          if [ -f bonfire-rc.pid ]; then
+            kill "$(cat bonfire-rc.pid)" 2>/dev/null || true
+          fi
+          docker rm -f paper-bonfire-rc-pg >/dev/null 2>&1 || true
+          rm -f bonfire-rc/.env bonfire-rc-ci.log bonfire-rc.pid bonfire-rc.tar.gz
