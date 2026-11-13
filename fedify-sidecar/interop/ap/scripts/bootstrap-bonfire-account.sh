@@ -71,9 +71,33 @@ compose exec -T -u 0 bonfire-app /bin/sh -c \
 
 # Password is available only to this disposable server through its startup
 # environment. It is never interpolated into the Elixir RPC or printed.
-compose exec -T bonfire-app bin/bonfire rpc \
-  "Bonfire.Federate.ActivityPub.set_federating(:instance, true); name = \"$USERNAME\"; case Bonfire.Me.Users.by_username(name) do {:ok, user} -> Bonfire.Federate.ActivityPub.set_federating(user, true); IO.puts(\"AP_INTEROP_USER_READY\"); _ -> case Bonfire.Me.make_account_and_user(name, name <> \"@bonfire.test\", System.fetch_env!(\"AP_INTEROP_USER_PASSWORD\")) do {:ok, user} -> Bonfire.Federate.ActivityPub.set_federating(user, true); IO.puts(\"AP_INTEROP_USER_READY\"); _ -> raise \"Bonfire test user creation failed\" end end" \
-  | grep -qx 'AP_INTEROP_USER_READY'
+# Postgres schema readiness is not BEAM Cachex application readiness.
+# A clean release can finish all 169 migrations before its cache is running.
+# Only this known transient cache-startup exception is retried; any other
+# failure is a hard error. Every attempt first checks the existing user so
+# that uncertainty after account creation cannot mint a duplicate.
+rpc_out=$(mktemp "${TMPDIR:-/tmp}/bonfire-user-rpc.XXXXXX")
+rpc_err=$(mktemp "${TMPDIR:-/tmp}/bonfire-user-err.XXXXXX")
+trap 'rm -f "$rpc_out" "$rpc_err"' EXIT HUP INT TERM
+user_ready=false
+for attempt in $(seq 1 60); do
+  if compose exec -T bonfire-app bin/bonfire rpc \
+    "Bonfire.Federate.ActivityPub.set_federating(:instance, true); name = \"$USERNAME\"; case Bonfire.Me.Users.by_username(name) do {:ok, user} -> Bonfire.Federate.ActivityPub.set_federating(user, true); IO.puts(\"AP_INTEROP_USER_READY\"); _ -> case Bonfire.Me.make_account_and_user(name, name <> \"@bonfire.test\", System.fetch_env!(\"AP_INTEROP_USER_PASSWORD\")) do {:ok, user} -> Bonfire.Federate.ActivityPub.set_federating(user, true); IO.puts(\"AP_INTEROP_USER_READY\"); _ -> raise \"Bonfire test user creation failed\" end end" \
+    >"$rpc_out" 2>"$rpc_err" && grep -qx 'AP_INTEROP_USER_READY' "$rpc_out"; then
+    user_ready=true
+    break
+  fi
+  if ! grep -Fq 'Specified cache not running' "$rpc_out" "$rpc_err"; then
+    echo 'Bonfire user/instance setup failed for a non-retryable reason' >&2
+    exit 1
+  fi
+  if [ "$attempt" -eq 60 ]; then break; fi
+  sleep 2
+done
+if [ "$user_ready" != true ]; then
+  echo 'Bonfire Cachex was not ready within the bounded fixture startup window' >&2
+  exit 1
+fi
 
 # Public discovery is mandatory; 401/403 or bare HTTP startup is not a pass.
 # The BEAM release may have committed migrations and accepted RPCs before
