@@ -193,7 +193,7 @@ jobs:
             exit 1
           }
           curl --fail --silent --show-error --max-time 20 \
-            -H 'Accept: application/jrd+json' \
+            -H 'Host: localhost:4000' -H 'Accept: application/jrd+json' \
             'http://127.0.0.1:4000/.well-known/webfinger?resource=acct:interop@localhost' \
             -o bonfire-webfinger.json
           node <<'NODE'
