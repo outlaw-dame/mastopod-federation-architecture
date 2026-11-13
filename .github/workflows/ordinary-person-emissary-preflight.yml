@@ -99,7 +99,7 @@ jobs:
               --write-out '%{http_code}' -H 'Host: localhost' \
               -H 'X-Forwarded-Proto: https' \
               -H 'Accept: application/activity+json' \
-              http://127.0.0.1:18880/@demo/pub || true)"
+              http://127.0.0.1:18880/@demo || true)"
             case "$code" in
               200)
                 echo "emissary_boot_http_status=$code"
@@ -121,7 +121,7 @@ jobs:
           curl --fail --silent --show-error --max-time 15 \
             -H 'Host: localhost' -H 'X-Forwarded-Proto: https' \
             -H 'Accept: application/activity+json' \
-            http://127.0.0.1:18880/@demo/pub > emissary-actor.json
+            http://127.0.0.1:18880/@demo > emissary-actor.json
           node <<'NODE'
           const fs = require('node:fs');
           const actor = JSON.parse(fs.readFileSync('emissary-actor.json', 'utf8'));
