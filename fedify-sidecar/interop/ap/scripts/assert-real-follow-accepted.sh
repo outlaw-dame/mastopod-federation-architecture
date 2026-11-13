@@ -112,7 +112,12 @@ query_count() {
       # could create remote actor state and amplify network retries.
       actor_b64=$(printf '%s' "${ACTOR_URI}" | openssl base64 -A)
       username_b64=$(printf '%s' "${LOCAL_USERNAME}" | openssl base64 -A)
-      printf '%s' "${actor_b64}" | LC_ALL=C grep -Eq '^[A-Za-z0-9+/=]+
+      case "${actor_b64}" in
+        ''|*[!A-Za-z0-9+/=]*) return 1 ;;
+      esac
+      case "${username_b64}" in
+        ''|*[!A-Za-z0-9+/=]*) return 1 ;;
+      esac
       output=$(compose exec -T bonfire-app bin/bonfire rpc \
         "with {:ok, follower} <- Bonfire.Federate.ActivityPub.AdapterUtils.get_character_by_ap_id(Base.decode64!(\"${actor_b64}\")), {:ok, target} <- Bonfire.Me.Users.by_username(Base.decode64!(\"${username_b64}\")) do IO.puts(if Bonfire.Social.Graph.Follows.following?(follower, target), do: \"1\", else: \"0\") else _ -> IO.puts(\"0\") end")
       value=$(printf '%s\n' "${output}" | awk '/^[01]$/{value=$0} END{print value}')
