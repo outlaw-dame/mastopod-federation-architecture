@@ -109,7 +109,7 @@ jobs:
           done
           # Keep app logs out of shared artifacts: this environment can emit
           # sensitive configuration and sign-in metadata.
-          ( cd bonfire-rc && bin/bonfire foreground ) >bonfire-rc-ci.log 2>&1 &
+          ( cd bonfire-rc && bin/bonfire start ) >bonfire-rc-ci.log 2>&1 &
           echo "$!" > bonfire-rc.pid
           diagnose() {
             echo 'bonfire_rc8_clean_boot=failed'
