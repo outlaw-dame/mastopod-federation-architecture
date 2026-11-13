@@ -33,7 +33,29 @@ for attempt in $(seq 1 180); do
   sleep 2
 done
 if [ "$ready" != true ]; then
-  echo 'Bonfire Community RC8 database schema failed readiness' >&2; exit 1
+  # Fixed-category diagnostics only: release logs can contain sensitive
+  # configuration, so never upload or print unredacted application logs.
+  for symptom in 'Postgrex.Error' 'DBConnection.ConnectionError' \
+      'could not start application' 'missing postgres' \
+      'permission denied' 'UndefinedFunctionError' \
+      'relation' 'migration'; do
+    if compose logs --no-color --tail=180 bonfire-app 2>/dev/null \
+       | grep -qiF "$symptom"; then
+      case "$symptom" in
+        *Postgrex*|*DBConnection*|*postgres*|relation)
+          echo 'bonfire_docker_failure=database_or_schema' ;;
+        *migration*) echo 'bonfire_docker_failure=migrations' ;;
+        *) echo 'bonfire_docker_failure=release_bootstrap' ;;
+      esac
+    fi
+  done
+  # Report only non-sensitive schema presence/count from disposable SQL.
+  compose exec -T -e PGPASSWORD="$BONFIRE_DB_PASSWORD" bonfire-db \
+    psql -h 127.0.0.1 -U postgres -d bonfire_db -X -Atqc \
+    "SELECT 'bonfire_docker_schema_count=' || count(*) FROM schema_migrations;" \
+    2>/dev/null || true
+  echo 'Bonfire Community RC8 database schema failed readiness' >&2
+  exit 1
 fi
 
 # Use the fixture CA with normal signature and TLS validation. Never turn off
