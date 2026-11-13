@@ -281,6 +281,14 @@ jobs:
                 fedify-sidecar/interop/ap/scripts/bootstrap-castopod-account.sh
               ;;
             bonfire)
+              # Compose expands this ephemeral fixture password on *every*
+              # invocation, not just during the bootstrap child process.
+              # Preserve it only in the protected Actions job environment;
+              # never commit it to a repository file or echo it to logs.
+              AP_INTEROP_BONFIRE_PASSWORD="$(openssl rand -hex 24)"
+              export AP_INTEROP_BONFIRE_PASSWORD
+              echo "::add-mask::${AP_INTEROP_BONFIRE_PASSWORD}"
+              printf 'AP_INTEROP_BONFIRE_PASSWORD=%s\n' "${AP_INTEROP_BONFIRE_PASSWORD}" >> "${GITHUB_ENV}"
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_BONFIRE_OVERLAY="${BONFIRE_OVERLAY}" \
               AP_INTEROP_BONFIRE_USERNAME="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
