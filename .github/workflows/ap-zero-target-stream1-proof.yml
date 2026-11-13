@@ -60,7 +60,7 @@ jobs:
         run: |
           set -euo pipefail
           docker rm -f ap-zero-target-redis >/dev/null 2>&1 || true
-          docker run -d --name ap-zero-target-redis -p 6379:6379 redis:7-alpine
+          docker run -d --name ap-zero-target-redis -p 6379:6379 redis:8.2.11-alpine
           ready=false
           for attempt in $(seq 1 60); do
             if docker exec ap-zero-target-redis redis-cli PING | grep -q PONG; then
@@ -80,7 +80,7 @@ jobs:
           docker rm -f ap-zero-target-redpanda >/dev/null 2>&1 || true
           docker run -d --name ap-zero-target-redpanda \
             -p 19092:19092 -p 19644:9644 \
-            redpandadata/redpanda:v24.1.3 \
+            redpandadata/redpanda:v26.2.6 \
             redpanda start \
               --overprovisioned \
               --smp 1 \

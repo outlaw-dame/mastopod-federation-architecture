@@ -1,7 +1,7 @@
 services:
   redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    image: redis:8.2.11-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -13,7 +13,7 @@ services:
       - ap-interop
 
   redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v25.1.4
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.6
     command:
       - redpanda
       - start
