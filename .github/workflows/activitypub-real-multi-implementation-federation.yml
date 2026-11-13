@@ -267,7 +267,7 @@ jobs:
               AP_INTEROP_MISSKEY_USERNAME="${TARGET_USERNAME}" \
                 fedify-sidecar/interop/ap/scripts/bootstrap-misskey-account.sh
               . fedify-sidecar/interop/ap/runtime/misskey-actor.env
-              echo "TARGET_ACTOR_URI=${TARGET_ACTOR_URI}" >> "${GITHUB_ENV}"
+              echo "RESOLVED_TARGET_ACTOR_URI=${TARGET_ACTOR_URI}" >> "${GITHUB_ENV}"
               ;;
             friendica)
               AP_INTEROP_COMPOSE_FILE="${COMPOSE_FILE}" AP_INTEROP_FRIENDICA_OVERLAY="${FRIENDICA_OVERLAY}" \
@@ -364,7 +364,7 @@ jobs:
                 }
               ' "${TARGET_ACTOR_URI}"
               export TARGET_ACTOR_URI
-              echo "TARGET_ACTOR_URI=${TARGET_ACTOR_URI}" >> "${GITHUB_ENV}"
+              echo "RESOLVED_TARGET_ACTOR_URI=${TARGET_ACTOR_URI}" >> "${GITHUB_ENV}"
               ;;
             *) exit 2 ;;
           esac
@@ -445,8 +445,17 @@ jobs:
           SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
         run: |
           set -euo pipefail
+          # An actor discovered through WebFinger must not be shadowed by
+          # the matrix's job-level TARGET_ACTOR_URI placeholder.
+          if [[ "${TARGET}" == bonfire || "${TARGET}" == misskey ]]; then
+            test -n "${RESOLVED_TARGET_ACTOR_URI:-}" || {
+              echo "::error::The canonical remote actor was not propagated"
+              exit 1
+            }
+          fi
+          remote_actor_uri="${RESOLVED_TARGET_ACTOR_URI:-${TARGET_ACTOR_URI}}"
           AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-${TARGET}-native" \
-            node scripts/activitypub-federation-follow-proof.js native "${TARGET_ACTOR_URI}" \
+            node scripts/activitypub-federation-follow-proof.js native "${remote_actor_uri}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.log"
           tail -n 1 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.log" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json"
           actor_uri="$(node -p "JSON.parse(require('fs').readFileSync('${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/native-origin.json','utf8')).actorUri")"
@@ -555,8 +564,15 @@ jobs:
           SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379/12
         run: |
           set -euo pipefail
+          if [[ "${TARGET}" == bonfire || "${TARGET}" == misskey ]]; then
+            test -n "${RESOLVED_TARGET_ACTOR_URI:-}" || {
+              echo "::error::The canonical remote actor was not propagated"
+              exit 1
+            }
+          fi
+          remote_actor_uri="${RESOLVED_TARGET_ACTOR_URI:-${TARGET_ACTOR_URI}}"
           AP_FEDERATION_RUN_ID="${GITHUB_RUN_ID}-${TARGET}-external" \
-            node scripts/activitypub-federation-follow-proof.js external "${TARGET_ACTOR_URI}" \
+            node scripts/activitypub-federation-follow-proof.js external "${remote_actor_uri}" \
             | tee "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.log"
           tail -n 1 "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.log" > "${GITHUB_WORKSPACE}/${EVIDENCE_DIR}/external-origin.json"
           node - <<'NODE'
