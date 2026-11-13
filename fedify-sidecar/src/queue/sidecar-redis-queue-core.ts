@@ -155,6 +155,22 @@ export interface DLQEntry {
 // Redis Streams Queue Implementation
 // ============================================================================
 
+/**
+ * Redis XAUTOCLAIM returns a SCAN-like cursor (`nextId` in node-redis).
+ * Keep the cursor process-local: a restart must re-scan old pending work.
+ */
+export function nextAutoClaimCursor(reply: unknown): string {
+  if (!reply || typeof reply !== "object" || Array.isArray(reply)) {
+    return "0-0";
+  }
+  const value = (reply as { nextId?: unknown }).nextId;
+  if (value === undefined) return "0-0";
+  if (typeof value !== "string" || !/^[0-9]+-[0-9]+$/.test(value)) {
+    throw new Error("Invalid Redis XAUTOCLAIM continuation cursor");
+  }
+  return value;
+}
+
 export class RedisStreamsQueue {
   private redis: RedisClientType;
   private inboundConsumerRedis: RedisClientType;
@@ -303,6 +319,7 @@ export class RedisStreamsQueue {
   async *consumeInbound(): AsyncIterable<{ messageId: string; envelope: InboundEnvelope }> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
+    let claimCursor = "0-0";
     while (true) {
       try {
         // Read pending messages first (crash recovery)
@@ -311,9 +328,12 @@ export class RedisStreamsQueue {
           this.consumerGroup,
           this.consumerId,
           this.claimIdleTimeMs,
-          "0-0",
+          claimCursor,
           { COUNT: this.claimBatchCount }
         );
+        // XAUTOCLAIM returns a SCAN-like continuation. Reusing 0-0 on
+        // every poll repeatedly scans the same PEL prefix at scale.
+        claimCursor = nextAutoClaimCursor(pending);
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
           const envelope = this.deserializeInboundEnvelope(messageId, fields);
@@ -339,6 +359,8 @@ export class RedisStreamsQueue {
           }
         }
       } catch (err: any) {
+        // A re-created group or failed scan invalidates the local cursor.
+        claimCursor = "0-0";
         if (this.isMissingConsumerGroupError(err)) {
           await this.ensureConsumerGroup(this.inboundStreamKey);
         }
@@ -443,6 +465,7 @@ export class RedisStreamsQueue {
   async *consumeOutbound(): AsyncIterable<{ messageId: string; job: OutboundJob }> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
+    let claimCursor = "0-0";
     while (true) {
       try {
         // Read pending messages first (crash recovery)
@@ -451,9 +474,12 @@ export class RedisStreamsQueue {
           this.consumerGroup,
           this.consumerId,
           this.claimIdleTimeMs,
-          "0-0",
+          claimCursor,
           { COUNT: this.claimBatchCount }
         );
+        // XAUTOCLAIM returns a SCAN-like continuation. Reusing 0-0 on
+        // every poll repeatedly scans the same PEL prefix at scale.
+        claimCursor = nextAutoClaimCursor(pending);
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
           try {
@@ -487,6 +513,8 @@ export class RedisStreamsQueue {
           }
         }
       } catch (err: any) {
+        // A re-created group or failed scan invalidates the local cursor.
+        claimCursor = "0-0";
         if (this.isMissingConsumerGroupError(err)) {
           await this.ensureConsumerGroup(this.outboundStreamKey);
         }
@@ -523,6 +551,7 @@ export class RedisStreamsQueue {
   async *consumeOutboxIntents(): AsyncIterable<{ messageId: string; intent: OutboxIntent }> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
+    let claimCursor = "0-0";
     while (true) {
       try {
         const pending = await (this.outboxIntentConsumerRedis as any).xAutoClaim(
@@ -530,9 +559,12 @@ export class RedisStreamsQueue {
           this.consumerGroup,
           this.consumerId,
           this.claimIdleTimeMs,
-          "0-0",
+          claimCursor,
           { COUNT: this.claimBatchCount },
         );
+        // XAUTOCLAIM returns a SCAN-like continuation. Reusing 0-0 on
+        // every poll repeatedly scans the same PEL prefix at scale.
+        claimCursor = nextAutoClaimCursor(pending);
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
           try {
@@ -565,6 +597,8 @@ export class RedisStreamsQueue {
           }
         }
       } catch (err: any) {
+        // A re-created group or failed scan invalidates the local cursor.
+        claimCursor = "0-0";
         if (this.isMissingConsumerGroupError(err)) {
           await this.ensureConsumerGroup(this.outboxIntentStreamKey);
         }
@@ -600,6 +634,7 @@ export class RedisStreamsQueue {
   async *consumeOriginReconciliation(): AsyncIterable<{ messageId: string; job: OriginReconciliationJob }> {
     if (!this.isConnected) throw new Error("Queue not connected");
 
+    let claimCursor = "0-0";
     while (true) {
       try {
         const pending = await (this.originReconcileConsumerRedis as any).xAutoClaim(
@@ -607,9 +642,12 @@ export class RedisStreamsQueue {
           this.consumerGroup,
           this.consumerId,
           this.claimIdleTimeMs,
-          "0-0",
+          claimCursor,
           { COUNT: this.claimBatchCount },
         );
+        // XAUTOCLAIM returns a SCAN-like continuation. Reusing 0-0 on
+        // every poll repeatedly scans the same PEL prefix at scale.
+        claimCursor = nextAutoClaimCursor(pending);
 
         for (const [messageId, fields] of this.normalizeClaimedMessages(pending?.messages)) {
           const job = this.deserializeOriginReconciliationJob(messageId, fields);
@@ -634,6 +672,8 @@ export class RedisStreamsQueue {
           }
         }
       } catch (err: any) {
+        // A re-created group or failed scan invalidates the local cursor.
+        claimCursor = "0-0";
         if (this.isMissingConsumerGroupError(err)) {
           await this.ensureConsumerGroup(this.originReconcileStreamKey);
         }
