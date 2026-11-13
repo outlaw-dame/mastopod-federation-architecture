@@ -183,19 +183,31 @@ jobs:
           set +a
           # Use a disposable account on the isolated runner. No public traffic.
           if ! (cd bonfire-rc && bin/bonfire rpc \
-            'case Bonfire.Me.make_account_and_user("interop", "interop@localhost", System.fetch_env!("AP_INTEROP_USER_PASSWORD")) do {:ok, user} -> Bonfire.Federate.ActivityPub.set_federating(user, true); IO.puts("AP_PERSON_CREATED"); other -> raise inspect(other) end') \
+            'Bonfire.Federate.ActivityPub.set_federating(:instance, true); case Bonfire.Me.make_account_and_user("interop", "interop@localhost", System.fetch_env!("AP_INTEROP_USER_PASSWORD")) do {:ok, user} -> Bonfire.Federate.ActivityPub.set_federating(user, true); IO.puts("AP_INSTANCE_FEDERATION=" <> to_string(Bonfire.Federate.ActivityPub.federating?(:instance))); IO.puts("AP_USER_FEDERATION=" <> to_string(Bonfire.Federate.ActivityPub.federating?(user))); IO.puts("AP_PERSON_CREATED"); other -> raise inspect(other) end') \
             >bonfire-actor-rpc.log 2>&1; then
             echo "::error::Bonfire disposable user creation failed"
             exit 1
           fi
+          grep -E '^AP_(INSTANCE|USER)_FEDERATION=(true|false)$' bonfire-actor-rpc.log || true
           grep -qx 'AP_PERSON_CREATED' bonfire-actor-rpc.log || {
             echo "::error::Bonfire did not confirm disposable Person creation"
             exit 1
           }
-          curl --fail --silent --show-error --max-time 20 \
+          # WebFinger must be publicly discoverable for ordinary Person
+          # federation. A 401 is a true acceptance failure, not an HTTP
+          # transport success. Report its status without logging response
+          # content, authorization headers or any account credentials.
+          status="$(curl --silent --show-error --max-time 20 \
             -H 'Host: localhost:4000' -H 'Accept: application/jrd+json' \
+            -w '%{http_code}' \
             'http://127.0.0.1:4000/.well-known/webfinger?resource=acct:interop@localhost' \
-            -o bonfire-webfinger.json
+            -o bonfire-webfinger.json || true)"
+          echo "bonfire_public_webfinger_status=${status:-unavailable}"
+          if [ "$status" != 200 ]; then
+            rm -f bonfire-webfinger.json
+            echo "::error::Bonfire local Person WebFinger cannot be dereferenced anonymously"
+            exit 1
+          fi
           node <<'NODE'
           const fs = require('node:fs');
           const doc = JSON.parse(fs.readFileSync('bonfire-webfinger.json', 'utf8'));
