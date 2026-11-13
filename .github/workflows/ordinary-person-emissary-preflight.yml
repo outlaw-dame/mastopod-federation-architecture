@@ -92,13 +92,14 @@ jobs:
               echo "::error::Emissary process exited during startup"
               exit 1
             fi
-            # Only a true HTTPS-equivalent application response proves the
-            # service route is alive. A bare 307 from HTTPS middleware is
+            # Only a concrete Person actor route response proves the
+            # federation route is available. A bare 307 from middleware is
             # not proof that the application or its actor is initialized.
             code="$(curl --silent --output /dev/null --max-time 3 \
               --write-out '%{http_code}' -H 'Host: localhost' \
               -H 'X-Forwarded-Proto: https' \
-              http://127.0.0.1:18880/ || true)"
+              -H 'Accept: application/activity+json' \
+              http://127.0.0.1:18880/@demo/pub || true)"
             case "$code" in
               200)
                 echo "emissary_boot_http_status=$code"
