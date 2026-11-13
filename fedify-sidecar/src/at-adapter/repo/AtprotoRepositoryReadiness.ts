@@ -24,7 +24,7 @@ export class AtprotoRepositoryNotReadyError extends Error {
 
 /** Never allow environment overrides to activate mock PDS state in production. */
 export function assertMockRepositoryAllowed(): void {
-  if (process.env.NODE_ENV === "production") {
+  if (process.env["NODE_ENV"] === "production") {
     throw new AtprotoRepositoryNotReadyError();
   }
 }
