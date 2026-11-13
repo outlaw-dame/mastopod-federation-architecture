@@ -692,7 +692,29 @@ jobs:
                 sh -c 'for f in writable/logs/*.log; do echo "--- $f ---"; cat "$f"; done' 2>/dev/null || true
               echo "::endgroup::"
               ;;
-            bonfire) docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" logs --no-color bonfire-app 2>/dev/null || true ;;
+            bonfire)
+              # Bonfire first boot can produce tens of MB of noisy UI warnings.
+              # Printing raw logs here also risks leaking fixture credentials,
+              # activity bodies and signatures into the Actions job output.
+              # Preserve raw evidence only in the disposable container; emit
+              # fixed, non-sensitive diagnostic categories with bounded work.
+              bonfire_logs="$(docker compose -f "${COMPOSE_FILE}" -f "${BONFIRE_OVERLAY}" \
+                logs --no-color --tail=200 bonfire-app 2>/dev/null | cut -c1-512 || true)"
+              for symptom in 'Postgrex.Error' 'DBConnection.ConnectionError' \
+                'Signature' 'URLVerifier' 'SSRF' 'Unauthorized' 'Forbidden' \
+                'ActivityPub' 'Follow' 'timeout' 'TLS' 'certificate'; do
+                if printf '%s\\n' "${bonfire_logs}" | grep -qiF -- "${symptom}"; then
+                  case "${symptom}" in
+                    Postgrex.Error|DBConnection.ConnectionError) category=database ;;
+                    Signature|URLVerifier|SSRF|Unauthorized|Forbidden) category=authorization_or_fetch ;;
+                    ActivityPub|Follow) category=federation ;;
+                    timeout|TLS|certificate) category=transport ;;
+                  esac
+                  echo "bonfire_failure_diagnostic=${category}:${symptom}"
+                fi
+              done
+              echo 'bonfire_raw_application_logs=withheld'
+              ;;
           esac
 
       - name: Stop isolated fixture
