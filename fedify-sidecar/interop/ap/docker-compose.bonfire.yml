@@ -22,8 +22,12 @@ services:
       dockerfile: Dockerfile
     environment:
       HOSTNAME: bonfire.test
+      SERVER_IP: "0.0.0.0"
       SERVER_PORT: "4000"
       PUBLIC_PORT: "443"
+      REPLACE_OS_VARS: "true"
+      DB_MIGRATE_INDEXES_CONCURRENTLY: "false"
+      OTEL_ENABLED: "0"
       POSTGRES_HOST: bonfire-db
       POSTGRES_USER: postgres
       POSTGRES_DB: bonfire_db
