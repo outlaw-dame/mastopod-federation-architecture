@@ -68,5 +68,37 @@ fi
 compose exec -T friendica-db /bin/sh -lc \
   "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"update user set nickname='friendica' where uid=0 and nickname='';\""
 
+# Friendica 2026.05 StreamLoggerFactory requires an EXISTING, writable
+# logfile. app and worker containers have separate /tmp filesystems.
+# Provision both with restrictive permissions in this disposable fixture.
+for service in friendica-app friendica-worker; do
+  compose up -d "$service"
+  compose exec -T "$service" /bin/sh -lc '
+    umask 077
+    touch /tmp/friendica-interop.log
+    chmod 600 /tmp/friendica-interop.log
+  '
+done
+# The official Apache/PHP process runs as www-data, not the root user
+# executing docker compose exec. A root-owned 0600 file makes HTTP receiver
+# logging silently impossible while the CLI worker log continues working.
+# Assign ownership only in the web container, retaining private 0600 mode.
+compose exec -T friendica-app /bin/sh -lc '
+  chown www-data:www-data /tmp/friendica-interop.log
+  test "$(stat -c %a /tmp/friendica-interop.log)" = 600
+  su -s /bin/sh www-data -c "test -w /tmp/friendica-interop.log"
+'
+
+# Friendica database config may override Docker logging environment.
+# This fixture uses the official CLI to verify bounded DEBUG to /tmp.
+ensure_debug_config() {
+  key="$1"; desired="$2"
+  observed=$(compose exec -T friendica-app php bin/console.php config system "$key" 2>/dev/null) || return 1
+  case "$observed" in *" => $desired") return 0 ;; esac
+  compose exec -T friendica-app php bin/console.php config system "$key" "$desired" >/dev/null
+}
+ensure_debug_config debugging 1
+ensure_debug_config logfile /tmp/friendica-interop.log
+ensure_debug_config loglevel debug
 compose up -d friendica-worker
 echo "Bootstrapped Friendica federation target ${USERNAME}"

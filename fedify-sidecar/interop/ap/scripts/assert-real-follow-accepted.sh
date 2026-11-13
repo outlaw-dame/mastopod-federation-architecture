@@ -155,11 +155,41 @@ pixelfed_diagnostics() {
 
 friendica_diagnostics() {
   echo "Friendica fail-closed persistence diagnostics:" >&2
+  # Debug only: independently test whether Friendica can dereference the
+  # ACTUAL remote actor over the same trusted HTTPS route it must use to
+  # process the Follow. Report status/length, not private actor JSON.
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" friendica-app /bin/sh -lc '
+    code=$(curl --connect-timeout 3 --max-time 12 --silent --show-error \
+      --output /dev/null --write-out "%{http_code} content_type=%{content_type}" \
+      --header "Accept: application/activity+json" \
+      "$AP_INTEROP_ACTOR_URI") || code="TLS_OR_NETWORK_FAILURE"
+    printf "friendica_actor_dereference_http_status=%s\\n" "$code"
+  ' >&2 || echo "Friendica HTTPS actor probe unavailable" >&2
+  # Determine whether Friendica imported the ActivityPub actor itself before
+  # a contact/follow mutation. These are counts, not raw actor material.
+  # Compare status of the canonical actor and its origin using Friendica's
+  # container DNS/TLS path. Unlike the native application HTTP client these
+  # are unsigned probes, so they do not prove a successful signed actor fetch.
+  compose exec -T -e AP_INTEROP_ACTOR_URI="${ACTOR_URI}" friendica-app /bin/sh -lc '
+    for target in actor origin; do
+      if [ "$target" = actor ]; then url="$AP_INTEROP_ACTOR_URI"; else url="https://activitypods.test/"; fi
+      for method in HEAD GET; do
+        status=$(curl --silent --show-error --connect-timeout 3 --max-time 8 \
+          --output /dev/null --write-out "%{http_code}" --request "$method" \
+          --header "Accept: application/activity+json" "$url") || status=TLS_OR_NETWORK_FAILURE
+        printf "friendica_probe_%s_%s_http_status=%s\n" "$target" "$method" "$status"
+      done
+    done
+  ' >&2 || echo "Friendica actor/origin diagnostics unavailable" >&2
   {
     printf '%s\n' "select concat('remote_contact_count=', count(*), ',local_relationship_count=', coalesce(sum(c.uid <> 0),0), ',accepted_count=', coalesce(sum(c.uid <> 0 and c.rel in (1,3) and c.pending=0 and c.deleted=0),0), ',pending_count=', coalesce(sum(c.uid <> 0 and c.pending=1 and c.deleted=0),0), ',blocked_count=', coalesce(sum(c.blocked=1 and c.deleted=0),0)) from contact c where c.url='${actor_sql}';"
+    printf '%s\n' "select concat('local_user_count=',count(*),',local_self_contact_count=',coalesce(sum(c.self=1),0),',local_canonical_actor_match_count=',coalesce(sum(c.self=1 and c.url=concat('https://friendica.test/profile/',u.nickname)),0)) from user u left join contact c on c.uid=u.uid and c.self=1 where u.nickname='${username_sql}';"
+    printf '%s\n' "select concat('apcontact_count=',count(*),',apcontact_public_key_count=',coalesce(sum(length(pubkey)>0),0),',apcontact_inbox_count=',coalesce(sum(length(inbox)>0),0)) from apcontact where url='${actor_sql}';"
     printf '%s\n' "select concat('inbox_entry_count=', count(*), ',trusted_count=', coalesce(sum(trust=1),0), ',follow_count=', coalesce(sum(type='as:Follow'),0)) from \`inbox-entry\` where signer='${actor_sql}';"
     printf '%s\n' "select concat('inbox_receiver_count=', count(*)) from \`inbox-entry-receiver\` r join \`inbox-entry\` e on e.id=r.\`queue-id\` where e.signer='${actor_sql}';"
     printf '%s\n' "select concat('introduction_count=', count(*)) from intro i join contact c on c.id=i.\`contact-id\` where c.url='${actor_sql}';"
+    printf '%s\n' "select concat('system_actor_contact_count=', count(*), ',has_private_signing_key=', coalesce(sum(length(prvkey)>0),0), ',has_public_signing_key=', coalesce(sum(length(pubkey)>0),0)) from contact where uid=0 and self=1;"
+    printf '%s\n' "select concat('system_user_count=', count(*), ',nonempty_nickname=', coalesce(sum(length(nickname)>0),0)) from user where uid=0;"
     printf '%s\n' "select concat('pending_worker_count=', count(*), ',retrying_worker_count=', coalesce(sum(retrial > 0),0)) from workerqueue where done=0;"
   } | compose exec -T friendica-db /bin/sh -lc \
     'MYSQL_PWD="$MARIADB_PASSWORD" mariadb --batch --skip-column-names -u friendica friendica' \
@@ -189,6 +219,16 @@ while [ "${attempt}" -le "${ATTEMPTS}" ]; do
     printf '{"ok":true,"target":"%s","actorUri":"%s","localUsername":"%s","persistedFollowCount":%s}\n' \
       "${TARGET}" "${ACTOR_URI}" "${LOCAL_USERNAME}" "${count}"
     exit 0
+  fi
+  # Real Friendica performs inbound federation through scheduled workers.
+  # The fixture proof is shorter than its normal 5-10-minute cron cycle.
+  # Run the OFFICIAL worker command at bounded intervals to execute accepted
+  # work, but retain the strict remote database Follow assertion above.
+  # This does not create synthetic Follow rows or bypass signature checks.
+  if [ "${TARGET}" = friendica ] && [ $((attempt % 15)) -eq 0 ]; then
+    compose exec -T -w /var/www/html friendica-worker \
+      php bin/console.php worker >/dev/null 2>&1 || \
+      echo "Friendica official worker command failed (remote Follow still required)" >&2
   fi
   if [ "${attempt}" -lt "${ATTEMPTS}" ]; then
     sleep "${DELAY_SECONDS}"

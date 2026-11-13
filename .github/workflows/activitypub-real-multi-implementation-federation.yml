@@ -314,6 +314,28 @@ jobs:
             sleep 2
           done
           [[ "${ready}" == true ]]
+          if [[ "${TARGET}" == friendica ]]; then
+            # Friendica FEP-2677 exposes /friendica as its own application
+            # actor. Resolve it before inbound Follow so its system
+            # (uid=0) signing key/contact is materialized. This is native
+            # server provisioning, not synthetic remote Follow acceptance.
+            curl --cacert fedify-sidecar/interop/ap/runtime/certs/rootCA.crt \
+              -fsS -H 'Accept: application/activity+json' \
+              "https://friendica.test/friendica" >/dev/null
+            system_ready=$(docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" \
+              exec -T friendica-db /bin/sh -lc \
+              'MYSQL_PWD="$MARIADB_PASSWORD" mariadb --batch --skip-column-names -u friendica friendica -e "select count(*) from contact where uid=0 and self=1 and length(pubkey)>0 and length(prvkey)>0;"' \
+              | awk 'NF {v=$0} END {print v}')
+            echo "Friendica system signing contact ready=${system_ready}"
+            [[ "${system_ready}" == 1 ]]
+            # Friendica's HTTP client uses dns_get_record(host + ".") rather
+            # than libc/getent; an /etc/hosts-only success is not sufficient.
+            # Check DNS through the actual PHP runtime, without changing any
+            # network allowlists, request signatures, or SSRF protection.
+            docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" exec -T friendica-app \
+              php -r '$host="activitypods.test."; $r=dns_get_record($host, DNS_A | DNS_AAAA); echo "friendica_php_activitypods_dns_record_count=".count($r)."\\n";'
+
+          fi
 
       - name: Start ActivityPods native mode
         working-directory: activitypods/pod-provider/backend
@@ -558,7 +580,38 @@ jobs:
             akkoma) docker compose -f "${COMPOSE_FILE}" --profile akkoma logs --no-color akkoma-app 2>/dev/null || true ;;
             pixelfed) docker compose -f "${COMPOSE_FILE}" -f "${PIXELFED_OVERLAY}" logs --no-color pixelfed-app pixelfed-horizon 2>/dev/null || true ;;
             misskey) docker compose -f "${COMPOSE_FILE}" -f "${MISSKEY_OVERLAY}" logs --no-color misskey-app misskey-db 2>/dev/null || true ;;
-            friendica) docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true ;;
+            friendica)
+              docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" logs --no-color friendica-app friendica-worker 2>/dev/null || true
+              # Friendica has a distinct internal application log, NOT
+              # necessarily exported to Apache or worker stdout. Print
+              # predefined error-pattern counts only: raw logs can contain
+              # HTTP headers, actor content and test access credentials.
+              for service in friendica-app friendica-worker; do
+                echo "::group::${service} Friendica internal error-category counts"
+                docker compose -f "${COMPOSE_FILE}" -f "${FRIENDICA_OVERLAY}" exec -T "${service}" sh -lc '
+                  file=/tmp/friendica-interop.log
+                  if [ ! -f "$file" ]; then
+                    printf "internal_log_present=0\n"
+                    exit 0
+                  fi
+                  printf "internal_log_present=1\n"
+                  printf "internal_log_line_count=%s\n" "$(wc -l < "$file" | tr -d "[:space:]")"
+                  printf "internal_log_bytes=%s\n" "$(wc -c < "$file" | tr -d "[:space:]")"
+                  for term in "Unexpected content type" "Invalid body" "Invalid HTTP signature" "Error fetching url" "Fetched for user" "No actor name was found" "System account not found" "Incoming message" "Message for user" "No actor" "No keyId" "Empty key" "Verification failed" "Digest does not match" "Unable to retrieve AP contact" "Could not find owner" "message is discarded" "URLVerifier" "signature" "certificate" "could not retrieve" "Could not fetch" "untrusted" "Invalid URL" "Domain is blocked" "Url not reachable" "Fetching was unsuccessful" "Multiple requests for the address" "Request failed" "contact" "curl" "HTTP 503" "protocol" "inbox" "message ignored" "URL cannot be resolved" "Receiver.php" "APContact.php" "HTTPSignature.php" "PHP Fatal" "Uncaught" "Invalid host"; do
+                    count=$(grep -iFc "$term" "$file" 2>/dev/null || true)
+                    printf "category=%s count=%s\n" "$term" "$count"
+                  done
+                  # Print only predetermined fixture-host counts from the
+                  # URL reachability warnings, never the request-bearing lines.
+                  for host in "activitypods.test" "friendica.test"; do
+                    count=$(grep -iF "Url not reachable" "$file" 2>/dev/null | grep -iFc "$host" || true)
+                    printf "unreachable_fixture_host=%s count=%s\\n" "$host" "$count"
+                  done
+                ' 2>/dev/null || true
+                echo "::endgroup::"
+              done
+              ;;
+
             castopod)
               docker compose -f "${COMPOSE_FILE}" -f "${CASTOPOD_OVERLAY}" logs --no-color castopod-app castopod-db 2>/dev/null || true
               # TEMP_DEBUG_REMOVE_BEFORE_MERGE: `docker compose logs` only

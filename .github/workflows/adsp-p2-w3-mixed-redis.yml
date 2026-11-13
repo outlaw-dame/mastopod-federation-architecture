@@ -29,7 +29,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      ACTIVITYPODS_SHA: '0cc30fc2a6e2774ac948e51c20a238e407b033c5'
+      # Experimental exact-head W3 validation of ActivityPods PR #136 (signup and API route ordering).
+      # This is not a release pin; retain strict 1/2/4 acceptance and roll back on failure.
+      ACTIVITYPODS_SHA: '893609a23a671f608341d2e8cb93de75291ea592'
       FEDERATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ADSP_REMOTE_REDIS_URL: redis://127.0.0.1:6379
       ADSP_REMOTE_TARGET_STATS_URL: http://127.0.0.1:18080/stats
@@ -172,6 +174,19 @@ jobs:
               if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then return 0; fi
               sleep 1
             done
+            # Preserve the original strict 2xx readiness gate but report which
+            # replica endpoint failed. Never convert a failed / into a pass.
+            local code
+            code="$(curl --silent --output /dev/null --max-time 2 --write-out '%{http_code}' "$url" || true)"
+            echo "::error::W3_HTTP_READINESS_FAILED url=$url status=${code:-unknown} tries=$tries" >&2
+            # A live Moleculer gateway can still have missing/incorrect aliases.
+            # Probe fixed, credential-free endpoints as diagnostics only; the
+            # missing root redirect remains a failing acceptance condition.
+            local base="${url%/}" probe probe_status
+            for probe in /favicon.ico /.well-known/config.js /.well-known/openid-configuration; do
+              probe_status="$(curl --silent --output /dev/null --max-time 2 --write-out '%{http_code}' "${base}${probe}" || true)"
+              echo "W3_ROUTE_PROBE path=$probe status=${probe_status:-unknown}" >&2
+            done
             return 1
           }
 
@@ -310,12 +325,63 @@ jobs:
             ports=(3000)
             if [[ "$replicas" -ge 2 ]]; then services+=(backend_p2_2); ports+=(3102); fi
             if [[ "$replicas" -ge 4 ]]; then services+=(backend_p2_3 backend_p2_4); ports+=(3103 3104); fi
+            # Single-writer bootstrap: the legacy SemApps ontology and
+            # controlled-container registry initialize through the first
+            # ActivityPods cell. Starting all 4 cells simultaneously causes
+            # type expansion ("as:Note") and LDP registry/bootstrap races
+            # before account provisioning can establish a real AP actor.
+            # Keep the full multi-cell delivery acceptance test unchanged:
+            # additional replicas start only after primary initialization.
             (
               cd "$compose_root"
-              docker compose $files up -d --no-deps "${services[@]}"
+              docker compose $files up -d --no-deps backend
             )
-            for port in "${ports[@]}"; do wait_http "http://127.0.0.1:${port}/" 180; done
+            wait_http "http://127.0.0.1:3000/" 180
+            if [[ "${replicas}" -ge 2 ]]; then
+              (
+                cd "$compose_root"
+                docker compose $files up -d --no-deps "${services[@]:1}"
+              )
+              for port in "${ports[@]:1}"; do
+                wait_http "http://127.0.0.1:${port}/" 180
+              done
+            fi
 
+            # HTTP root readiness only proves that Express is listening.
+            # The older W3 fixture creates accounts while required Solid
+            # registry/type-index services may still be unavailable to the
+            # Redis-transporter. Check their actual Moleculer registry presence
+            # before asserting user provisionability. This cannot fabricate a
+            # WebID resource or relax any downstream completeness assertion.
+            (
+              cd "$GITHUB_WORKSPACE/activitypods/pod-provider/backend"
+              ADSP_P2_NAMESPACE="$namespace" \
+              SEMAPPS_REDIS_TRANSPORTER_URL=redis://127.0.0.1:6379/12 \
+                node - <<'NODE'
+          const {ServiceBroker}=require('moleculer');
+          const Serializer=require('./RdfJSONSerializer');
+          const broker=new ServiceBroker({
+            namespace:process.env.ADSP_P2_NAMESPACE,
+            nodeID:'w3-required-solid-services-'+process.pid,
+            logger:false,
+            transporter:process.env.SEMAPPS_REDIS_TRANSPORTER_URL,
+            serializer:new Serializer(),
+            retryPolicy:{enabled:false},
+            registry:{preferLocal:true}
+          });
+          (async()=>{
+            await broker.start();
+            try{
+              await broker.waitForServices([
+                'auth','activitypub.actor','activitypub.outbox',
+                'auth-agent','agent-registry','auth-registry',
+                'data-registry','solid-preferences-file','type-indexes'
+              ],120000);
+              process.stdout.write('W3: required Solid/ActivityPub services discovered\\n');
+            }finally{await broker.stop();}
+          })().catch(error=>{console.error('W3_REQUIRED_SERVICES_MISSING',error.message);process.exitCode=1;});
+          NODE
+            )
             start_sidecar "$arm_dir"
 
             backend_cid="$(cd "$compose_root" && docker compose $files ps -q backend)"
