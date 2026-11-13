@@ -179,6 +179,14 @@ jobs:
             local code
             code="$(curl --silent --output /dev/null --max-time 2 --write-out '%{http_code}' "$url" || true)"
             echo "::error::W3_HTTP_READINESS_FAILED url=$url status=${code:-unknown} tries=$tries" >&2
+            # A live Moleculer gateway can still have missing/incorrect aliases.
+            # Probe fixed, credential-free endpoints as diagnostics only; the
+            # missing root redirect remains a failing acceptance condition.
+            local base="${url%/}" probe probe_status
+            for probe in /favicon.ico /.well-known/config.js /.well-known/openid-configuration; do
+              probe_status="$(curl --silent --output /dev/null --max-time 2 --write-out '%{http_code}' "${base}${probe}" || true)"
+              echo "W3_ROUTE_PROBE path=$probe status=${probe_status:-unknown}" >&2
+            done
             return 1
           }
 
