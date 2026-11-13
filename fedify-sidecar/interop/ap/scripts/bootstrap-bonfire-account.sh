@@ -18,12 +18,16 @@ fi
 compose build bonfire-app
 compose up -d bonfire-db bonfire-app
 
-# Actual account schema read, bounded to six minutes (not mere BEAM health).
+# First-boot migrations are asynchronous. An existing Users table or an
+# accepting BEAM process is NOT proof that settings/Federate tables exist.
+# The official RC8 clean release has 169 migrations. Require their ledger
+# and the exact settings table before performing any user/instance writes.
 ready=false
 for attempt in $(seq 1 180); do
-  if compose exec -T bonfire-app bin/bonfire rpc \
-    'case Bonfire.Me.Users.by_username("interop") do _ -> IO.puts("AP_INTEROP_SCHEMA_READY") end' \
-    2>/dev/null | grep -qx 'AP_INTEROP_SCHEMA_READY'; then
+  if compose exec -T -e PGPASSWORD="$BONFIRE_DB_PASSWORD" bonfire-db \
+    psql -h 127.0.0.1 -U postgres -d bonfire_db -X -Atqc \
+    "SELECT CASE WHEN to_regclass('public.bonfire_data_identity_settings') IS NOT NULL AND (SELECT count(*) FROM schema_migrations) >= 169 THEN 1 ELSE 0 END;" \
+    2>/dev/null | grep -qx 1; then
     ready=true; break
   fi
   sleep 2
