@@ -297,11 +297,28 @@ jobs:
                 const self=Array.isArray(j.links) ? j.links.find(link=>
                   link.rel==="self" && typeof link.type==="string" &&
                   (link.type.includes("activity+json")||link.type.includes("ld+json"))) : null;
-                if(!self || typeof self.href!=="string") process.exit(1);
-                const u=new URL(self.href);
+                if(!self || typeof self.href!=="string") {
+                  console.error("bonfire_webfinger_self_missing");
+                  process.exit(1);
+                }
+                let u;
+                try { u=new URL(self.href); }
+                catch { console.error("bonfire_webfinger_self_invalid_uri"); process.exit(1); }
                 if(u.origin!=="https://bonfire.test" ||
                    !u.pathname.startsWith("/pub/actors/") ||
-                   u.username || u.password || u.hash) process.exit(1);
+                   u.username || u.password || u.hash) {
+                  // Only bounded structural fields from this disposable
+                  // actor are printed, never raw JRD, credentials, keys, URLs.
+                  console.error(JSON.stringify({
+                    bonfire_webfinger_invalid_self:true,
+                    https:u.protocol==="https:",
+                    hostIsFixture:u.hostname==="bonfire.test",
+                    noUnexpectedPort:u.port==="",
+                    actorPath:u.pathname.startsWith("/pub/actors/"),
+                    hasUnsafeComponents:Boolean(u.username||u.password||u.hash)
+                  }));
+                  process.exit(1);
+                }
                 process.stdout.write(self.href);
               ')"
               test -n "${TARGET_ACTOR_URI}"
