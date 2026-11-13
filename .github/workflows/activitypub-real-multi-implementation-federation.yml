@@ -703,7 +703,7 @@ jobs:
               for symptom in 'Postgrex.Error' 'DBConnection.ConnectionError' \
                 'Signature' 'URLVerifier' 'SSRF' 'Unauthorized' 'Forbidden' \
                 'ActivityPub' 'Follow' 'timeout' 'TLS' 'certificate'; do
-                if printf '%s\\n' "${bonfire_logs}" | grep -qiF -- "${symptom}"; then
+                if grep -qiF -- "${symptom}" <<< "${bonfire_logs}"; then
                   case "${symptom}" in
                     Postgrex.Error|DBConnection.ConnectionError) category=database ;;
                     Signature|URLVerifier|SSRF|Unauthorized|Forbidden) category=authorization_or_fetch ;;
