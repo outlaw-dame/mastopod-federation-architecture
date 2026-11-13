@@ -18,6 +18,7 @@
  */
 
 import { AtprotoRepoRegistry } from '../../atproto/repo/AtprotoRepoRegistry.js';
+import { assertMockRepositoryAllowed } from './AtprotoRepositoryReadiness.js';
 import { isValidDid } from '../identity/HandleResolutionReader.js';
 
 export interface AtCarExporter {
@@ -28,6 +29,9 @@ export class DefaultAtCarExporter implements AtCarExporter {
   constructor(private readonly repoRegistry: AtprotoRepoRegistry) {}
 
   async exportRepo(did: string, since?: string): Promise<Uint8Array> {
+    // A header-only CAR is not a signed repository and must never be served
+    // as a production PDS response.
+    assertMockRepositoryAllowed();
     // Validate DID before any storage access.
     if (!did || !isValidDid(did)) {
       throw new Error(`Invalid DID: ${did}`);
