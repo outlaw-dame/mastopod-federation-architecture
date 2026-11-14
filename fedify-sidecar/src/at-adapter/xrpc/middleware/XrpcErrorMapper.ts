@@ -13,6 +13,8 @@
  * Ref: https://atproto.com/specs/xrpc
  */
 
+import { AtprotoRepositoryNotReadyError } from '../../repo/AtprotoRepositoryReadiness.js';
+
 // ---------------------------------------------------------------------------
 // Typed XRPC error
 // ---------------------------------------------------------------------------
@@ -32,6 +34,7 @@ export type XrpcErrorName =
   | 'RepoTakendown'
   | 'UnsupportedAlgorithm'
   | 'InternalServerError'
+  | 'ServiceUnavailable'
   // Phase 7: auth + write errors
   | 'AuthRequired'
   | 'Forbidden'
@@ -93,6 +96,20 @@ export function mapToXrpcError(err: unknown): XrpcErrorResponse {
     return {
       status: err.status,
       body: { error: err.error, message: err.message }
+    };
+  }
+
+  // Only the specific production mock-repository fence maps to this
+  // stable 503. Do NOT trust an arbitrary object's statusCode/code fields:
+  // other internal errors must still fail closed as generic 500s.
+  // The wire response never exposes the legacy mock's storage details.
+  if (err instanceof AtprotoRepositoryNotReadyError) {
+    return {
+      status: 503,
+      body: {
+        error: 'ServiceUnavailable',
+        message: 'Signed repository storage is not available'
+      }
     };
   }
 
