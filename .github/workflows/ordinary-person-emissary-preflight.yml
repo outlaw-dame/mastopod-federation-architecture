@@ -1,0 +1,177 @@
+name: Ordinary Person Emissary Fixture Preflight
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ordinary-person-emissary-preflight.yml'
+      - 'docs/interop/ordinary-person-federation-matrix.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  emissary-source-boot:
+    name: Pinned Emissary + MongoDB boot (NOT Follow proof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout federation acceptance candidate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact upstream Emissary source
+        uses: actions/checkout@v4
+        with:
+          repository: EmissarySocial/emissary
+          ref: 597b9b16a63b4a60db0fab096c918291335f4a16
+          path: emissary
+          persist-credentials: false
+
+      - name: Install Go version required by Emissary
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: emissary/go.mod
+          cache-dependency-path: emissary/go.sum
+
+      - name: Start disposable single-member MongoDB replica set
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --rm --network host --name paper-emissary-mongo \
+            mongo:8 --replSet rs0 --bind_ip 127.0.0.1 --port 27017
+          ready=false
+          for attempt in $(seq 1 90); do
+            if docker exec paper-emissary-mongo mongosh --quiet \
+                --host 127.0.0.1 --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null \
+                | grep -qx 1; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker exec paper-emissary-mongo mongosh --quiet --host 127.0.0.1 --eval \
+            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})' \
+            >/dev/null
+          for attempt in $(seq 1 60); do
+            if docker exec paper-emissary-mongo mongosh --quiet \
+                --host 127.0.0.1 --eval 'db.hello().isWritablePrimary' 2>/dev/null \
+                | grep -qx true; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Build exact Emissary commit
+        working-directory: emissary
+        run: |
+          set -euo pipefail
+          go build -trimpath -o ../emissary-ci ./server.go
+          test -x ../emissary-ci
+
+      - name: Generate disposable owner and boot Emissary
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const config = JSON.parse(fs.readFileSync('emissary/.docker/demo.json', 'utf8'));
+          config.domains[0].connectString = 'mongodb://127.0.0.1:27017/?directConnection=true';
+          config.activityPubCache.connectString = 'mongodb://127.0.0.1:27017/?directConnection=true';
+          config.domains[0].masterKey = crypto.randomBytes(32).toString('hex');
+          config.httpPort = 18880;
+          config.httpsPort = 0;
+          config.debugLevel = 'Error';
+          fs.writeFileSync('emissary-ci-config.json', JSON.stringify(config), {mode:0o600});
+          NODE
+          ./emissary-ci --config="file://$GITHUB_WORKSPACE/emissary-ci-config.json" \
+            >emissary-ci.log 2>&1 &
+          echo "$!" > emissary-ci.pid
+          ready=false
+          for attempt in $(seq 1 90); do
+            if ! kill -0 "$(cat emissary-ci.pid)" 2>/dev/null; then
+              echo "::error::Emissary process exited during startup"
+              exit 1
+            fi
+            # Only a concrete Person actor route response proves the
+            # federation route is available. A bare 307 from middleware is
+            # not proof that the application or its actor is initialized.
+            code="$(curl --silent --output /dev/null --max-time 3 \
+              --write-out '%{http_code}' -H 'Host: localhost' \
+              -H 'X-Forwarded-Proto: https' \
+              -H 'Accept: application/activity+json' \
+              http://127.0.0.1:18880/@demo || true)"
+            case "$code" in
+              200)
+                echo "emissary_boot_http_status=$code"
+                ready=true
+                break
+                ;;
+            esac
+            sleep 2
+          done
+          test "$ready" = true
+          echo 'emissary_source_boot=passed (no remote Follow attempted)'
+
+      - name: Verify the actual disposable Person actor endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only the local controlled demo user is fetched. Avoid third-party
+          # actors, network fanout, or ever treating HTTP 202 as a Follow.
+          curl --fail --silent --show-error --max-time 15 \
+            -H 'Host: localhost' -H 'X-Forwarded-Proto: https' \
+            -H 'Accept: application/activity+json' \
+            http://127.0.0.1:18880/@demo > emissary-actor.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const actor = JSON.parse(fs.readFileSync('emissary-actor.json', 'utf8'));
+          const asUrl = value => typeof value === 'string'
+            ? value : value && typeof value.id === 'string' ? value.id : '';
+          const fixtureUrl = text => {
+            try {
+              const u = new URL(text);
+              // Local disposable HTTP is allowed; real remote federation
+              // must still use the canonical HTTPS actor behind TLS.
+              return (u.protocol === 'https:' ||
+                (u.protocol === 'http:' && ['localhost','127.0.0.1'].includes(u.hostname))) &&
+                u.username === '' && u.password === '' && !u.hash;
+            } catch { return false; }
+          };
+          const actorId = asUrl(actor.id);
+          const inbox = asUrl(actor.inbox);
+          const sameOrigin = fixtureUrl(actorId) && fixtureUrl(inbox) &&
+            new URL(actorId).origin === new URL(inbox).origin;
+          const valid = actor.type === 'Person' &&
+            sameOrigin && new URL(actorId).pathname.startsWith('/@') &&
+            new URL(inbox).pathname.endsWith('/inbox') &&
+            (typeof actor.publicKey?.publicKeyPem === 'string' ||
+              typeof actor.publicKey?.publicKeyMultibase === 'string');
+          if (!valid) {
+            // Diagnose only the schema of this disposable actor. Never log
+            // account metadata, public keys, private fields, or raw JSON.
+            console.error('Emissary demo actor is not a complete signed ActivityPub Person');
+            console.error(JSON.stringify({
+              observedType: ['Person','Service','Application','Group'].includes(actor.type) ? actor.type : 'other',
+              idHttps: asUrl(actor.id).startsWith('https://'),
+              inboxHttps: asUrl(actor.inbox).startsWith('https://'),
+              idPresent: Boolean(asUrl(actor.id)),
+              inboxPresent: Boolean(asUrl(actor.inbox)),
+              hasPem: typeof actor.publicKey?.publicKeyPem === 'string',
+              hasMultibase: typeof actor.publicKey?.publicKeyMultibase === 'string',
+              hasVerificationMethod: Boolean(actor.verificationMethod),
+            }));
+            process.exit(1);
+          }
+          console.log('emissary_disposable_local_person_actor=validated (real HTTPS/Follow persistence remains untested)');
+          NODE
+          rm -f emissary-actor.json
+
+      - name: Cleanup ephemeral instance and MongoDB
+        if: always()
+        shell: bash
+        run: |
+          if [ -f emissary-ci.pid ]; then
+            kill "$(cat emissary-ci.pid)" 2>/dev/null || true
+          fi
+          docker rm -f paper-emissary-mongo >/dev/null 2>&1 || true
+          rm -f emissary-ci-config.json emissary-ci.log emissary-ci.pid emissary-actor.json

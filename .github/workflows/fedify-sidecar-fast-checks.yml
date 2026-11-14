@@ -40,6 +40,13 @@ jobs:
       - name: Check Out Repository
         uses: actions/checkout@v4
 
+      - name: Validate POSIX federation assertion and Bonfire bootstrap scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh
+          sh -n fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
+
       - name: Set Up Node.js
         uses: actions/setup-node@v4
         with:

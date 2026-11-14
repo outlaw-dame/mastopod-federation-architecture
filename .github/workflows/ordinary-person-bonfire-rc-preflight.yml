@@ -1,0 +1,305 @@
+name: Ordinary Person Bonfire Community RC Clean Bootstrap
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ordinary-person-bonfire-rc-preflight.yml'
+      - 'fedify-sidecar/interop/ap/bonfire-rc8/**'
+      - 'fedify-sidecar/interop/ap/docker-compose.bonfire.yml'
+      - 'fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bonfire-rc-clean-db:
+    name: Bonfire RC8 clean PostgreSQL migration (NOT Follow proof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BONFIRE_RELEASE: v1.1.0-rc.8
+    steps:
+      - name: Checkout test harness
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Cache pinned Bonfire release archive for repeatable CI
+        uses: actions/cache@v4
+        with:
+          path: bonfire-rc.tar.gz
+          key: bonfire-v1.1.0-rc.8-bookworm-3b1630f0f59105b378d0bd47e8e096d8ac96dd58a5d758e99003e4ce7dfb5ed5
+
+      - name: Download and verify immutable upstream Bonfire archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/bonfire-networks/bonfire-app/releases/download/v1.1.0-rc.8/bonfire-community-amd64-debian-bookworm.tar.gz"
+          if [ ! -s bonfire-rc.tar.gz ]; then
+            curl --fail --location --silent --show-error \
+              --retry 3 --retry-all-errors --connect-timeout 15 --max-time 900 \
+              "$url" -o bonfire-rc.tar.gz
+          fi
+          echo '3b1630f0f59105b378d0bd47e8e096d8ac96dd58a5d758e99003e4ce7dfb5ed5  bonfire-rc.tar.gz' \
+            | sha256sum --check -
+          mkdir -p bonfire-rc
+          tar -xzf bonfire-rc.tar.gz -C bonfire-rc --strip-components=1
+          test -x bonfire-rc/bin/bonfire
+          echo 'bonfire_rc8_release_sha256=verified'
+
+      - name: Start disposable PostgreSQL 17 with PostGIS
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --rm --name paper-bonfire-rc-pg \
+            --network host \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=disposable-bonfire-db-only \
+            -e POSTGRES_DB=bonfire_ci \
+            postgis/postgis:17-3.5
+          ready=false
+          for attempt in $(seq 1 120); do
+            if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+                psql -h 127.0.0.1 -X -Atqc 'SELECT 1' -U postgres -d bonfire_ci 2>/dev/null \
+                | grep -qx 1; then
+              sleep 1
+              if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+                  psql -h 127.0.0.1 -X -Atqc 'SELECT 1' -U postgres -d bonfire_ci 2>/dev/null \
+                  | grep -qx 1; then ready=true; break; fi
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+            psql -h 127.0.0.1 -X -v ON_ERROR_STOP=1 -U postgres -d bonfire_ci -c \
+            'CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS postgis;' \
+            >/dev/null
+          echo 'bonfire_disposable_postgis=ready'
+
+      - name: Configure isolated Bonfire release and prove clean migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bonfire's upstream release installation guide describes these
+          # non-production template variables. Do not write credentials to CI
+          # logs, repository files or persistent deployment environments.
+          env_file="$GITHUB_WORKSPACE/bonfire-rc/.env"
+          cat > "$env_file" <<'EOF'
+          FLAVOUR=community
+          HOSTNAME=localhost
+          SERVER_PORT=4000
+          PUBLIC_PORT=4000
+          SERVER_IP=127.0.0.1
+          POSTGRES_HOST=127.0.0.1
+          POSTGRES_USER=postgres
+          POSTGRES_PASSWORD=disposable-bonfire-db-only
+          POSTGRES_DB=bonfire_ci
+          MAIL_BACKEND=none
+          OTEL_ENABLED=0
+          REPLACE_OS_VARS=true
+          DB_MIGRATE_INDEXES_CONCURRENTLY=false
+          EOF
+          for key in SECRET_KEY_BASE SIGNING_SALT ENCRYPTION_SALT RELEASE_COOKIE; do
+            printf '%s=%s\n' "$key" "$(openssl rand -hex 64)" >> "$env_file"
+          done
+          printf 'AP_INTEROP_USER_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> "$env_file"
+          chmod 600 "$env_file"
+          set -a
+          source "$env_file"
+          set +a
+          for key in SECRET_KEY_BASE SIGNING_SALT ENCRYPTION_SALT RELEASE_COOKIE; do
+            echo "::add-mask::${!key}"
+          done
+          # Keep app logs out of shared artifacts: this environment can emit
+          # sensitive configuration and sign-in metadata.
+          ( cd bonfire-rc && bin/bonfire start ) >bonfire-rc-ci.log 2>&1 &
+          echo "$!" > bonfire-rc.pid
+          diagnose() {
+            echo 'bonfire_rc8_clean_boot=failed'
+            # Generated secrets are masked above, and only limited,
+            # redacted bootstrap error lines from this fresh disposable
+            # instance may be emitted. No production/third-party data.
+            tail -n 100 bonfire-rc-ci.log \
+              | grep -Ei 'error|failed|fatal|exiting|cannot|missing|undefined|no such|not found|init terminating|permission|config|ssl' \
+              | sed -E 's/[[:xdigit:]]{48,}/[redacted-hex]/g; s/[[:alnum:]+/=]{96,}/[redacted-long-token]/g' \
+              | cut -c1-230 | tail -n 24 >&2 || true
+            # Keep fixed machine-readable categories as well.
+            for category in 'Postgrex.Error' 'DBConnection.ConnectionError' \
+              'UndefinedFunctionError' 'could not start application' \
+              'libcrypto.so' 'libssl.so' 'libvips.so' 'no such file' \
+              'permission denied' 'failed to start' 'could not load' \
+              'migration' 'timeout'; do
+              if grep -qiF "$category" bonfire-rc-ci.log; then
+                case "$category" in
+                  *postgres*|*DBConnection*) echo 'bonfire_failure=database_connection_or_query' ;;
+                  *lib*) echo 'bonfire_failure=missing_shared_library' ;;
+                  *migration*) echo 'bonfire_failure=migration' ;;
+                  *) echo 'bonfire_failure=application_bootstrap' ;;
+                esac
+              fi
+            done
+            docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+              psql -h 127.0.0.1 -X -Atqc "SELECT CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'absent' ELSE 'present' END;" \
+              -U postgres -d bonfire_ci 2>/dev/null \
+              | sed 's/^/bonfire_schema_migrations_table=/' || true
+          }
+          ready=false
+          for attempt in $(seq 1 240); do
+            if ! kill -0 "$(cat bonfire-rc.pid)" 2>/dev/null; then
+              echo "::error::Bonfire release exited before clean migration verification"
+              diagnose
+              exit 1
+            fi
+            if docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+                psql -h 127.0.0.1 -X -Atqc 'SELECT count(*) FROM schema_migrations' \
+                -U postgres -d bonfire_ci 2>/dev/null | awk 'NF && $1+0>0 { found=1 } END { exit(!found) }'; then
+              code="$(curl --silent --output /dev/null --max-time 3 \
+                --write-out '%{http_code}' -H 'Host: localhost' \
+                http://127.0.0.1:4000/ || true)"
+              case "$code" in
+                200|301|302|303|307|308)
+                  ready=true
+                  break
+                  ;;
+              esac
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            diagnose
+            echo "::error::Bonfire clean bootstrap did not become ready"
+            exit 1
+          fi
+          count="$(docker exec -e PGPASSWORD=disposable-bonfire-db-only paper-bonfire-rc-pg \
+            psql -h 127.0.0.1 -X -Atqc 'SELECT count(*) FROM schema_migrations' -U postgres -d bonfire_ci)"
+          test "$count" -gt 0
+          echo "bonfire_rc8_schema_migrations_applied=$count"
+          echo 'bonfire_rc8_clean_boot=passed (no remote Follow attempted)'
+
+      - name: Verify disposable Bonfire Person WebFinger and actor
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source "$GITHUB_WORKSPACE/bonfire-rc/.env"
+          set +a
+          # Use a disposable account on the isolated runner. No public traffic.
+          if ! (cd bonfire-rc && bin/bonfire rpc \
+            'Bonfire.Federate.ActivityPub.set_federating(:instance, true); case Bonfire.Me.make_account_and_user("interop", "interop@localhost", System.fetch_env!("AP_INTEROP_USER_PASSWORD")) do {:ok, user} -> Bonfire.Federate.ActivityPub.set_federating(user, true); IO.puts("AP_INSTANCE_FEDERATION=" <> to_string(Bonfire.Federate.ActivityPub.federating?(:instance))); IO.puts("AP_USER_FEDERATION=" <> to_string(Bonfire.Federate.ActivityPub.federating?(user))); IO.puts("AP_PERSON_CREATED"); other -> raise inspect(other) end') \
+            >bonfire-actor-rpc.log 2>&1; then
+            echo "::error::Bonfire disposable user creation failed"
+            exit 1
+          fi
+          grep -E '^AP_(INSTANCE|USER)_FEDERATION=(true|false)$' bonfire-actor-rpc.log || true
+          grep -qx 'AP_PERSON_CREATED' bonfire-actor-rpc.log || {
+            echo "::error::Bonfire did not confirm disposable Person creation"
+            exit 1
+          }
+          # WebFinger must be publicly discoverable for ordinary Person
+          # federation. A 401 is a true acceptance failure, not an HTTP
+          # transport success. Report its status without logging response
+          # content, authorization headers or any account credentials.
+          status="$(curl --silent --show-error --max-time 20 \
+            -H 'Host: localhost:4000' -H 'Accept: application/jrd+json' \
+            -w '%{http_code}' \
+            'http://127.0.0.1:4000/.well-known/webfinger?resource=acct:interop@localhost' \
+            -o bonfire-webfinger.json || true)"
+          echo "bonfire_public_webfinger_status=${status:-unavailable}"
+          if [ "$status" != 200 ]; then
+            rm -f bonfire-webfinger.json
+            echo "::error::Bonfire local Person WebFinger cannot be dereferenced anonymously"
+            exit 1
+          fi
+          node <<'NODE'
+          const fs = require('node:fs');
+          const doc = JSON.parse(fs.readFileSync('bonfire-webfinger.json', 'utf8'));
+          const links = Array.isArray(doc.links) ? doc.links : [];
+          const self = links.find(link => link.rel === 'self' &&
+            typeof link.type === 'string' &&
+            (link.type.includes('activity+json') || link.type.includes('ld+json')));
+          if (!self || typeof self.href !== 'string') {
+            console.error('Bonfire disposable Person WebFinger self link is missing');
+            process.exit(1);
+          }
+          const u = new URL(self.href);
+          if (!['localhost','127.0.0.1'].includes(u.hostname) ||
+              !['http:','https:'].includes(u.protocol) || u.username || u.password) {
+            console.error('Bonfire actor URI is not local to the disposable fixture');
+            process.exit(1);
+          }
+          fs.writeFileSync('bonfire-actor-uri.txt', self.href, { mode: 0o600 });
+          NODE
+          actor_uri="$(cat bonfire-actor-uri.txt)"
+          actor_path="$(node -e 'const u=new URL(process.argv[1]); process.stdout.write(u.pathname+u.search);' "$actor_uri")"
+          curl --fail --silent --show-error --max-time 20 \
+            -H 'Accept: application/activity+json' -H 'Host: localhost:4000' \
+            "http://127.0.0.1:4000$actor_path" -o bonfire-actor.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const actor = JSON.parse(fs.readFileSync('bonfire-actor.json','utf8'));
+          const value = x => typeof x === 'string' ? x : typeof x?.id === 'string' ? x.id : null;
+          if (actor.type !== 'Person' || !value(actor.id) || !value(actor.inbox) ||
+              typeof actor.publicKey?.publicKeyPem !== 'string') {
+            console.error('Bonfire disposable Person actor lacks required type, inbox or public key');
+            process.exit(1);
+          }
+          console.log('bonfire_disposable_local_person_actor=validated (signed remote Follow not tested)');
+          NODE
+
+      - name: Verify pinned RC8 Docker fixture and private-network Person
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fedify-sidecar/interop/ap/bonfire-rc8/runtime
+          cp bonfire-rc.tar.gz \
+            fedify-sidecar/interop/ap/bonfire-rc8/runtime/bonfire-community-rc8.tar.gz
+          bash fedify-sidecar/interop/ap/scripts/generate-certs.sh
+          for key in BONFIRE_DB_PASSWORD BONFIRE_SECRET_KEY_BASE \
+            BONFIRE_SIGNING_SALT BONFIRE_ENCRYPTION_SALT BONFIRE_RELEASE_COOKIE; do
+            value="$(openssl rand -hex 48)"
+            echo "::add-mask::$value"
+            export "$key=$value"
+          done
+          AP_INTEROP_BONFIRE_PASSWORD="$(openssl rand -hex 24)"
+          export AP_INTEROP_BONFIRE_PASSWORD
+          echo "::add-mask::${AP_INTEROP_BONFIRE_PASSWORD}"
+          AP_INTEROP_COMPOSE_FILE=fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
+          AP_INTEROP_BONFIRE_OVERLAY=fedify-sidecar/interop/ap/docker-compose.bonfire.yml \
+          AP_INTEROP_BONFIRE_USERNAME=interop \
+            sh fedify-sidecar/interop/ap/scripts/bootstrap-bonfire-account.sh
+          echo 'bonfire_rc8_disposable_docker_person_ready'
+
+          # Negative control: the same read-only persisted-Follow RPC used
+          # in real federation must return a definite zero for an actor
+          # that does not exist. An RPC/Compose failure must NOT masquerade
+          # as valid zero. No Follow activity or external network fetch.
+          probe_error="$(mktemp)"
+          trap 'rm -f "$probe_error"' EXIT
+          if AP_INTEROP_COMPOSE_FILE=fedify-sidecar/interop/ap/docker-compose.ap-interop.yml \
+             AP_INTEROP_COMPOSE_OVERLAY=fedify-sidecar/interop/ap/docker-compose.bonfire.yml \
+             AP_INTEROP_FOLLOW_ASSERT_ATTEMPTS=1 \
+             AP_INTEROP_FOLLOW_ASSERT_DELAY_SECONDS=0 \
+             sh fedify-sidecar/interop/ap/scripts/assert-real-follow-accepted.sh \
+               bonfire https://activitypods.test/unregistered-negative-control interop \
+               >/dev/null 2>"$probe_error"; then
+            echo "::error::Bonfire negative-control actor unexpectedly has a persisted Follow"
+            exit 1
+          fi
+          if ! grep -q '^bonfire did not persist the expected Follow' "$probe_error"; then
+            echo "::error::Bonfire read-only persistence verifier did not return a determinate zero"
+            exit 1
+          fi
+          echo 'bonfire_rpc_readonly_negative_control=passed'
+
+      - name: Remove disposable Bonfire server and PostgreSQL
+        if: always()
+        shell: bash
+        run: |
+          if [ -f bonfire-rc.pid ]; then
+            kill "$(cat bonfire-rc.pid)" 2>/dev/null || true
+          fi
+          docker compose             -f fedify-sidecar/interop/ap/docker-compose.ap-interop.yml             -f fedify-sidecar/interop/ap/docker-compose.bonfire.yml             down -v >/dev/null 2>&1 || true
+          docker rm -f paper-bonfire-rc-pg >/dev/null 2>&1 || true
+          rm -f bonfire-rc/.env bonfire-rc-ci.log bonfire-rc.pid bonfire-rc.tar.gz \
+            bonfire-actor-rpc.log bonfire-webfinger.json bonfire-actor-uri.txt bonfire-actor.json
