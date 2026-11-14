@@ -28,6 +28,11 @@ function rawEvent(rawCborBase64: string) {
 }
 
 describe("external Sync full-frame Redpanda payload limits", () => {
+  it("uses the normative decimal 5 MB frame ceiling, not 5 MiB", () => {
+    expect(AT_SYNC_MAX_FRAME_BYTES).toBe(5_000_000);
+    expect(AT_SYNC_MAX_FRAME_BYTES).toBeLessThan(5 * 1024 * 1024);
+  });
+
   it("supports a maximum-sized raw CBOR frame without raising ordinary event limits", async () => {
     const producer = mockProducer();
     const publisher = new RedpandaEventPublisher({
