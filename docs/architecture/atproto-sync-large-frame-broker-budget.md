@@ -1,7 +1,8 @@
 # External Sync firehose: large raw frame acceptance
 
-AT Protocol Sync v1.1 permits WebSocket firehose frames up to 5,000,000
-bytes (the consumer currently reserves up to 5 MiB). The sidecar wraps the
+AT Protocol Sync v1.1 caps the complete WebSocket firehose frame at exactly
+5,000,000 bytes (5 MB, decimal), including its encoded protocol overhead.
+The consumer enforces this exact cap rather than rounding up to 5 MiB. The sidecar wraps the
 raw frame as Base64 in JSON before publishing to the external Redpanda raw
 topic. Therefore a valid high-end frame cannot reliably fit the ordinary
 512,000-byte application-event publisher budget or the default 1 MiB
@@ -10,7 +11,7 @@ Redpanda topic configuration.
 The following explicit limits apply **only when**
 `ENABLE_AT_EXTERNAL_FIREHOSE=true`:
 
-- Socket maximum: 5 MiB, unchanged.
+- Socket maximum: 5,000,000 bytes (5 MB); one byte beyond is rejected.
 - Serialized raw JSON event: 8 MiB; only for the configured
   `AT_EXTERNAL_FIREHOSE_RAW_TOPIC`, not trusted `at.ingress.v1`.
 - Raw Redpanda topic `max.message.bytes`: 9 MiB. The topic
@@ -29,7 +30,7 @@ not have their maximum message size raised.
    least 9 MiB. The Redpanda cluster also needs to permit that size;
    `kafka_max_message_size_upper_limit_bytes` must not prevent it.
 2. Prove producer acknowledgment and raw consumer decoding of a
-   near-maximum frame against the actual broker version, with and without
+   protocol-maximum frame against the actual broker version, with and without
    compression, and verify that trusted ingress still requires cryptographic
    validation.
 3. Measure batching/network/RSS under burst loads. A 9 MiB raw message
