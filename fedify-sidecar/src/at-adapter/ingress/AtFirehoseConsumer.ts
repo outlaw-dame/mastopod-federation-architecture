@@ -36,7 +36,7 @@ import { AT_SYNC_MAX_FRAME_BYTES } from './AtExternalFirehosePayloadLimits.js';
 
 const RAW_FIREHOSE_TOPIC = 'at.firehose.raw.v1';
 
-/** Maximum allowed size for a single CBOR frame (5MB). Prevents OOM. */
+/** Complete Sync firehose WebSocket frame: exactly 5,000,000 bytes. */
 const MAX_FRAME_SIZE_BYTES = AT_SYNC_MAX_FRAME_BYTES;
 
 /** Interval to flush the hot cursor to the durable store. */

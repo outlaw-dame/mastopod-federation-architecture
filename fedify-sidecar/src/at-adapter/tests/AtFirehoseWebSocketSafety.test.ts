@@ -4,6 +4,7 @@ import net from "node:net";
 import type { EventPublisher } from "../../core-domain/events/CoreIdentityEvents.js";
 import type { AtFirehoseDecoder } from "../ingress/AtFirehoseDecoder.js";
 import { DefaultAtFirehoseConsumer } from "../ingress/AtFirehoseConsumer.js";
+import { AT_SYNC_MAX_FRAME_BYTES } from "../ingress/AtExternalFirehosePayloadLimits.js";
 import { InMemoryAtFirehoseCursorManager } from "../ingress/AtFirehoseCursorManager.js";
 
 const path="/xrpc/com.atproto.sync.subscribeRepos";
@@ -51,6 +52,60 @@ afterEach(async()=>{
 });
 
 describe("verified Sync firehose WebSocket resource and cursor safety",()=>{
+
+  it("accepts the exact 5,000,000-byte Sync frame ceiling over WebSocket", async () => {
+    const frame = Buffer.alloc(AT_SYNC_MAX_FRAME_BYTES, 0x20);
+    frame[0] = 0x31;
+    const url = await serve(socket => socket.send(frame));
+    const boundaryDecoder: AtFirehoseDecoder = {
+      decodeHeader(data) {
+        if (data.byteLength !== AT_SYNC_MAX_FRAME_BYTES || data[0] !== 0x31) {
+          throw new Error("Unexpected boundary fixture");
+        }
+        return {seq: 1, eventType: "#commit", did: "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"};
+      },
+      decodeFull() { return {}; },
+    };
+    const cursor = new InMemoryAtFirehoseCursorManager();
+    const publish = vi.fn(async (_topic: string, event: {seq: number}) => {
+      const envelope = event as {seq: number; rawCborBase64: string};
+      expect(envelope.seq).toBe(1);
+      expect(Buffer.from(envelope.rawCborBase64, "base64").byteLength)
+        .toBe(AT_SYNC_MAX_FRAME_BYTES);
+    });
+    const consumer = new DefaultAtFirehoseConsumer(boundaryDecoder, cursor,
+      publishAdapter(publish));
+    consumers.push(consumer);
+    await consumer.start({id: "fixture", url, sourceType: "relay"});
+    await until(() => publish.mock.calls.length === 1, 10000);
+    const deadline = Date.now() + 5000;
+    while (await cursor.getHotCursor("fixture") !== 1 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(await cursor.getHotCursor("fixture")).toBe(1);
+    await consumer.stop("fixture");
+    expect(await cursor.getCommittedCursor("fixture")).toBe(1);
+  }, 15000);
+
+  it("closes a Sync socket for one byte over the limit without publishing or advancing its cursor", async () => {
+    const frame = Buffer.alloc(AT_SYNC_MAX_FRAME_BYTES + 1, 0x31);
+    let closed = 0;
+    const url = await serve(socket => {
+      socket.once("close", () => { closed++; });
+      socket.send(frame);
+    });
+    const cursor = new InMemoryAtFirehoseCursorManager();
+    const publish = vi.fn(async () => undefined);
+    const consumer = new DefaultAtFirehoseConsumer(decoder, cursor,
+      publishAdapter(publish));
+    consumers.push(consumer);
+    await consumer.start({id: "fixture", url, sourceType: "relay"});
+    await until(() => closed > 0, 10000);
+    expect(publish).not.toHaveBeenCalled();
+    expect(await cursor.getHotCursor("fixture")).toBeNull();
+    expect(await cursor.getCommittedCursor("fixture")).toBeNull();
+  }, 15000);
+
   it("serializes broker writes, pauses reads and commits only acknowledged frames",async()=>{
     const url=await serve(socket=>{
       for(const seq of [1,2,3])socket.send(Buffer.from(String(seq)));
