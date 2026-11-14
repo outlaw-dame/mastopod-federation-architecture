@@ -6,7 +6,7 @@ import kafkaJs from "kafkajs";
 import { resolveRedpandaCompression } from "../src/streams/kafka-compression.js";
 
 const { Kafka, logLevel } = kafkaJs;
-const IMAGE = process.env["REDPANDA_RF3_IMAGE"] ?? "redpandadata/redpanda:v24.1.3";
+const IMAGE = process.env["REDPANDA_RF3_IMAGE"] ?? "redpandadata/redpanda:v26.2.6";
 const OUTPUT = process.env["REDPANDA_RF3_OUTPUT"] ?? "../measurements/redpanda-compression-rf3/summary.json";
 const REPEATS = positive("REDPANDA_RF3_REPEATS", 3);
 const MESSAGE_COUNT = positive("REDPANDA_RF3_MESSAGES", 4_000);

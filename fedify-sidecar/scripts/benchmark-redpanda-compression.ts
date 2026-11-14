@@ -9,7 +9,7 @@ const { Kafka, logLevel } = kafkaJs;
 
 const BROKER_HOST = process.env["REDPANDA_BENCH_BROKER"] ?? "127.0.0.1:19092";
 const CONTAINER_NAME = process.env["REDPANDA_BENCH_CONTAINER"] ?? "redpanda-compression-bench";
-const REDPANDA_IMAGE = process.env["REDPANDA_BENCH_IMAGE"] ?? "redpandadata/redpanda:v24.1.3";
+const REDPANDA_IMAGE = process.env["REDPANDA_BENCH_IMAGE"] ?? "redpandadata/redpanda:v26.2.6";
 const OUTPUT = process.env["REDPANDA_COMPRESSION_BENCH_OUTPUT"] ?? "../measurements/redpanda-compression/summary.json";
 const SAMPLE_COUNT = parsePositiveInt("REDPANDA_BENCH_SAMPLES", 5);
 const LATENCY_SAMPLE_COUNT = parsePositiveInt("REDPANDA_BENCH_LATENCY_SAMPLES", 3);

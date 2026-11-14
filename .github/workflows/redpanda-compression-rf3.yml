@@ -40,7 +40,7 @@ jobs:
       - name: Run matched three-broker replication-factor-3 matrix
         working-directory: fedify-sidecar
         env:
-          REDPANDA_RF3_IMAGE: redpandadata/redpanda:v24.1.3
+          REDPANDA_RF3_IMAGE: redpandadata/redpanda:v26.2.6
           REDPANDA_RF3_REPEATS: '3'
           REDPANDA_RF3_MESSAGES: '4000'
           REDPANDA_RF3_LATENCY_MESSAGES: '300'
@@ -55,21 +55,69 @@ jobs:
           REDPANDA_RF3_DECISION_OUTPUT: ../measurements/redpanda-compression-rf3/decision.json
         run: node scripts/analyze-redpanda-compression-rf3.mjs
 
-      - name: Validate production Zstd level against RF3 evidence
+      - name: Validate measured fallback and unchanged RF3 latency gates
         run: |
           node <<'NODE'
           const fs = require('node:fs');
           const summary = JSON.parse(fs.readFileSync('measurements/redpanda-compression-rf3/summary.json', 'utf8'));
           const decision = JSON.parse(fs.readFileSync('measurements/redpanda-compression-rf3/decision.json', 'utf8'));
           const expected = ['gzip','zstd-1','zstd-2','zstd-3'];
-          if (summary.version !== 1 || summary.methodology?.brokers !== 3 || summary.methodology?.replicationFactor !== 3 || summary.methodology?.repeats !== 3) {
+          if (summary.version !== 1 || summary.methodology?.brokers !== 3 ||
+              summary.methodology?.replicationFactor !== 3 ||
+              summary.methodology?.repeats !== 3) {
             throw new Error('RF3 methodology contract drift');
           }
-          if (JSON.stringify(summary.medians.map((x) => x.arm)) !== JSON.stringify(expected)) throw new Error('RF3 arm drift');
-          const z1 = decision.comparisons.find((x) => x.arm === 'zstd-1');
-          if (!z1 || !z1.eligible) throw new Error(`Zstd-1 is not RF3-eligible: ${JSON.stringify(z1?.reasons)}`);
-          if (decision.selectedArm !== 'zstd-1') throw new Error(`RF3 analyzer selected ${decision.selectedArm}, expected zstd-1 for current production config`);
-          console.log(JSON.stringify({ selectedArm: decision.selectedArm, zstd1: z1 }, null, 2));
+          if (JSON.stringify(summary.medians.map(x => x.arm)) !== JSON.stringify(expected) ||
+              JSON.stringify(decision.comparisons.map(x => x.arm)) !== JSON.stringify(expected)) {
+            throw new Error('RF3 candidate/analysis arms drift');
+          }
+          // The original promotion policy is not relaxed for a broker upgrade.
+          const policy = decision.policy;
+          if (!policy || policy.singletonP95MaxRatioToGzip !== 1.15 ||
+              policy.singletonP99MaxRatioToGzip !== 1.25 ||
+              policy.singletonP99MaxAbsoluteIncreaseMs !== 0.5 ||
+              policy.totalCpuMaxRatioToGzip !== 0.9 ||
+              policy.producerThroughputMinRatioToGzip !== 1.25) {
+            throw new Error('RF3 safety/efficiency promotion gate drift');
+          }
+          const fallback = decision.comparisons.find(x => x.arm === 'gzip');
+          if (!fallback?.eligible || !Array.isArray(fallback.reasons) ||
+              fallback.reasons.length !== 0) {
+            throw new Error('Configured Gzip baseline is invalid under measured RF3 evidence');
+          }
+          // A single hosted-runner result may suggest an eligible Zstd codec.
+          // Keep that recommendation as evidence, not an automatic promotion.
+          const selected = decision.comparisons.find(x => x.arm === decision.selectedArm);
+          if (!selected?.eligible || selected.reasons.length !== 0) {
+            throw new Error('RF3 analyzer selected an ineligible candidate');
+          }
+          const files = {
+            'fedify-sidecar/Dockerfile': /^ENV REDPANDA_COMPRESSION=gzip$/m,
+            'fedify-sidecar/.env.v6.example': /^REDPANDA_COMPRESSION=gzip$/m,
+            'fedify-sidecar/docker-compose.v6.yml': /^\s+REDPANDA_COMPRESSION: 'gzip'$/m,
+          };
+          for (const [path,pattern] of Object.entries(files)) {
+            if (!pattern.test(fs.readFileSync(path, 'utf8'))) {
+              throw new Error('Production Gzip fallback differs from measured RF3 policy: ' + path);
+            }
+          }
+          // Keep every non-Gzip candidate measured and evaluated, including
+          // ineligible ones; never alter thresholds to force Zstd promotion.
+          for (const arm of decision.comparisons.slice(1)) {
+            if (typeof arm.eligible !== 'boolean' || !Array.isArray(arm.reasons) ||
+                !Number.isFinite(arm.ratiosToGzip?.singletonP99)) {
+              throw new Error('RF3 candidate evidence is incomplete: ' + arm.arm);
+            }
+          }
+          console.log(JSON.stringify({
+            selectedArm: decision.selectedArm,
+            comparisons: decision.comparisons.map(({arm,eligible,reasons})=>({arm,eligible,reasons})),
+            latencyGates: {
+              p95Ratio: policy.singletonP95MaxRatioToGzip,
+              p99Ratio: policy.singletonP99MaxRatioToGzip,
+              p99DeltaMs: policy.singletonP99MaxAbsoluteIncreaseMs
+            }
+          },null,2));
           NODE
 
       - name: Capture runner context

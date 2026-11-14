@@ -209,7 +209,7 @@ jobs:
         run: |
           set -euo pipefail
           docker rm -f "ap-real-redpanda-${TARGET}" >/dev/null 2>&1 || true
-          docker run -d --name "ap-real-redpanda-${TARGET}" -p 19092:19092 redpandadata/redpanda:v24.1.3 \
+          docker run -d --name "ap-real-redpanda-${TARGET}" -p 19092:19092 redpandadata/redpanda:v26.2.6 \
             redpanda start --overprovisioned --smp 1 --memory 768M --reserve-memory 0M --node-id 0 --check=false \
             --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \
             --advertise-kafka-addr internal://127.0.0.1:9092,external://127.0.0.1:19092

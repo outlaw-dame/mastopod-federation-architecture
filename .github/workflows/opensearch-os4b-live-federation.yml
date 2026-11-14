@@ -97,10 +97,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/os4b-live
-          docker run -d --name os4b-live-redis -p 16379:6379 redis:7-alpine
+          docker run -d --name os4b-live-redis -p 16379:6379 redis:8.2.11-alpine
           docker run -d --name os4b-live-redpanda \
             -p 19092:19092 \
-            redpandadata/redpanda:v25.1.4 \
+            redpandadata/redpanda:v26.2.6 \
             redpanda start --overprovisioned --smp 1 --memory 768M --reserve-memory 0M --node-id 0 --check=false \
               --kafka-addr external://0.0.0.0:19092 --advertise-kafka-addr external://127.0.0.1:19092
           docker run -d --name os4b-live-opensearch \

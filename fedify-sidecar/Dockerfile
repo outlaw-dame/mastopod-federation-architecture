@@ -38,9 +38,10 @@ ENV PORT=3001
 # into the historical dual/Qdrant topology when SEARCH_BACKEND is omitted.
 ENV SEARCH_BACKEND=opensearch
 
-# Node 22 provides native Zstandard support. Existing Redpanda evidence selected
-# level 1 as the balanced event-log operating point.
-ENV REDPANDA_COMPRESSION=zstd
+# Redpanda 26.2 RF3 measured Zstd singleton p99 above our promotion gate.
+# Prefer Gzip for new writes; Node 22 retains the Zstd decoder for
+# existing batches. Explicit Zstd opt-in requires new measured evidence.
+ENV REDPANDA_COMPRESSION=gzip
 ENV REDPANDA_ZSTD_LEVEL=1
 
 EXPOSE 3001
