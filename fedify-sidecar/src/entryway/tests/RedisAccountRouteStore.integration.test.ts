@@ -203,6 +203,46 @@ describe.skipIf(!run)("RedisAccountRouteStore real Lua fencing and pending-index
       .some(candidate => candidate.accountId === route.accountId)).toBe(false);
   });
 
+  it("never permits a new worker to erase an external-create uncertainty marker", async () => {
+    const route = makeRoute(`acct_${randomUUID()}`, "uncertain");
+    track(route);
+    expect((await store.reserve({
+      accountId: route.accountId, username: route.username,
+      idempotencyKeyHash: route.provisioning.idempotencyKeyHash,
+      requestFingerprint: route.provisioning.requestFingerprint, route,
+    })).kind).toBe("created");
+    const held = claim(route, "first-owner");
+    expect(await store.compareAndSet(route, held)).toBe(true);
+    const started: AccountRoute = {
+      ...held, revision: 2,
+      provisioning: {
+        ...held.provisioning,
+        phase: "PROVIDER_CREATE_STARTED",
+        providerCreateMayHaveSideEffects: true,
+      },
+    };
+    expect(await store.compareAndSet(held, started)).toBe(true);
+    const erased: AccountRoute = {
+      ...started, revision: 3,
+      provisioning: {
+        ...started.provisioning,
+        providerCreateMayHaveSideEffects: false,
+      },
+    };
+    expect(await store.compareAndSet(started, erased)).toBe(false);
+    expect((await store.getByAccountId(route.accountId))?.provisioning
+      .providerCreateMayHaveSideEffects).toBe(true);
+    const reconciled: AccountRoute = {
+      ...started, revision: 3, status: "reconciliation_required",
+      provisioning: {
+        ...started.provisioning,
+        phase: "RECONCILIATION_REQUIRED",
+      },
+    };
+    expect(await store.compareAndSet(started, reconciled)).toBe(true);
+    expect(await redis.zscore(`${prefix}:index`, route.accountId)).toBeNull();
+  });
+
   it("drains legacy active records and repairs legacy creation-time scores", async () => {
     const active = makeRoute(`acct_${randomUUID()}`, "oldactive", { status: "active" });
     const recent = makeRoute(`acct_${randomUUID()}`, "recent", {

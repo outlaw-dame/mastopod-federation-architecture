@@ -226,6 +226,54 @@ describe("EntrywayProvisioningService", () => {
     });
   });
 
+  it("commits the uncertainty fence before an external provider signup can take effect", async () => {
+    const store = new InMemoryAccountRouteStore();
+    let entered!: () => void;
+    const received = new Promise<void>(resolve => { entered = resolve; });
+    let failCall!: () => void;
+    const blocked = new Promise<never>((_resolve, reject) => {
+      failCall = () => reject(new Error("Connection lost after request"));
+    });
+    const providerFetch = vi.fn(async (_url: string | URL | Request) => {
+      entered();
+      return blocked;
+    });
+    const service = createService(providerFetch as unknown as typeof fetch, { store });
+    const pending = service.createAccount(createInput());
+
+    await received;
+    const inFlight = await store.getByUsername("alice");
+    expect(inFlight).toMatchObject({
+      status: "provisioning",
+      provisioning: {
+        phase: "PROVIDER_CREATE_STARTED",
+        providerCreateMayHaveSideEffects: true,
+      },
+    });
+    expect(inFlight?.revision).toBeGreaterThan(1);
+    failCall();
+
+    await expect(pending).rejects.toMatchObject({
+      code: "account_reconciliation_required", statusCode: 409, retryable: false,
+    });
+    const frozen = await store.getByUsername("alice");
+    expect(frozen).toMatchObject({
+      status: "reconciliation_required",
+      provisioning: {
+        phase: "RECONCILIATION_REQUIRED",
+        providerCreateMayHaveSideEffects: true,
+        lastErrorCode: "provider_creation_outcome_uncertain",
+      },
+    });
+    expect(await service.recoverStaleProvisioning()).toEqual({
+      recovered: 0, failed: 0, skipped: 0,
+    });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "account_reconciliation_required", retryable: false,
+    });
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("marks the route failed when actor bundle verification fails", async () => {
     const { fetchMock } = createFetchMock({ invalidActor: true });
     const service = createService(fetchMock as unknown as typeof fetch);

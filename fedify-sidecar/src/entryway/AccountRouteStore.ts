@@ -290,6 +290,12 @@ local expectedRevision = tonumber(ARGV[1])
 local currentFence = current.provisioning and current.provisioning.fenceToken or ""
 local expectedFence = ARGV[2]
 if currentRevision ~= expectedRevision or currentFence ~= expectedFence then return 0 end
+-- Once an external account-create RPC may have begun, no later CAS writer
+-- may erase the uncertainty evidence or allow a second blind create.
+if current.provisioning and current.provisioning.providerCreateMayHaveSideEffects == true and
+   (not next.provisioning or next.provisioning.providerCreateMayHaveSideEffects ~= true) then
+  return 0
+end
 if current.status ~= "provisioning" and current.status ~= "failed" and
    current.status ~= "awaiting_consent" then return 0 end
 if current.status == "provisioning" then
@@ -331,6 +337,8 @@ function isValidRouteTransition(current: AccountRoute, expected: AccountRoute, n
     currentRevision === (expected.revision ?? 0) &&
     next.revision === currentRevision + 1 &&
     (current.provisioning.fenceToken ?? "") === (expected.provisioning.fenceToken ?? "") &&
+    (current.provisioning.providerCreateMayHaveSideEffects !== true ||
+      next.provisioning.providerCreateMayHaveSideEffects === true) &&
     next.username === current.username &&
     next.createdAt === current.createdAt &&
     next.provisioning.idempotencyKeyHash === current.provisioning.idempotencyKeyHash &&

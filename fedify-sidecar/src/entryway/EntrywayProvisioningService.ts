@@ -162,6 +162,15 @@ export class EntrywayProvisioningService {
       };
     } catch (error) {
       const failed = await this.markFailed(route.accountId, fenceToken, error);
+      if (failed?.status === "reconciliation_required") {
+        // The provider may have committed a DID/WebID even when its reply was
+        // lost. A retry here could allocate another identity. Only verified
+        // provider reconciliation may resume this operation.
+        throw new EntrywayError("account_reconciliation_required",
+          "Account creation outcome requires authoritative reconciliation", {
+            statusCode: 409, retryable: false,
+          });
+      }
       if (error instanceof EntrywayError) {
         if (error.code === "app_consent_required") {
           await this.raiseNativeSaiConsent(route.accountId, fenceToken);
@@ -457,10 +466,20 @@ export class EntrywayProvisioningService {
       return latest;
     }
 
-    await this.assertOwnership(route.accountId, fenceToken);
+    const current = await this.assertOwnership(route.accountId, fenceToken);
+    // Commit the uncertainty fence BEFORE the outbound provider request.
+    // There is no safe way to distinguish a lost HTTP reply from a completed
+    // WebID/PLC/PDS write after a crash. The marker survives worker loss.
+    const started = await this.updateRoute(route.accountId, fenceToken, {
+      provisioning: {
+        ...current.provisioning,
+        phase: "PROVIDER_CREATE_STARTED",
+        providerCreateMayHaveSideEffects: true,
+      },
+    });
     const providerResult = await this.providerClient.createAccount({
       provider,
-      idempotencyKey: buildProviderIdempotencyKey(route),
+      idempotencyKey: buildProviderIdempotencyKey(started),
       account: input,
       protocols,
     });
@@ -712,16 +731,21 @@ export class EntrywayProvisioningService {
       return null;
     }
 
-    const code = error instanceof EntrywayError ? error.code : "entryway_provisioning_failed";
+    const uncertain = current.provisioning.providerCreateMayHaveSideEffects === true &&
+      (!current.canonicalAccountId || !current.webId || !current.actorId || !current.podStorageUrl);
+    const code = uncertain ? "provider_creation_outcome_uncertain"
+      : error instanceof EntrywayError ? error.code : "entryway_provisioning_failed";
     const updated: AccountRoute = {
       ...current,
       revision: (current.revision ?? 0) + 1,
-      status: "failed",
+      status: uncertain ? "reconciliation_required" : "failed",
       provisioning: {
         ...current.provisioning,
-        phase: "FAILED",
+        phase: uncertain ? "RECONCILIATION_REQUIRED" : "FAILED",
         lastErrorCode: code,
-        lastErrorMessage: sanitizeErrorMessage(error),
+        lastErrorMessage: uncertain
+          ? "Original provider signup requires reconciliation"
+          : sanitizeErrorMessage(error),
       },
       updatedAt: this.now(),
     };
