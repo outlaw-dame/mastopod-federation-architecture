@@ -137,7 +137,7 @@ export class EntrywayProvisioningService {
       const failed = await this.markFailed(route.accountId, fenceToken, error);
       if (error instanceof EntrywayError) {
         if (error.code === "app_consent_required") {
-          await this.raiseNativeSaiConsent(error, route.accountId, fenceToken);
+          await this.raiseNativeSaiConsent(route.accountId, fenceToken);
         }
         throw error;
       }
@@ -207,10 +207,7 @@ export class EntrywayProvisioningService {
     if (current.status === "active" && current.appBootstrap.status === "ready") {
       // An idempotent backend retry must recheck *current* provider grants
       // before returning active routing metadata. This is not a session.
-      let proof;
-      try {
-        proof = await this.appBootstrapper.bootstrap({ provider, route: current });
-      } catch (error) {
+      const proof = await this.appBootstrapper.bootstrap({ provider, route: current }).catch(error => {
         if (error instanceof EntrywayError && error.code === "app_consent_required") {
           // An already-active route has not been placed in a new durable
           // awaiting_consent phase. Never relay a provider-influenced URL
@@ -220,7 +217,7 @@ export class EntrywayProvisioningService {
           });
         }
         throw error;
-      }
+      });
       if (proof.snapshot.status !== "ready" ||
           proof.snapshot.appClientId !== appClientId) {
         throw new EntrywayError("app_consent_not_verified", "Current owner consent could not be verified", {
@@ -258,7 +255,7 @@ export class EntrywayProvisioningService {
       const failed = await this.markFailed(claimed.accountId, fenceToken, error);
       if (error instanceof EntrywayError) {
         if (error.code === "app_consent_required") {
-          await this.raiseNativeSaiConsent(error, claimed.accountId, fenceToken);
+          await this.raiseNativeSaiConsent(claimed.accountId, fenceToken);
         }
         throw error;
       }
@@ -549,7 +546,7 @@ export class EntrywayProvisioningService {
    * native SAI link. No provider response body can override this URL.
    */
   private async raiseNativeSaiConsent(
-    error: EntrywayError, accountId: string, fenceToken: string,
+    accountId: string, fenceToken: string,
   ): Promise<never> {
     const current = await this.store.getByAccountId(accountId);
     const provider = current?.providerId
