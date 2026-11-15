@@ -274,6 +274,46 @@ describe("EntrywayProvisioningService", () => {
     expect(providerFetch).toHaveBeenCalledTimes(1);
   });
 
+  it("never repeats provider creation after reclaiming an unacknowledged previous attempt", async () => {
+    const store = new InMemoryAccountRouteStore();
+    const original = {
+      ...staleRoute("default"),
+      canonicalAccountId: undefined,
+      webId: "",
+      actorId: "",
+      podStorageUrl: "",
+      provisioning: {
+        ...staleRoute("default").provisioning,
+        phase: "PROVIDER_CREATE_STARTED" as const,
+        providerCreateMayHaveSideEffects: true,
+        fenceToken: "crashed-worker",
+      },
+    };
+    await store.save(original);
+    vi.spyOn(store, "reserve").mockResolvedValueOnce({
+      kind: "replayed", route: original,
+    });
+    const { fetchMock, calls } = createFetchMock();
+    const service = createService(fetchMock as unknown as typeof fetch, { store });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "account_reconciliation_required", statusCode: 409, retryable: false,
+    });
+    expect(calls).toHaveLength(0);
+    const persisted = await store.getByUsername("alice");
+    expect(persisted).toMatchObject({
+      status: "reconciliation_required",
+      provisioning: {
+        phase: "RECONCILIATION_REQUIRED",
+        providerCreateMayHaveSideEffects: true,
+        lastErrorCode: "provider_creation_outcome_uncertain",
+      },
+    });
+    expect((persisted?.revision ?? 0)).toBeGreaterThan(1);
+    expect(await service.recoverStaleProvisioning()).toEqual({
+      recovered: 0, failed: 0, skipped: 0,
+    });
+  });
+
   it("marks the route failed when actor bundle verification fails", async () => {
     const { fetchMock } = createFetchMock({ invalidActor: true });
     const service = createService(fetchMock as unknown as typeof fetch);
