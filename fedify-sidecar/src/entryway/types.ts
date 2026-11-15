@@ -10,6 +10,9 @@ export type EntrywayAccountStatus =
   | "provisioning"
   | "active"
   | "awaiting_consent"
+  // Partial provider side effects cannot be safely recreated without
+  // an authoritative reconciliation of the original signup operation.
+  | "reconciliation_required"
   | "migrating"
   | "suspended"
   | "failed";
@@ -23,6 +26,7 @@ export type EntrywayProvisioningPhase =
   | "ACTOR_VALIDATED"
   | "APP_BOOTSTRAP_READY"
   | "AWAITING_APP_CONSENT"
+  | "RECONCILIATION_REQUIRED"
   | "SESSION_READY"
   | "ACTIVE"
   | "FAILED";

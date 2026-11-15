@@ -498,6 +498,35 @@ describe("EntrywayProvisioningService", () => {
     expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
   });
 
+  it("rechecks current Pod consent when an active signup is replayed", async () => {
+    const { service, appBootstrapper, store, calls } = await consentPendingFixture();
+    await service.resumeAwaitingConsent(consentResume);
+    appBootstrapper.bootstrap.mockRejectedValueOnce(new EntrywayError(
+      "app_consent_required", "Owner authorization requires renewal",
+      { statusCode: 428, retryable: false },
+    ));
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_required", statusCode: 428,
+    });
+    expect((await store.getByUsername("alice"))?.status).toBe("active");
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+    appBootstrapper.bootstrap.mockResolvedValueOnce({
+      snapshot: {
+        status: "ready" as const,
+        appClientId: "https://memory.example/app",
+        accessGrantUris: [],
+      },
+    });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_not_verified", statusCode: 409,
+    });
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+    const replay = await service.createAccount(createInput());
+    expect(replay.replayed).toBe(true);
+    expect(replay.route.appBootstrap?.status).toBe("ready");
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+  });
+
   it("an idempotent resume of an active route rechecks current provider grants without issuing a session", async () => {
     const { service, appBootstrapper, calls } = await consentPendingFixture();
     await service.resumeAwaitingConsent(consentResume);
@@ -636,6 +665,33 @@ describe("EntrywayProvisioningService", () => {
     const route = await service.getByUsername("alice");
     expect(route?.status).toBe("failed");
     expect(route?.provisioning.phase).toBe("FAILED");
+  });
+
+  it("quarantines an incomplete stale identity and avoids duplicate creation", async () => {
+    const { fetchMock, calls } = createFetchMock();
+    const store = new InMemoryAccountRouteStore();
+    await store.save({ ...staleRoute("default"), actorId: "", podStorageUrl: "" });
+    const service = createService(fetchMock as unknown as typeof fetch, { store });
+    expect(await service.recoverStaleProvisioning()).toEqual({
+      recovered: 0, failed: 1, skipped: 0,
+    });
+    const route = await store.getByUsername("alice");
+    expect(route).toMatchObject({
+      status: "reconciliation_required",
+      provisioning: {
+        phase: "RECONCILIATION_REQUIRED",
+        lastErrorCode: "account_identity_incomplete",
+      },
+    });
+    expect(await service.recoverStaleProvisioning()).toEqual({
+      recovered: 0, failed: 0, skipped: 0,
+    });
+    expect(calls).toHaveLength(0);
+    vi.spyOn(store, "reserve").mockResolvedValueOnce({ kind: "replayed", route: route! });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "account_reconciliation_required", statusCode: 409, retryable: false,
+    });
+    expect(calls).toHaveLength(0);
   });
 
   it("never activates a stale provisioned account whose original provider is missing", async () => {

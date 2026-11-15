@@ -294,7 +294,8 @@ if current.status ~= "provisioning" and current.status ~= "failed" and
    current.status ~= "awaiting_consent" then return 0 end
 if current.status == "provisioning" then
   if next.status ~= "provisioning" and next.status ~= "active" and
-     next.status ~= "failed" and next.status ~= "awaiting_consent" then return 0 end
+     next.status ~= "failed" and next.status ~= "awaiting_consent" and
+     next.status ~= "reconciliation_required" then return 0 end
 elseif next.status ~= "provisioning" then
   return 0
 end
@@ -324,7 +325,8 @@ function isValidRouteTransition(current: AccountRoute, expected: AccountRoute, n
       current.status === "failed" || current.status === "awaiting_consent") &&
     (current.status === "provisioning"
       ? (next.status === "provisioning" || next.status === "active" ||
-        next.status === "failed" || next.status === "awaiting_consent")
+        next.status === "failed" || next.status === "awaiting_consent" ||
+        next.status === "reconciliation_required")
       : next.status === "provisioning") &&
     currentRevision === (expected.revision ?? 0) &&
     next.revision === currentRevision + 1 &&
