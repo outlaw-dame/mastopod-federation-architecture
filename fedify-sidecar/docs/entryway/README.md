@@ -47,6 +47,9 @@ ENTRYWAY_PROVIDER_PROVISIONING_TOKEN=<provider-approved provisioning token>
 ENTRYWAY_DEFAULT_PROVIDER_URL=https://pods.memory.example
 ENTRYWAY_APP_BOOTSTRAP_ENABLED=true
 ENTRYWAY_APP_BOOTSTRAP_PATH=/api/internal/entryway/app-bootstrap
+# Optional, operator-owned authenticated provider SAI consent page:
+ENTRYWAY_SAI_AUTHORIZATION_URL=https://pods-ui.memory.example/authorize
+ENTRYWAY_SAI_APP_URI=https://memory.example/app
 REDIS_URL=redis://redis:6379
 ```
 
@@ -63,6 +66,8 @@ REDIS_URL=redis://redis:6379
     "redirectUri": "https://memory.example/signup/callback",
     "appBootstrapEnabled": true,
     "appBootstrapPath": "/api/internal/entryway/app-bootstrap",
+    "saiAuthorizationUrl": "https://pods-ui.memory.example/authorize",
+    "saiAppUri": "https://memory.example/app",
     "enabled": true
   }
 ]
@@ -103,9 +108,11 @@ It does not blindly call account creation again.
 
 When `appBootstrapEnabled` is true for the selected provider, Entryway calls the
 provider-owned bootstrap endpoint after account bundle verification and before
-marking the account route active. The endpoint is expected to register the app,
-create provider-owned grants, and optionally return a short-lived session
-handoff.
+marking the account route active. The provider **does not automatically issue
+app grants**. Only the Pod owner's authenticated native SAI authorization flow
+may register the application and create its approved permissions; bootstrap
+then checks persisted account, grant and (where configured) durable PostgreSQL
+consent evidence without mutating rights.
 
 On the ActivityPods provider, enable the internal bootstrap endpoint with:
 
@@ -136,8 +143,40 @@ Entryway persists only:
 Entryway does not persist access tokens, refresh tokens, session cookies,
 passwords, or verification challenge tokens.
 
-## Current Limits
+## Native SAI user-consent continuation
 
-The provider bootstrap endpoint still needs to be implemented by the selected
-ActivityPods provider. Entryway now has the orchestration contract and will fail
-closed if configured bootstrap does not complete.
+When the provider returns HTTP 428 (owner authorization required), Entryway
+holds the provider-backed account in `awaiting_consent` and **does not activate
+it or retry automatically**. For an authenticated signup caller, Entryway can
+return a trusted `authorizationUrl` along with the stable
+`app_consent_required` error. This is a direct link to the provider's existing
+native `/authorize?client_id=...` page. The page requires real Pod-owner login
+and explicit SAI application authorization, with optional permissions unselected
+by default.
+
+A link is returned only if the operator has explicitly configured **both**
+`saiAuthorizationUrl` and `saiAppUri` (or the single-provider environment
+equivalents), using canonical HTTPS; the page must end in `/authorize` with
+no existing query, fragment or credentials. Do **not** substitute the signup
+app-client ID for the SAI app URI: they can be different resource identifiers.
+Neither the user request, the provider error body nor a remote application
+callback is allowed to set the redirect destination. If no safe URL is
+configured, the error has no link and the route remains non-active.
+
+After authorizing the app, the client must retry the **exact original**
+idempotency-scoped signup operation. A changed request will be rejected; a
+correct replay resumes the existing route without creating another WebID,
+actor or DID. Never put the account password, verification token or raw
+idempotency secret in an authorization URL or browser storage. The higher-level
+Paper client must handle this browser return and securely resume the operation.
+
+## Current limits and release boundaries
+
+The provider-owned bootstrap endpoint is implemented with local-owner and
+SAI grant checks; its production authority deliberately refuses readiness
+until the real signed PDS, canonical PostgreSQL and native SAI owner flows are
+reviewed together. The consent URL is an **initiation link**, not a login token
+or an assertion that any permission was granted. The native browser handoff,
+trusted application callback, multi-worker recovery and revocation-at-operation
+checks still need full cross-repository acceptance. Production signup remains
+source-controlled closed.

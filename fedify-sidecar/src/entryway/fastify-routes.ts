@@ -235,12 +235,36 @@ function parseRequestBody(body: unknown): unknown {
   }
 }
 
+function safeNativeSaiAuthorizationUrl(raw: unknown): string | undefined {
+  if (typeof raw !== "string" || raw.length > 4096) return undefined;
+  try {
+    const url = new URL(raw);
+    const appUri = url.searchParams.getAll("client_id");
+    if (url.protocol !== "https:" || !url.hostname ||
+        url.username || url.password || url.hash ||
+        !url.pathname.endsWith("/authorize") ||
+        [...url.searchParams.keys()].some(key => key !== "client_id") ||
+        appUri.length !== 1 || !appUri[0]) return undefined;
+    const app = new URL(appUri[0]);
+    if (app.protocol !== "https:" || !app.hostname ||
+        app.username || app.password) return undefined;
+    return url.toString() === raw ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function sendEntrywayError(reply: { code(statusCode: number): { send(payload: unknown): unknown } }, error: unknown): void {
   const entrywayError = toEntrywayError(error);
+  const authorizationUrl = entrywayError.code === "app_consent_required" &&
+    entrywayError.statusCode === 428
+    ? safeNativeSaiAuthorizationUrl(entrywayError.details?.["authorizationUrl"])
+    : undefined;
   reply.code(entrywayError.statusCode).send({
     error: entrywayError.code,
     message: entrywayError.message,
     retryable: entrywayError.retryable,
+    ...(authorizationUrl ? { authorizationUrl } : {}),
   });
 }
 

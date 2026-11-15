@@ -65,6 +65,11 @@ export interface EntrywayProviderDefinition {
   enabled?: boolean;
   appBootstrapPath?: string;
   appBootstrapEnabled?: boolean;
+  // Operator-pinned URL to the provider's authenticated native SAI UI.
+  // Not a caller-supplied callback or an untrusted provider error redirect.
+  saiAuthorizationUrl?: string;
+  // Exact provider-approved SAI application URI; may differ from appClientId.
+  saiAppUri?: string;
 }
 
 export interface EntrywayProviderSelectionInput {

@@ -309,7 +309,11 @@ describe("EntrywayProvisioningService", () => {
         .mockRejectedValueOnce(new EntrywayError(
           "app_consent_required",
           "Pod owner authorization is required",
-          { statusCode: 428, retryable: false },
+          {
+            statusCode: 428,
+            retryable: false,
+            details: { authorizationUrl: "https://evil.example/authorize?client_id=https://evil.example/app" },
+          },
         ))
         .mockResolvedValue(grantResponse),
     };
@@ -320,6 +324,8 @@ describe("EntrywayProvisioningService", () => {
       appClientId: "https://memory.example/app",
       appBootstrapEnabled: true,
       appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+      saiAuthorizationUrl: "https://id.pods.example.org/authorize",
+      saiAppUri: "https://memory.example/app",
     }];
     const service = createService(fetchMock as unknown as typeof fetch, {
       store,
@@ -331,6 +337,9 @@ describe("EntrywayProvisioningService", () => {
       code: "app_consent_required",
       statusCode: 428,
       retryable: false,
+      details: {
+        authorizationUrl: "https://id.pods.example.org/authorize?client_id=https%3A%2F%2Fmemory.example%2Fapp",
+      },
     });
     const waiting = await store.getByUsername("alice");
     expect(waiting).toMatchObject({

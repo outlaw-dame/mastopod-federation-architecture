@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import { registerEntrywayFastifyRoutes } from "../fastify-routes.js";
+import { EntrywayError } from "../errors.js";
 
 describe("Entryway Fastify routes", () => {
   it("requires the Entryway bearer token for account creation", async () => {
@@ -24,6 +25,89 @@ describe("Entryway Fastify routes", () => {
     });
 
     expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("offers only a sanitized provider-pinned native SAI URL on consent-required status", async () => {
+    const expected = "https://id.pods.example.org/authorize?client_id=https%3A%2F%2Fmemory.example.org%2Fsai%2Fapp%23main";
+    const app = Fastify();
+    registerEntrywayFastifyRoutes(app, {
+      entrywayToken: "entryway-token",
+      service: {
+        createAccount: vi.fn().mockRejectedValue(new EntrywayError(
+          "app_consent_required", "Pod owner authorization is required",
+          {
+            statusCode: 428, retryable: false,
+            details: {
+              authorizationUrl: expected,
+              password: "must-not-appear",
+              accessJwt: "must-not-appear",
+            },
+          },
+        )),
+      } as any,
+    });
+    await app.ready();
+    const response = await app.inject({
+      method: "POST",
+      url: "/entryway/accounts",
+      headers: {
+        authorization: "Bearer entryway-token",
+        "idempotency-key": "idem.route.001",
+      },
+      payload: {
+        username: "alice",
+        password: "CorrectHorseBatteryStaple1",
+        profile: { displayName: "Alice" },
+      },
+    });
+    expect(response.statusCode).toBe(428);
+    expect(response.json()).toEqual({
+      error: "app_consent_required",
+      message: "Pod owner authorization is required",
+      retryable: false,
+      authorizationUrl: expected,
+    });
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body).not.toContain("must-not-appear");
+    expect(response.body).not.toContain("CorrectHorseBatteryStaple1");
+    await app.close();
+  });
+
+  it.each([
+    "javascript:alert(1)",
+    "http://id.pods.example.org/authorize?client_id=https%3A%2F%2Fmemory.example%2Fapp",
+    "https://user:password@id.pods.example.org/authorize?client_id=https%3A%2F%2Fmemory.example%2Fapp",
+    "https://id.pods.example.org/authorize?next=https%3A%2F%2Fevil.example&client_id=https%3A%2F%2Fmemory.example%2Fapp",
+    "https://id.pods.example.org/authorize?client_id=https%3A%2F%2Fmemory.example%2Fapp&client_id=https%3A%2F%2Fevil.example%2Fapp",
+    "https://id.pods.example.org/authorize?client_id=javascript%3Aalert%281%29",
+  ])("never relays unsafe SAI navigation URL %s", async unsafe => {
+    const app = Fastify();
+    registerEntrywayFastifyRoutes(app, {
+      entrywayToken: "entryway-token",
+      service: {
+        createAccount: vi.fn().mockRejectedValue(new EntrywayError(
+          "app_consent_required", "Pod owner authorization is required",
+          { statusCode: 428, retryable: false, details: { authorizationUrl: unsafe } },
+        )),
+      } as any,
+    });
+    await app.ready();
+    const result = await app.inject({
+      method: "POST", url: "/entryway/accounts",
+      headers: {
+        authorization: "Bearer entryway-token",
+        "idempotency-key": "idem.route.001",
+      },
+      payload: {
+        username: "alice",
+        password: "CorrectHorseBatteryStaple1",
+        profile: { displayName: "Alice" },
+      },
+    });
+    expect(result.statusCode).toBe(428);
+    expect(result.json()).not.toHaveProperty("authorizationUrl");
+    expect(result.body).not.toContain(unsafe);
     await app.close();
   });
 
