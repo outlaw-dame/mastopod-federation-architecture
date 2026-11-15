@@ -107,9 +107,10 @@ function createService(fetchFn: typeof fetch, options: {
   providerPreflight?: EntrywayProviderPreflight;
   appBootstrapper?: EntrywayAppBootstrapper;
   providers?: ConstructorParameters<typeof StaticEntrywayProviderRouter>[0];
+  store?: InMemoryAccountRouteStore;
 } = {}) {
   return new EntrywayProvisioningService({
-    store: new InMemoryAccountRouteStore(),
+    store: options.store ?? new InMemoryAccountRouteStore(),
     providerRouter: new StaticEntrywayProviderRouter(options.providers ?? [
       {
         providerId: "default",
@@ -291,7 +292,101 @@ describe("EntrywayProvisioningService", () => {
     });
     expect(JSON.stringify(result.route)).not.toContain("handoff-123");
   });
+
+  it("refuses activation when a configured bootstrap provider has no bootstrap client", async () => {
+    const { fetchMock } = createFetchMock();
+    const service = createService(fetchMock as unknown as typeof fetch, {
+      providers: [{
+        providerId: "default",
+        baseUrl: "http://localhost:3000",
+        provisioningBearerToken: "provider-provisioning-token",
+        appClientId: "https://memory.example/app",
+        appBootstrapEnabled: true,
+        appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+      }],
+    });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_bootstrap_unavailable",
+      statusCode: 503,
+    });
+    const route = await service.getByUsername("alice");
+    expect(route?.status).toBe("failed");
+    expect(route?.provisioning.phase).toBe("FAILED");
+  });
+
+  it("never activates a stale provisioned account whose original provider is missing", async () => {
+    const { fetchMock, calls } = createFetchMock();
+    const store = new InMemoryAccountRouteStore();
+    await store.save(staleRoute("removed-provider"));
+    const service = createService(fetchMock as unknown as typeof fetch, { store });
+
+    const result = await service.recoverStaleProvisioning();
+    expect(result).toEqual({ recovered: 0, failed: 1, skipped: 0 });
+    const route = await store.getByUsername("alice");
+    expect(route?.status).toBe("failed");
+    expect(route?.provisioning.lastErrorCode).toBe("recovery_provider_unavailable");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("never reuses another app client's bootstrap grants during recovery", async () => {
+    const { fetchMock } = createFetchMock();
+    const store = new InMemoryAccountRouteStore();
+    await store.save({
+      ...staleRoute("default"),
+      appBootstrap: {
+        status: "ready",
+        appClientId: "https://different.example/app",
+        accessGrantUris: ["http://localhost:3000/alice/data/foreign-grant"],
+      },
+    });
+    const appBootstrapper = { bootstrap: vi.fn() };
+    const service = createService(fetchMock as unknown as typeof fetch, {
+      store,
+      appBootstrapper,
+      providers: [{
+        providerId: "default",
+        baseUrl: "http://localhost:3000",
+        provisioningBearerToken: "provider-provisioning-token",
+        appClientId: "https://memory.example/app",
+        appBootstrapEnabled: true,
+        appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+      }],
+    });
+
+    const result = await service.recoverStaleProvisioning();
+    expect(result).toEqual({ recovered: 0, failed: 1, skipped: 0 });
+    const route = await store.getByUsername("alice");
+    expect(route?.status).toBe("failed");
+    expect(route?.provisioning.lastErrorCode).toBe("app_bootstrap_identity_mismatch");
+    expect(appBootstrapper.bootstrap).not.toHaveBeenCalled();
+  });
 });
+
+
+function staleRoute(providerId: string) {
+  return {
+    accountId: "acct_11111111-1111-4111-8111-111111111111",
+    canonicalAccountId: "http://localhost:3000/alice/profile/card#me",
+    username: "alice",
+    handle: "@alice@localhost",
+    webId: "http://localhost:3000/alice/profile/card#me",
+    actorId: "http://localhost:3000/alice",
+    podStorageUrl: "http://localhost:3000/alice/data/",
+    providerId,
+    providerBaseUrl: "http://localhost:3000",
+    oidcIssuer: "http://localhost:3000",
+    status: "provisioning" as const,
+    provisioning: {
+      phase: "POD_ACCOUNT_CREATED" as const,
+      attempts: 1,
+      idempotencyKeyHash: "hash",
+      requestFingerprint: "fingerprint",
+      checks: [],
+    },
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
