@@ -9,6 +9,7 @@ export type EntrywayDidMethod = "did:plc" | "did:web";
 export type EntrywayAccountStatus =
   | "provisioning"
   | "active"
+  | "awaiting_consent"
   | "migrating"
   | "suspended"
   | "failed";
@@ -21,6 +22,7 @@ export type EntrywayProvisioningPhase =
   | "WEBID_DISCOVERED"
   | "ACTOR_VALIDATED"
   | "APP_BOOTSTRAP_READY"
+  | "AWAITING_APP_CONSENT"
   | "SESSION_READY"
   | "ACTIVE"
   | "FAILED";
@@ -101,7 +103,7 @@ export interface EntrywaySessionHandoff {
 }
 
 export interface EntrywayAppBootstrapSnapshot {
-  status: "not_configured" | "ready" | "failed";
+  status: "not_configured" | "awaiting_consent" | "ready" | "failed";
   appClientId: string;
   appRegistrationUri?: string;
   accessGrantUris: string[];
