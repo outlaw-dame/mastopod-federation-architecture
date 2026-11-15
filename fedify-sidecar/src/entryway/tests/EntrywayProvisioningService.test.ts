@@ -656,6 +656,33 @@ describe("EntrywayProvisioningService", () => {
     expect(route?.provisioning.phase).toBe("FAILED");
   });
 
+  it("quarantines an incomplete stale identity and avoids duplicate creation", async () => {
+    const { fetchMock, calls } = createFetchMock();
+    const store = new InMemoryAccountRouteStore();
+    await store.save({ ...staleRoute("default"), actorId: "", podStorageUrl: "" });
+    const service = createService(fetchMock as unknown as typeof fetch, { store });
+    expect(await service.recoverStaleProvisioning()).toEqual({
+      recovered: 0, failed: 1, skipped: 0,
+    });
+    const route = await store.getByUsername("alice");
+    expect(route).toMatchObject({
+      status: "reconciliation_required",
+      provisioning: {
+        phase: "RECONCILIATION_REQUIRED",
+        lastErrorCode: "account_identity_incomplete",
+      },
+    });
+    expect(await service.recoverStaleProvisioning()).toEqual({
+      recovered: 0, failed: 0, skipped: 0,
+    });
+    expect(calls).toHaveLength(0);
+    vi.spyOn(store, "reserve").mockResolvedValueOnce({ kind: "replayed", route: route! });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "account_reconciliation_required", statusCode: 409, retryable: false,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
   it("never activates a stale provisioned account whose original provider is missing", async () => {
     const { fetchMock, calls } = createFetchMock();
     const store = new InMemoryAccountRouteStore();
