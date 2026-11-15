@@ -122,6 +122,17 @@ export class ActivityPodsAppBootstrapClient implements EntrywayAppBootstrapper {
             return body as Record<string, unknown>;
           }
 
+          // A provider HTTP 428 means the user must authorize the app via
+          // native Solid SAI. No upstream response bytes or redirect locations
+          // are trusted. Keep a stable protocol signal for safe resume.
+          if (response.status === 428) {
+            throw new EntrywayError("app_consent_required", "Pod owner authorization is required", {
+              statusCode: 428,
+              retryable: false,
+              details: { providerStatus: 428 },
+            });
+          }
+
           // Provider error bodies are untrusted and may contain credentials or
           // verification artifacts. Do not persist or relay any of their bytes.
           throw new EntrywayError(
