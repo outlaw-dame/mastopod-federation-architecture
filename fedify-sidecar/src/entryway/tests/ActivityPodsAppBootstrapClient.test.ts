@@ -57,6 +57,7 @@ describe("ActivityPodsAppBootstrapClient", () => {
       "http://localhost:3000/api/internal/entryway/app-bootstrap",
       expect.objectContaining({
         method: "POST",
+        redirect: "manual",
         headers: expect.objectContaining({
           authorization: "Bearer provider-token",
         }),
