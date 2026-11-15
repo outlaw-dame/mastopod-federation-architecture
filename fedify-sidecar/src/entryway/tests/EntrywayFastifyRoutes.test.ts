@@ -111,6 +111,135 @@ describe("Entryway Fastify routes", () => {
     await app.close();
   });
 
+  it("resumes native owner consent only under backend bearer and original idempotency header", async () => {
+    const route = {
+      accountId: "acct_11111111-1111-4111-8111-111111111111",
+      username: "alice", handle: "@alice@localhost",
+      webId: "http://localhost:3000/alice/profile/card#me",
+      actorId: "http://localhost:3000/alice",
+      podStorageUrl: "http://localhost:3000/alice/data/",
+      providerId: "default", providerBaseUrl: "http://localhost:3000",
+      oidcIssuer: "http://localhost:3000", status: "active",
+      appBootstrap: {
+        status: "ready", appClientId: "https://memory.example/app",
+        accessGrantUris: ["http://localhost:3000/alice/data/grant"],
+      },
+      provisioning: {
+        phase: "ACTIVE", attempts: 2, checks: [],
+        idempotencyKeyHash: "private-hmac-only",
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const resumeAwaitingConsent = vi.fn().mockResolvedValue({
+      route, replayed: true, sessionHandoff: {
+        type: "redirect", url: "https://never-return-session.example/token",
+      },
+    });
+    const app = Fastify();
+    registerEntrywayFastifyRoutes(app, {
+      entrywayToken: "entryway-token",
+      service: { resumeAwaitingConsent } as any,
+    });
+    await app.ready();
+    const request = {
+      method: "POST" as const,
+      url: "/entryway/accounts/consent/resume",
+      payload: {
+        username: "Alice",
+        appClientId: "https://memory.example/app",
+      },
+    };
+    const unauthorized = await app.inject(request);
+    expect(unauthorized.statusCode).toBe(401);
+    const noKey = await app.inject({
+      ...request, headers: { authorization: "Bearer entryway-token" },
+    });
+    expect(noKey.statusCode).toBe(400);
+    expect(noKey.json().error).toBe("idempotency_key_required");
+    const extraPassword = await app.inject({
+      ...request,
+      headers: {
+        authorization: "Bearer entryway-token",
+        "idempotency-key": "idem.alice.0001",
+      },
+      payload: {
+        ...request.payload,
+        password: "CorrectHorseBatteryStaple1",
+      },
+    });
+    expect(extraPassword.statusCode).toBe(400);
+    expect(resumeAwaitingConsent).not.toHaveBeenCalled();
+
+    const success = await app.inject({
+      ...request,
+      headers: {
+        authorization: "Bearer entryway-token",
+        "idempotency-key": "idem.alice.0001",
+      },
+    });
+    expect(success.statusCode).toBe(200);
+    expect(resumeAwaitingConsent).toHaveBeenCalledWith({
+      username: "Alice",
+      appClientId: "https://memory.example/app",
+      idempotencyKey: "idem.alice.0001",
+    });
+    expect(success.json().account.status).toBe("active");
+    expect(success.json().replayed).toBe(true);
+    expect(success.json()).not.toHaveProperty("sessionHandoff");
+    expect(success.body).not.toContain("never-return-session");
+    expect(success.body).not.toContain("private-hmac-only");
+    expect(success.headers["cache-control"]).toBe("no-store");
+    await app.close();
+  });
+
+  it("does not expose a browser resume route or accept client-supplied redirect state", async () => {
+    const resumeAwaitingConsent = vi.fn().mockRejectedValue(new EntrywayError(
+      "app_consent_required", "Pod owner authorization is required", {
+        statusCode: 428,
+        retryable: false,
+        details: {
+          authorizationUrl: "https://id.pods.example/authorize?client_id=https%3A%2F%2Fmemory.example%2Fapp",
+        },
+      },
+    ));
+    const app = Fastify();
+    registerEntrywayFastifyRoutes(app, {
+      entrywayToken: "entryway-token",
+      service: { resumeAwaitingConsent } as any,
+    });
+    await app.ready();
+    const rejected = await app.inject({
+      method: "POST", url: "/entryway/accounts/consent/resume",
+      headers: {
+        authorization: "Bearer entryway-token",
+        "idempotency-key": "idem.alice.0001",
+      },
+      payload: {
+        username: "alice",
+        appClientId: "https://memory.example/app",
+        redirectUri: "https://evil.example/callback",
+      },
+    });
+    expect(rejected.statusCode).toBe(400);
+    expect(resumeAwaitingConsent).not.toHaveBeenCalled();
+    const pending = await app.inject({
+      method: "POST", url: "/entryway/accounts/consent/resume",
+      headers: {
+        authorization: "Bearer entryway-token",
+        "idempotency-key": "idem.alice.0001",
+      },
+      payload: {
+        username: "alice",
+        appClientId: "https://memory.example/app",
+      },
+    });
+    expect(pending.statusCode).toBe(428);
+    expect(pending.json().authorizationUrl).toContain("id.pods.example/authorize");
+    expect(pending.body).not.toContain("evil.example");
+    await app.close();
+  });
+
   it("passes sanitized signup payload and header idempotency key to the service", async () => {
     const app = Fastify();
     const createAccount = vi.fn().mockResolvedValue({
