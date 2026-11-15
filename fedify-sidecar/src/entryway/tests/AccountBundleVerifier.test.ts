@@ -29,14 +29,14 @@ function route(overrides: Partial<AccountRoute> = {}): AccountRoute {
   };
 }
 
-function fetchFixture(actorResponse?: Response) {
+function fetchFixture(actorResponse?: Response, oidcResponse?: Response) {
   const calls: string[] = [];
   const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
     calls.push(href);
     expect(init?.redirect).toBe("manual");
     if (href === `${base}/.well-known/openid-configuration`) {
-      return json({ issuer: base });
+      return oidcResponse ?? json({ issuer: base });
     }
     if (href === `${base}/alice/profile/card`) {
       return new Response("<#me> a <http://xmlns.com/foaf/0.1/Person> .", { status: 200 });
@@ -74,6 +74,21 @@ describe("AccountBundleVerifier HTTP boundaries", () => {
     expect(result.checks.every((check) => check.status === "passed")).toBe(true);
     expect(calls).toContain(`${base}/alice`);
     expect(calls).toHaveLength(3);
+  });
+
+  it("rejects OIDC discovery with missing or path-mismatched issuer metadata", async () => {
+    for (const metadata of [{}, { issuer: `${base}/unrelated` }]) {
+      const { fetchMock } = fetchFixture(undefined, json(metadata));
+      const verifier = new AccountBundleVerifier({
+        fetchFn: fetchMock as unknown as typeof fetch,
+        retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+      });
+      const result = await verifier.verify(route());
+      expect(result.passed).toBe(false);
+      expect(result.checks.find((check) => check.name === "oidc_issuer_resolves")).toMatchObject({
+        status: "failed",
+      });
+    }
   });
 
   it("never fetches an actor outside the selected provider origin", async () => {
