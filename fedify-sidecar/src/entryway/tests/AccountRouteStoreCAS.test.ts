@@ -89,7 +89,7 @@ describe("AccountRoute CAS fencing", () => {
   });
 
   it("sends revision and old fence to one atomic Redis script, never a SET pipeline", async () => {
-    const evalMock = vi.fn(async () => 1);
+    const evalMock = vi.fn(async (..._args: unknown[]) => 1);
     const redis = {
       eval: evalMock,
       pipeline: vi.fn(() => { throw new Error("CAS must not use a pipeline"); }),
