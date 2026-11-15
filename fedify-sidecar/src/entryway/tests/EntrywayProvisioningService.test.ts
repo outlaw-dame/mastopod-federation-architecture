@@ -330,12 +330,42 @@ describe("EntrywayProvisioningService", () => {
       appRegistrationUri: "http://localhost:3000/alice/data/app-registration-memory",
       accessGrantUris: ["http://localhost:3000/alice/data/grant-memory"],
     });
-    expect(result.sessionHandoff).toEqual({
-      type: "handoff",
-      handoffId: "handoff-123",
-      expiresAt: "2026-01-01T00:05:00.000Z",
-    });
+    expect(result).not.toHaveProperty("sessionHandoff");
     expect(JSON.stringify(result.route)).not.toContain("handoff-123");
+  });
+
+  it("never activates a bootstrapper that claims ready without the owner registration", async () => {
+    const { fetchMock, calls } = createFetchMock();
+    const service = createService(fetchMock as unknown as typeof fetch, {
+      appBootstrapper: {
+        bootstrap: vi.fn().mockResolvedValue({
+          snapshot: {
+            status: "ready" as const,
+            appClientId: "https://memory.example/app",
+            accessGrantUris: [],
+          },
+          sessionHandoff: {
+            type: "redirect", url: "https://evil.example/session/token",
+          },
+        }),
+      },
+      providers: [{
+        providerId: "default",
+        baseUrl: "http://localhost:3000",
+        provisioningBearerToken: "provider-provisioning-token",
+        appClientId: "https://memory.example/app",
+        appBootstrapEnabled: true,
+        appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+      }],
+    });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_bootstrap_invalid_response",
+    });
+    const route = await service.getByUsername("alice");
+    expect(route?.status).toBe("failed");
+    expect(route?.provisioning.phase).toBe("FAILED");
+    expect(JSON.stringify(route)).not.toContain("evil.example");
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
   });
 
   it("holds a completed Pod account for native SAI consent and resumes without a second signup", async () => {
@@ -498,6 +528,7 @@ describe("EntrywayProvisioningService", () => {
       return {
         snapshot: {
           status: "ready" as const, appClientId: "https://memory.example/app",
+          appRegistrationUri: "http://localhost:3000/alice/data/app-registration-memory",
           accessGrantUris: ["http://localhost:3000/alice/data/grant-memory"],
         },
       };
