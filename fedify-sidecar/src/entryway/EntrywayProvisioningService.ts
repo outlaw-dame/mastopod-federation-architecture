@@ -456,9 +456,10 @@ export class EntrywayProvisioningService {
     provider: EntrywayProviderDefinition,
     fenceToken: string,
   ): Promise<{ route: AccountRoute; sessionHandoff?: EntrywayProvisioningResult["sessionHandoff"] }> {
-    // A consent-pending account can never be promoted by disabling the
-    // bootstrap feature or changing its approved client during a retry.
-    if (route.appBootstrap?.status === "awaiting_consent" &&
+    // Any account previously bound to an app must not drop that policy
+    // during a stale retry, including when it has an older "ready" snapshot.
+    // Provider registration policy and current Pod consent remain required.
+    if (route.appBootstrap &&
         (provider.appBootstrapEnabled !== true ||
           route.appBootstrap.appClientId !== provider.appClientId)) {
       throw new EntrywayError(
@@ -479,15 +480,10 @@ export class EntrywayProvisioningService {
       });
     }
 
-    if (route.appBootstrap?.status === "ready") {
-      if (route.appBootstrap.appClientId !== provider.appClientId) {
-        throw new EntrywayError("app_bootstrap_identity_mismatch", "App bootstrap belongs to a different client", {
-          statusCode: 409,
-          retryable: false,
-        });
-      }
-      return { route };
-    }
+    // A persisted "ready" flag is not a lease: the Pod owner may have
+    // revoked SAI rights after the last worker wrote this snapshot.
+    // Always verify the *current* provider grant and account generation
+    // before any new activation, even when a previous attempt was ready.
 
     try {
       await this.assertOwnership(route.accountId, fenceToken);
