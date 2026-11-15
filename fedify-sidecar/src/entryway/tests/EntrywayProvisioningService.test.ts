@@ -321,11 +321,17 @@ describe("EntrywayProvisioningService", () => {
     const service = createService(fetchMock as unknown as typeof fetch, { store });
 
     const result = await service.recoverStaleProvisioning();
-    expect(result).toEqual({ recovered: 0, failed: 1, skipped: 0 });
+    expect(result).toEqual({ recovered: 0, failed: 0, skipped: 1 });
     const route = await store.getByUsername("alice");
-    expect(route?.status).toBe("failed");
-    expect(route?.provisioning.lastErrorCode).toBe("recovery_provider_unavailable");
+    expect(route?.status).toBe("provisioning");
+    expect(route?.provisioning.lastErrorCode).toBeUndefined();
     expect(calls).toHaveLength(0);
+    // Once provider configuration is restored, a later recovery pass
+    // should be able to activate the same bound account without re-signup.
+    const resumedService = createService(fetchMock as unknown as typeof fetch, { store });
+    const resumed = await resumedService.recoverStaleProvisioning();
+    expect(resumed.recovered).toBe(1);
+    expect((await store.getByUsername("alice"))?.status).toBe("active");
   });
 
   it("never reuses another app client's bootstrap grants during recovery", async () => {
