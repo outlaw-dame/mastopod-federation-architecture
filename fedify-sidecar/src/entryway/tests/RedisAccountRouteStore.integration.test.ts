@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import { RedisAccountRouteStore } from "../AccountRouteStore.js";
 import type { AccountRoute } from "../types.js";
 
 // Real Redis proof is intentionally opt-in locally and mandatory in the
 // protected Fast Checks workflow. No fake EVAL or simulated Lua semantics.
-const run = process.env.ENTRYWAY_REDIS_INTEGRATION === "1";
-const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const run = process.env["ENTRYWAY_REDIS_INTEGRATION"] === "1";
+const redisUrl = process.env["REDIS_URL"] || "redis://127.0.0.1:6379";
 
 function makeRoute(accountId: string, username: string, overrides: Partial<AccountRoute> = {}): AccountRoute {
   return {
