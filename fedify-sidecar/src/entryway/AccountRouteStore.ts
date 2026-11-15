@@ -83,8 +83,11 @@ export class InMemoryAccountRouteStore implements AccountRouteStore {
 
     return [...this.routesByAccountId.values()]
       .filter((route) => route.status === "provisioning")
-      .filter((route) => Date.parse(route.updatedAt) < beforeMs)
-      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+      // A damaged timestamp is not evidence that the account is fresh.
+      // Surface it for fenced quarantine rather than allowing it to starve
+      // every later recovery pass indefinitely.
+      .filter((route) => !Number.isFinite(routeTimestamp(route)) || routeTimestamp(route) < beforeMs)
+      .sort((left, right) => recoveryTimestamp(left) - recoveryTimestamp(right))
       .slice(0, clampLimit(limit))
       .map((route) => deepClone(route));
   }
@@ -190,7 +193,9 @@ export class RedisAccountRouteStore implements AccountRouteStore {
       }
       const timestamp = Date.parse(route.updatedAt);
       if (!Number.isFinite(timestamp)) {
-        repairs.push({ accountId, route: null, timestamp: 0 });
+        // Do not silently detach a still-provisioning account from the only
+        // recovery index. The worker will CAS-quarantine this exact record.
+        stale.push(route);
         continue;
       }
       if (timestamp !== indexedScores[index]) {
@@ -220,7 +225,7 @@ export class RedisAccountRouteStore implements AccountRouteStore {
       }
     }
     return stale
-      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+      .sort((left, right) => recoveryTimestamp(left) - recoveryTimestamp(right))
       .slice(0, boundedLimit);
   }
 
@@ -372,6 +377,17 @@ redis.call("SET", KEYS[1], ARGV[1] .. ":" .. ARGV[2])
 redis.call("ZADD", KEYS[4], ARGV[4], ARGV[2])
 return {"created", ARGV[2]}
 `;
+
+function routeTimestamp(route: AccountRoute): number {
+  return typeof route.updatedAt === "string" ? Date.parse(route.updatedAt) : NaN;
+}
+
+function recoveryTimestamp(route: AccountRoute): number {
+  const timestamp = routeTimestamp(route);
+  // Corrupt timestamps are prioritized for one-time reconciliation, not
+  // silently hidden behind a busy queue of otherwise recoverable entries.
+  return Number.isFinite(timestamp) ? timestamp : -1;
+}
 
 function normalizeUsernameKey(username: string): string {
   return username.trim().toLowerCase();
