@@ -138,13 +138,16 @@ export class AccountBundleVerifier {
       invalidMessage: "Verification endpoint returned invalid or oversized JSON",
       maxBytes: 1024 * 1024,
     });
-    if (body && typeof body === "object" && !Array.isArray(body)) {
-      const advertisedIssuer = (body as Record<string, unknown>)["issuer"];
-      if (typeof advertisedIssuer === "string" && new URL(advertisedIssuer).origin !== issuer) {
-        throw new EntrywayError("oidc_issuer_mismatch", "OIDC issuer metadata did not match route issuer", {
-          statusCode: 502,
-        });
-      }
+    // An HTTP 200 with missing issuer or a merely matching origin is not
+    // trustworthy OIDC discovery. The advertised issuer is an exact identity.
+    const advertisedIssuer = body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)["issuer"]
+      : undefined;
+    if (advertisedIssuer !== route.oidcIssuer) {
+      throw new EntrywayError("oidc_issuer_mismatch", "OIDC issuer metadata did not match route issuer", {
+        statusCode: 502,
+        retryable: false,
+      });
     }
   }
 
