@@ -207,7 +207,20 @@ export class EntrywayProvisioningService {
     if (current.status === "active" && current.appBootstrap.status === "ready") {
       // An idempotent backend retry must recheck *current* provider grants
       // before returning active routing metadata. This is not a session.
-      const proof = await this.appBootstrapper.bootstrap({ provider, route: current });
+      let proof;
+      try {
+        proof = await this.appBootstrapper.bootstrap({ provider, route: current });
+      } catch (error) {
+        if (error instanceof EntrywayError && error.code === "app_consent_required") {
+          // An already-active route has not been placed in a new durable
+          // awaiting_consent phase. Never relay a provider-influenced URL
+          // from this error as though it were a trusted pending consent link.
+          throw new EntrywayError("app_consent_required", "Current Pod consent requires reauthorization", {
+            statusCode: 428, retryable: false,
+          });
+        }
+        throw error;
+      }
       if (proof.snapshot.status !== "ready" ||
           proof.snapshot.appClientId !== appClientId) {
         throw new EntrywayError("app_consent_not_verified", "Current owner consent could not be verified", {
@@ -557,7 +570,11 @@ export class EntrywayProvisioningService {
         });
       }
     }
-    throw error;
+    // Never forward a provider-supplied authorizationUrl when no exact,
+    // fenced awaiting_consent state could be verified.
+    throw new EntrywayError("app_consent_required", "Pod owner authorization is required", {
+      statusCode: 428, retryable: false,
+    });
   }
 
   private async claimProvisioning(route: AccountRoute): Promise<AccountRoute | null> {
