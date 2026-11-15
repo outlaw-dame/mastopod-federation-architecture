@@ -1,4 +1,5 @@
 import { EntrywayError } from "./errors.js";
+import { readBoundedJson } from "./readBoundedJson.js";
 import {
   isRetryableHttpStatus,
   isRetryableTransportError,
@@ -104,10 +105,14 @@ export class ActivityPodsProvisioningClient {
         try {
           const response = await this.fetchFn(url, {
             ...init,
+            redirect: "manual",
             signal: controller.signal,
           });
           if (response.ok) {
-            const body = await parseJsonBody(response);
+            const body = await readBoundedJson(response, {
+              errorCode: "provider_invalid_response",
+              invalidMessage: "Provider returned invalid JSON or exceeded the response limit",
+            });
             if (!body || typeof body !== "object" || Array.isArray(body)) {
               throw new EntrywayError("provider_invalid_response", "Provider returned an invalid JSON response", {
                 statusCode: 502,
@@ -145,22 +150,6 @@ export class ActivityPodsProvisioningClient {
       this.retryPolicy,
       (error) => error instanceof EntrywayError ? error.retryable : isRetryableTransportError(error),
     );
-  }
-}
-
-async function parseJsonBody(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text) {
-    return {};
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch (error) {
-    throw new EntrywayError("provider_invalid_response", "Provider returned malformed JSON", {
-      statusCode: 502,
-      retryable: false,
-      cause: error,
-    });
   }
 }
 
