@@ -165,7 +165,11 @@ export class AccountBundleVerifier {
       throw httpCheckError("actor_unavailable", "ActivityPub actor did not resolve", response.status);
     }
 
-    const actor = await safeReadJson(response);
+    const actor = await readBoundedJson(response, {
+      errorCode: "invalid_json",
+      invalidMessage: "ActivityPub actor returned invalid or oversized JSON",
+      maxBytes: 1024 * 1024,
+    });
     if (!actor || typeof actor !== "object" || Array.isArray(actor)) {
       throw new EntrywayError("actor_invalid", "ActivityPub actor response is not a JSON object", {
         statusCode: 502,
