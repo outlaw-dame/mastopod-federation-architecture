@@ -498,6 +498,24 @@ describe("EntrywayProvisioningService", () => {
     expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
   });
 
+  it("rechecks current Pod consent when an active signup is replayed", async () => {
+    const { service, appBootstrapper, store, calls } = await consentPendingFixture();
+    await service.resumeAwaitingConsent(consentResume);
+    appBootstrapper.bootstrap.mockRejectedValueOnce(new EntrywayError(
+      "app_consent_required", "Owner authorization requires renewal",
+      { statusCode: 428, retryable: false },
+    ));
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_required", statusCode: 428,
+    });
+    expect((await store.getByUsername("alice"))?.status).toBe("active");
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+    const replay = await service.createAccount(createInput());
+    expect(replay.replayed).toBe(true);
+    expect(replay.route.appBootstrap?.status).toBe("ready");
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+  });
+
   it("an idempotent resume of an active route rechecks current provider grants without issuing a session", async () => {
     const { service, appBootstrapper, calls } = await consentPendingFixture();
     await service.resumeAwaitingConsent(consentResume);
