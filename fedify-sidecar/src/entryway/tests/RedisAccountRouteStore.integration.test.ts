@@ -171,6 +171,38 @@ describe.skipIf(!run)("RedisAccountRouteStore real Lua fencing and pending-index
     expect((await store.getByAccountId(old.accountId))?.status).toBe("active");
   });
 
+  it("atomically quarantines incomplete account evidence outside the recovery index", async () => {
+    const route = makeRoute(`acct_${randomUUID()}`, "incomplete");
+    track(route);
+    expect((await store.reserve({
+      accountId: route.accountId, username: route.username,
+      idempotencyKeyHash: route.provisioning.idempotencyKeyHash,
+      requestFingerprint: route.provisioning.requestFingerprint,
+      route,
+    })).kind).toBe("created");
+    const claimed = claim(route, "reconcile-fence");
+    expect(await store.compareAndSet(route, claimed)).toBe(true);
+    const frozen: AccountRoute = {
+      ...claimed,
+      status: "reconciliation_required",
+      revision: (claimed.revision ?? 0) + 1,
+      provisioning: {
+        ...claimed.provisioning,
+        phase: "RECONCILIATION_REQUIRED",
+        lastErrorCode: "account_identity_incomplete",
+      },
+    };
+    expect(await store.compareAndSet(claimed, frozen)).toBe(true);
+    expect(await redis.zscore(`${prefix}:index`, route.accountId)).toBeNull();
+    expect((await store.getByAccountId(route.accountId))?.status).toBe("reconciliation_required");
+    expect(await store.compareAndSet(frozen, {
+      ...frozen, revision: (frozen.revision ?? 0) + 1,
+      status: "provisioning",
+    })).toBe(false);
+    expect((await store.listStaleProvisioning("2030-01-01T00:00:00.000Z", 20))
+      .some(candidate => candidate.accountId === route.accountId)).toBe(false);
+  });
+
   it("drains legacy active records and repairs legacy creation-time scores", async () => {
     const active = makeRoute(`acct_${randomUUID()}`, "oldactive", { status: "active" });
     const recent = makeRoute(`acct_${randomUUID()}`, "recent", {
