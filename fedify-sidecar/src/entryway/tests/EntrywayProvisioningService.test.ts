@@ -328,7 +328,16 @@ describe("EntrywayProvisioningService", () => {
     expect(calls).toHaveLength(0);
     // Once provider configuration is restored, a later recovery pass
     // should be able to activate the same bound account without re-signup.
-    const resumedService = createService(fetchMock as unknown as typeof fetch, { store });
+    const resumedService = createService(fetchMock as unknown as typeof fetch, {
+      store,
+      providers: [{
+        providerId: "removed-provider",
+        baseUrl: "http://localhost:3000",
+        provisioningBearerToken: "provider-provisioning-token",
+        appClientId: "https://memory.example/app",
+        appBootstrapEnabled: false,
+      }],
+    });
     const resumed = await resumedService.recoverStaleProvisioning();
     expect(resumed.recovered).toBe(1);
     expect((await store.getByUsername("alice"))?.status).toBe("active");
