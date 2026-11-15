@@ -54,9 +54,7 @@ describe("operator-pinned native Solid SAI consent navigation", () => {
     { saiAuthorizationUrl: "https://id.example.org/authorize", saiAppUri: undefined },
     { saiAuthorizationUrl: undefined, saiAppUri: "https://memory.example.org/app" },
   ])("rejects untrusted/incomplete consent navigation configuration: %j", override => {
-    expect(() => normalizeProviderDefinition(provider(override))).toThrowError(
-      expect.objectContaining({ code: "provider_invalid" }),
-    );
+    expect(() => normalizeProviderDefinition(provider(override))).toThrowError(/Native SAI/);
   });
 
   it("parses the explicit SAI fields from both default and provider-array configuration", () => {
