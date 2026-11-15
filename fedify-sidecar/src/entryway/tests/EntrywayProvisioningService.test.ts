@@ -742,6 +742,28 @@ describe("EntrywayProvisioningService", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("fences a malformed legacy recovery timestamp instead of starving the queue", async () => {
+    const { fetchMock, calls } = createFetchMock();
+    const store = new InMemoryAccountRouteStore();
+    await store.save({ ...staleRoute("default"), updatedAt: "broken-timestamp" });
+    const service = createService(fetchMock as unknown as typeof fetch, { store });
+    expect(await service.recoverStaleProvisioning()).toEqual({
+      recovered: 0, failed: 1, skipped: 0,
+    });
+    const stored = await store.getByUsername("alice");
+    expect(stored).toMatchObject({
+      status: "reconciliation_required",
+      provisioning: {
+        phase: "RECONCILIATION_REQUIRED",
+        lastErrorCode: "account_timestamp_invalid",
+      },
+    });
+    expect(await service.recoverStaleProvisioning()).toEqual({
+      recovered: 0, failed: 0, skipped: 0,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
   it("never activates a stale provisioned account whose original provider is missing", async () => {
     const { fetchMock, calls } = createFetchMock();
     const store = new InMemoryAccountRouteStore();
