@@ -96,6 +96,30 @@ describe("ActivityPodsProvisioningClient provider failure isolation", () => {
     });
   });
 
+  it("never automatically retries a provider account-create POST after an uncertain 503", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 503 }));
+    const client = new ActivityPodsProvisioningClient({
+      fetchFn: fetchMock as unknown as typeof fetch,
+      retryPolicy: { maxAttempts: 4, baseDelayMs: 1, maxDelayMs: 4 },
+    });
+    await expect(client.createAccount(accountRequest())).rejects.toMatchObject({
+      code: "provider_request_failed", statusCode: 502, retryable: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains bounded retries for safe provider capability GET requests", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 503 }));
+    const client = new ActivityPodsProvisioningClient({
+      fetchFn: fetchMock as unknown as typeof fetch,
+      retryPolicy: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 },
+    });
+    await expect(client.getProviderCapabilities(provider)).rejects.toMatchObject({
+      code: "provider_request_failed", statusCode: 502,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("does not reflect credential-bearing provider capability failures", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ message: leakedSecret }), {
