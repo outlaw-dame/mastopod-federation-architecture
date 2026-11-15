@@ -74,6 +74,54 @@ describe("ActivityPodsAppBootstrapClient", () => {
       expiresAt: "2026-01-01T00:05:00.000Z",
     });
   });
+  it.each([
+    ["plain text", new Response("password=leaked-secret", { status: 502, headers: { "content-type": "text/plain" } })],
+    ["malformed JSON", new Response('{"accessJwt":"leaked-secret"', { status: 502, headers: { "content-type": "application/json" } })],
+    ["structured JSON", jsonResponse(502, { error: "leaked-secret", message: "password=leaked-secret", accessJwt: "leaked-secret" })],
+  ])("does not expose %s provider error bodies", async (_label, providerResponse) => {
+    const fetchMock = vi.fn().mockResolvedValue(providerResponse);
+    const client = new ActivityPodsAppBootstrapClient({
+      fetchFn: fetchMock as unknown as typeof fetch,
+      retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    });
+
+    await expect(client.bootstrap({
+      provider: {
+        providerId: "default",
+        baseUrl: "http://localhost:3000",
+        provisioningBearerToken: "provider-token",
+        appClientId: "https://memory.example/app",
+        appBootstrapEnabled: true,
+        appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+      },
+      route: {
+        accountId: "acct_11111111-1111-4111-8111-111111111111",
+        canonicalAccountId: "http://localhost:3000/alice/profile/card#me",
+        username: "alice",
+        handle: "@alice@localhost",
+        webId: "http://localhost:3000/alice/profile/card#me",
+        actorId: "http://localhost:3000/alice",
+        podStorageUrl: "http://localhost:3000/alice/data/",
+        providerId: "default",
+        providerBaseUrl: "http://localhost:3000",
+        oidcIssuer: "http://localhost:3000",
+        status: "provisioning",
+        provisioning: {
+          phase: "ACTOR_VALIDATED",
+          attempts: 1,
+          idempotencyKeyHash: "hash",
+          requestFingerprint: "fingerprint",
+          checks: [],
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    })).rejects.toMatchObject({
+      code: "app_bootstrap_failed",
+      message: "Provider app bootstrap failed with HTTP 502",
+      details: { providerStatus: 502 },
+    });
+  });
 });
 
 function jsonResponse(status: number, body: unknown): Response {
