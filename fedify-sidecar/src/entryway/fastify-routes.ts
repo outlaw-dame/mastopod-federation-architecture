@@ -77,7 +77,8 @@ export function registerEntrywayFastifyRoutes(app: FastifyInstance, deps: Entryw
       reply.code(result.replayed ? 200 : 201).send({
         account: serializeAccountRoute(result.route),
         replayed: result.replayed,
-        sessionHandoff: result.sessionHandoff,
+        // Never treat arbitrary bootstrap handoff metadata as a verified
+        // Solid-OIDC login or a redirect destination.
       });
     } catch (error) {
       sendEntrywayError(reply, error);
