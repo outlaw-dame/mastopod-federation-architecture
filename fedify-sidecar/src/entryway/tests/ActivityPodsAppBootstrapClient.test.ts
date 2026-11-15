@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { ActivityPodsAppBootstrapClient } from "../ActivityPodsAppBootstrapClient.js";
 
@@ -61,6 +62,15 @@ describe("ActivityPodsAppBootstrapClient", () => {
         }),
       }),
     );
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
+    expect(requestBody["idempotencyKey"]).toBe(
+      "entryway:acct_11111111-1111-4111-8111-111111111111:" +
+      createHash("sha256").update("hash").digest("hex").slice(0, 24),
+    );
+    expect(JSON.stringify(requestBody)).not.toContain("fingerprint");
+    expect(requestBody["webId"]).toBe("http://localhost:3000/alice/profile/card#me");
+    expect(requestBody["actorId"]).toBe("http://localhost:3000/alice");
+
     expect(result.snapshot).toEqual({
       status: "ready",
       appClientId: "https://memory.example/app",

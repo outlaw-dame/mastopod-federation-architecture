@@ -1,4 +1,5 @@
 import { EntrywayError } from "./errors.js";
+import { buildProviderIdempotencyKey } from "./providerIdempotency.js";
 import {
   isRetryableHttpStatus,
   isRetryableTransportError,
@@ -78,6 +79,7 @@ export class ActivityPodsAppBootstrapClient implements EntrywayAppBootstrapper {
       },
       body: JSON.stringify({
         accountId: route.accountId,
+        idempotencyKey: buildProviderIdempotencyKey(route),
         canonicalAccountId: route.canonicalAccountId,
         username: route.username,
         webId: route.webId,
