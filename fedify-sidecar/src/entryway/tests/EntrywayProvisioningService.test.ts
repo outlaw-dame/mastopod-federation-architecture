@@ -736,7 +736,7 @@ describe("EntrywayProvisioningService", () => {
     expect(result).toEqual({ recovered: 0, failed: 1, skipped: 0 });
     const route = await store.getByUsername("alice");
     expect(route?.status).toBe("failed");
-    expect(route?.provisioning.lastErrorCode).toBe("app_bootstrap_identity_mismatch");
+    expect(route?.provisioning.lastErrorCode).toBe("app_consent_provider_changed");
     expect(appBootstrapper.bootstrap).not.toHaveBeenCalled();
   });
 });
