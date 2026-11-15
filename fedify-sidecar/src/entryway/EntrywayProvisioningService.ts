@@ -131,7 +131,6 @@ export class EntrywayProvisioningService {
       return {
         route: activeRoute,
         replayed: reservation.kind === "replayed",
-        sessionHandoff: bootstrapped.sessionHandoff,
       };
     } catch (error) {
       const failed = await this.markFailed(route.accountId, fenceToken, error);
