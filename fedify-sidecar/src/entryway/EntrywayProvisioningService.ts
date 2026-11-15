@@ -485,17 +485,26 @@ export class EntrywayProvisioningService {
     try {
       await this.assertOwnership(route.accountId, fenceToken);
       const result = await this.appBootstrapper.bootstrap({ provider, route });
+      if (!result?.snapshot || result.snapshot.status !== "ready" ||
+          result.snapshot.appClientId !== provider.appClientId ||
+          typeof result.snapshot.appRegistrationUri !== "string" ||
+          !result.snapshot.appRegistrationUri ||
+          !Array.isArray(result.snapshot.accessGrantUris)) {
+        throw new EntrywayError("app_bootstrap_invalid_response",
+          "Provider app bootstrap did not prove current owner authorization", {
+            statusCode: 502, retryable: false,
+          });
+      }
       const updated = await this.updateRoute(route.accountId, fenceToken, {
         appBootstrap: result.snapshot,
         provisioning: {
           ...route.provisioning,
-          phase: result.sessionHandoff ? "SESSION_READY" : "APP_BOOTSTRAP_READY",
+          // Unverified provider URL/ID metadata cannot establish a real
+          // Solid-OIDC user session; never mark SESSION_READY here.
+          phase: "APP_BOOTSTRAP_READY",
         },
       });
-      return {
-        route: updated,
-        sessionHandoff: result.sessionHandoff,
-      };
+      return { route: updated };
     } catch (error) {
       if (error instanceof EntrywayError && error.code === "app_consent_required") {
         // Preserve the completed provider identity but leave the account
