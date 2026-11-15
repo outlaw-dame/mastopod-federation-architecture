@@ -4,7 +4,7 @@ import { ActivityPodsProvisioningClient } from "./ActivityPodsProvisioningClient
 import type { EntrywayAppBootstrapper } from "./ActivityPodsAppBootstrapClient.js";
 import { AccountBundleVerifier } from "./AccountBundleVerifier.js";
 import { EntrywayError, sanitizeErrorMessage } from "./errors.js";
-import type { EntrywayProviderRouter } from "./ProviderRouter.js";
+import { buildNativeSaiAuthorizationUrl, type EntrywayProviderRouter } from "./ProviderRouter.js";
 import type { EntrywayProviderPreflight } from "./ProviderPreflight.js";
 import { stableStringify } from "./stable.js";
 import type {
@@ -135,6 +135,27 @@ export class EntrywayProvisioningService {
     } catch (error) {
       const failed = await this.markFailed(route.accountId, fenceToken, error);
       if (error instanceof EntrywayError) {
+        if (error.code === "app_consent_required") {
+          // A link can be offered only after this exact attempt durably
+          // entered awaiting_consent. Derive it from the trusted provider
+          // definition, never from its untrusted HTTP error body.
+          const current = await this.store.getByAccountId(route.accountId);
+          const provider = current?.providerId
+            ? this.providerRouter.getProvider(current.providerId) : null;
+          if (current?.status === "awaiting_consent" &&
+              current.provisioning.fenceToken === fenceToken &&
+              provider?.enabled !== false &&
+              provider?.baseUrl === current.providerBaseUrl &&
+              current.appBootstrap?.appClientId === provider?.appClientId) {
+            const authorizationUrl = buildNativeSaiAuthorizationUrl(provider);
+            if (authorizationUrl) {
+              throw new EntrywayError("app_consent_required", "Pod owner authorization is required", {
+                statusCode: 428, retryable: false,
+                details: { authorizationUrl },
+              });
+            }
+          }
+        }
         throw error;
       }
       throw new EntrywayError("entryway_provisioning_failed", "Account provisioning failed", {
