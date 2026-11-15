@@ -115,16 +115,15 @@ export class ActivityPodsAppBootstrapClient implements EntrywayAppBootstrapper {
             return body as Record<string, unknown>;
           }
 
-          const parsed = await parseErrorResponse(response);
+          // Provider error bodies are untrusted and may contain credentials or
+          // verification artifacts. Do not persist or relay any of their bytes.
           throw new EntrywayError(
-            parsed.error ?? "app_bootstrap_failed",
-            parsed.message ?? `Provider app bootstrap failed with HTTP ${response.status}`,
+            "app_bootstrap_failed",
+            `Provider app bootstrap failed with HTTP ${response.status}`,
             {
               statusCode: response.status >= 500 ? 502 : response.status,
               retryable: isRetryableHttpStatus(response.status),
-              details: parsed.sanitizedBody ? { providerStatus: response.status, body: parsed.sanitizedBody } : {
-                providerStatus: response.status,
-              },
+              details: { providerStatus: response.status },
             },
           );
         } catch (error) {
@@ -208,58 +207,12 @@ async function parseJsonBody(response: Response): Promise<unknown> {
   }
 }
 
-async function parseErrorResponse(response: Response): Promise<{
-  error?: string;
-  message?: string;
-  sanitizedBody?: string;
-}> {
-  const contentType = response.headers.get("content-type") ?? "";
-  const text = await response.text();
-  if (!text) {
-    return {};
-  }
-
-  if (contentType.includes("json")) {
-    try {
-      const parsed = JSON.parse(text) as Record<string, unknown>;
-      return {
-        error: typeof parsed["error"] === "string" ? parsed["error"] : undefined,
-        message: typeof parsed["message"] === "string" ? parsed["message"] : undefined,
-        sanitizedBody: JSON.stringify(redactSensitive(parsed)).slice(0, 512),
-      };
-    } catch {
-      return { sanitizedBody: text.slice(0, 512) };
-    }
-  }
-
-  return { sanitizedBody: text.slice(0, 512) };
-}
-
 function readOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function formatBearer(token: string): string {
   return token.toLowerCase().startsWith("bearer ") ? token : `Bearer ${token}`;
-}
-
-function redactSensitive(value: unknown): unknown {
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.map(redactSensitive);
-  }
-
-  const redacted: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (/password|token|authorization|accessJwt|refreshJwt|session/i.test(key)) {
-      redacted[key] = "[redacted]";
-      continue;
-    }
-    redacted[key] = redactSensitive(entry);
-  }
-  return redacted;
 }
 
 function clampInteger(value: number, min: number, max: number): number {
