@@ -513,6 +513,38 @@ describe("EntrywayProvisioningService", () => {
     expect((await store.getByUsername("alice"))?.status).toBe("active");
   });
 
+  it("rechecks a persisted ready SAI snapshot after a stale worker crash before activation", async () => {
+    const { service, store, appBootstrapper, calls } = await consentPendingFixture();
+    const pending = await store.getByUsername("alice");
+    expect(pending).not.toBeNull();
+    await store.save({
+      ...pending!,
+      status: "provisioning",
+      updatedAt: "2025-01-01T00:00:00.000Z",
+      appBootstrap: {
+        status: "ready",
+        appClientId: "https://memory.example/app",
+        appRegistrationUri: "http://localhost:3000/alice/data/old-registration",
+        accessGrantUris: ["http://localhost:3000/alice/data/now-revoked-grant"],
+      },
+      provisioning: {
+        ...pending!.provisioning,
+        phase: "APP_BOOTSTRAP_READY",
+      },
+    });
+    appBootstrapper.bootstrap.mockRejectedValueOnce(new EntrywayError(
+      "app_consent_required", "SAI grant has since been revoked",
+      { statusCode: 428, retryable: false },
+    ));
+
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_required", statusCode: 428,
+    });
+    expect((await store.getByUsername("alice"))?.status).toBe("awaiting_consent");
+    expect(appBootstrapper.bootstrap).toHaveBeenCalledTimes(2);
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+  });
+
   it("cannot skip pending owner consent by disabling provider bootstrap", async () => {
     const { fetchMock, calls } = createFetchMock();
     const store = new InMemoryAccountRouteStore();
