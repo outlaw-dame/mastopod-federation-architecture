@@ -111,6 +111,10 @@ describe("RedisAccountRouteStore.listStaleProvisioning", () => {
           index === 1 ? Date.parse(second.updatedAt) : Date.parse(BEFORE_ISO) - 1_000),
       ])),
       mget: vi.fn(async () => [JSON.stringify(first), JSON.stringify(second)]),
+      pipeline: vi.fn(() => ({
+        eval: vi.fn(),
+        exec: vi.fn(async () => [[null, 1]]),
+      })),
     } as any, PREFIX);
 
     const routes = await store.listStaleProvisioning(BEFORE_ISO, 10);
