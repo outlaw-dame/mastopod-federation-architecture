@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildProviderIdempotencyKey } from "./providerIdempotency.js";
 import { ActivityPodsProvisioningClient } from "./ActivityPodsProvisioningClient.js";
 import type { EntrywayAppBootstrapper } from "./ActivityPodsAppBootstrapClient.js";
@@ -11,6 +11,7 @@ import type {
   AccountRoute,
   AccountRouteStore,
   EntrywayAccountCreateInput,
+  EntrywayConsentResumeInput,
   EntrywayBundleCheck,
   EntrywayProtocolSet,
   EntrywayProviderDefinition,
@@ -136,25 +137,7 @@ export class EntrywayProvisioningService {
       const failed = await this.markFailed(route.accountId, fenceToken, error);
       if (error instanceof EntrywayError) {
         if (error.code === "app_consent_required") {
-          // A link can be offered only after this exact attempt durably
-          // entered awaiting_consent. Derive it from the trusted provider
-          // definition, never from its untrusted HTTP error body.
-          const current = await this.store.getByAccountId(route.accountId);
-          const provider = current?.providerId
-            ? this.providerRouter.getProvider(current.providerId) : null;
-          if (current?.status === "awaiting_consent" &&
-              current.provisioning.fenceToken === fenceToken &&
-              provider?.enabled !== false &&
-              provider?.baseUrl === current.providerBaseUrl &&
-              current.appBootstrap?.appClientId === provider?.appClientId) {
-            const authorizationUrl = buildNativeSaiAuthorizationUrl(provider);
-            if (authorizationUrl) {
-              throw new EntrywayError("app_consent_required", "Pod owner authorization is required", {
-                statusCode: 428, retryable: false,
-                details: { authorizationUrl },
-              });
-            }
-          }
+          await this.raiseNativeSaiConsent(error, route.accountId, fenceToken);
         }
         throw error;
       }
@@ -173,6 +156,104 @@ export class EntrywayProvisioningService {
 
   public async getByUsername(username: string): Promise<AccountRoute | null> {
     return this.store.getByUsername(normalizeUsername(username));
+  }
+
+  /**
+   * Backend-only continuation after the Pod owner has completed native SAI
+   * authorization. The original caller keeps a high-entropy idempotency key
+   * in its server-side transaction store; nothing sensitive is put into the
+   * browser callback URL. A second account-create RPC is never performed.
+   */
+  public async resumeAwaitingConsent(input: EntrywayConsentResumeInput): Promise<EntrywayProvisioningResult> {
+    const username = normalizeUsername(input.username);
+    const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
+    const appClientId = input.appClientId.trim();
+    if (!appClientId || appClientId.length > 2048) {
+      throw new EntrywayError("invalid_app_client", "A scoped app client is required", {
+        statusCode: 400, retryable: false,
+      });
+    }
+
+    const current = await this.store.getByUsername(username);
+    const calculatedHash = Buffer.from(this.hashIdempotencyKey(idempotencyKey), "hex");
+    const storedHashText = current?.provisioning.idempotencyKeyHash ?? "";
+    const storedHash = /^[a-f0-9]{64}$/.test(storedHashText)
+      ? Buffer.from(storedHashText, "hex") : Buffer.alloc(32);
+    if (!current || !timingSafeEqual(calculatedHash, storedHash)) {
+      // Use the same response for an unknown username and a wrong key.
+      throw new EntrywayError("consent_resume_not_found", "Consent operation was not found", {
+        statusCode: 404, retryable: false,
+      });
+    }
+
+    const provider = current.providerId
+      ? this.providerRouter.getProvider(current.providerId) : null;
+    if (!provider || provider.enabled === false ||
+        provider.baseUrl !== current.providerBaseUrl ||
+        provider.appClientId !== appClientId ||
+        provider.appBootstrapEnabled !== true ||
+        !current.appBootstrap ||
+        current.appBootstrap.appClientId !== appClientId) {
+      throw new EntrywayError("app_consent_provider_changed", "Original application authorization policy is unavailable", {
+        statusCode: 409, retryable: false,
+      });
+    }
+    if (!this.appBootstrapper) {
+      throw new EntrywayError("app_bootstrap_unavailable", "Provider consent verification is unavailable", {
+        statusCode: 503, retryable: true,
+      });
+    }
+
+    if (current.status === "active" && current.appBootstrap.status === "ready") {
+      // An idempotent backend retry must recheck *current* provider grants
+      // before returning active routing metadata. This is not a session.
+      const proof = await this.appBootstrapper.bootstrap({ provider, route: current });
+      if (proof.snapshot.status !== "ready" ||
+          proof.snapshot.appClientId !== appClientId) {
+        throw new EntrywayError("app_consent_not_verified", "Current owner consent could not be verified", {
+          statusCode: 409, retryable: false,
+        });
+      }
+      return { route: { ...current, appBootstrap: proof.snapshot }, replayed: true };
+    }
+
+    if (current.status !== "awaiting_consent" ||
+        current.appBootstrap.status !== "awaiting_consent" ||
+        !current.webId || !current.actorId || !current.podStorageUrl) {
+      throw new EntrywayError("consent_not_pending", "Account is not awaiting native owner authorization", {
+        statusCode: 409, retryable: false,
+      });
+    }
+
+    // Claim ownership atomically. Competing workers may not both resume
+    // and no stale responder may overwrite an activated route.
+    const claimed = await this.claimProvisioning(current);
+    if (!claimed) {
+      throw new EntrywayError("provisioning_in_progress", "Another consent attempt owns this route", {
+        statusCode: 409, retryable: true,
+      });
+    }
+    const fenceToken = claimed.provisioning.fenceToken!;
+    try {
+      const verified = await this.verifyAccountBundle(claimed, fenceToken);
+      const completed = await this.bootstrapAppIfConfigured(verified, provider, fenceToken);
+      const activated = await this.activateRoute(completed.route, fenceToken);
+      // The HTTP route intentionally returns no provider session handoff
+      // until the actual Solid-OIDC browser continuation is verified.
+      return { route: activated, replayed: true };
+    } catch (error) {
+      const failed = await this.markFailed(claimed.accountId, fenceToken, error);
+      if (error instanceof EntrywayError) {
+        if (error.code === "app_consent_required") {
+          await this.raiseNativeSaiConsent(error, claimed.accountId, fenceToken);
+        }
+        throw error;
+      }
+      throw new EntrywayError("consent_resume_failed", "Consent continuation failed", {
+        statusCode: 500, retryable: false, cause: error,
+        details: failed ? { accountId: failed.accountId } : undefined,
+      });
+    }
   }
 
   public async recoverStaleProvisioning(limit = 25): Promise<{ recovered: number; failed: number; skipped: number }> {
@@ -452,6 +533,31 @@ export class EntrywayProvisioningService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Only a fenced, durably pending route may yield an operator-pinned
+   * native SAI link. No provider response body can override this URL.
+   */
+  private async raiseNativeSaiConsent(
+    error: EntrywayError, accountId: string, fenceToken: string,
+  ): Promise<never> {
+    const current = await this.store.getByAccountId(accountId);
+    const provider = current?.providerId
+      ? this.providerRouter.getProvider(current.providerId) : null;
+    if (current?.status === "awaiting_consent" &&
+        current.provisioning.fenceToken === fenceToken &&
+        provider?.enabled !== false &&
+        provider?.baseUrl === current.providerBaseUrl &&
+        current.appBootstrap?.appClientId === provider?.appClientId) {
+      const authorizationUrl = buildNativeSaiAuthorizationUrl(provider);
+      if (authorizationUrl) {
+        throw new EntrywayError("app_consent_required", "Pod owner authorization is required", {
+          statusCode: 428, retryable: false, details: { authorizationUrl },
+        });
+      }
+    }
+    throw error;
   }
 
   private async claimProvisioning(route: AccountRoute): Promise<AccountRoute | null> {
