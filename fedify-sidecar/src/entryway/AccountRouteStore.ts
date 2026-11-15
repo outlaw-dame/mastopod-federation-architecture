@@ -58,10 +58,21 @@ export class InMemoryAccountRouteStore implements AccountRouteStore {
     return this.getByAccountId(accountId);
   }
 
+  // Test fixture seeding only; the production Redis implementation has no
+  // unconditional overwrite API. Runtime updates use compareAndSet below.
   public async save(route: AccountRoute): Promise<void> {
     const cloned = deepClone(route);
     this.routesByAccountId.set(cloned.accountId, cloned);
     this.accountIdByUsername.set(normalizeUsernameKey(cloned.username), cloned.accountId);
+  }
+
+  public async compareAndSet(expected: AccountRoute, next: AccountRoute): Promise<boolean> {
+    const current = this.routesByAccountId.get(expected.accountId);
+    if (!current || !isValidRouteTransition(current, expected, next)) {
+      return false;
+    }
+    this.routesByAccountId.set(expected.accountId, deepClone(next));
+    return true;
   }
 
   public async listStaleProvisioning(beforeIso: string, limit: number): Promise<AccountRoute[]> {
@@ -128,12 +139,22 @@ export class RedisAccountRouteStore implements AccountRouteStore {
     return this.getByAccountId(accountId);
   }
 
-  public async save(route: AccountRoute): Promise<void> {
-    const pipeline = this.redis.pipeline();
-    pipeline.set(this.routeKey(route.accountId), JSON.stringify(route));
-    pipeline.set(this.usernameKey(route.username), route.accountId);
-    pipeline.zadd(this.indexKey(), String(Date.parse(route.createdAt) || Date.now()), route.accountId);
-    await pipeline.exec();
+  public async compareAndSet(expected: AccountRoute, next: AccountRoute): Promise<boolean> {
+    if (!isValidRouteTransition(expected, expected, next)) {
+      return false;
+    }
+    const result = await this.redis.eval(
+      COMPARE_ROUTE_LUA,
+      2,
+      this.routeKey(expected.accountId),
+      this.indexKey(),
+      String(expected.revision ?? 0),
+      expected.provisioning.fenceToken ?? "",
+      JSON.stringify(next),
+      String(Date.parse(next.updatedAt)),
+      expected.accountId,
+    );
+    return result === 1;
   }
 
   public async listStaleProvisioning(beforeIso: string, limit: number): Promise<AccountRoute[]> {
@@ -143,18 +164,47 @@ export class RedisAccountRouteStore implements AccountRouteStore {
     }
 
     const boundedLimit = clampLimit(limit);
+    // Older deployments indexed creation time and retained completed rows.
+    // Examine a bounded window, repair index drift, and drain old non-pending
+    // entries incrementally. No account-wide read or unbounded Redis scan.
+    const scanBudget = Math.min(4096, Math.max(1024, boundedLimit * 3));
     const accountIds = await this.redis.zrangebyscore(
-      this.indexKey(),
-      "-inf",
-      String(beforeMs),
-      "LIMIT",
-      0,
-      boundedLimit * 3,
+      this.indexKey(), "-inf", String(beforeMs), "LIMIT", 0, scanBudget,
     );
     const routes = await this.loadRoutesByAccountIds(accountIds);
-    return routes
-      .filter((route): route is AccountRoute => !!route && route.status === "provisioning")
-      .filter((route) => Date.parse(route.updatedAt) < beforeMs)
+    const stale: AccountRoute[] = [];
+    const remove: string[] = [];
+    const rescore: Array<{ accountId: string; timestamp: number }> = [];
+    for (let index = 0; index < accountIds.length; index += 1) {
+      const accountId = accountIds[index]!;
+      const route = routes[index];
+      if (!route || route.accountId !== accountId || route.status !== "provisioning") {
+        remove.push(accountId);
+        continue;
+      }
+      const updatedAtMs = Date.parse(route.updatedAt);
+      if (!Number.isFinite(updatedAtMs)) {
+        remove.push(accountId);
+        continue;
+      }
+      // Rescore legacy entries by last update, even if they are not stale.
+      rescore.push({ accountId, timestamp: updatedAtMs });
+      if (updatedAtMs < beforeMs) {
+        stale.push(route);
+      }
+    }
+    if (remove.length || rescore.length) {
+      const pipeline = this.redis.pipeline();
+      for (const accountId of remove) pipeline.zrem(this.indexKey(), accountId);
+      for (const entry of rescore) {
+        pipeline.zadd(this.indexKey(), String(entry.timestamp), entry.accountId);
+      }
+      const results = await pipeline.exec();
+      if (!results || results.some(([error]) => error)) {
+        throw new Error("Entryway recovery index repair failed");
+      }
+    }
+    return stale
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
       .slice(0, boundedLimit);
   }
@@ -186,6 +236,51 @@ export class RedisAccountRouteStore implements AccountRouteStore {
   private indexKey(): string {
     return `${this.prefix}:index`;
   }
+}
+
+const COMPARE_ROUTE_LUA = `
+local raw = redis.call("GET", KEYS[1])
+if not raw then return 0 end
+local ok, current = pcall(cjson.decode, raw)
+if not ok or type(current) ~= "table" then return 0 end
+local next = cjson.decode(ARGV[3])
+local currentRevision = tonumber(current.revision or 0)
+local expectedRevision = tonumber(ARGV[1])
+local currentFence = current.provisioning and current.provisioning.fenceToken or ""
+local expectedFence = ARGV[2]
+if currentRevision ~= expectedRevision or currentFence ~= expectedFence then return 0 end
+if current.status ~= "provisioning" and current.status ~= "failed" then return 0 end
+if next.accountId ~= current.accountId or current.accountId ~= ARGV[5] or
+   next.username ~= current.username or
+   next.createdAt ~= current.createdAt or
+   next.provisioning.idempotencyKeyHash ~= current.provisioning.idempotencyKeyHash or
+   next.provisioning.requestFingerprint ~= current.provisioning.requestFingerprint or
+   tonumber(next.revision) ~= currentRevision + 1 then
+  return 0
+end
+redis.call("SET", KEYS[1], ARGV[3])
+if next.status == "provisioning" then
+  redis.call("ZADD", KEYS[2], ARGV[4], ARGV[5])
+else
+  redis.call("ZREM", KEYS[2], ARGV[5])
+end
+return 1
+`;
+
+function isValidRouteTransition(current: AccountRoute, expected: AccountRoute, next: AccountRoute): boolean {
+  const currentRevision = current.revision ?? 0;
+  return current.accountId === expected.accountId &&
+    current.accountId === next.accountId &&
+    current.status !== "active" && current.status !== "suspended" && current.status !== "migrating" &&
+    (current.status === "provisioning" || current.status === "failed") &&
+    currentRevision === (expected.revision ?? 0) &&
+    next.revision === currentRevision + 1 &&
+    (current.provisioning.fenceToken ?? "") === (expected.provisioning.fenceToken ?? "") &&
+    next.username === current.username &&
+    next.createdAt === current.createdAt &&
+    next.provisioning.idempotencyKeyHash === current.provisioning.idempotencyKeyHash &&
+    next.provisioning.requestFingerprint === current.provisioning.requestFingerprint &&
+    Number.isFinite(Date.parse(next.updatedAt));
 }
 
 const RESERVE_ROUTE_LUA = `
