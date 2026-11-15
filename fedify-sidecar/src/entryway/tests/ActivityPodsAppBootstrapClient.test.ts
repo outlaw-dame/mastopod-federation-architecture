@@ -162,6 +162,46 @@ describe("ActivityPodsAppBootstrapClient", () => {
     });
   });
 
+  it("allows a genuine owner registration with no optional grants, but never treats a blank 200 as consent", async () => {
+    const client = new ActivityPodsAppBootstrapClient({
+      fetchFn: vi.fn().mockResolvedValue(jsonResponse(200, {
+        appRegistrationUri: "http://localhost:3000/alice/data/registration",
+        accessGrantUris: [],
+      })) as unknown as typeof fetch,
+      retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    });
+    const provider = {
+      providerId: "default", baseUrl: "http://localhost:3000",
+      provisioningBearerToken: "provider-token",
+      appClientId: "https://memory.example/app", appBootstrapEnabled: true,
+      appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+    };
+    const route = {
+      accountId: "acct_11111111-1111-4111-8111-111111111111",
+      canonicalAccountId: "http://localhost:3000/alice/profile/card#me",
+      username: "alice", handle: "@alice@localhost",
+      webId: "http://localhost:3000/alice/profile/card#me",
+      actorId: "http://localhost:3000/alice",
+      podStorageUrl: "http://localhost:3000/alice/data/",
+      providerId: "default", providerBaseUrl: "http://localhost:3000",
+      oidcIssuer: "http://localhost:3000",
+      status: "provisioning" as const,
+      provisioning: {
+        phase: "ACTOR_VALIDATED" as const, attempts: 1,
+        idempotencyKeyHash: "hash", requestFingerprint: "fingerprint", checks: [],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const result = await client.bootstrap({ provider, route });
+    expect(result.snapshot).toMatchObject({
+      status: "ready",
+      appRegistrationUri: "http://localhost:3000/alice/data/registration",
+      accessGrantUris: [],
+    });
+    expect(result).not.toHaveProperty("sessionHandoff");
+  });
+
   it("converts native SAI consent-required HTTP 428 into a safe resumable signal", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ message: "password=must-not-leak", consentUrl: "https://evil.example/steal" }),
