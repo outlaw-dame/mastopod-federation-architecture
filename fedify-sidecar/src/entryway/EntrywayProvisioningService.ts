@@ -164,20 +164,34 @@ export class EntrywayProvisioningService {
     let skipped = 0;
 
     for (const route of staleRoutes) {
-      if (!route.webId || !route.actorId || !route.podStorageUrl) {
+      if (!route.canonicalAccountId || !route.webId || !route.actorId || !route.podStorageUrl) {
         skipped += 1;
         continue;
       }
 
       try {
         const provider = route.providerId ? this.providerRouter.getProvider(route.providerId) : null;
+        // Never activate a stranded account without its original, approved
+        // provider. An unknown, disabled or reconfigured provider is not
+        // authority to skip the app's consent and bootstrap requirements.
+        if (!provider || provider.enabled === false || provider.baseUrl !== route.providerBaseUrl) {
+          throw new EntrywayError("recovery_provider_unavailable", "Original account provider is unavailable", {
+            statusCode: 503,
+            retryable: true,
+          });
+        }
         const verifiedRoute = await this.verifyAccountBundle(route);
-        const bootstrapped = provider
-          ? await this.bootstrapAppIfConfigured(verifiedRoute, provider)
-          : { route: verifiedRoute };
+        const bootstrapped = await this.bootstrapAppIfConfigured(verifiedRoute, provider);
         await this.activateRoute(bootstrapped.route);
         recovered += 1;
       } catch (error) {
+        if (error instanceof EntrywayError && error.retryable) {
+          // A temporarily unavailable provider or verification endpoint must
+          // not permanently strand the account. Leave the route in the
+          // provisioning index for the next bounded recovery pass.
+          skipped += 1;
+          continue;
+        }
         await this.markFailed(route.accountId, error);
         failed += 1;
       }
@@ -321,11 +335,24 @@ export class EntrywayProvisioningService {
     route: AccountRoute,
     provider: EntrywayProviderDefinition,
   ): Promise<{ route: AccountRoute; sessionHandoff?: EntrywayProvisioningResult["sessionHandoff"] }> {
-    if (!this.appBootstrapper || provider.appBootstrapEnabled !== true) {
+    if (provider.appBootstrapEnabled !== true) {
       return { route };
     }
 
+    if (!this.appBootstrapper) {
+      throw new EntrywayError("app_bootstrap_unavailable", "Required provider app bootstrap is unavailable", {
+        statusCode: 503,
+        retryable: true,
+      });
+    }
+
     if (route.appBootstrap?.status === "ready") {
+      if (route.appBootstrap.appClientId !== provider.appClientId) {
+        throw new EntrywayError("app_bootstrap_identity_mismatch", "App bootstrap belongs to a different client", {
+          statusCode: 409,
+          retryable: false,
+        });
+      }
       return { route };
     }
 
