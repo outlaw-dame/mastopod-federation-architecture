@@ -471,6 +471,17 @@ export class EntrywayProvisioningService {
     }
 
     const current = await this.assertOwnership(route.accountId, fenceToken);
+    if (current.provisioning.providerCreateMayHaveSideEffects === true) {
+      // This is a reclaimed attempt, not a new provider operation. The
+      // previous worker may have created the WebID, DID or PDS repository
+      // before its reply or state update was lost. Never send a second
+      // create request, even with the same idempotency reference.
+      throw new EntrywayError(
+        "account_reconciliation_required",
+        "Previous provider creation outcome requires reconciliation",
+        { statusCode: 409, retryable: false },
+      );
+    }
     // Commit the uncertainty fence BEFORE the outbound provider request.
     // There is no safe way to distinguish a lost HTTP reply from a completed
     // WebID/PLC/PDS write after a crash. The marker survives worker loss.
