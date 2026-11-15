@@ -38,6 +38,11 @@ const createAccountBodySchema = z.object({
   idempotencyKey: z.string().trim().min(8).max(200).optional(),
 });
 
+const resumeBodySchema = z.object({
+  username: z.string().trim().min(3).max(64),
+  appClientId: z.string().trim().url().max(2048),
+}).strict();
+
 const recoverBodySchema = z.object({
   limit: z.number().int().min(1).max(100).optional(),
 }).optional();
@@ -72,7 +77,45 @@ export function registerEntrywayFastifyRoutes(app: FastifyInstance, deps: Entryw
       reply.code(result.replayed ? 200 : 201).send({
         account: serializeAccountRoute(result.route),
         replayed: result.replayed,
-        sessionHandoff: result.sessionHandoff,
+        // Never treat arbitrary bootstrap handoff metadata as a verified
+        // Solid-OIDC login or a redirect destination.
+      });
+    } catch (error) {
+      sendEntrywayError(reply, error);
+    }
+  });
+
+  // Backend-to-backend continuation only. The Paper server must keep the
+  // original idempotency key in its own protected transaction session;
+  // never put the key or account password into a browser callback.
+  app.post("/entryway/accounts/consent/resume", async (req, reply) => {
+    applyNoStoreHeaders(reply);
+    if (!isAuthorized(req, deps.entrywayToken)) {
+      reply.code(401).send({ error: "unauthorized" });
+      return;
+    }
+
+    try {
+      const parsed = resumeBodySchema.safeParse(parseRequestBody(req.body));
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request" });
+        return;
+      }
+      const idempotencyKey = readIdempotencyKey(req);
+      if (!idempotencyKey) {
+        reply.code(400).send({ error: "idempotency_key_required", retryable: false });
+        return;
+      }
+
+      const resumed = await deps.service.resumeAwaitingConsent({
+        ...parsed.data,
+        idempotencyKey,
+      });
+      reply.code(200).send({
+        account: serializeAccountRoute(resumed.route),
+        replayed: resumed.replayed,
+        // Never expose a provider-issued session handoff here. Native
+        // Solid-OIDC login must prove the owner in a separate accepted flow.
       });
     } catch (error) {
       sendEntrywayError(reply, error);

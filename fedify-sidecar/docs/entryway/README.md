@@ -163,12 +163,67 @@ Neither the user request, the provider error body nor a remote application
 callback is allowed to set the redirect destination. If no safe URL is
 configured, the error has no link and the route remains non-active.
 
-After authorizing the app, the client must retry the **exact original**
-idempotency-scoped signup operation. A changed request will be rejected; a
-correct replay resumes the existing route without creating another WebID,
-actor or DID. Never put the account password, verification token or raw
-idempotency secret in an authorization URL or browser storage. The higher-level
-Paper client must handle this browser return and securely resume the operation.
+After authorizing the app, the trusted backend can invoke the
+**backend-only consent-resume endpoint below**, supplying the same
+idempotency reference from its protected server-side transaction store.
+The earlier exact-original-signup replay remains supported for legacy
+backend clients, but new clients do not need to resend the signup password
+or verification token. The Paper client must still implement and test
+its authenticated browser return and secure transaction binding.
+
+## Backend-only consent resumption without resending signup credentials
+
+After the Pod owner completes native SAI authorization, the trusted Paper
+backend can resume an **already provisioned** consent-pending account using
+only its existing server-side transaction reference:
+
+```http
+POST /entryway/accounts/consent/resume
+Authorization: Bearer <backend-to-entryway token>
+Idempotency-Key: <original high-entropy signup key>
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "appClientId": "https://memory.example/app"
+}
+```
+
+The endpoint is **not publicly callable**. It rejects requests without
+`ENTRYWAY_TOKEN` before looking up an account, requires the original
+idempotency key in the HTTP header, and rejects client-supplied passwords,
+redirect URIs and unsolicited body properties. The Paper backend must
+retain the key inside a protected, expiring **server-side transaction**
+bound to the original authenticated signup session. Never put the
+idempotency key, signup password, verification challenge, provider bearer
+or access token in a browser callback URL, query string, web storage,
+analytics, or log.
+
+Entryway loads the canonical username route and uses the same HMAC secret
+as the original reservation to check the supplied idempotency key
+without revealing whether an unrelated username exists. It additionally
+requires the exact original provider, enabled bootstrap policy and
+app-client ID, even if multiple clients share one SAI application URI.
+No signup password, verification token or provider account creation RPC
+is needed for an account with complete existing provider identity.
+
+For a still-`awaiting_consent` account, Entryway claims the existing
+route with its Redis/PostgreSQL-independent route CAS revision/fence,
+reverifies the WebID/ActivityPub/ATProto bundle, and invokes the
+provider-owned read-only SAI bootstrap. Only verified current owner
+grants can advance the route to active. A second worker cannot overwrite
+the winning fence or create a second WebID/DID. A 428 response leaves
+the original route non-active, with only the operator-pinned SAI consent
+URL. A repeated call after activation rechecks **current** provider
+grants and returns routing state, not a newly minted user session.
+
+The resume response intentionally **never returns a provider session
+handoff**. This is not a replacement for Solid-OIDC login; an actual
+browser session must authenticate as the Pod owner independently.
+The browser-to-Paper authenticated callback and secure state linkage are
+not yet implemented by this Entryway route. The production signed-PDS,
+restricted PostgreSQL credentials, native SAI permission enforcement
+and real browser callback acceptance remain separate release gates.
 
 ## Current limits and release boundaries
 

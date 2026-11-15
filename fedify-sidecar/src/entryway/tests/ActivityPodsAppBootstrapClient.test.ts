@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ActivityPodsAppBootstrapClient } from "../ActivityPodsAppBootstrapClient.js";
 
 describe("ActivityPodsAppBootstrapClient", () => {
-  it("calls the configured provider bootstrap path and returns only sanitized handoff metadata", async () => {
+  it("requires real SAI grant resources and drops unverified provider session-handoff metadata", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {
       appRegistrationUri: "http://localhost:3000/alice/data/app-registration-memory",
       accessGrantUris: ["http://localhost:3000/alice/data/grant-memory"],
@@ -79,12 +79,129 @@ describe("ActivityPodsAppBootstrapClient", () => {
       accessGrantUris: ["http://localhost:3000/alice/data/grant-memory"],
       bootstrappedAt: "2026-01-01T00:00:00.000Z",
     });
-    expect(result.sessionHandoff).toEqual({
-      type: "redirect",
-      url: "https://memory.example/session/handoff?id=abc",
-      expiresAt: "2026-01-01T00:05:00.000Z",
+    expect(result).not.toHaveProperty("sessionHandoff");
+    expect(JSON.stringify(result)).not.toContain("session/handoff");
+    expect(JSON.stringify(result)).not.toContain("must-not-surface");
+  });
+  it.each([
+    ["empty HTTP 200", {}],
+    ["missing registration", { accessGrantUris: [] }],
+    ["missing grant collection", {
+      appRegistrationUri: "http://localhost:3000/alice/data/registration"
+    }],
+    ["cross-account registration", {
+      appRegistrationUri: "http://localhost:3000/bob/data/registration", accessGrantUris: [],
+    }],
+    ["cross-account grant", {
+      appRegistrationUri: "http://localhost:3000/alice/data/registration",
+      accessGrantUris: ["http://localhost:3000/bob/data/grant"],
+    }],
+    ["cross-provider origin", {
+      appRegistrationUri: "https://evil.example/alice/data/registration",
+      accessGrantUris: [],
+    }],
+    ["invalid scheme", {
+      appRegistrationUri: "javascript:alert(1)", accessGrantUris: [],
+    }],
+    ["credential-bearing URL", {
+      appRegistrationUri: "http://admin:secret@localhost:3000/alice/data/registration",
+      accessGrantUris: [],
+    }],
+    ["query-injected grant URI", {
+      appRegistrationUri: "http://localhost:3000/alice/data/registration",
+      accessGrantUris: ["http://localhost:3000/alice/data/grant?token=secret"],
+    }],
+    ["duplicate grant", {
+      appRegistrationUri: "http://localhost:3000/alice/data/registration",
+      accessGrantUris: [
+        "http://localhost:3000/alice/data/grant",
+        "http://localhost:3000/alice/data/grant",
+      ],
+    }],
+    ["silent filtering of invalid grants", {
+      appRegistrationUri: "http://localhost:3000/alice/data/registration",
+      accessGrantUris: [false],
+    }],
+    ["oversized grant list", {
+      appRegistrationUri: "http://localhost:3000/alice/data/registration",
+      accessGrantUris: Array(129).fill("http://localhost:3000/alice/data/grant"),
+    }],
+  ])("fails closed on %s provider SAI proof", async (_name, body) => {
+    const client = new ActivityPodsAppBootstrapClient({
+      fetchFn: vi.fn().mockResolvedValue(jsonResponse(200, body)) as unknown as typeof fetch,
+      retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    });
+    const provider = {
+      providerId: "default",
+      baseUrl: "http://localhost:3000",
+      provisioningBearerToken: "provider-token",
+      appClientId: "https://memory.example/app",
+      appBootstrapEnabled: true,
+      appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+    };
+    const route = {
+      accountId: "acct_11111111-1111-4111-8111-111111111111",
+      canonicalAccountId: "http://localhost:3000/alice/profile/card#me",
+      username: "alice",
+      handle: "@alice@localhost",
+      webId: "http://localhost:3000/alice/profile/card#me",
+      actorId: "http://localhost:3000/alice",
+      podStorageUrl: "http://localhost:3000/alice/data/",
+      providerId: "default", providerBaseUrl: "http://localhost:3000",
+      oidcIssuer: "http://localhost:3000",
+      status: "provisioning" as const,
+      provisioning: {
+        phase: "ACTOR_VALIDATED" as const, attempts: 1,
+        idempotencyKeyHash: "hash", requestFingerprint: "fingerprint", checks: [],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    await expect(client.bootstrap({ provider, route })).rejects.toMatchObject({
+      code: "app_bootstrap_invalid_response", statusCode: 502, retryable: false,
     });
   });
+
+  it("allows a genuine owner registration with no optional grants, but never treats a blank 200 as consent", async () => {
+    const client = new ActivityPodsAppBootstrapClient({
+      fetchFn: vi.fn().mockResolvedValue(jsonResponse(200, {
+        appRegistrationUri: "http://localhost:3000/alice/data/registration",
+        accessGrantUris: [],
+      })) as unknown as typeof fetch,
+      retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    });
+    const provider = {
+      providerId: "default", baseUrl: "http://localhost:3000",
+      provisioningBearerToken: "provider-token",
+      appClientId: "https://memory.example/app", appBootstrapEnabled: true,
+      appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+    };
+    const route = {
+      accountId: "acct_11111111-1111-4111-8111-111111111111",
+      canonicalAccountId: "http://localhost:3000/alice/profile/card#me",
+      username: "alice", handle: "@alice@localhost",
+      webId: "http://localhost:3000/alice/profile/card#me",
+      actorId: "http://localhost:3000/alice",
+      podStorageUrl: "http://localhost:3000/alice/data/",
+      providerId: "default", providerBaseUrl: "http://localhost:3000",
+      oidcIssuer: "http://localhost:3000",
+      status: "provisioning" as const,
+      provisioning: {
+        phase: "ACTOR_VALIDATED" as const, attempts: 1,
+        idempotencyKeyHash: "hash", requestFingerprint: "fingerprint", checks: [],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const result = await client.bootstrap({ provider, route });
+    expect(result.snapshot).toMatchObject({
+      status: "ready",
+      appRegistrationUri: "http://localhost:3000/alice/data/registration",
+      accessGrantUris: [],
+    });
+    expect(result).not.toHaveProperty("sessionHandoff");
+  });
+
   it("converts native SAI consent-required HTTP 428 into a safe resumable signal", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ message: "password=must-not-leak", consentUrl: "https://evil.example/steal" }),

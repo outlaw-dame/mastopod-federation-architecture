@@ -55,6 +55,16 @@ export interface EntrywayAccountCreateInput {
   idempotencyKey: string;
 }
 
+/**
+ * Server-to-server resumption of an existing consent-pending signup.
+ * Never contains a password, verification token, OIDC bearer or browser URL.
+ */
+export interface EntrywayConsentResumeInput {
+  username: string;
+  appClientId: string;
+  idempotencyKey: string;
+}
+
 export interface EntrywayProviderDefinition {
   providerId: string;
   baseUrl: string;

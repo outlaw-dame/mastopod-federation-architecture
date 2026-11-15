@@ -135,6 +135,51 @@ function createService(fetchFn: typeof fetch, options: {
   });
 }
 
+async function consentPendingFixture() {
+  const { fetchMock, calls } = createFetchMock();
+  const store = new InMemoryAccountRouteStore();
+  const ready = {
+    snapshot: {
+      status: "ready" as const,
+      appClientId: "https://memory.example/app",
+      appRegistrationUri: "http://localhost:3000/alice/data/app-registration-memory",
+      accessGrantUris: ["http://localhost:3000/alice/data/grant-memory"],
+    },
+  };
+  const appBootstrapper = {
+    bootstrap: vi.fn()
+      .mockRejectedValueOnce(new EntrywayError(
+        "app_consent_required", "Native Pod-owner authorization required",
+        { statusCode: 428, retryable: false },
+      ))
+      .mockResolvedValue(ready),
+  };
+  const provider = {
+    providerId: "default",
+    baseUrl: "http://localhost:3000",
+    provisioningBearerToken: "provider-provisioning-token",
+    appClientId: "https://memory.example/app",
+    appBootstrapEnabled: true,
+    appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+    saiAuthorizationUrl: "https://id.pods.example/authorize",
+    saiAppUri: "https://memory.example/app",
+  };
+  const service = createService(fetchMock as unknown as typeof fetch, {
+    store, appBootstrapper, providers: [provider],
+  });
+  await expect(service.createAccount(createInput())).rejects.toMatchObject({
+    code: "app_consent_required",
+    statusCode: 428,
+  });
+  return { service, store, appBootstrapper, ready, provider, calls, fetchMock };
+}
+
+const consentResume = {
+  username: "Alice",
+  appClientId: "https://memory.example/app",
+  idempotencyKey: "idem.alice.0001",
+};
+
 describe("EntrywayProvisioningService", () => {
   it("creates an active route only after provider provisioning and bundle verification", async () => {
     const { fetchMock, calls } = createFetchMock();
@@ -285,12 +330,42 @@ describe("EntrywayProvisioningService", () => {
       appRegistrationUri: "http://localhost:3000/alice/data/app-registration-memory",
       accessGrantUris: ["http://localhost:3000/alice/data/grant-memory"],
     });
-    expect(result.sessionHandoff).toEqual({
-      type: "handoff",
-      handoffId: "handoff-123",
-      expiresAt: "2026-01-01T00:05:00.000Z",
-    });
+    expect(result).not.toHaveProperty("sessionHandoff");
     expect(JSON.stringify(result.route)).not.toContain("handoff-123");
+  });
+
+  it("never activates a bootstrapper that claims ready without the owner registration", async () => {
+    const { fetchMock, calls } = createFetchMock();
+    const service = createService(fetchMock as unknown as typeof fetch, {
+      appBootstrapper: {
+        bootstrap: vi.fn().mockResolvedValue({
+          snapshot: {
+            status: "ready" as const,
+            appClientId: "https://memory.example/app",
+            accessGrantUris: [],
+          },
+          sessionHandoff: {
+            type: "redirect", url: "https://evil.example/session/token",
+          },
+        }),
+      },
+      providers: [{
+        providerId: "default",
+        baseUrl: "http://localhost:3000",
+        provisioningBearerToken: "provider-provisioning-token",
+        appClientId: "https://memory.example/app",
+        appBootstrapEnabled: true,
+        appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+      }],
+    });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_bootstrap_invalid_response",
+    });
+    const route = await service.getByUsername("alice");
+    expect(route?.status).toBe("failed");
+    expect(route?.provisioning.phase).toBe("FAILED");
+    expect(JSON.stringify(route)).not.toContain("evil.example");
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
   });
 
   it("holds a completed Pod account for native SAI consent and resumes without a second signup", async () => {
@@ -367,6 +442,138 @@ describe("EntrywayProvisioningService", () => {
     expect(resumed.route.revision).toBeGreaterThan(waiting!.revision!);
     expect(calls.filter((call) => call.url.endsWith("/api/accounts/create"))).toHaveLength(1);
     expect(appBootstrapper.bootstrap).toHaveBeenCalledTimes(2);
+  });
+
+  it("resumes an authenticated consent-pending signup without password, provider creation or another DID", async () => {
+    const { service, store, appBootstrapper, calls } = await consentPendingFixture();
+    const awaiting = await store.getByUsername("alice");
+    expect(awaiting?.status).toBe("awaiting_consent");
+    expect(JSON.stringify(awaiting)).not.toContain("CorrectHorseBatteryStaple1");
+
+    const result = await service.resumeAwaitingConsent(consentResume);
+    expect(result.replayed).toBe(true);
+    expect(result.route.status).toBe("active");
+    expect(result.route.provisioning.phase).toBe("ACTIVE");
+    expect(result).not.toHaveProperty("sessionHandoff");
+    expect(result.route.revision).toBeGreaterThan(awaiting!.revision!);
+    expect(appBootstrapper.bootstrap).toHaveBeenCalledTimes(2);
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+    expect((await store.getByUsername("alice"))?.status).toBe("active");
+  });
+
+  it("does not disclose another signup or call provider on wrong idempotency key and app-client scope", async () => {
+    const { service, appBootstrapper, calls } = await consentPendingFixture();
+    for (const input of [
+      { ...consentResume, username: "bob" },
+      { ...consentResume, idempotencyKey: "idem.not-alice.12345" },
+    ]) {
+      await expect(service.resumeAwaitingConsent(input)).rejects.toMatchObject({
+        code: "consent_resume_not_found", statusCode: 404,
+      });
+    }
+    await expect(service.resumeAwaitingConsent({
+      ...consentResume, appClientId: "https://alternate.example/app",
+    })).rejects.toMatchObject({
+      code: "app_consent_provider_changed", statusCode: 409,
+    });
+    expect(appBootstrapper.bootstrap).toHaveBeenCalledTimes(1);
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+  });
+
+  it("does not activate an owner who has not finished native SAI consent", async () => {
+    const { service, store, appBootstrapper, calls } = await consentPendingFixture();
+    appBootstrapper.bootstrap.mockRejectedValueOnce(new EntrywayError(
+      "app_consent_required", "Authorization is still missing",
+      { statusCode: 428, retryable: false },
+    ));
+    await expect(service.resumeAwaitingConsent(consentResume)).rejects.toMatchObject({
+      code: "app_consent_required", statusCode: 428,
+      details: {
+        authorizationUrl: "https://id.pods.example/authorize?client_id=https%3A%2F%2Fmemory.example%2Fapp",
+      },
+    });
+    const awaiting = await store.getByUsername("alice");
+    expect(awaiting?.status).toBe("awaiting_consent");
+    expect(awaiting?.provisioning.phase).toBe("AWAITING_APP_CONSENT");
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+  });
+
+  it("an idempotent resume of an active route rechecks current provider grants without issuing a session", async () => {
+    const { service, appBootstrapper, calls } = await consentPendingFixture();
+    await service.resumeAwaitingConsent(consentResume);
+    const duplicate = await service.resumeAwaitingConsent(consentResume);
+    expect(duplicate.replayed).toBe(true);
+    expect(duplicate.route.status).toBe("active");
+    expect(duplicate).not.toHaveProperty("sessionHandoff");
+    expect(appBootstrapper.bootstrap).toHaveBeenCalledTimes(3);
+    appBootstrapper.bootstrap.mockRejectedValueOnce(new EntrywayError(
+      "app_consent_required", "Grant has been revoked",
+      { statusCode: 428, retryable: false },
+    ));
+    await expect(service.resumeAwaitingConsent(consentResume)).rejects.toMatchObject({
+      code: "app_consent_required", statusCode: 428,
+    });
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+  });
+
+  it("a competing authenticated worker cannot take an already claimed consent route", async () => {
+    const { service, appBootstrapper, store } = await consentPendingFixture();
+    let release!: () => void;
+    const parked = new Promise<void>(resolve => { release = resolve; });
+    let started!: () => void;
+    const reached = new Promise<void>(resolve => { started = resolve; });
+    appBootstrapper.bootstrap.mockImplementationOnce(async () => {
+      started();
+      await parked;
+      return {
+        snapshot: {
+          status: "ready" as const, appClientId: "https://memory.example/app",
+          appRegistrationUri: "http://localhost:3000/alice/data/app-registration-memory",
+          accessGrantUris: ["http://localhost:3000/alice/data/grant-memory"],
+        },
+      };
+    });
+    const winner = service.resumeAwaitingConsent(consentResume);
+    await reached;
+    await expect(service.resumeAwaitingConsent(consentResume)).rejects.toMatchObject({
+      code: "consent_not_pending", statusCode: 409,
+    });
+    release();
+    const result = await winner;
+    expect(result.route.status).toBe("active");
+    expect((await store.getByUsername("alice"))?.status).toBe("active");
+  });
+
+  it("rechecks a persisted ready SAI snapshot after a stale worker crash before activation", async () => {
+    const { service, store, appBootstrapper, calls } = await consentPendingFixture();
+    const pending = await store.getByUsername("alice");
+    expect(pending).not.toBeNull();
+    await store.save({
+      ...pending!,
+      status: "provisioning",
+      updatedAt: "2025-01-01T00:00:00.000Z",
+      appBootstrap: {
+        status: "ready",
+        appClientId: "https://memory.example/app",
+        appRegistrationUri: "http://localhost:3000/alice/data/old-registration",
+        accessGrantUris: ["http://localhost:3000/alice/data/now-revoked-grant"],
+      },
+      provisioning: {
+        ...pending!.provisioning,
+        phase: "APP_BOOTSTRAP_READY",
+      },
+    });
+    appBootstrapper.bootstrap.mockRejectedValueOnce(new EntrywayError(
+      "app_consent_required", "SAI grant has since been revoked",
+      { statusCode: 428, retryable: false },
+    ));
+
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_required", statusCode: 428,
+    });
+    expect((await store.getByUsername("alice"))?.status).toBe("awaiting_consent");
+    expect(appBootstrapper.bootstrap).toHaveBeenCalledTimes(2);
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
   });
 
   it("cannot skip pending owner consent by disabling provider bootstrap", async () => {
@@ -529,7 +736,7 @@ describe("EntrywayProvisioningService", () => {
     expect(result).toEqual({ recovered: 0, failed: 1, skipped: 0 });
     const route = await store.getByUsername("alice");
     expect(route?.status).toBe("failed");
-    expect(route?.provisioning.lastErrorCode).toBe("app_bootstrap_identity_mismatch");
+    expect(route?.provisioning.lastErrorCode).toBe("app_consent_provider_changed");
     expect(appBootstrapper.bootstrap).not.toHaveBeenCalled();
   });
 });
