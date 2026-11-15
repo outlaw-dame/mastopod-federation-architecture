@@ -94,7 +94,7 @@ export class ActivityPodsAppBootstrapClient implements EntrywayAppBootstrapper {
       }),
     });
 
-    return parseBootstrapResponse(provider, response);
+    return parseBootstrapResponse(provider, route, response);
   }
 
   private async requestJson(url: string, init: RequestInit): Promise<Record<string, unknown>> {
@@ -166,12 +166,28 @@ export class ActivityPodsAppBootstrapClient implements EntrywayAppBootstrapper {
 
 function parseBootstrapResponse(
   provider: EntrywayProviderDefinition,
+  route: AccountRoute,
   response: Record<string, unknown>,
 ): AppBootstrapResult {
-  const appRegistrationUri = readOptionalString(response["appRegistrationUri"]);
-  const accessGrantUris = Array.isArray(response["accessGrantUris"])
-    ? response["accessGrantUris"].filter((value): value is string => typeof value === "string" && !!value.trim())
-    : [];
+  // HTTP 200 is not proof of a Pod owner grant. The provider must return
+  // the actual SAI registration and a complete, bounded set of current
+  // grant URIs scoped to the new account's *own* Pod storage.
+  const appRegistrationUri = requirePodResourceUri(
+    response["appRegistrationUri"], route.podStorageUrl,
+  );
+  const rawGrants = response["accessGrantUris"];
+  if (!Array.isArray(rawGrants) || rawGrants.length > 128) {
+    throw new EntrywayError("app_bootstrap_invalid_response", "Provider SAI grant evidence is incomplete", {
+      statusCode: 502, retryable: false,
+    });
+  }
+  const accessGrantUris = rawGrants.map(value =>
+    requirePodResourceUri(value, route.podStorageUrl));
+  if (new Set(accessGrantUris).size !== accessGrantUris.length) {
+    throw new EntrywayError("app_bootstrap_invalid_response", "Provider SAI grant evidence is inconsistent", {
+      statusCode: 502, retryable: false,
+    });
+  }
 
   const snapshot: EntrywayAppBootstrapSnapshot = {
     status: "ready",
@@ -181,32 +197,40 @@ function parseBootstrapResponse(
     bootstrappedAt: readOptionalString(response["bootstrappedAt"]) ?? new Date().toISOString(),
   };
 
-  const sessionHandoff = parseSessionHandoff(response["sessionHandoff"]);
-  return sessionHandoff ? { snapshot, sessionHandoff } : { snapshot };
+  // A provider-supplied URL or handoff ID is not an authenticated Solid-OIDC
+  // session. Do not relay even apparently valid 2xx handoff metadata until
+  // its issuer, signature, audience, expiry and redirect binding are verified.
+  return { snapshot };
 }
 
-function parseSessionHandoff(value: unknown): EntrywaySessionHandoff | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
+function requirePodResourceUri(value: unknown, podStorageUrl: string): string {
+  const invalid = () => new EntrywayError(
+    "app_bootstrap_invalid_response",
+    "Provider SAI resource evidence is not scoped to the Pod owner",
+    { statusCode: 502, retryable: false },
+  );
+  if (typeof value !== "string" || value.length > 2048 ||
+      typeof podStorageUrl !== "string" || podStorageUrl.length > 2048) {
+    throw invalid();
   }
-
-  const record = value as Record<string, unknown>;
-  const type = record["type"] === "redirect" ? "redirect" : record["type"] === "handoff" ? "handoff" : undefined;
-  if (!type) {
-    return undefined;
+  try {
+    const root = new URL(podStorageUrl);
+    const uri = new URL(value);
+    const pathPrefix = root.pathname.endsWith("/") ? root.pathname : root.pathname + "/";
+    if ((root.protocol !== "https:" && root.protocol !== "http:") ||
+        (uri.protocol !== "https:" && uri.protocol !== "http:") ||
+        !root.hostname || !uri.hostname ||
+        root.username || root.password || root.search || root.hash ||
+        uri.username || uri.password || uri.search || uri.hash ||
+        uri.origin !== root.origin ||
+        !uri.pathname.startsWith(pathPrefix) ||
+        root.href !== podStorageUrl || uri.href !== value) {
+      throw invalid();
+    }
+    return uri.href;
+  } catch {
+    throw invalid();
   }
-
-  const handoff: EntrywaySessionHandoff = { type };
-  if (typeof record["url"] === "string" && record["url"].trim()) {
-    handoff.url = record["url"].trim();
-  }
-  if (typeof record["handoffId"] === "string" && record["handoffId"].trim()) {
-    handoff.handoffId = record["handoffId"].trim();
-  }
-  if (typeof record["expiresAt"] === "string" && record["expiresAt"].trim()) {
-    handoff.expiresAt = record["expiresAt"].trim();
-  }
-  return handoff;
 }
 
 function readOptionalString(value: unknown): string | undefined {
