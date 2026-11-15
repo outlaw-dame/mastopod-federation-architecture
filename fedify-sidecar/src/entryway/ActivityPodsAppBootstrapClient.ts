@@ -1,4 +1,5 @@
 import { EntrywayError } from "./errors.js";
+import { readBoundedJson } from "./readBoundedJson.js";
 import { buildProviderIdempotencyKey } from "./providerIdempotency.js";
 import {
   isRetryableHttpStatus,
@@ -104,10 +105,14 @@ export class ActivityPodsAppBootstrapClient implements EntrywayAppBootstrapper {
         try {
           const response = await this.fetchFn(url, {
             ...init,
+            redirect: "manual",
             signal: controller.signal,
           });
           if (response.ok) {
-            const body = await parseJsonBody(response);
+            const body = await readBoundedJson(response, {
+              errorCode: "app_bootstrap_invalid_response",
+              invalidMessage: "Provider app bootstrap returned invalid JSON or exceeded the response limit",
+            });
             if (!body || typeof body !== "object" || Array.isArray(body)) {
               throw new EntrywayError("app_bootstrap_invalid_response", "Provider app bootstrap response is invalid", {
                 statusCode: 502,
@@ -191,22 +196,6 @@ function parseSessionHandoff(value: unknown): EntrywaySessionHandoff | undefined
     handoff.expiresAt = record["expiresAt"].trim();
   }
   return handoff;
-}
-
-async function parseJsonBody(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text) {
-    return {};
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch (error) {
-    throw new EntrywayError("app_bootstrap_invalid_response", "Provider app bootstrap returned malformed JSON", {
-      statusCode: 502,
-      retryable: false,
-      cause: error,
-    });
-  }
 }
 
 function readOptionalString(value: unknown): string | undefined {
