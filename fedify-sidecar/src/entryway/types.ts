@@ -21,6 +21,7 @@ export type EntrywayProvisioningPhase =
   | "PENDING"
   | "USERNAME_RESERVED"
   | "PROVIDER_SELECTED"
+  | "PROVIDER_CREATE_STARTED"
   | "POD_ACCOUNT_CREATED"
   | "WEBID_DISCOVERED"
   | "ACTOR_VALIDATED"
@@ -105,6 +106,9 @@ export interface EntrywayProvisioningSnapshot {
   attempts: number;
   // Rotated whenever a new worker wins ownership of a provisioning attempt.
   fenceToken?: string;
+  // Set atomically before the first account-create RPC. A missing response
+  // must never be treated as evidence that no WebID/DID was created.
+  providerCreateMayHaveSideEffects?: boolean;
   idempotencyKeyHash: string;
   requestFingerprint: string;
   checks: EntrywayBundleCheck[];
