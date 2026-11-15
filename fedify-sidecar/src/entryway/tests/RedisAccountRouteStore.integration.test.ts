@@ -243,6 +243,35 @@ describe.skipIf(!run)("RedisAccountRouteStore real Lua fencing and pending-index
     expect(await redis.zscore(`${prefix}:index`, route.accountId)).toBeNull();
   });
 
+  it("surfaces a corrupt legacy timestamp until a fenced worker quarantines it", async () => {
+    const original = makeRoute(`acct_${randomUUID()}`, "corrupttimestamp", {
+      updatedAt: "not-an-iso-timestamp",
+    });
+    track(original);
+    expect((await store.reserve({
+      accountId: original.accountId, username: original.username,
+      idempotencyKeyHash: original.provisioning.idempotencyKeyHash,
+      requestFingerprint: original.provisioning.requestFingerprint,
+      route: original,
+    })).kind).toBe("created");
+    const found = await store.listStaleProvisioning("2030-01-01T00:00:00.000Z", 20);
+    expect(found.some(candidate => candidate.accountId === original.accountId)).toBe(true);
+    const claimed = claim(original, "timestamp-repair-owner");
+    expect(await store.compareAndSet(original, claimed)).toBe(true);
+    const quarantine: AccountRoute = {
+      ...claimed, revision: 2, status: "reconciliation_required",
+      provisioning: {
+        ...claimed.provisioning,
+        phase: "RECONCILIATION_REQUIRED",
+        lastErrorCode: "account_timestamp_invalid",
+      },
+    };
+    expect(await store.compareAndSet(claimed, quarantine)).toBe(true);
+    expect(await redis.zscore(`${prefix}:index`, original.accountId)).toBeNull();
+    expect((await store.listStaleProvisioning("2030-01-01T00:00:00.000Z", 20))
+      .some(candidate => candidate.accountId === original.accountId)).toBe(false);
+  });
+
   it("drains legacy active records and repairs legacy creation-time scores", async () => {
     const active = makeRoute(`acct_${randomUUID()}`, "oldactive", { status: "active" });
     const recent = makeRoute(`acct_${randomUUID()}`, "recent", {
