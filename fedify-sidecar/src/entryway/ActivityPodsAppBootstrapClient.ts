@@ -128,7 +128,7 @@ export class ActivityPodsAppBootstrapClient implements EntrywayAppBootstrapper {
             "app_bootstrap_failed",
             `Provider app bootstrap failed with HTTP ${response.status}`,
             {
-              statusCode: response.status >= 500 ? 502 : response.status,
+              statusCode: response.status >= 400 && response.status < 500 ? response.status : 502,
               retryable: isRetryableHttpStatus(response.status),
               details: { providerStatus: response.status },
             },
