@@ -1,4 +1,5 @@
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
+import { buildProviderIdempotencyKey } from "./providerIdempotency.js";
 import { ActivityPodsProvisioningClient } from "./ActivityPodsProvisioningClient.js";
 import type { EntrywayAppBootstrapper } from "./ActivityPodsAppBootstrapClient.js";
 import { AccountBundleVerifier } from "./AccountBundleVerifier.js";
@@ -573,13 +574,6 @@ function mapProviderResultToRoute(
     atprotoDid,
     atprotoHandle,
   };
-}
-
-function buildProviderIdempotencyKey(route: AccountRoute): string {
-  return `entryway:${route.accountId}:${createHash("sha256")
-    .update(route.provisioning.idempotencyKeyHash)
-    .digest("hex")
-    .slice(0, 24)}`;
 }
 
 function mergeChecks(existing: EntrywayBundleCheck[], next: EntrywayBundleCheck[]): EntrywayBundleCheck[] {
