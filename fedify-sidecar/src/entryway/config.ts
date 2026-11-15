@@ -46,6 +46,8 @@ export function buildEntrywayProvidersFromEnv(
       enabled: env["ENTRYWAY_DEFAULT_PROVIDER_ENABLED"] !== "false",
       appBootstrapPath: env["ENTRYWAY_APP_BOOTSTRAP_PATH"] || undefined,
       appBootstrapEnabled: env["ENTRYWAY_APP_BOOTSTRAP_ENABLED"] === "true",
+      saiAuthorizationUrl: env["ENTRYWAY_SAI_AUTHORIZATION_URL"] || undefined,
+      saiAppUri: env["ENTRYWAY_SAI_APP_URI"] || undefined,
     },
   ];
 }
@@ -85,6 +87,8 @@ function parseProvidersJson(rawJson: string): EntrywayProviderDefinition[] {
       enabled: record["enabled"] !== false,
       appBootstrapPath: readOptionalString(record, "appBootstrapPath"),
       appBootstrapEnabled: record["appBootstrapEnabled"] === true,
+      saiAuthorizationUrl: readOptionalString(record, "saiAuthorizationUrl"),
+      saiAppUri: readOptionalString(record, "saiAppUri"),
     };
   });
 }
