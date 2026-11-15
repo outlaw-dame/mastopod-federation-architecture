@@ -341,6 +341,18 @@ export class EntrywayProvisioningService {
     provider: EntrywayProviderDefinition,
     fenceToken: string,
   ): Promise<{ route: AccountRoute; sessionHandoff?: EntrywayProvisioningResult["sessionHandoff"] }> {
+    // A consent-pending account can never be promoted by disabling the
+    // bootstrap feature or changing its approved client during a retry.
+    if (route.appBootstrap?.status === "awaiting_consent" &&
+        (provider.appBootstrapEnabled !== true ||
+          route.appBootstrap.appClientId !== provider.appClientId)) {
+      throw new EntrywayError(
+        "app_consent_provider_changed",
+        "Original application authorization policy is no longer available",
+        { statusCode: 409, retryable: false },
+      );
+    }
+
     if (provider.appBootstrapEnabled !== true) {
       return { route };
     }
@@ -377,6 +389,29 @@ export class EntrywayProvisioningService {
         sessionHandoff: result.sessionHandoff,
       };
     } catch (error) {
+      if (error instanceof EntrywayError && error.code === "app_consent_required") {
+        // Preserve the completed provider identity but leave the account
+        // nonactive and outside unattended recovery. Only a new authenticated,
+        // same-idempotency request may resume after native SAI approval.
+        await this.updateRoute(route.accountId, fenceToken, {
+          status: "awaiting_consent",
+          appBootstrap: {
+            status: "awaiting_consent",
+            appClientId: provider.appClientId,
+            accessGrantUris: [],
+            lastErrorCode: "app_consent_required",
+            lastErrorMessage: "Pod owner authorization is required",
+          },
+          provisioning: {
+            ...route.provisioning,
+            phase: "AWAITING_APP_CONSENT",
+            lastErrorCode: "app_consent_required",
+            lastErrorMessage: "Pod owner authorization is required",
+          },
+        });
+        throw error;
+      }
+
       const code = error instanceof EntrywayError ? error.code : "app_bootstrap_failed";
       await this.updateRoute(route.accountId, fenceToken, {
         appBootstrap: {
@@ -399,7 +434,8 @@ export class EntrywayProvisioningService {
   }
 
   private async claimProvisioning(route: AccountRoute): Promise<AccountRoute | null> {
-    if (route.status !== "provisioning" && route.status !== "failed") return null;
+    if (route.status !== "provisioning" && route.status !== "failed" &&
+        route.status !== "awaiting_consent") return null;
     const token = randomUUID();
     const claimed: AccountRoute = {
       ...route,

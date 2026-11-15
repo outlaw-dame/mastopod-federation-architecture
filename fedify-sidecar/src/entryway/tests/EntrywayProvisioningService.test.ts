@@ -293,6 +293,114 @@ describe("EntrywayProvisioningService", () => {
     expect(JSON.stringify(result.route)).not.toContain("handoff-123");
   });
 
+  it("holds a completed Pod account for native SAI consent and resumes without a second signup", async () => {
+    const { fetchMock, calls } = createFetchMock();
+    const store = new InMemoryAccountRouteStore();
+    const grantResponse = {
+      snapshot: {
+        status: "ready" as const,
+        appClientId: "https://memory.example/app",
+        appRegistrationUri: "http://localhost:3000/alice/data/app-registration-memory",
+        accessGrantUris: ["http://localhost:3000/alice/data/grant-memory"],
+      },
+    };
+    const appBootstrapper = {
+      bootstrap: vi.fn()
+        .mockRejectedValueOnce(new EntrywayError(
+          "app_consent_required",
+          "Pod owner authorization is required",
+          { statusCode: 428, retryable: false },
+        ))
+        .mockResolvedValue(grantResponse),
+    };
+    const providers = [{
+      providerId: "default",
+      baseUrl: "http://localhost:3000",
+      provisioningBearerToken: "provider-provisioning-token",
+      appClientId: "https://memory.example/app",
+      appBootstrapEnabled: true,
+      appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+    }];
+    const service = createService(fetchMock as unknown as typeof fetch, {
+      store,
+      appBootstrapper,
+      providers,
+    });
+
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_required",
+      statusCode: 428,
+      retryable: false,
+    });
+    const waiting = await store.getByUsername("alice");
+    expect(waiting).toMatchObject({
+      status: "awaiting_consent",
+      provisioning: { phase: "AWAITING_APP_CONSENT" },
+      appBootstrap: {
+        status: "awaiting_consent",
+        appClientId: "https://memory.example/app",
+        accessGrantUris: [],
+      },
+    });
+    expect(waiting?.webId).toBe("http://localhost:3000/alice/profile/card#me");
+    expect(waiting?.revision).toBeGreaterThan(0);
+    expect((await store.listStaleProvisioning("2030-01-01T00:00:00.000Z", 25))).toEqual([]);
+    expect(calls.filter((call) => call.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+
+    await expect(service.createAccount(createInput({
+      email: "changed-owner@example.com",
+    }))).rejects.toMatchObject({ code: "idempotency_key_conflict" });
+
+    const resumed = await service.createAccount(createInput());
+    expect(resumed.replayed).toBe(true);
+    expect(resumed.route.status).toBe("active");
+    expect(resumed.route.appBootstrap?.status).toBe("ready");
+    expect(resumed.route.revision).toBeGreaterThan(waiting!.revision!);
+    expect(calls.filter((call) => call.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+    expect(appBootstrapper.bootstrap).toHaveBeenCalledTimes(2);
+  });
+
+  it("cannot skip pending owner consent by disabling provider bootstrap", async () => {
+    const { fetchMock, calls } = createFetchMock();
+    const store = new InMemoryAccountRouteStore();
+    const first = createService(fetchMock as unknown as typeof fetch, {
+      store,
+      appBootstrapper: {
+        bootstrap: vi.fn().mockRejectedValue(new EntrywayError(
+          "app_consent_required", "Pod owner authorization is required",
+          { statusCode: 428, retryable: false },
+        )),
+      },
+      providers: [{
+        providerId: "default",
+        baseUrl: "http://localhost:3000",
+        provisioningBearerToken: "provider-provisioning-token",
+        appClientId: "https://memory.example/app",
+        appBootstrapEnabled: true,
+        appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+      }],
+    });
+    await expect(first.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_required",
+    });
+    const changedProvider = createService(fetchMock as unknown as typeof fetch, {
+      store,
+      providers: [{
+        providerId: "default",
+        baseUrl: "http://localhost:3000",
+        provisioningBearerToken: "provider-provisioning-token",
+        appClientId: "https://memory.example/app",
+        appBootstrapEnabled: false,
+      }],
+    });
+    await expect(changedProvider.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_provider_changed",
+      statusCode: 409,
+    });
+    expect((await store.getByUsername("alice"))?.status).not.toBe("active");
+    expect(calls.filter((call) => call.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+  });
+
   it("refuses activation when a configured bootstrap provider has no bootstrap client", async () => {
     const { fetchMock } = createFetchMock();
     const service = createService(fetchMock as unknown as typeof fetch, {

@@ -74,6 +74,43 @@ describe("AccountRoute CAS fencing", () => {
     expect((await store.getByAccountId(old.accountId))?.status).toBe("active");
   });
 
+  it("does not index consent-pending accounts or accept stale activation during resume", async () => {
+    const store = new InMemoryAccountRouteStore();
+    const old = route();
+    await store.save(old);
+    const claimed = nextAttempt(old, "first-attempt");
+    expect(await store.compareAndSet(old, claimed)).toBe(true);
+
+    const waiting: AccountRoute = {
+      ...claimed,
+      revision: 2,
+      status: "awaiting_consent",
+      provisioning: {
+        ...claimed.provisioning,
+        phase: "AWAITING_APP_CONSENT",
+      },
+    };
+    expect(await store.compareAndSet(claimed, waiting)).toBe(true);
+    expect(await store.listStaleProvisioning("2030-01-01T00:00:00.000Z", 25)).toEqual([]);
+    const forbidden = { ...waiting, revision: 3, status: "active" as const };
+    expect(await store.compareAndSet(waiting, forbidden)).toBe(false);
+    expect(await store.compareAndSet(claimed, {
+      ...claimed, revision: 3, status: "active",
+    })).toBe(false);
+
+    const newClaim = nextAttempt(waiting, "after-native-sai-consent");
+    expect(await store.compareAndSet(waiting, newClaim)).toBe(true);
+    expect(await store.compareAndSet(waiting, nextAttempt(waiting, "attacker"))).toBe(false);
+    const active: AccountRoute = {
+      ...newClaim,
+      revision: 4,
+      status: "active",
+      provisioning: { ...newClaim.provisioning, phase: "ACTIVE" },
+    };
+    expect(await store.compareAndSet(newClaim, active)).toBe(true);
+    expect((await store.getByAccountId(old.accountId))?.status).toBe("active");
+  });
+
   it("rejects mutations to immutable username and idempotency scope", async () => {
     const store = new InMemoryAccountRouteStore();
     const old = route();

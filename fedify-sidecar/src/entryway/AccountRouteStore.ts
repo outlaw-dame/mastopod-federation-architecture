@@ -290,7 +290,14 @@ local expectedRevision = tonumber(ARGV[1])
 local currentFence = current.provisioning and current.provisioning.fenceToken or ""
 local expectedFence = ARGV[2]
 if currentRevision ~= expectedRevision or currentFence ~= expectedFence then return 0 end
-if current.status ~= "provisioning" and current.status ~= "failed" then return 0 end
+if current.status ~= "provisioning" and current.status ~= "failed" and
+   current.status ~= "awaiting_consent" then return 0 end
+if current.status == "provisioning" then
+  if next.status ~= "provisioning" and next.status ~= "active" and
+     next.status ~= "failed" and next.status ~= "awaiting_consent" then return 0 end
+elseif next.status ~= "provisioning" then
+  return 0
+end
 if next.accountId ~= current.accountId or current.accountId ~= ARGV[5] or
    next.username ~= current.username or
    next.createdAt ~= current.createdAt or
@@ -313,7 +320,12 @@ function isValidRouteTransition(current: AccountRoute, expected: AccountRoute, n
   return current.accountId === expected.accountId &&
     current.accountId === next.accountId &&
     current.status !== "active" && current.status !== "suspended" && current.status !== "migrating" &&
-    (current.status === "provisioning" || current.status === "failed") &&
+    (current.status === "provisioning" ||
+      current.status === "failed" || current.status === "awaiting_consent") &&
+    (current.status === "provisioning"
+      ? (next.status === "provisioning" || next.status === "active" ||
+        next.status === "failed" || next.status === "awaiting_consent")
+      : next.status === "provisioning") &&
     currentRevision === (expected.revision ?? 0) &&
     next.revision === currentRevision + 1 &&
     (current.provisioning.fenceToken ?? "") === (expected.provisioning.fenceToken ?? "") &&
