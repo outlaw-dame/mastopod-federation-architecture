@@ -27,7 +27,7 @@ jobs:
 
     services:
       redis:
-        image: redis:7-alpine
+        image: redis:8.2-alpine
         ports:
           - 6379:6379
         options: >-
@@ -52,6 +52,13 @@ jobs:
 
       - name: Run Fast Sidecar Checks
         run: npm --prefix fedify-sidecar run check:fast
+
+      - name: Verify Entryway atomic CAS and index recovery on Redis 8.2
+        working-directory: fedify-sidecar
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          ENTRYWAY_REDIS_INTEGRATION: "1"
+        run: npm exec -- vitest run src/entryway/tests/RedisAccountRouteStore.integration.test.ts
 
       - name: Prove APDM delayed outbox-intent scheduler on real Redis
         working-directory: fedify-sidecar

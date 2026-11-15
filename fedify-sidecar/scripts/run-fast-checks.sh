@@ -75,3 +75,7 @@ npm exec -- vitest run \
   src/interop/ap/FixtureMetadata.test.ts \
   src/interop/ap/FixtureBoundaryRunner.test.ts \
   src/interop/ap/FixtureCorpus.test.ts
+
+# Exercise account route CAS, delegated signup, SAI bootstrap and recovery in
+# the protected fast lane instead of typechecking them without executing tests.
+npm exec -- vitest run src/entryway/tests

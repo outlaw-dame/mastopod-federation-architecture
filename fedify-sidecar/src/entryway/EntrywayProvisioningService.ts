@@ -110,33 +110,30 @@ export class EntrywayProvisioningService {
       }
     }
 
-    const route = {
-      ...reservation.route,
-      status: "provisioning" as const,
-      provisioning: {
-        ...reservation.route.provisioning,
-        attempts: reservation.route.provisioning.attempts + 1,
-        lastAttemptAt: now,
-        lastErrorCode: undefined,
-        lastErrorMessage: undefined,
-      },
-      updatedAt: now,
-    };
-    await this.store.save(route);
+    // Competing retries must not both claim the same stale or failed account.
+    // The winning attempt owns a unique fence across all subsequent writes.
+    const route = await this.claimProvisioning(reservation.route);
+    if (!route) {
+      throw new EntrywayError("provisioning_in_progress", "Another account provisioning attempt owns this route", {
+        statusCode: 409,
+        retryable: true,
+      });
+    }
+    const fenceToken = route.provisioning.fenceToken!;
 
     try {
-      const provider = await this.resolveProvider(route, normalized, protocols);
-      const providerBackedRoute = await this.ensureProviderAccount(route, provider, normalized, protocols);
-      const verifiedRoute = await this.verifyAccountBundle(providerBackedRoute);
-      const bootstrapped = await this.bootstrapAppIfConfigured(verifiedRoute, provider);
-      const activeRoute = await this.activateRoute(bootstrapped.route);
+      const provider = await this.resolveProvider(route, normalized, protocols, fenceToken);
+      const providerBackedRoute = await this.ensureProviderAccount(route, provider, normalized, protocols, fenceToken);
+      const verifiedRoute = await this.verifyAccountBundle(providerBackedRoute, fenceToken);
+      const bootstrapped = await this.bootstrapAppIfConfigured(verifiedRoute, provider, fenceToken);
+      const activeRoute = await this.activateRoute(bootstrapped.route, fenceToken);
       return {
         route: activeRoute,
         replayed: reservation.kind === "replayed",
         sessionHandoff: bootstrapped.sessionHandoff,
       };
     } catch (error) {
-      const failed = await this.markFailed(route.accountId, error);
+      const failed = await this.markFailed(route.accountId, fenceToken, error);
       if (error instanceof EntrywayError) {
         throw error;
       }
@@ -170,30 +167,34 @@ export class EntrywayProvisioningService {
         continue;
       }
 
+      const claimed = await this.claimProvisioning(route);
+      if (!claimed) {
+        skipped += 1;
+        continue;
+      }
+      const fenceToken = claimed.provisioning.fenceToken!;
+
       try {
-        const provider = route.providerId ? this.providerRouter.getProvider(route.providerId) : null;
-        // Never activate a stranded account without its original, approved
-        // provider. An unknown, disabled or reconfigured provider is not
-        // authority to skip the app's consent and bootstrap requirements.
-        if (!provider || provider.enabled === false || provider.baseUrl !== route.providerBaseUrl) {
+        const provider = claimed.providerId ? this.providerRouter.getProvider(claimed.providerId) : null;
+        if (!provider || provider.enabled === false || provider.baseUrl !== claimed.providerBaseUrl) {
           throw new EntrywayError("recovery_provider_unavailable", "Original account provider is unavailable", {
             statusCode: 503,
             retryable: true,
           });
         }
-        const verifiedRoute = await this.verifyAccountBundle(route);
-        const bootstrapped = await this.bootstrapAppIfConfigured(verifiedRoute, provider);
-        await this.activateRoute(bootstrapped.route);
+        const verifiedRoute = await this.verifyAccountBundle(claimed, fenceToken);
+        const bootstrapped = await this.bootstrapAppIfConfigured(verifiedRoute, provider, fenceToken);
+        await this.activateRoute(bootstrapped.route, fenceToken);
         recovered += 1;
       } catch (error) {
-        if (error instanceof EntrywayError && error.retryable) {
-          // A temporarily unavailable provider or verification endpoint must
-          // not permanently strand the account. Leave the route in the
-          // provisioning index for the next bounded recovery pass.
+        if (error instanceof EntrywayError &&
+            (error.retryable || error.code === "route_fence_lost")) {
+          // A transient outage or lost CAS ownership must never overwrite
+          // an account claimed/activated by another worker.
           skipped += 1;
           continue;
         }
-        await this.markFailed(route.accountId, error);
+        await this.markFailed(claimed.accountId, fenceToken, error);
         failed += 1;
       }
     }
@@ -205,6 +206,7 @@ export class EntrywayProvisioningService {
     route: AccountRoute,
     input: EntrywayAccountCreateInput,
     protocols: EntrywayProtocolSet,
+    fenceToken: string,
   ): Promise<EntrywayProviderDefinition> {
     const existingProvider = route.providerId ? this.providerRouter.getProvider(route.providerId) : null;
     const candidates = existingProvider
@@ -246,7 +248,7 @@ export class EntrywayProvisioningService {
           ? await this.providerPreflight.assertProviderReady(provider, protocols)
           : [];
         const latest = await this.store.getByAccountId(route.accountId);
-        await this.updateRoute(route.accountId, {
+        await this.updateRoute(route.accountId, fenceToken, {
           providerId: provider.providerId,
           providerBaseUrl: provider.baseUrl,
           oidcIssuer: provider.baseUrl,
@@ -280,12 +282,14 @@ export class EntrywayProvisioningService {
     provider: EntrywayProviderDefinition,
     input: EntrywayAccountCreateInput,
     protocols: EntrywayProtocolSet,
+    fenceToken: string,
   ): Promise<AccountRoute> {
     const latest = await this.store.getByAccountId(route.accountId);
     if (latest?.webId && latest.actorId && latest.podStorageUrl) {
       return latest;
     }
 
+    await this.assertOwnership(route.accountId, fenceToken);
     const providerResult = await this.providerClient.createAccount({
       provider,
       idempotencyKey: buildProviderIdempotencyKey(route),
@@ -293,7 +297,7 @@ export class EntrywayProvisioningService {
       protocols,
     });
     const routeUpdates = mapProviderResultToRoute(provider, providerResult);
-    return this.updateRoute(route.accountId, {
+    return this.updateRoute(route.accountId, fenceToken, {
       ...routeUpdates,
       provisioning: {
         ...(latest?.provisioning ?? route.provisioning),
@@ -302,15 +306,15 @@ export class EntrywayProvisioningService {
     });
   }
 
-  private async verifyAccountBundle(route: AccountRoute): Promise<AccountRoute> {
-    const discovered = await this.updateRoute(route.accountId, {
+  private async verifyAccountBundle(route: AccountRoute, fenceToken: string): Promise<AccountRoute> {
+    const discovered = await this.updateRoute(route.accountId, fenceToken, {
       provisioning: {
         ...route.provisioning,
         phase: "WEBID_DISCOVERED",
       },
     });
     const verification = await this.verifier.verify(discovered);
-    const checked = await this.updateRoute(discovered.accountId, {
+    const checked = await this.updateRoute(discovered.accountId, fenceToken, {
       ...verification.routeUpdates,
       provisioning: {
         ...discovered.provisioning,
@@ -335,6 +339,7 @@ export class EntrywayProvisioningService {
   private async bootstrapAppIfConfigured(
     route: AccountRoute,
     provider: EntrywayProviderDefinition,
+    fenceToken: string,
   ): Promise<{ route: AccountRoute; sessionHandoff?: EntrywayProvisioningResult["sessionHandoff"] }> {
     if (provider.appBootstrapEnabled !== true) {
       return { route };
@@ -358,8 +363,9 @@ export class EntrywayProvisioningService {
     }
 
     try {
+      await this.assertOwnership(route.accountId, fenceToken);
       const result = await this.appBootstrapper.bootstrap({ provider, route });
-      const updated = await this.updateRoute(route.accountId, {
+      const updated = await this.updateRoute(route.accountId, fenceToken, {
         appBootstrap: result.snapshot,
         provisioning: {
           ...route.provisioning,
@@ -372,7 +378,7 @@ export class EntrywayProvisioningService {
       };
     } catch (error) {
       const code = error instanceof EntrywayError ? error.code : "app_bootstrap_failed";
-      await this.updateRoute(route.accountId, {
+      await this.updateRoute(route.accountId, fenceToken, {
         appBootstrap: {
           status: "failed",
           appClientId: provider.appClientId,
@@ -392,8 +398,40 @@ export class EntrywayProvisioningService {
     }
   }
 
-  private async activateRoute(route: AccountRoute): Promise<AccountRoute> {
-    return this.updateRoute(route.accountId, {
+  private async claimProvisioning(route: AccountRoute): Promise<AccountRoute | null> {
+    if (route.status !== "provisioning" && route.status !== "failed") return null;
+    const token = randomUUID();
+    const claimed: AccountRoute = {
+      ...route,
+      revision: (route.revision ?? 0) + 1,
+      status: "provisioning",
+      provisioning: {
+        ...route.provisioning,
+        fenceToken: token,
+        attempts: route.provisioning.attempts + 1,
+        lastAttemptAt: this.now(),
+        lastErrorCode: undefined,
+        lastErrorMessage: undefined,
+      },
+      updatedAt: this.now(),
+    };
+    return await this.store.compareAndSet(route, claimed) ? claimed : null;
+  }
+
+  private async assertOwnership(accountId: string, fenceToken: string): Promise<AccountRoute> {
+    const current = await this.store.getByAccountId(accountId);
+    if (!current || current.status !== "provisioning" ||
+        current.provisioning.fenceToken !== fenceToken) {
+      throw new EntrywayError("route_fence_lost", "Account provisioning is owned by another attempt", {
+        statusCode: 409,
+        retryable: true,
+      });
+    }
+    return current;
+  }
+
+  private async activateRoute(route: AccountRoute, fenceToken: string): Promise<AccountRoute> {
+    return this.updateRoute(route.accountId, fenceToken, {
       status: "active",
       provisioning: {
         ...route.provisioning,
@@ -403,45 +441,53 @@ export class EntrywayProvisioningService {
     });
   }
 
-  private async updateRoute(accountId: string, patch: Partial<AccountRoute>): Promise<AccountRoute> {
-    const current = await this.store.getByAccountId(accountId);
-    if (!current) {
-      throw new EntrywayError("route_not_found", "Entryway account route was not found", {
-        statusCode: 404,
-        retryable: false,
-      });
-    }
-
+  private async updateRoute(
+    accountId: string,
+    fenceToken: string,
+    patch: Partial<AccountRoute>,
+  ): Promise<AccountRoute> {
+    const current = await this.assertOwnership(accountId, fenceToken);
     const updated: AccountRoute = {
       ...current,
       ...patch,
-      provisioning: patch.provisioning ?? current.provisioning,
+      revision: (current.revision ?? 0) + 1,
+      provisioning: {
+        ...current.provisioning,
+        ...(patch.provisioning ?? {}),
+        fenceToken,
+      },
       updatedAt: this.now(),
     };
-    await this.store.save(updated);
+    if (!await this.store.compareAndSet(current, updated)) {
+      throw new EntrywayError("route_fence_lost", "Account route changed before update", {
+        statusCode: 409,
+        retryable: true,
+      });
+    }
     return updated;
   }
 
-  private async markFailed(accountId: string, error: unknown): Promise<AccountRoute | null> {
-    const route = await this.store.getByAccountId(accountId);
-    if (!route) {
+  private async markFailed(accountId: string, fenceToken: string, error: unknown): Promise<AccountRoute | null> {
+    const current = await this.store.getByAccountId(accountId);
+    if (!current || current.status !== "provisioning" ||
+        current.provisioning.fenceToken !== fenceToken) {
       return null;
     }
 
     const code = error instanceof EntrywayError ? error.code : "entryway_provisioning_failed";
     const updated: AccountRoute = {
-      ...route,
+      ...current,
+      revision: (current.revision ?? 0) + 1,
       status: "failed",
       provisioning: {
-        ...route.provisioning,
+        ...current.provisioning,
         phase: "FAILED",
         lastErrorCode: code,
         lastErrorMessage: sanitizeErrorMessage(error),
       },
       updatedAt: this.now(),
     };
-    await this.store.save(updated);
-    return updated;
+    return await this.store.compareAndSet(current, updated) ? updated : null;
   }
 
   private isStaleProvisioning(route: AccountRoute): boolean {
