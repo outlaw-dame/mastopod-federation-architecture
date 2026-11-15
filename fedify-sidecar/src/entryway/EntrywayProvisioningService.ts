@@ -100,8 +100,36 @@ export class EntrywayProvisioningService {
     }
 
     if (reservation.kind === "replayed") {
+      if (reservation.route.status === "reconciliation_required") {
+        // A partial prior signup may have created a WebID or DID without
+        // completing the route. Never perform another provider create RPC.
+        throw new EntrywayError("account_reconciliation_required",
+          "Account requires authoritative provider reconciliation", {
+            statusCode: 409, retryable: false,
+          });
+      }
       if (reservation.route.status === "active") {
-        return { route: reservation.route, replayed: true };
+        const existing = reservation.route;
+        const provider = existing.providerId
+          ? this.providerRouter.getProvider(existing.providerId) : null;
+        if (!provider || provider.enabled === false ||
+            provider.baseUrl !== existing.providerBaseUrl) {
+          throw new EntrywayError("replay_provider_unavailable",
+            "Original account provider is unavailable", {
+              statusCode: 503, retryable: true,
+            });
+        }
+        // A completed route is not a persistent grant. Re-check the Pod's
+        // current SAI permission whenever this account is bound to an app;
+        // never acknowledge stale consent merely because the route is active.
+        if (provider.appBootstrapEnabled === true || existing.appBootstrap) {
+          return this.resumeAwaitingConsent({
+            username: existing.username,
+            idempotencyKey: normalized.idempotencyKey,
+            appClientId: provider.appClientId,
+          });
+        }
+        return { route: existing, replayed: true };
       }
       if (reservation.route.status === "provisioning" && !this.isStaleProvisioning(reservation.route)) {
         throw new EntrywayError("provisioning_in_progress", "Account provisioning is already in progress", {
@@ -217,8 +245,11 @@ export class EntrywayProvisioningService {
         }
         throw error;
       });
-      if (proof.snapshot.status !== "ready" ||
-          proof.snapshot.appClientId !== appClientId) {
+      if (!proof?.snapshot || proof.snapshot.status !== "ready" ||
+          proof.snapshot.appClientId !== appClientId ||
+          typeof proof.snapshot.appRegistrationUri !== "string" ||
+          !proof.snapshot.appRegistrationUri ||
+          !Array.isArray(proof.snapshot.accessGrantUris)) {
         throw new EntrywayError("app_consent_not_verified", "Current owner consent could not be verified", {
           statusCode: 409, retryable: false,
         });
@@ -273,8 +304,34 @@ export class EntrywayProvisioningService {
     let skipped = 0;
 
     for (const route of staleRoutes) {
+      // A crashed signup with incomplete identity evidence cannot safely be
+      // re-created by a background worker that has no user credentials.
+      // Fence it once and require operator/provider reconciliation. Keeping
+      // this row perpetually stale would also starve younger recoverable rows.
       if (!route.canonicalAccountId || !route.webId || !route.actorId || !route.podStorageUrl) {
-        skipped += 1;
+        const held = await this.claimProvisioning(route);
+        if (!held) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          await this.updateRoute(held.accountId, held.provisioning.fenceToken!, {
+            status: "reconciliation_required",
+            provisioning: {
+              ...held.provisioning,
+              phase: "RECONCILIATION_REQUIRED",
+              lastErrorCode: "account_identity_incomplete",
+              lastErrorMessage: "Original provider signup requires reconciliation",
+            },
+          });
+          failed += 1;
+        } catch (error) {
+          if (error instanceof EntrywayError && error.code === "route_fence_lost") {
+            skipped += 1;
+            continue;
+          }
+          throw error;
+        }
         continue;
       }
 
