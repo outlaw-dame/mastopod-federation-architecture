@@ -94,10 +94,11 @@ export class ActivityPodsProvisioningClient {
         },
         body: JSON.stringify(pruneUndefined(body)),
       },
+      false, // Side-effecting signup cannot be blindly replayed on a lost reply.
     );
   }
 
-  private async requestJson(url: string, init: RequestInit): Promise<Record<string, unknown>> {
+  private async requestJson(url: string, init: RequestInit, retrySafe = true): Promise<Record<string, unknown>> {
     return withEntrywayRetry(
       async () => {
         const controller = new AbortController();
@@ -147,7 +148,7 @@ export class ActivityPodsProvisioningClient {
           clearTimeout(timeout);
         }
       },
-      this.retryPolicy,
+      retrySafe ? this.retryPolicy : { ...this.retryPolicy, maxAttempts: 1 },
       (error) => error instanceof EntrywayError ? error.retryable : isRetryableTransportError(error),
     );
   }
