@@ -82,6 +82,8 @@ export interface EntrywayBundleCheck {
 export interface EntrywayProvisioningSnapshot {
   phase: EntrywayProvisioningPhase;
   attempts: number;
+  // Rotated whenever a new worker wins ownership of a provisioning attempt.
+  fenceToken?: string;
   idempotencyKeyHash: string;
   requestFingerprint: string;
   checks: EntrywayBundleCheck[];
@@ -110,6 +112,8 @@ export interface EntrywayAppBootstrapSnapshot {
 
 export interface AccountRoute {
   accountId: string;
+  // Monotonic CAS revision; absent on pre-migration routes (treated as zero).
+  revision?: number;
   canonicalAccountId?: string;
   username: string;
   handle: string;
@@ -151,7 +155,8 @@ export interface AccountRouteStore {
   reserve(input: AccountRouteReservationInput): Promise<AccountRouteReservationResult>;
   getByAccountId(accountId: string): Promise<AccountRoute | null>;
   getByUsername(username: string): Promise<AccountRoute | null>;
-  save(route: AccountRoute): Promise<void>;
+  // No read/modify/write update may bypass this atomic version/fence check.
+  compareAndSet(expected: AccountRoute, next: AccountRoute): Promise<boolean>;
   listStaleProvisioning(beforeIso: string, limit: number): Promise<AccountRoute[]>;
 }
 
