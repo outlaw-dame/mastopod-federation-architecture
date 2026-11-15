@@ -1,4 +1,5 @@
 import { EntrywayError } from "./errors.js";
+import { readBoundedJson } from "./readBoundedJson.js";
 import {
   isRetryableHttpStatus,
   isRetryableTransportError,
@@ -96,6 +97,7 @@ export class AccountBundleVerifier {
     }
 
     const url = parseSafeHttpUrl(route.webId, "WebID URL");
+    assertProviderOwnedUrl(url, route, "WebID");
     url.hash = "";
     const response = await this.fetchWithRetry(url.toString(), {
       method: "GET",
@@ -112,7 +114,7 @@ export class AccountBundleVerifier {
     if (!route.podStorageUrl) {
       throw new EntrywayError("pod_storage_missing", "Pod storage URL is missing", { statusCode: 502 });
     }
-    parseSafeHttpUrl(route.podStorageUrl, "Pod storage URL");
+    assertProviderOwnedUrl(parseSafeHttpUrl(route.podStorageUrl, "Pod storage URL"), route, "Pod storage");
   }
 
   private async verifyOidcIssuer(route: AccountRoute): Promise<void> {
@@ -120,7 +122,9 @@ export class AccountBundleVerifier {
       throw new EntrywayError("oidc_issuer_missing", "OIDC issuer is missing", { statusCode: 502 });
     }
 
-    const issuer = parseSafeHttpUrl(route.oidcIssuer, "OIDC issuer URL").origin;
+    const issuerUrl = parseSafeHttpUrl(route.oidcIssuer, "OIDC issuer URL");
+    assertProviderOwnedUrl(issuerUrl, route, "OIDC issuer");
+    const issuer = issuerUrl.origin;
     const response = await this.fetchWithRetry(new URL("/.well-known/openid-configuration", issuer).toString(), {
       method: "GET",
       headers: { accept: "application/json" },
@@ -129,7 +133,11 @@ export class AccountBundleVerifier {
       throw httpCheckError("oidc_issuer_unavailable", "OIDC issuer metadata did not resolve", response.status);
     }
 
-    const body = await safeReadJson(response);
+    const body = await readBoundedJson(response, {
+      errorCode: "invalid_json",
+      invalidMessage: "Verification endpoint returned invalid or oversized JSON",
+      maxBytes: 1024 * 1024,
+    });
     if (body && typeof body === "object" && !Array.isArray(body)) {
       const advertisedIssuer = (body as Record<string, unknown>)["issuer"];
       if (typeof advertisedIssuer === "string" && new URL(advertisedIssuer).origin !== issuer) {
@@ -145,7 +153,9 @@ export class AccountBundleVerifier {
       throw new EntrywayError("actor_missing", "ActivityPub actor is missing", { statusCode: 502 });
     }
 
-    const response = await this.fetchWithRetry(parseSafeHttpUrl(route.actorId, "ActivityPub actor URL").toString(), {
+    const actorUrl = parseSafeHttpUrl(route.actorId, "ActivityPub actor URL");
+    assertProviderOwnedUrl(actorUrl, route, "ActivityPub actor");
+    const response = await this.fetchWithRetry(actorUrl.toString(), {
       method: "GET",
       headers: {
         accept: "application/activity+json, application/ld+json, application/json",
@@ -206,6 +216,7 @@ export class AccountBundleVerifier {
         try {
           const response = await this.fetchFn(url, {
             ...init,
+            redirect: "manual",
             signal: controller.signal,
           });
           if (isRetryableHttpStatus(response.status)) {
@@ -246,18 +257,12 @@ function parseSafeHttpUrl(value: string, label: string): URL {
   return parsed;
 }
 
-async function safeReadJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(text) as unknown;
-  } catch (error) {
-    throw new EntrywayError("invalid_json", "Verification endpoint returned malformed JSON", {
+function assertProviderOwnedUrl(url: URL, route: AccountRoute, label: string): void {
+  const provider = parseSafeHttpUrl(route.providerBaseUrl, "Provider base URL");
+  if (url.origin !== provider.origin) {
+    throw new EntrywayError("provider_origin_mismatch", `${label} does not belong to the configured provider`, {
       statusCode: 502,
-      cause: error,
+      retryable: false,
     });
   }
 }
@@ -287,9 +292,8 @@ function sanitizeCheckMessage(error: unknown): string {
   if (error instanceof EntrywayError) {
     return error.message;
   }
-  if (error instanceof Error && error.message) {
-    return error.message.slice(0, 256);
-  }
+  // Transport/runtime error messages may echo untrusted URI or credential
+  // fragments. Return only stable, locally authored verification errors.
   return "Verification failed";
 }
 
