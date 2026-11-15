@@ -121,6 +121,56 @@ describe.skipIf(!run)("RedisAccountRouteStore real Lua fencing and pending-index
     expect((await store.getByAccountId(old.accountId))?.status).toBe("active");
   });
 
+  it("atomically excludes pending consent from recovery and permits fenced client resumption", async () => {
+    const old = makeRoute(`acct_${randomUUID()}`, "consentuser");
+    track(old);
+    expect((await store.reserve({
+      accountId: old.accountId,
+      username: old.username,
+      idempotencyKeyHash: old.provisioning.idempotencyKeyHash,
+      requestFingerprint: old.provisioning.requestFingerprint,
+      route: old,
+    })).kind).toBe("created");
+
+    const first = claim(old, "initial-attempt");
+    expect(await store.compareAndSet(old, first)).toBe(true);
+    const waiting: AccountRoute = {
+      ...first,
+      revision: 2,
+      status: "awaiting_consent",
+      provisioning: {
+        ...first.provisioning,
+        phase: "AWAITING_APP_CONSENT",
+      },
+    };
+    expect(await store.compareAndSet(first, waiting)).toBe(true);
+    expect(await redis.zscore(`${prefix}:index`, old.accountId)).toBeNull();
+    const staleCandidates = await store.listStaleProvisioning("2030-01-01T00:00:00.000Z", 25);
+    expect(staleCandidates.some((entry) => entry.accountId === old.accountId)).toBe(false);
+    expect(await store.compareAndSet(waiting, {
+      ...waiting, revision: 3, status: "active",
+    })).toBe(false);
+
+    const resumed: AccountRoute = {
+      ...claim(waiting, "consent-approved"),
+      status: "provisioning",
+    };
+    expect(await store.compareAndSet(waiting, resumed)).toBe(true);
+    expect(await redis.zscore(`${prefix}:index`, old.accountId)).not.toBeNull();
+    expect(await store.compareAndSet(waiting, {
+      ...claim(waiting, "stale-worker"), status: "provisioning",
+    })).toBe(false);
+    const active: AccountRoute = {
+      ...resumed,
+      revision: 4,
+      status: "active",
+      provisioning: { ...resumed.provisioning, phase: "ACTIVE" },
+    };
+    expect(await store.compareAndSet(resumed, active)).toBe(true);
+    expect(await redis.zscore(`${prefix}:index`, old.accountId)).toBeNull();
+    expect((await store.getByAccountId(old.accountId))?.status).toBe("active");
+  });
+
   it("drains legacy active records and repairs legacy creation-time scores", async () => {
     const active = makeRoute(`acct_${randomUUID()}`, "oldactive", { status: "active" });
     const recent = makeRoute(`acct_${randomUUID()}`, "recent", {
