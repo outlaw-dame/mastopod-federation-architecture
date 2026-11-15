@@ -328,6 +328,11 @@ describe("EntrywayProvisioningService", () => {
     expect(calls).toHaveLength(0);
     // Once provider configuration is restored, a later recovery pass
     // should be able to activate the same bound account without re-signup.
+    // Model the next recovery interval after an outage, not an immediate
+    // second scan of the newly fenced and timestamp-refreshed attempt.
+    const pending = await store.getByUsername("alice");
+    expect(pending).not.toBeNull();
+    await store.save({ ...pending!, updatedAt: "2026-01-01T00:00:00.000Z" });
     const resumedService = createService(fetchMock as unknown as typeof fetch, {
       store,
       providers: [{
@@ -341,6 +346,41 @@ describe("EntrywayProvisioningService", () => {
     const resumed = await resumedService.recoverStaleProvisioning();
     expect(resumed.recovered).toBe(1);
     expect((await store.getByUsername("alice"))?.status).toBe("active");
+  });
+
+  it("permits one of two concurrent retries to own a failed account", async () => {
+    const { fetchMock, calls } = createFetchMock();
+    const store = new InMemoryAccountRouteStore();
+    let preflightCount = 0;
+    const preflight = {
+      assertProviderReady: vi.fn(async () => {
+        preflightCount += 1;
+        if (preflightCount === 1) {
+          throw new EntrywayError("temporary_provider_outage", "Provider temporarily unavailable", {
+            statusCode: 503, retryable: true,
+          });
+        }
+        return [];
+      }),
+    };
+    const service = createService(fetchMock as unknown as typeof fetch, {
+      store,
+      providerPreflight: preflight,
+    });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "provider_not_available",
+    });
+    const result = await Promise.allSettled([
+      service.createAccount(createInput()),
+      service.createAccount(createInput()),
+    ]);
+    expect(result.filter((entry) => entry.status === "fulfilled")).toHaveLength(1);
+    const rejected = result.find((entry) => entry.status === "rejected") as PromiseRejectedResult;
+    expect(rejected.reason).toMatchObject({ code: "provisioning_in_progress", statusCode: 409 });
+    const account = await store.getByUsername("alice");
+    expect(account?.status).toBe("active");
+    expect(account?.revision).toBeGreaterThan(0);
+    expect(calls.filter((call) => call.url.endsWith("/api/accounts/create"))).toHaveLength(1);
   });
 
   it("never reuses another app client's bootstrap grants during recovery", async () => {
