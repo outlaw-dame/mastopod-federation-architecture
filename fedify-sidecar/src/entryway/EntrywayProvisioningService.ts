@@ -185,6 +185,13 @@ export class EntrywayProvisioningService {
         await this.activateRoute(bootstrapped.route);
         recovered += 1;
       } catch (error) {
+        if (error instanceof EntrywayError && error.retryable) {
+          // A temporarily unavailable provider or verification endpoint must
+          // not permanently strand the account. Leave the route in the
+          // provisioning index for the next bounded recovery pass.
+          skipped += 1;
+          continue;
+        }
         await this.markFailed(route.accountId, error);
         failed += 1;
       }
