@@ -131,7 +131,7 @@ describe("Entryway Fastify routes", () => {
   });
 
   it("hides failed and provisioning accounts from anonymous public username lookup", async () => {
-    const getByUsername = vi.fn().mockResolvedValue({
+    const route = {
       accountId: "acct_11111111-1111-4111-8111-111111111111",
       username: "alice",
       handle: "@alice@localhost",
@@ -150,7 +150,8 @@ describe("Entryway Fastify routes", () => {
       provisioning: { phase: "FAILED", attempts: 1, checks: [], lastErrorMessage: "private diagnostic" },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
-    });
+    };
+    const getByUsername = vi.fn(async () => route);
     const app = Fastify();
     registerEntrywayFastifyRoutes(app, {
       entrywayToken: "entryway-token",
@@ -160,23 +161,7 @@ describe("Entryway Fastify routes", () => {
     await app.ready();
 
     for (const status of ["provisioning", "failed", "suspended", "migrating"]) {
-      getByUsername.mock.results.length; // preserve mock for the same route state
-      getByUsername.mockImplementation(async () => ({
-        ...(await getByUsernameResult()),
-        status,
-      }));
-      async function getByUsernameResult() {
-        return {
-          accountId: "acct_11111111-1111-4111-8111-111111111111",
-          username: "alice",
-          handle: "@alice@localhost",
-          webId: "http://localhost:3000/alice/profile/card#me",
-          actorId: "http://localhost:3000/alice",
-          podStorageUrl: "http://localhost:3000/alice/data/",
-          status: "provisioning",
-          appBootstrap: { status: "failed", accessGrantUris: ["private-grant"] },
-        };
-      }
+      route.status = status;
       const response = await app.inject({ method: "GET", url: "/entryway/accounts/by-username/alice" });
       expect(response.statusCode).toBe(404);
       expect(response.body).not.toContain("private-grant");
