@@ -317,7 +317,10 @@ export class EntrywayProvisioningService {
       // re-created by a background worker that has no user credentials.
       // Fence it once and require operator/provider reconciliation. Keeping
       // this row perpetually stale would also starve younger recoverable rows.
-      if (!route.canonicalAccountId || !route.webId || !route.actorId || !route.podStorageUrl) {
+      const invalidTimestamp = typeof route.updatedAt !== "string" ||
+        !Number.isFinite(Date.parse(route.updatedAt));
+      if (invalidTimestamp ||
+          !route.canonicalAccountId || !route.webId || !route.actorId || !route.podStorageUrl) {
         const held = await this.claimProvisioning(route);
         if (!held) {
           skipped += 1;
@@ -329,7 +332,8 @@ export class EntrywayProvisioningService {
             provisioning: {
               ...held.provisioning,
               phase: "RECONCILIATION_REQUIRED",
-              lastErrorCode: "account_identity_incomplete",
+              lastErrorCode: invalidTimestamp
+                ? "account_timestamp_invalid" : "account_identity_incomplete",
               lastErrorMessage: "Original provider signup requires reconciliation",
             },
           });
