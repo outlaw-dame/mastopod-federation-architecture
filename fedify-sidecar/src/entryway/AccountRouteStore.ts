@@ -164,40 +164,55 @@ export class RedisAccountRouteStore implements AccountRouteStore {
     }
 
     const boundedLimit = clampLimit(limit);
-    // Older deployments indexed creation time and retained completed rows.
-    // Examine a bounded window, repair index drift, and drain old non-pending
-    // entries incrementally. No account-wide read or unbounded Redis scan.
+    // An old index may still contain active rows and creation-time scores.
+    // Examine a bounded window, repair only drifted entries using a second
+    // atomic state check, and progressively drain legacy index pollution.
     const scanBudget = Math.min(4096, Math.max(1024, boundedLimit * 3));
-    const accountIds = await this.redis.zrangebyscore(
-      this.indexKey(), "-inf", String(beforeMs), "LIMIT", 0, scanBudget,
+    const raw = await this.redis.zrangebyscore(
+      this.indexKey(), "-inf", String(beforeMs),
+      "WITHSCORES", "LIMIT", 0, scanBudget,
     );
+    const accountIds: string[] = [];
+    const indexedScores: number[] = [];
+    for (let index = 0; index + 1 < raw.length; index += 2) {
+      accountIds.push(raw[index]!);
+      indexedScores.push(Number(raw[index + 1]));
+    }
     const routes = await this.loadRoutesByAccountIds(accountIds);
     const stale: AccountRoute[] = [];
-    const remove: string[] = [];
-    const rescore: Array<{ accountId: string; timestamp: number }> = [];
+    const repairs: Array<{ accountId: string; route: AccountRoute | null; timestamp: number }> = [];
     for (let index = 0; index < accountIds.length; index += 1) {
       const accountId = accountIds[index]!;
-      const route = routes[index];
+      const route = routes[index] ?? null;
       if (!route || route.accountId !== accountId || route.status !== "provisioning") {
-        remove.push(accountId);
+        repairs.push({ accountId, route: null, timestamp: 0 });
         continue;
       }
-      const updatedAtMs = Date.parse(route.updatedAt);
-      if (!Number.isFinite(updatedAtMs)) {
-        remove.push(accountId);
+      const timestamp = Date.parse(route.updatedAt);
+      if (!Number.isFinite(timestamp)) {
+        repairs.push({ accountId, route: null, timestamp: 0 });
         continue;
       }
-      // Rescore legacy entries by last update, even if they are not stale.
-      rescore.push({ accountId, timestamp: updatedAtMs });
-      if (updatedAtMs < beforeMs) {
-        stale.push(route);
+      if (timestamp !== indexedScores[index]) {
+        repairs.push({ accountId, route, timestamp });
       }
+      if (timestamp < beforeMs) stale.push(route);
     }
-    if (remove.length || rescore.length) {
+
+    // Do not repair a stale snapshot by unconditional ZADD/ZREM: another
+    // worker may have already activated or reclaimed the account. Each Lua
+    // operation examines the live route before touching its pending index.
+    for (let offset = 0; offset < repairs.length; offset += STALE_ROUTE_MGET_BATCH_SIZE) {
       const pipeline = this.redis.pipeline();
-      for (const accountId of remove) pipeline.zrem(this.indexKey(), accountId);
-      for (const entry of rescore) {
-        pipeline.zadd(this.indexKey(), String(entry.timestamp), entry.accountId);
+      for (const repair of repairs.slice(offset, offset + STALE_ROUTE_MGET_BATCH_SIZE)) {
+        pipeline.eval(
+          REPAIR_PENDING_INDEX_LUA,
+          2, this.routeKey(repair.accountId), this.indexKey(),
+          repair.accountId,
+          String(repair.route?.revision ?? 0),
+          repair.route?.updatedAt ?? "",
+          String(repair.timestamp),
+        );
       }
       const results = await pipeline.exec();
       if (!results || results.some(([error]) => error)) {
@@ -237,6 +252,32 @@ export class RedisAccountRouteStore implements AccountRouteStore {
     return `${this.prefix}:index`;
   }
 }
+
+const REPAIR_PENDING_INDEX_LUA = `
+local raw = redis.call("GET", KEYS[1])
+if not raw then
+  redis.call("ZREM", KEYS[2], ARGV[1])
+  return 1
+end
+local ok, current = pcall(cjson.decode, raw)
+if not ok or type(current) ~= "table" then
+  redis.call("ZREM", KEYS[2], ARGV[1])
+  return 1
+end
+if current.status ~= "provisioning" then
+  redis.call("ZREM", KEYS[2], ARGV[1])
+  return 1
+end
+if tonumber(current.revision or 0) ~= tonumber(ARGV[2]) or
+   current.updatedAt ~= ARGV[3] then
+  return 0
+end
+if tonumber(ARGV[4]) and tonumber(ARGV[4]) > 0 then
+  redis.call("ZADD", KEYS[2], ARGV[4], ARGV[1])
+  return 1
+end
+return 0
+`;
 
 const COMPARE_ROUTE_LUA = `
 local raw = redis.call("GET", KEYS[1])
