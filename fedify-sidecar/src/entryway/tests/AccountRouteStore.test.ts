@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { RedisAccountRouteStore } from "../AccountRouteStore.js";
+import { InMemoryAccountRouteStore, RedisAccountRouteStore } from "../AccountRouteStore.js";
 import type { AccountRoute } from "../types.js";
 
 const PREFIX = "entryway-test";
@@ -37,16 +37,18 @@ describe("RedisAccountRouteStore.listStaleProvisioning", () => {
   it("loads candidate routes in bounded MGET batches without per-route GETs", async () => {
     const accountIds = Array.from({ length: 520 }, (_, index) => `account-${index}`);
     const values = new Map<string, string | null>();
+    const scores = new Map<string, number>();
     for (const [index, accountId] of accountIds.entries()) {
       const updatedAt = new Date(Date.parse(BEFORE_ISO) - (index + 1) * 1000).toISOString();
       values.set(`${PREFIX}:route:${accountId}`, JSON.stringify(makeRoute(accountId, updatedAt)));
+      scores.set(accountId, Date.parse(updatedAt));
     }
 
     const get = vi.fn(async () => {
       throw new Error("per-route GET must not be used by stale route scan");
     });
     const mget = vi.fn(async (...keys: string[]) => keys.map((key) => values.get(key) ?? null));
-    const zrangebyscore = vi.fn(async () => accountIds);
+    const zrangebyscore = vi.fn(async () => accountIds.flatMap((id) => [id, String(scores.get(id))]));
     const store = new RedisAccountRouteStore({ get, mget, zrangebyscore } as any, PREFIX);
 
     const routes = await store.listStaleProvisioning(BEFORE_ISO, 500);
@@ -60,6 +62,7 @@ describe("RedisAccountRouteStore.listStaleProvisioning", () => {
       `${PREFIX}:index`,
       "-inf",
       String(Date.parse(BEFORE_ISO)),
+      "WITHSCORES",
       "LIMIT",
       0,
       1500,
@@ -79,16 +82,21 @@ describe("RedisAccountRouteStore.listStaleProvisioning", () => {
       [`${PREFIX}:route:older-a`, JSON.stringify(makeRoute("older-a", "2026-08-16T08:30:00.000Z"))],
     ]);
     const mget = vi.fn(async (...keys: string[]) => keys.map((key) => values.get(key) ?? null));
+    const repairs: unknown[][] = [];
+    const pipeline = () => ({
+      eval: (...args: unknown[]) => { repairs.push(args); },
+      exec: async () => repairs.map(() => [null, 1]),
+    });
     const store = new RedisAccountRouteStore({
-      get: vi.fn(),
-      mget,
-      zrangebyscore: vi.fn(async () => accountIds),
+      get: vi.fn(), mget, pipeline,
+      zrangebyscore: vi.fn(async () => accountIds.flatMap((id) => [id, String(Date.parse(BEFORE_ISO) - 60_000)])),
     } as any, PREFIX);
 
     const routes = await store.listStaleProvisioning(BEFORE_ISO, 1);
 
     expect(routes.map((route) => route.accountId)).toEqual(["older-a"]);
     expect(mget).toHaveBeenCalledTimes(1);
+    expect(repairs.length).toBeGreaterThan(0);
   });
 
   it("treats a short MGET response as missing trailing route values without shifting alignment", async () => {
@@ -97,7 +105,11 @@ describe("RedisAccountRouteStore.listStaleProvisioning", () => {
     const second = makeRoute("second", "2026-08-16T09:00:00.000Z");
     const store = new RedisAccountRouteStore({
       get: vi.fn(),
-      zrangebyscore: vi.fn(async () => accountIds),
+      zrangebyscore: vi.fn(async () => accountIds.flatMap((id, index) => [
+        id,
+        String(index === 0 ? Date.parse(first.updatedAt) :
+          index === 1 ? Date.parse(second.updatedAt) : Date.parse(BEFORE_ISO) - 1_000),
+      ])),
       mget: vi.fn(async () => [JSON.stringify(first), JSON.stringify(second)]),
     } as any, PREFIX);
 
