@@ -510,6 +510,17 @@ describe("EntrywayProvisioningService", () => {
     });
     expect((await store.getByUsername("alice"))?.status).toBe("active");
     expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+    appBootstrapper.bootstrap.mockResolvedValueOnce({
+      snapshot: {
+        status: "ready" as const,
+        appClientId: "https://memory.example/app",
+        accessGrantUris: [],
+      },
+    });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_not_verified", statusCode: 409,
+    });
+    expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
     const replay = await service.createAccount(createInput());
     expect(replay.replayed).toBe(true);
     expect(replay.route.appBootstrap?.status).toBe("ready");
