@@ -71,6 +71,8 @@ describe("Entryway Fastify routes", () => {
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.body).not.toContain("must-not-appear");
     expect(response.body).not.toContain("CorrectHorseBatteryStaple1");
+    expect(response.json()).not.toHaveProperty("sessionHandoff");
+    expect(response.body).not.toContain("do-not-relay");
     await app.close();
   });
 
@@ -244,6 +246,10 @@ describe("Entryway Fastify routes", () => {
     const app = Fastify();
     const createAccount = vi.fn().mockResolvedValue({
       replayed: false,
+      sessionHandoff: {
+        type: "redirect",
+        url: "https://evil.example/session/handoff?token=do-not-relay",
+      },
       route: {
         accountId: "acct_11111111-1111-4111-8111-111111111111",
         username: "alice",
