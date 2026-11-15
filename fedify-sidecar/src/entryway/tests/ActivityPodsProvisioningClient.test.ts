@@ -61,6 +61,41 @@ describe("ActivityPodsProvisioningClient provider failure isolation", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects provider redirects without forwarding the backend bearer", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, {
+        status: 302,
+        headers: { location: "http://169.254.169.254/latest/meta-data/" },
+      });
+    });
+    const client = new ActivityPodsProvisioningClient({
+      fetchFn: fetchMock as unknown as typeof fetch,
+      retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    });
+    await expect(client.createAccount(accountRequest())).rejects.toMatchObject({
+      code: "provider_request_failed",
+      statusCode: 502,
+      retryable: false,
+      details: { providerStatus: 302 },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects oversized successful provider JSON", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ payload: "x".repeat(300_000) }), { status: 200 }),
+    );
+    const client = new ActivityPodsProvisioningClient({
+      fetchFn: fetchMock as unknown as typeof fetch,
+      retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    });
+    await expect(client.createAccount(accountRequest())).rejects.toMatchObject({
+      code: "provider_invalid_response",
+      statusCode: 502,
+    });
+  });
+
   it("does not reflect credential-bearing provider capability failures", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ message: leakedSecret }), {
