@@ -13,7 +13,7 @@ Memory backend / Entryway client
   -> POST /entryway/accounts
   -> Entryway provider router
   -> ActivityPods POST /api/accounts/create
-  -> WebID + Pod + ActivityPub actor + optional ATProto
+  -> mandatory new-account WebID + Pod + ActivityPub actor + did:plc
   -> Entryway verification
   -> AccountRoute(status=active)
 ```
@@ -225,6 +225,71 @@ not yet implemented by this Entryway route. The production signed-PDS,
 restricted PostgreSQL credentials, native SAI permission enforcement
 and real browser callback acceptance remain separate release gates.
 
+## Crash recovery, idempotency and reconciliation
+
+A network timeout **does not** mean the provider failed to create an identity.
+The provider may already have committed a WebID, ActivityPub actor, PLC DID
+or signed PDS repository before the HTTP acknowledgment was lost. Entryway
+therefore has a strict boundary between retrying *verification* and retrying
+*creation*.
+
+- Before the first provider account-create POST, Entryway atomically records
+  `PROVIDER_CREATE_STARTED` and the irreversible
+  `providerCreateMayHaveSideEffects=true` marker in its Redis route.
+  The provider-create POST is issued **at most once** by this coordinator
+  operation. Safe provider capability GETs retain bounded HTTP retries.
+- A lost response, incomplete provider bundle or crash after that marker is
+  not permission to call `/api/accounts/create` again. A stale client
+  retry must inspect the persisted marker under its CAS fence and refuse a
+  second provider call. If the outcome cannot be established, Entryway
+  transitions into `reconciliation_required`, using
+  `RECONCILIATION_REQUIRED` as the provisioning phase. This is a
+  non-active, non-automatically-retryable state.
+- The recovery worker uses versioned, fenced Redis updates. Incomplete
+  identities or malformed legacy `updatedAt` timestamps are quarantined
+  rather than repeatedly requeued. Once quarantined, the account is
+  atomically removed from the pending-recovery sorted set. Active accounts
+  and `awaiting_consent` routes are not unattended recovery candidates.
+- When a complete provider-owned account bundle was durably recorded,
+  recovery may reverify the same WebID, ActivityPub actor, and ATProto
+  binding without a second create. Activation of a grant-bound account
+  rechecks the current persisted Pod-owner SAI authorization; historical
+  `ready` snapshots are not proof of current consent.
+- The original username and idempotency reservation remain reserved
+  during reconciliation. They must not be recycled simply because a
+  worker failed or a client received HTTP 409.
+
+### Operator handling of `account_reconciliation_required`
+
+Treat HTTP 409 `account_reconciliation_required` or an account route in
+`reconciliation_required` as an investigation gate, **not** a signal for
+the client to retry account creation. Inspect only through an authorized
+operational path; preserve the original idempotency scope, route revision,
+fence and non-secret error code. Compare against the **provider-owned**
+PostgreSQL signup journal and account record, exact WebID/ActivityPub actor,
+did:plc mapping, signed repository head, Solid Pod ownership, and canonical
+SAI consent/revocation revision where relevant. A database or provider
+timeout must itself be reported as uncertain, not interpreted as absence.
+
+Do **not** clear the Redis username/idempotency keys, reset the
+`providerCreateMayHaveSideEffects` marker, change the route to `active`,
+mint a replacement DID, replay the provider-create POST, or create synthetic
+consent or repository readiness evidence. The existing Entryway API **does
+not** provide an approved operator reconciliation/reset action. Only a
+separately reviewed provider-owned reconciliation transaction with durable
+identity proofs may close that gap. Existing-account migrations remain
+outside this new-account flow.
+
+### Verification baseline
+
+The protected Fedify Sidecar Fast Checks workflow executes
+`npm exec -- vitest run src/entryway/tests`, plus a separate
+`ENTRYWAY_REDIS_INTEGRATION=1` suite against real Redis 8.2. It checks
+CAS revisions, winner-only fences, monotonic provider-create markers,
+quarantine index removal, and lost-response behavior. These checks do not
+replace a deployed multiworker crash and backup/restore acceptance test
+against the actual ActivityPods PostgreSQL and hosted PDS infrastructure.
+
 ## Current limits and release boundaries
 
 The provider-owned bootstrap endpoint is implemented with local-owner and
@@ -232,6 +297,7 @@ SAI grant checks; its production authority deliberately refuses readiness
 until the real signed PDS, canonical PostgreSQL and native SAI owner flows are
 reviewed together. The consent URL is an **initiation link**, not a login token
 or an assertion that any permission was granted. The native browser handoff,
-trusted application callback, multi-worker recovery and revocation-at-operation
-checks still need full cross-repository acceptance. Production signup remains
-source-controlled closed.
+trusted application callback, deployed cross-worker crash recovery,
+restricted PostgreSQL authority, hosted signed PDS, and
+revocation-at-operation checks still need full cross-repository acceptance.
+Production signup remains source-controlled closed.
