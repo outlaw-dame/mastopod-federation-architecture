@@ -81,7 +81,8 @@ export function registerEntrywayFastifyRoutes(app: FastifyInstance, deps: Entryw
 
   app.get("/entryway/accounts/by-username/:username", async (req, reply) => {
     applyNoStoreHeaders(reply);
-    if (!deps.allowPublicResolve && !isAuthorized(req, deps.entrywayToken)) {
+    const authorized = isAuthorized(req, deps.entrywayToken);
+    if (!authorized && !deps.allowPublicResolve) {
       reply.code(401).send({ error: "unauthorized" });
       return;
     }
@@ -94,11 +95,13 @@ export function registerEntrywayFastifyRoutes(app: FastifyInstance, deps: Entryw
 
     try {
       const route = await deps.service.getByUsername(username);
-      if (!route) {
+      // Public lookup is opt-in and must not expose pending accounts,
+      // internal route identifiers, grant URIs or diagnostic state.
+      if (!route || (!authorized && route.status !== "active")) {
         reply.code(404).send({ error: "not_found" });
         return;
       }
-      reply.send({ account: serializeAccountRoute(route) });
+      reply.send({ account: authorized ? serializeAccountRoute(route) : serializePublicAccountRoute(route) });
     } catch (error) {
       sendEntrywayError(reply, error);
     }
@@ -149,6 +152,17 @@ export function registerEntrywayFastifyRoutes(app: FastifyInstance, deps: Entryw
       sendEntrywayError(reply, error);
     }
   });
+}
+
+function serializePublicAccountRoute(route: AccountRoute): Record<string, unknown> {
+  return {
+    username: route.username,
+    handle: route.handle,
+    webId: route.webId,
+    actorId: route.actorId,
+    atprotoDid: route.atprotoDid,
+    atprotoHandle: route.atprotoHandle,
+  };
 }
 
 function serializeAccountRoute(route: AccountRoute): Record<string, unknown> {
