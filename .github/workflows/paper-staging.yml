@@ -1,0 +1,78 @@
+name: Paper staging foundation
+on:
+  pull_request:
+    paths:
+      - 'deploy/paper-staging/**'
+      - '.github/workflows/paper-staging.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: paper-staging-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  local-provider:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch pinned ActivityPods source
+        run: |
+          git init "$RUNNER_TEMP/activitypods"
+          git -C "$RUNNER_TEMP/activitypods" remote add origin https://github.com/outlaw-dame/activity-pods.git
+          git -C "$RUNNER_TEMP/activitypods" fetch --depth=1 origin 6b518a3f90c4cebcffaf5e89cb34be90a3ee402e
+      - name: Prepare and validate actual provider profile
+        run: |
+          python3 deploy/paper-staging/prepare.py "$RUNNER_TEMP/paper-provider" --activitypods-checkout "$RUNNER_TEMP/activitypods"
+          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider config --quiet
+      - name: Build actual provider and frontend
+        run: docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider build provider frontend
+      - name: Verify HTTPS surfaces and closed signup gate
+        run: |
+          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider up -d ingress
+          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" exec -T provider node /staging/provider-probe.mjs
+          curl --fail --silent --show-error --max-time 10 --cacert "$RUNNER_TEMP/paper-provider/certificates/ca.crt" \
+            --resolve provider.paper.example.org:8443:127.0.0.1 https://provider.paper.example.org:8443/_staging/ready
+          curl --fail --silent --show-error --max-time 10 --cacert "$RUNNER_TEMP/paper-provider/certificates/ca.crt" \
+            --resolve login.paper.example.org:8443:127.0.0.1 https://login.paper.example.org:8443/login --output /dev/null
+      - name: Diagnose provider failure without publishing secrets
+        if: failure()
+        run: python3 deploy/paper-staging/diagnose.py "$RUNNER_TEMP/paper-provider"
+      - name: Cleanup this disposable provider
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/paper-provider/PREPARED"; then
+            docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider down --volumes
+          fi
+  tls-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python3 -m unittest discover -s deploy/paper-staging -p 'test_*.py'
+      - run: python3 deploy/paper-staging/prepare.py "$RUNNER_TEMP/paper-staging"
+      - name: Validate deployment configuration
+        run: docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" --profile acceptance config --quiet
+      - name: Build exact pinned source and exercise TLS runtime
+        run: |
+          docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" --profile acceptance build acceptance
+          docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" up -d --wait --wait-timeout 120 postgres
+          docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" --profile acceptance run --rm acceptance
+      - name: Restart without remigrating or rotating secrets
+        run: |
+          docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" restart postgres
+          docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" up -d --wait --wait-timeout 120 postgres
+          docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" --profile acceptance run --rm acceptance
+      - name: Bounded sanitized database diagnostics
+        if: failure()
+        run: python3 deploy/paper-staging/diagnose.py "$RUNNER_TEMP/paper-staging"
+      - name: Remove this job's disposable resources
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/paper-staging/PREPARED"; then
+            docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" --profile acceptance down --volumes
+          fi
