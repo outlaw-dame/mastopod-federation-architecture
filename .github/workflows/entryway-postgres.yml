@@ -18,6 +18,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
+      restored:
+        image: postgres:18
+        env:
+          POSTGRES_USER: entryway_admin
+          POSTGRES_PASSWORD: disposable_admin
+          POSTGRES_DB: entryway_control_plane
+        ports:
+          - 5550:5432
+        options: >-
+          --health-cmd "pg_isready -U entryway_admin -d entryway_control_plane"
+          --health-interval 2s --health-timeout 5s --health-retries 30
       postgres:
         image: postgres:18
         env:
@@ -27,7 +38,7 @@ jobs:
         ports:
           - 5549:5432
         options: >-
-          --health-cmd 'pg_isready -U entryway_admin -d entryway_control_plane'
+          --health-cmd "pg_isready -U entryway_admin -d entryway_control_plane"
           --health-interval 2s --health-timeout 5s --health-retries 30
     env:
       ENTRYWAY_POSTGRES_INTEGRATION: '1'
@@ -75,4 +86,20 @@ jobs:
         env:
           ENTRYWAY_POSTGRES_RESTORE: '1'
           ENTRYWAY_TEST_DATABASE_URL: postgres://entryway_test:disposable_runtime@127.0.0.1:5549/entryway_restored
+        run: npm exec -- vitest run src/entryway/tests/PostgresAccountRouteStore.integration.test.ts
+      - name: Restore into a different cluster with the same database OID
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          RESTORE_CONTAINER: ${{ job.services.restored.id }}
+        run: |
+          source_oid=$(docker exec "$PG_CONTAINER" psql -U entryway_admin -d entryway_control_plane -Atc "SELECT oid FROM pg_database WHERE datname=current_database()")
+          target_oid=$(docker exec "$RESTORE_CONTAINER" psql -U entryway_admin -d entryway_control_plane -Atc "SELECT oid FROM pg_database WHERE datname=current_database()")
+          test "$source_oid" = "$target_oid"
+          docker exec "$RESTORE_CONTAINER" psql -U entryway_admin -d entryway_control_plane -v ON_ERROR_STOP=1 -c "CREATE ROLE paper_entryway_owner NOLOGIN; CREATE ROLE paper_entryway_runtime NOLOGIN; CREATE ROLE entryway_test LOGIN PASSWORD 'disposable_runtime'; GRANT paper_entryway_runtime TO entryway_test; GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO paper_entryway_owner;"
+          docker exec -i "$RESTORE_CONTAINER" pg_restore -U entryway_admin -d entryway_control_plane --exit-on-error < /tmp/entryway.dump
+      - name: Verify cross-cluster OID collision cannot reopen writes
+        working-directory: fedify-sidecar
+        env:
+          ENTRYWAY_POSTGRES_RESTORE: '1'
+          ENTRYWAY_TEST_DATABASE_URL: postgres://entryway_test:disposable_runtime@127.0.0.1:5550/entryway_control_plane
         run: npm exec -- vitest run src/entryway/tests/PostgresAccountRouteStore.integration.test.ts

@@ -3,6 +3,8 @@
 BEGIN;
 CREATE ROLE paper_entryway_owner NOLOGIN;
 CREATE ROLE paper_entryway_runtime NOLOGIN;
+-- The non-login function owner can inspect this one non-secret cluster identity.
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO paper_entryway_owner;
 CREATE SCHEMA paper_entryway AUTHORIZATION paper_entryway_owner;
 SET LOCAL ROLE paper_entryway_owner;
 REVOKE ALL ON SCHEMA paper_entryway FROM PUBLIC;
@@ -96,14 +98,17 @@ CREATE INDEX routes_recovery ON paper_entryway.routes(updated_at, account_id) WH
 
 -- A logical restore into another database is read-only until operator reconciliation.
 CREATE TABLE paper_entryway.installation (
-  singleton boolean PRIMARY KEY CHECK (singleton), database_oid oid NOT NULL
+  singleton boolean PRIMARY KEY CHECK (singleton), database_oid oid NOT NULL,
+  cluster_identifier bigint NOT NULL
 );
-INSERT INTO paper_entryway.installation SELECT true, oid FROM pg_database WHERE datname = current_database();
+INSERT INTO paper_entryway.installation SELECT true, d.oid, c.system_identifier
+  FROM pg_database d CROSS JOIN pg_control_system() c WHERE d.datname = current_database();
 CREATE FUNCTION paper_entryway.assert_writable() RETURNS void
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
   IF NOT EXISTS (SELECT FROM paper_entryway.installation i JOIN pg_database d ON d.oid = i.database_oid
-    WHERE d.datname = current_database()) THEN
+    CROSS JOIN pg_control_system() c
+    WHERE d.datname = current_database() AND c.system_identifier = i.cluster_identifier) THEN
     RAISE EXCEPTION 'Restored Entryway database requires reconciliation' USING ERRCODE = '55000';
   END IF;
 END $$;

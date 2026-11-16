@@ -368,7 +368,9 @@ The `Entryway PostgreSQL authority` workflow uses real PostgreSQL 18 and separat
 administrator/runtime logins. It checks concurrent reservations, CAS winners,
 restricted roles, marker/replay preservation, database restart, and logical
 backup/restore. Restored rows are compared exactly; a logical restore to a new
-database is write-quarantined by its installation identity. Do not reset that
+database is write-quarantined by its database OID and actual PostgreSQL cluster
+system identifier. Acceptance also restores to another cluster with the same
+database OID, which must still reject writes. Do not reset that
 identity merely to make restore tests pass. Reconcile external provider effects
 since the backup first. Physical restore and same-database point-in-time recovery
 also require an external deployment fence and remain deployed acceptance gates.
