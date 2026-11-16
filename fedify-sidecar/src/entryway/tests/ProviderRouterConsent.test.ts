@@ -29,12 +29,16 @@ describe("operator-pinned native Solid SAI consent navigation", () => {
     }));
     expect(normalized.ownerSessionAudience).toBe("urn:paper:entryway:owner-session:v1");
     expect(normalized.ownerSessionJwksUrl).toBe("https://pods.example.org/.well-known/jwks.json");
+    expect(normalizeProviderDefinition(provider({
+      ownerSessionIssuer: "https://pods.example.org/",
+      ownerSessionJwksUrl: "https://pods.example.org/jwks",
+    })).ownerSessionIssuer).toBe("https://pods.example.org/");
   });
 
   it.each([
     { ownerSessionIssuer: "http://pods.example.org", ownerSessionJwksUrl: "https://pods.example.org/jwks" },
     { ownerSessionIssuer: "https://pods.example.org", ownerSessionJwksUrl: "https://evil.example/jwks" },
-    { ownerSessionIssuer: "https://pods.example.org/", ownerSessionJwksUrl: "https://pods.example.org/jwks" },
+    { ownerSessionIssuer: "https://pods.example.org/path", ownerSessionJwksUrl: "https://pods.example.org/jwks" },
     { ownerSessionIssuer: "https://pods.example.org", ownerSessionJwksUrl: undefined },
     { ownerSessionIssuer: undefined, ownerSessionJwksUrl: "https://pods.example.org/jwks" },
   ])("rejects incomplete or cross-origin owner-session authority: %j", override => {

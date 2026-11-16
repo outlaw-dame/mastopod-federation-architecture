@@ -46,7 +46,7 @@ describe("provider-signed Solid-OIDC owner-session proof", () => {
       .sign(privateKey);
 
     await expect(verifier.verify({ proof, provider, route }))
-      .resolves.toEqual({ jti });
+      .resolves.toEqual({ jti, expiresAt: new Date((now + 90) * 1_000).toISOString() });
     await expect(verifier.verify({
       proof, provider, route: { ...route, accountId: "acct_22222222-2222-4222-8222-222222222222" },
     })).rejects.toMatchObject({ code: "owner_session_proof_invalid", statusCode: 401 });
@@ -59,5 +59,22 @@ describe("provider-signed Solid-OIDC owner-session proof", () => {
     await expect(verifier.verify({ proof: "x".repeat(100), provider: {
       ...provider, ownerSessionJwksUrl: undefined,
     }, route })).rejects.toMatchObject({ code: "owner_session_proof_invalid" });
+  });
+
+  it("rejects a proof whose signed lifetime exceeds the provider contract", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("ES256");
+    const jwk = await exportJWK(publicKey);
+    jwk.alg = "ES256";
+    const verifier = new ProviderJwksOwnerSessionProofVerifier(() => createLocalJWKSet({ keys: [jwk] }));
+    const now = Math.floor(Date.now() / 1000);
+    const proof = await new SignJWT({
+      purpose: "paper.entryway.owner-session.v1", account_id: route.accountId,
+      username: route.username, webid: route.webId, app_client_id: appClientId,
+    }).setProtectedHeader({ alg: "ES256", typ: "JWT" })
+      .setIssuer(issuer).setAudience(audience).setSubject(route.webId)
+      .setJti(randomUUID()).setIssuedAt(now).setExpirationTime(now + 181)
+      .sign(privateKey);
+    await expect(verifier.verify({ proof, provider, route }))
+      .rejects.toMatchObject({ code: "owner_session_proof_invalid" });
   });
 });

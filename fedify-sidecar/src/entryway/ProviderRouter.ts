@@ -107,8 +107,10 @@ function normalizeOwnerSessionConfig(
     const issuerUrl = new URL(issuer);
     const jwksUrl = new URL(jwks);
     const providerOrigin = new URL(baseUrl).origin;
+    const canonicalIssuer = issuer === issuerUrl.origin || issuer === `${issuerUrl.origin}/`;
     if (issuerUrl.protocol !== "https:" || !issuerUrl.hostname || issuerUrl.username || issuerUrl.password ||
-        issuerUrl.search || issuerUrl.hash || issuerUrl.origin !== providerOrigin || issuerUrl.origin !== issuer ||
+        issuerUrl.pathname !== "/" || issuerUrl.search || issuerUrl.hash ||
+        issuerUrl.origin !== providerOrigin || !canonicalIssuer ||
         jwksUrl.protocol !== "https:" || !jwksUrl.hostname || jwksUrl.username || jwksUrl.password ||
         jwksUrl.search || jwksUrl.hash || jwksUrl.origin !== providerOrigin || jwksUrl.toString() !== jwks) {
       throw new Error("invalid owner-session authority");

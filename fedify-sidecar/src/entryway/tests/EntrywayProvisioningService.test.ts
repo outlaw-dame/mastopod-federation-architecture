@@ -137,6 +137,7 @@ function createService(fetchFn: typeof fetch, options: {
     ownerSessionProofVerifier: options.ownerSessionProofVerifier ?? {
       verify: vi.fn(async () => ({
         jti: `11111111-1111-4111-8111-${String(++proofSequence).padStart(12, "0")}`,
+        expiresAt: new Date(Date.now() + 180_000).toISOString(),
       })),
     },
     fingerprintSecret,
@@ -595,9 +596,16 @@ describe("EntrywayProvisioningService", () => {
     expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
   });
 
-  it("persists only a keyed one-time proof digest and rejects replay after a failed consent recheck", async () => {
+  it("retains unexpired keyed proof digests and rejects an A/B/A replay after failed consent rechecks", async () => {
+    const proofA = "provider-signed-owner-session-proof-a-" + "x".repeat(96);
+    const proofB = "provider-signed-owner-session-proof-b-" + "x".repeat(96);
     const fixedProof = {
-      verify: vi.fn(async () => ({ jti: "11111111-1111-4111-8111-111111111111" })),
+      verify: vi.fn(async ({ proof }: { proof?: string }) => ({
+        jti: proof === proofB
+          ? "22222222-2222-4222-8222-222222222222"
+          : "11111111-1111-4111-8111-111111111111",
+        expiresAt: new Date(Date.now() + 180_000).toISOString(),
+      })),
     };
     const { fetchMock } = createFetchMock();
     const store = new InMemoryAccountRouteStore();
@@ -621,14 +629,20 @@ describe("EntrywayProvisioningService", () => {
     await expect(service.createAccount(createInput())).rejects.toMatchObject({
       code: "app_consent_required",
     });
-    await expect(service.resumeAwaitingConsent(consentResume)).rejects.toMatchObject({
+    await expect(service.resumeAwaitingConsent({ ...consentResume, ownerSessionProof: proofA })).rejects.toMatchObject({
+      code: "app_consent_required",
+    });
+    await expect(service.resumeAwaitingConsent({ ...consentResume, ownerSessionProof: proofB })).rejects.toMatchObject({
       code: "app_consent_required",
     });
     const stored = await store.getByUsername("alice");
-    expect(stored?.provisioning.ownerSessionProofJtiHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(stored?.provisioning.ownerSessionProofUses).toHaveLength(2);
+    expect(stored?.provisioning.ownerSessionProofUses?.every(use => /^[a-f0-9]{64}$/.test(use.jtiHash))).toBe(true);
     expect(JSON.stringify(stored)).not.toContain("11111111-1111-4111-8111-111111111111");
-    expect(JSON.stringify(stored)).not.toContain(consentResume.ownerSessionProof);
-    await expect(service.resumeAwaitingConsent(consentResume)).rejects.toMatchObject({
+    expect(JSON.stringify(stored)).not.toContain("22222222-2222-4222-8222-222222222222");
+    expect(JSON.stringify(stored)).not.toContain(proofA);
+    expect(JSON.stringify(stored)).not.toContain(proofB);
+    await expect(service.resumeAwaitingConsent({ ...consentResume, ownerSessionProof: proofA })).rejects.toMatchObject({
       code: "owner_session_proof_replayed", statusCode: 409,
     });
   });

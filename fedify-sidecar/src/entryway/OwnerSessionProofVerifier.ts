@@ -13,6 +13,7 @@ export interface OwnerSessionProofInput {
 
 export interface VerifiedOwnerSessionProof {
   jti: string;
+  expiresAt: string;
 }
 
 export interface EntrywayOwnerSessionProofVerifier {
@@ -57,11 +58,15 @@ export class ProviderJwksOwnerSessionProofVerifier implements EntrywayOwnerSessi
           payload["account_id"] !== route.accountId ||
           payload["username"] !== route.username ||
           payload["app_client_id"] !== provider.appClientId ||
+          !Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp) ||
+          (payload.exp as number) <= (payload.iat as number) ||
+          (payload.exp as number) - (payload.iat as number) > 180 ||
+          (payload.exp as number) <= Math.floor(Date.now() / 1_000) ||
           typeof payload.jti !== "string" ||
           !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(payload.jti)) {
         throw invalid();
       }
-      return { jti: payload.jti };
+      return { jti: payload.jti, expiresAt: new Date((payload.exp as number) * 1_000).toISOString() };
     } catch (error) {
       if (error instanceof EntrywayError) throw error;
       throw invalid();

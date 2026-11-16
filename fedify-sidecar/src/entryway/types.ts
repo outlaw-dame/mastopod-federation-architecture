@@ -123,9 +123,9 @@ export interface EntrywayProvisioningSnapshot {
   lastErrorMessage?: string;
   lastAttemptAt?: string;
   completedAt?: string;
-  // Server-keyed digest only. Never persist a JWT, raw jti, OIDC token or
-  // browser callback state in the account route.
-  ownerSessionProofJtiHash?: string;
+  // Bounded, expiry-pruned server-keyed digests only. Never persist a JWT,
+  // raw jti, OIDC token or browser callback state in the account route.
+  ownerSessionProofUses?: Array<{ jtiHash: string; expiresAt: string }>;
 }
 
 export interface EntrywaySessionHandoff {

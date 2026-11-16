@@ -176,9 +176,10 @@ It must also supply a fresh provider-signed owner-session proof obtained by
 the authenticated browser from the provider. The proof is ES256, has a maximum
 accepted age of five minutes, and is bound to the exact provider issuer,
 account ID, username, WebID and app client ID. Entryway accepts keys only from
-the operator-pinned same-origin JWKS URL. It stores only an HMAC digest of the
-proof JTI before calling the provider, so a failed attempt requires a fresh
-proof and JWT bytes never enter route state.
+the operator-pinned same-origin JWKS URL. In the same CAS operation that claims
+the route fence, it stores only a bounded, expiry-pruned set of HMAC proof-JTI
+digests, so failed attempts require fresh proofs, A/B/A replay is rejected, and
+JWT bytes never enter route state.
 The earlier exact-original-signup replay remains supported for legacy
 backend clients, but new clients do not need to resend the signup password
 or verification token. The Paper client must still implement and test

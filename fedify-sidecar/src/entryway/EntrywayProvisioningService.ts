@@ -289,15 +289,36 @@ export class EntrywayProvisioningService {
       route: current,
     });
     const ownerProofHash = this.hashOwnerSessionJti(verifiedOwner.jti);
-    if (current.provisioning.ownerSessionProofJtiHash === ownerProofHash) {
+    const storedOwnerProofUses = current.provisioning.ownerSessionProofUses ?? [];
+    if (!Array.isArray(storedOwnerProofUses) || storedOwnerProofUses.length > 64 ||
+        storedOwnerProofUses.some(use => !use || !/^[a-f0-9]{64}$/.test(use.jtiHash) ||
+          !Number.isFinite(Date.parse(use.expiresAt)))) {
+      throw new EntrywayError("owner_session_proof_state_invalid", "Owner proof replay state is invalid", {
+        statusCode: 500, retryable: false,
+      });
+    }
+    const now = Date.now();
+    const activeOwnerProofUses = storedOwnerProofUses.filter(use => Date.parse(use.expiresAt) > now);
+    if (activeOwnerProofUses.some(use => use.jtiHash === ownerProofHash)) {
       throw new EntrywayError("owner_session_proof_replayed", "Owner authentication proof was already consumed", {
         statusCode: 409, retryable: false,
       });
     }
+    if (activeOwnerProofUses.length >= 64) {
+      throw new EntrywayError("owner_session_proof_capacity", "Too many owner proofs are currently in flight", {
+        statusCode: 429, retryable: true,
+      });
+    }
 
-    // Claim ownership atomically. Competing workers may not both resume
-    // and no stale responder may overwrite an activated route.
-    const claimed = await this.claimProvisioning(current);
+    // Claim ownership and consume the proof in the same CAS. Competing
+    // workers may not both resume, and a crash after the claim cannot make
+    // the same proof reusable.
+    const claimed = await this.claimProvisioning(current, {
+      ownerSessionProofUses: [...activeOwnerProofUses, {
+        jtiHash: ownerProofHash,
+        expiresAt: verifiedOwner.expiresAt,
+      }],
+    });
     if (!claimed) {
       throw new EntrywayError("provisioning_in_progress", "Another consent attempt owns this route", {
         statusCode: 409, retryable: true,
@@ -305,16 +326,9 @@ export class EntrywayProvisioningService {
     }
     const fenceToken = claimed.provisioning.fenceToken!;
     try {
-      // Persist only a keyed digest of the one-time jti before any provider
-      // call. A failed attempt requires a freshly authenticated proof; JWT
-      // bytes and browser/OIDC credentials never enter durable route state.
-      const ownerClaimed = await this.updateRoute(claimed.accountId, fenceToken, {
-        provisioning: {
-          ...claimed.provisioning,
-          ownerSessionProofJtiHash: ownerProofHash,
-        },
-      });
-      const verified = await this.verifyAccountBundle(ownerClaimed, fenceToken);
+      // Only keyed, expiring JTI digests entered the CAS claim. JWT bytes and
+      // browser/OIDC credentials never enter route state.
+      const verified = await this.verifyAccountBundle(claimed, fenceToken);
       const completed = await this.bootstrapAppIfConfigured(verified, provider, fenceToken);
       const activated = await this.activateRoute(completed.route, fenceToken);
       // The HTTP route intentionally returns no provider session handoff
@@ -699,7 +713,10 @@ export class EntrywayProvisioningService {
     });
   }
 
-  private async claimProvisioning(route: AccountRoute): Promise<AccountRoute | null> {
+  private async claimProvisioning(
+    route: AccountRoute,
+    provisioningPatch: Partial<AccountRoute["provisioning"]> = {},
+  ): Promise<AccountRoute | null> {
     if (route.status !== "provisioning" && route.status !== "failed" &&
         route.status !== "awaiting_consent") return null;
     const token = randomUUID();
@@ -709,6 +726,7 @@ export class EntrywayProvisioningService {
       status: "provisioning",
       provisioning: {
         ...route.provisioning,
+        ...provisioningPatch,
         fenceToken: token,
         attempts: route.provisioning.attempts + 1,
         lastAttemptAt: this.now(),
