@@ -272,7 +272,7 @@ import type { ProviderProfile } from "./capabilities/types.js";
 import { AccountBundleVerifier } from "./entryway/AccountBundleVerifier.js";
 import { ActivityPodsAppBootstrapClient } from "./entryway/ActivityPodsAppBootstrapClient.js";
 import { ActivityPodsProvisioningClient } from "./entryway/ActivityPodsProvisioningClient.js";
-import { RedisAccountRouteStore } from "./entryway/AccountRouteStore.js";
+import { openEntrywayPostgres } from "./entryway/PostgresAccountRouteStore.js";
 import { buildEntrywayProvidersFromEnv } from "./entryway/config.js";
 import { EntrywayProvisioningService } from "./entryway/EntrywayProvisioningService.js";
 import { EntrywayRecoveryWorker } from "./entryway/EntrywayRecoveryWorker.js";
@@ -442,8 +442,6 @@ const config = {
     process.env["ENABLE_ENTRYWAY"] === "true",
   entrywayToken: process.env["ENTRYWAY_TOKEN"] || "",
   entrywayFingerprintSecret: process.env["ENTRYWAY_FINGERPRINT_SECRET"] || "",
-  entrywayRedisUrl: process.env["ENTRYWAY_REDIS_URL"] || process.env["REDIS_URL"] || "redis://localhost:6379",
-  entrywayRedisPrefix: process.env["ENTRYWAY_REDIS_PREFIX"] || "entryway:accounts",
   entrywayPublicResolve: process.env["ENTRYWAY_PUBLIC_RESOLVE"] === "true",
   entrywayRequestTimeoutMs: Number.parseInt(process.env["ENTRYWAY_REQUEST_TIMEOUT_MS"] || "10000", 10),
   entrywayRequestMaxAttempts: Number.parseInt(process.env["ENTRYWAY_REQUEST_MAX_ATTEMPTS"] || "4", 10),
@@ -804,7 +802,7 @@ let streamSubscriptionService: DurableStreamSubscriptionService | null = null;
 let feedStreamKafkaConsumer: FeedStreamKafkaConsumer | null = null;
 let unifiedFeedBridge: UnifiedFeedBridge | null = null;
 let fep3ab2Runtime: Fep3ab2Runtime | null = null;
-let entrywayRedisClient: Redis | null = null;
+let entrywayPostgres: Awaited<ReturnType<typeof openEntrywayPostgres>> | null = null;
 let entrywayRecoveryWorker: EntrywayRecoveryWorker | null = null;
 let isShuttingDown = false;
 const startupState: StartupState = {
@@ -1771,10 +1769,7 @@ async function main() {
         throw new Error("ENABLE_ENTRYWAY requires at least one configured Entryway provider");
       }
 
-      entrywayRedisClient = new Redis(config.entrywayRedisUrl);
-      entrywayRedisClient.on("error", (err: Error) =>
-        logger.error("Entryway Redis error", { error: err.message }),
-      );
+      entrywayPostgres = await openEntrywayPostgres(process.env);
 
       const entrywayProviderClient = new ActivityPodsProvisioningClient({
         timeoutMs: config.entrywayRequestTimeoutMs,
@@ -1786,7 +1781,7 @@ async function main() {
         userAgent: process.env["USER_AGENT"] || "ActivityPods-Entryway/1.0",
       });
       const entrywayService = new EntrywayProvisioningService({
-        store: new RedisAccountRouteStore(entrywayRedisClient, config.entrywayRedisPrefix),
+        store: entrywayPostgres.store,
         providerRouter: new StaticEntrywayProviderRouter(entrywayProviders),
         providerClient: entrywayProviderClient,
         providerPreflight: new ProviderCapabilitiesPreflight(entrywayProviderClient),
@@ -4035,9 +4030,9 @@ async function shutdown(signal: string): Promise<void> {
       logger.info("Entryway recovery worker stopped");
     }
 
-    if (entrywayRedisClient) {
-      await entrywayRedisClient.quit().catch(() => entrywayRedisClient!.disconnect());
-      entrywayRedisClient = null;
+    if (entrywayPostgres) {
+      await entrywayPostgres.pool.end();
+      entrywayPostgres = null;
       logger.info("Entryway Redis client disconnected");
     }
 

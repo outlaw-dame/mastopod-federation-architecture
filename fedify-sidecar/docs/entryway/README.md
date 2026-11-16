@@ -53,7 +53,9 @@ ENTRYWAY_OWNER_SESSION_AUDIENCE=urn:paper:entryway:owner-session:v1
 # Optional, operator-owned authenticated provider SAI consent page:
 ENTRYWAY_SAI_AUTHORIZATION_URL=https://pods-ui.memory.example/authorize
 ENTRYWAY_SAI_APP_URI=https://memory.example/app
-REDIS_URL=redis://redis:6379
+ENTRYWAY_DATABASE_URL=postgresql://entryway_runtime:<password>@postgres.example/entryway
+# Optional PEM CA for PostgreSQL TLS (certificate verification stays enabled):
+ENTRYWAY_DATABASE_CA=<PEM CA certificate>
 ```
 
 `ENTRYWAY_PROVIDERS_JSON` can replace the single default provider:
@@ -266,7 +268,7 @@ therefore has a strict boundary between retrying *verification* and retrying
 
 - Before the first provider account-create POST, Entryway atomically records
   `PROVIDER_CREATE_STARTED` and the irreversible
-  `providerCreateMayHaveSideEffects=true` marker in its Redis route.
+  `providerCreateMayHaveSideEffects=true` marker in its PostgreSQL route.
   The provider-create POST is issued **at most once** by this coordinator
   operation. Safe provider capability GETs retain bounded HTTP retries.
 - A lost response, incomplete provider bundle or crash after that marker is
@@ -276,10 +278,10 @@ therefore has a strict boundary between retrying *verification* and retrying
   transitions into `reconciliation_required`, using
   `RECONCILIATION_REQUIRED` as the provisioning phase. This is a
   non-active, non-automatically-retryable state.
-- The recovery worker uses versioned, fenced Redis updates. Incomplete
+- The recovery worker uses versioned, fenced PostgreSQL updates. Incomplete
   identities or malformed legacy `updatedAt` timestamps are quarantined
   rather than repeatedly requeued. Once quarantined, the account is
-  atomically removed from the pending-recovery sorted set. Active accounts
+  atomically excluded from the pending-recovery partial index. Active accounts
   and `awaiting_consent` routes are not unattended recovery candidates.
 - When a complete provider-owned account bundle was durably recorded,
   recovery may reverify the same WebID, ActivityPub actor, and ATProto
@@ -332,8 +334,48 @@ trusted application callback, deployed cross-worker crash recovery,
 PostgreSQL canonical Entryway route authority with restricted credentials,
 hosted signed PDS, and
 revocation-at-operation checks still need full cross-repository acceptance.
-Redis remains the current Entryway route/CAS implementation; it is not the
-requested PostgreSQL canonical control plane. Migration, split-brain and
-dual-write avoidance, backup/restore, and restricted-role acceptance remain
-production blockers.
+The runtime now requires the PostgreSQL route store described below. The Redis
+implementation remains only for historical compatibility tests; startup has no
+Redis fallback and never dual-writes route authority. Existing Redis installations
+must stop signup and reconcile their reservations before switching authority.
 Production signup remains source-controlled closed.
+
+## PostgreSQL canonical route store and cutover
+
+Apply `sql/entryway-control-plane-v1.sql` once using a migration administrator in
+a dedicated database. It creates a non-login owner and a non-login runtime role.
+Provision a separate login with only membership in `paper_entryway_runtime`;
+never grant it ownership, direct table privileges or membership in the owner
+role. The application does not run migrations. Startup verifies restricted
+credentials and required function grants, failing closed when unavailable.
+
+The runtime has only reservation, read, CAS and bounded recovery functions.
+Unique database constraints enforce account, username and idempotency ownership.
+All updates require the current revision and fence, preserve established identity,
+and cannot clear provider-create uncertainty or unexpired proof replay evidence.
+Each mutation is one database transaction. Connection loss is not retried as an
+assumed rollback. Connection acquisition, locks, statements, pool size and route
+payloads are bounded. Production connections verify TLS certificates; plaintext
+is accepted only on loopback under explicit disposable-test configuration.
+
+Do not point a newly empty PostgreSQL database at existing Redis signups. This
+change intentionally provides no automatic migration or reset API. Freeze all
+writers, inventory reservations (including uncertain outcomes), reconcile against
+the provider-owned signup journal, and review a separate cutover before enabling
+the new authority. Redis must not remain a parallel writer.
+
+The `Entryway PostgreSQL authority` workflow uses real PostgreSQL 18 and separate
+administrator/runtime logins. It checks concurrent reservations, CAS winners,
+restricted roles, marker/replay preservation, database restart, and logical
+backup/restore. Restored rows are compared exactly; a logical restore to a new
+database is write-quarantined by its database OID and actual PostgreSQL cluster
+system identifier. Acceptance also restores to another cluster with the same
+database OID, which must still reject writes. Do not reset that
+identity merely to make restore tests pass. Reconcile external provider effects
+since the backup first. Physical restore and same-database point-in-time recovery
+also require an external deployment fence and remain deployed acceptance gates.
+
+Passing these repository tests is not deployed multiworker acceptance and does
+not prove the hosted PDS, browser return binding, or native operation-level SAI
+revocation gates. Those release fuses stay closed until their independent evidence
+is available.
