@@ -11,6 +11,34 @@ concurrency:
   group: paper-staging-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  local-provider:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch pinned ActivityPods source
+        run: |
+          git init "$RUNNER_TEMP/activitypods"
+          git -C "$RUNNER_TEMP/activitypods" remote add origin https://github.com/outlaw-dame/activity-pods.git
+          git -C "$RUNNER_TEMP/activitypods" fetch --depth=1 origin 6b518a3f90c4cebcffaf5e89cb34be90a3ee402e
+      - name: Prepare and validate actual provider profile
+        run: |
+          python3 deploy/paper-staging/prepare.py "$RUNNER_TEMP/paper-provider" --activitypods-checkout "$RUNNER_TEMP/activitypods"
+          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider config --quiet
+      - name: Build actual provider and frontend
+        run: docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider build provider frontend
+      - name: Verify HTTPS surfaces and closed signup gate
+        run: |
+          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider up -d ingress
+          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" exec -T provider node /staging/provider-probe.mjs
+      - name: Cleanup this disposable provider
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/paper-provider/PREPARED"; then
+            docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider down --volumes
+          fi
   tls-runtime:
     runs-on: ubuntu-latest
     timeout-minutes: 15

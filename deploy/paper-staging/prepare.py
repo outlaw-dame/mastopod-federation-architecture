@@ -22,7 +22,7 @@ def write(path, content):
     path.chmod(0o600)
 
 
-def prepare(destination):
+def prepare(destination, activitypods_checkout=None):
     lock = json.loads((HERE / "lock.json").read_text())
     if lock["release"] != "CLOSED":
         raise ValueError("Release must remain CLOSED")
@@ -64,7 +64,11 @@ def prepare(destination):
     (ca / "ca.key").chmod(0o600)
     (certs / "server.key").chmod(0o600)
     write(destination / "build" / "Dockerfile", f"FROM {lock['node_image']}\nWORKDIR /app\nCOPY fedify-sidecar/package*.json ./\nRUN npm ci --ignore-scripts --no-audit --no-fund\nCOPY fedify-sidecar/ ./\nENV NODE_ENV=production\nCMD [\"node\",\"--import\",\"tsx\",\"staging-smoke.ts\"]\n")
-    write(destination / "compose.json", json.dumps(compose(lock), indent=2) + "\n")
+    config = compose(lock)
+    if activitypods_checkout is not None:
+        from provider import add_provider
+        add_provider(destination, activitypods_checkout, lock, config, run, write)
+    write(destination / "compose.json", json.dumps(config, indent=2) + "\n")
     write(destination / "lock.json", json.dumps(lock, indent=2) + "\n")
     write(destination / "PREPARED", "Foundation only. No provider, PDS, browser or production acceptance claimed.\n")
 
@@ -100,10 +104,11 @@ def compose(lock):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
+    parser.add_argument("--activitypods-checkout", type=Path, help="Include the pinned real provider and frontend for local-only browser staging")
     args = parser.parse_args()
     os.umask(0o077)
     try:
-        prepare(args.destination.absolute())
+        prepare(args.destination.absolute(), args.activitypods_checkout)
     except (OSError, ValueError, subprocess.SubprocessError):
         parser.exit(1, "Preparation failed; no deployment performed. Do not use a directory without PREPARED.\n")
     print("Prepared isolated database staging files. No deployment performed; release CLOSED.")

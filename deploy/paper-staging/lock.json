@@ -3,6 +3,9 @@
   "federation": "78c22c0438d3ce090c32cc9ef8aba5d76c2edfcb",
   "postgres_image": "postgres:18@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc",
   "node_image": "node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+  "caddy_image": "caddy:2-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0",
+  "fuseki_image": "semapps/jena-fuseki-webacl@sha256:e6098e796b8594353bd157ec9017976d65538e542884d3287390197208076561",
+  "redis_image": "redis:8.2.11-alpine@sha256:da23c2478319ceb4903857d77a2fd7aa5137d9e9d4c8165dafbacedac6403e95",
   "release": "CLOSED",
   "scope": "isolated PostgreSQL TLS foundation; provider/PDS deployment remains blocked"
 }
