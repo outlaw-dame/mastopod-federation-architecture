@@ -33,6 +33,10 @@ jobs:
         run: |
           docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider up -d ingress
           docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" exec -T provider node /staging/provider-probe.mjs
+          curl --fail --silent --show-error --max-time 10 --cacert "$RUNNER_TEMP/paper-provider/certificates/ca.crt" \
+            --resolve provider.paper.example.org:8443:127.0.0.1 https://provider.paper.example.org:8443/_staging/ready
+          curl --fail --silent --show-error --max-time 10 --cacert "$RUNNER_TEMP/paper-provider/certificates/ca.crt" \
+            --resolve login.paper.example.org:8443:127.0.0.1 https://login.paper.example.org:8443/login --output /dev/null
       - name: Diagnose provider failure without publishing secrets
         if: failure()
         run: python3 deploy/paper-staging/diagnose.py "$RUNNER_TEMP/paper-provider"
