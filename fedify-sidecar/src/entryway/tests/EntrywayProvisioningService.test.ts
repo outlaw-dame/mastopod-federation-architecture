@@ -7,6 +7,7 @@ import { EntrywayProvisioningService } from "../EntrywayProvisioningService.js";
 import { StaticEntrywayProviderRouter } from "../ProviderRouter.js";
 import { EntrywayError } from "../errors.js";
 import type { EntrywayProviderPreflight } from "../ProviderPreflight.js";
+import type { EntrywayOwnerSessionProofVerifier } from "../OwnerSessionProofVerifier.js";
 
 const fingerprintSecret = "test-entryway-fingerprint-secret-minimum-32-chars";
 
@@ -27,7 +28,7 @@ function createInput(overrides: Record<string, unknown> = {}) {
         didMethod: "did:plc" as const,
       },
     },
-    idempotencyKey: "idem.alice.0001",
+    idempotencyKey: "idem.alice.0001.0123456789abcdef",
     verification: {
       method: "email",
       challengeToken: "verified-user-token",
@@ -108,7 +109,9 @@ function createService(fetchFn: typeof fetch, options: {
   appBootstrapper?: EntrywayAppBootstrapper;
   providers?: ConstructorParameters<typeof StaticEntrywayProviderRouter>[0];
   store?: InMemoryAccountRouteStore;
+  ownerSessionProofVerifier?: EntrywayOwnerSessionProofVerifier;
 } = {}) {
+  let proofSequence = 0;
   return new EntrywayProvisioningService({
     store: options.store ?? new InMemoryAccountRouteStore(),
     providerRouter: new StaticEntrywayProviderRouter(options.providers ?? [
@@ -131,6 +134,11 @@ function createService(fetchFn: typeof fetch, options: {
     }),
     providerPreflight: options.providerPreflight,
     appBootstrapper: options.appBootstrapper,
+    ownerSessionProofVerifier: options.ownerSessionProofVerifier ?? {
+      verify: vi.fn(async () => ({
+        jti: `11111111-1111-4111-8111-${String(++proofSequence).padStart(12, "0")}`,
+      })),
+    },
     fingerprintSecret,
   });
 }
@@ -177,7 +185,8 @@ async function consentPendingFixture() {
 const consentResume = {
   username: "Alice",
   appClientId: "https://memory.example/app",
-  idempotencyKey: "idem.alice.0001",
+  idempotencyKey: "idem.alice.0001.0123456789abcdef",
+  ownerSessionProof: "provider-signed-owner-session-proof-" + "x".repeat(96),
 };
 
 describe("EntrywayProvisioningService", () => {
@@ -584,6 +593,44 @@ describe("EntrywayProvisioningService", () => {
     expect(awaiting?.status).toBe("awaiting_consent");
     expect(awaiting?.provisioning.phase).toBe("AWAITING_APP_CONSENT");
     expect(calls.filter(c => c.url.endsWith("/api/accounts/create"))).toHaveLength(1);
+  });
+
+  it("persists only a keyed one-time proof digest and rejects replay after a failed consent recheck", async () => {
+    const fixedProof = {
+      verify: vi.fn(async () => ({ jti: "11111111-1111-4111-8111-111111111111" })),
+    };
+    const { fetchMock } = createFetchMock();
+    const store = new InMemoryAccountRouteStore();
+    const appBootstrapper = {
+      bootstrap: vi.fn().mockRejectedValue(new EntrywayError(
+        "app_consent_required", "Native owner authorization is still missing",
+        { statusCode: 428, retryable: false },
+      )),
+    };
+    const service = createService(fetchMock as unknown as typeof fetch, {
+      store, appBootstrapper, ownerSessionProofVerifier: fixedProof,
+      providers: [{
+        providerId: "default", baseUrl: "http://localhost:3000",
+        provisioningBearerToken: "provider-provisioning-token",
+        appClientId: "https://memory.example/app", appBootstrapEnabled: true,
+        appBootstrapPath: "/api/internal/entryway/app-bootstrap",
+        saiAuthorizationUrl: "https://id.pods.example/authorize",
+        saiAppUri: "https://memory.example/app",
+      }],
+    });
+    await expect(service.createAccount(createInput())).rejects.toMatchObject({
+      code: "app_consent_required",
+    });
+    await expect(service.resumeAwaitingConsent(consentResume)).rejects.toMatchObject({
+      code: "app_consent_required",
+    });
+    const stored = await store.getByUsername("alice");
+    expect(stored?.provisioning.ownerSessionProofJtiHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(stored)).not.toContain("11111111-1111-4111-8111-111111111111");
+    expect(JSON.stringify(stored)).not.toContain(consentResume.ownerSessionProof);
+    await expect(service.resumeAwaitingConsent(consentResume)).rejects.toMatchObject({
+      code: "owner_session_proof_replayed", statusCode: 409,
+    });
   });
 
   it("rechecks current Pod consent when an active signup is replayed", async () => {

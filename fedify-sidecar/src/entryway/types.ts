@@ -68,6 +68,7 @@ export interface EntrywayConsentResumeInput {
   username: string;
   appClientId: string;
   idempotencyKey: string;
+  ownerSessionProof?: string;
 }
 
 export interface EntrywayProviderDefinition {
@@ -85,6 +86,12 @@ export interface EntrywayProviderDefinition {
   saiAuthorizationUrl?: string;
   // Exact provider-approved SAI application URI; may differ from appClientId.
   saiAppUri?: string;
+  // Exact provider issuer/JWKS used for short-lived Solid-OIDC owner proofs.
+  // Both must be configured together; the JWKS endpoint must share the
+  // provider origin so configuration cannot create an SSRF primitive.
+  ownerSessionIssuer?: string;
+  ownerSessionJwksUrl?: string;
+  ownerSessionAudience?: string;
 }
 
 export interface EntrywayProviderSelectionInput {
@@ -116,6 +123,9 @@ export interface EntrywayProvisioningSnapshot {
   lastErrorMessage?: string;
   lastAttemptAt?: string;
   completedAt?: string;
+  // Server-keyed digest only. Never persist a JWT, raw jti, OIDC token or
+  // browser callback state in the account route.
+  ownerSessionProofJtiHash?: string;
 }
 
 export interface EntrywaySessionHandoff {

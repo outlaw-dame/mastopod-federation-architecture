@@ -2,6 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildProviderIdempotencyKey } from "./providerIdempotency.js";
 import { ActivityPodsProvisioningClient } from "./ActivityPodsProvisioningClient.js";
 import type { EntrywayAppBootstrapper } from "./ActivityPodsAppBootstrapClient.js";
+import type { EntrywayOwnerSessionProofVerifier } from "./OwnerSessionProofVerifier.js";
 import { AccountBundleVerifier } from "./AccountBundleVerifier.js";
 import { EntrywayError, sanitizeErrorMessage } from "./errors.js";
 import { buildNativeSaiAuthorizationUrl, type EntrywayProviderRouter } from "./ProviderRouter.js";
@@ -25,6 +26,7 @@ export interface EntrywayProvisioningServiceOptions {
   providerClient: ActivityPodsProvisioningClient;
   providerPreflight?: EntrywayProviderPreflight;
   appBootstrapper?: EntrywayAppBootstrapper;
+  ownerSessionProofVerifier?: EntrywayOwnerSessionProofVerifier;
   verifier: AccountBundleVerifier;
   fingerprintSecret: string;
   staleProvisioningAfterMs?: number;
@@ -37,6 +39,7 @@ export class EntrywayProvisioningService {
   private readonly providerClient: ActivityPodsProvisioningClient;
   private readonly providerPreflight?: EntrywayProviderPreflight;
   private readonly appBootstrapper?: EntrywayAppBootstrapper;
+  private readonly ownerSessionProofVerifier?: EntrywayOwnerSessionProofVerifier;
   private readonly verifier: AccountBundleVerifier;
   private readonly fingerprintSecret: string;
   private readonly staleProvisioningAfterMs: number;
@@ -56,6 +59,7 @@ export class EntrywayProvisioningService {
     this.providerClient = options.providerClient;
     this.providerPreflight = options.providerPreflight;
     this.appBootstrapper = options.appBootstrapper;
+    this.ownerSessionProofVerifier = options.ownerSessionProofVerifier;
     this.verifier = options.verifier;
     this.fingerprintSecret = options.fingerprintSecret;
     this.staleProvisioningAfterMs = clampInteger(options.staleProvisioningAfterMs ?? 10 * 60 * 1_000, 30_000, 60 * 60 * 1_000);
@@ -274,6 +278,23 @@ export class EntrywayProvisioningService {
       });
     }
 
+    if (!this.ownerSessionProofVerifier) {
+      throw new EntrywayError("owner_session_proof_unavailable", "Owner authentication verification is unavailable", {
+        statusCode: 503, retryable: true,
+      });
+    }
+    const verifiedOwner = await this.ownerSessionProofVerifier.verify({
+      proof: input.ownerSessionProof,
+      provider,
+      route: current,
+    });
+    const ownerProofHash = this.hashOwnerSessionJti(verifiedOwner.jti);
+    if (current.provisioning.ownerSessionProofJtiHash === ownerProofHash) {
+      throw new EntrywayError("owner_session_proof_replayed", "Owner authentication proof was already consumed", {
+        statusCode: 409, retryable: false,
+      });
+    }
+
     // Claim ownership atomically. Competing workers may not both resume
     // and no stale responder may overwrite an activated route.
     const claimed = await this.claimProvisioning(current);
@@ -284,7 +305,16 @@ export class EntrywayProvisioningService {
     }
     const fenceToken = claimed.provisioning.fenceToken!;
     try {
-      const verified = await this.verifyAccountBundle(claimed, fenceToken);
+      // Persist only a keyed digest of the one-time jti before any provider
+      // call. A failed attempt requires a freshly authenticated proof; JWT
+      // bytes and browser/OIDC credentials never enter durable route state.
+      const ownerClaimed = await this.updateRoute(claimed.accountId, fenceToken, {
+        provisioning: {
+          ...claimed.provisioning,
+          ownerSessionProofJtiHash: ownerProofHash,
+        },
+      });
+      const verified = await this.verifyAccountBundle(ownerClaimed, fenceToken);
       const completed = await this.bootstrapAppIfConfigured(verified, provider, fenceToken);
       const activated = await this.activateRoute(completed.route, fenceToken);
       // The HTTP route intentionally returns no provider session handoff
@@ -792,6 +822,13 @@ export class EntrywayProvisioningService {
   private hashIdempotencyKey(value: string): string {
     return createHmac("sha256", this.fingerprintSecret)
       .update(value.trim())
+      .digest("hex");
+  }
+
+  private hashOwnerSessionJti(value: string): string {
+    return createHmac("sha256", this.fingerprintSecret)
+      .update("paper:entryway:owner-session:jti:v1\0")
+      .update(value)
       .digest("hex");
   }
 }
