@@ -38,8 +38,11 @@ def add_provider(destination, checkout, lock, config, run, write):
     readiness.chmod(0o644)
     write(build / "Backend.Dockerfile", f'''FROM {lock['node_image']}
 WORKDIR /app
+COPY pod-provider/backend/package*.json ./
+COPY pod-provider/backend/scripts/ ./scripts/
+RUN npm ci --no-audit --no-fund && npm cache clean --force
 COPY pod-provider/backend/ ./
-RUN npm ci --no-audit --no-fund && mkdir -p jwt uploads exports data logs && chown -R node:node jwt uploads exports data logs
+RUN mkdir -p jwt uploads exports data logs && chown -R node:node jwt uploads exports data logs
 COPY provider-start.cjs /staging/provider-start.cjs
 COPY provider-probe.mjs /staging/provider-probe.mjs
 ENV NODE_ENV=production
@@ -47,8 +50,9 @@ CMD ["node", "/staging/provider-start.cjs"]
 ''')
     write(build / "Frontend.Dockerfile", f'''FROM {lock['node_image']} AS build
 WORKDIR /app
+COPY pod-provider/frontend/package*.json ./
+RUN npm ci --no-audit --no-fund && npm cache clean --force
 COPY pod-provider/frontend/ ./
-RUN npm ci --no-audit --no-fund
 ENV REACT_APP_CONFIG_URL={API}/.well-known/config.js
 RUN npm run build
 FROM {lock['caddy_image']}
