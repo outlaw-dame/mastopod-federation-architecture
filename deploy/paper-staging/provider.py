@@ -35,7 +35,7 @@ def add_provider(destination, checkout, lock, config, run, write):
     write(build / "Backend.Dockerfile", f'''FROM {lock['node_image']}
 WORKDIR /app
 COPY pod-provider/backend/ ./
-RUN npm ci --no-audit --no-fund && mkdir -p jwt uploads && chown -R node:node jwt uploads
+RUN npm ci --no-audit --no-fund && mkdir -p jwt uploads exports data logs && chown -R node:node jwt uploads exports data logs
 COPY provider-start.cjs /staging/provider-start.cjs
 COPY provider-probe.mjs /staging/provider-probe.mjs
 ENV NODE_ENV=production
@@ -113,7 +113,7 @@ exec /docker-entrypoint.sh /jena-fuseki/fuseki-server
         "provider": {"build": {"context": "./provider-build", "dockerfile": "Backend.Dockerfile"},
             "profiles": ["provider"], "environment": env, "networks": ["authority", "provider-egress"],
             "volumes": ["./secrets/provider.json:/run/provider-secrets.json:ro", "./certificates/ca.crt:/run/staging-ca.crt:ro",
-                        "provider-jwt:/app/jwt", "provider-uploads:/app/uploads"],
+                        "provider-jwt:/app/jwt", "provider-uploads:/app/uploads", "provider-data:/app/data"],
             "depends_on": {"fuseki": {"condition": "service_healthy"}, "redis": {"condition": "service_healthy"}},
             "mem_limit": "2g", "pids_limit": 128, "restart": "no"},
         "frontend": {"build": {"context": "./provider-build", "dockerfile": "Frontend.Dockerfile"},
@@ -126,6 +126,6 @@ exec /docker-entrypoint.sh /jena-fuseki/fuseki-server
             "depends_on": ["provider", "frontend"], "mem_limit": "128m", "restart": "no"},
     })
     config["networks"]["provider-egress"] = {}
-    for name in ("fuseki", "redis", "provider-jwt", "provider-uploads"):
+    for name in ("fuseki", "redis", "provider-jwt", "provider-uploads", "provider-data"):
         config["volumes"][name] = {}
     write(destination / "LOCAL_BROWSER_README.txt", f"Local provider: {API}\nLocal login: {UI}/login\nMap both names to 127.0.0.1 for your browser. Import certificates/ca.crt into a disposable browser profile only. Production signup remains CLOSED until the completion integration passes. Do not use real account credentials.\n")
