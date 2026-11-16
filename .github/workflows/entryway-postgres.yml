@@ -1,0 +1,78 @@
+name: Entryway PostgreSQL authority
+on:
+  pull_request:
+    paths:
+      - 'fedify-sidecar/src/entryway/**'
+      - 'fedify-sidecar/sql/entryway-*'
+      - 'fedify-sidecar/src/index.ts'
+      - 'fedify-sidecar/package*.json'
+      - '.github/workflows/entryway-postgres.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: entryway-postgres-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  restricted-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: entryway_admin
+          POSTGRES_PASSWORD: disposable_admin
+          POSTGRES_DB: entryway_control_plane
+        ports:
+          - 5549:5432
+        options: >-
+          --health-cmd 'pg_isready -U entryway_admin -d entryway_control_plane'
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      ENTRYWAY_POSTGRES_INTEGRATION: '1'
+      ENTRYWAY_TEST_DATABASE_URL: postgres://entryway_test:disposable_runtime@127.0.0.1:5549/entryway_control_plane
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --prefix fedify-sidecar --ignore-scripts --no-audit --no-fund
+      - name: Migrate using separate disposable administrator
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec -i "$PG_CONTAINER" psql -U entryway_admin -d entryway_control_plane -v ON_ERROR_STOP=1 < fedify-sidecar/sql/entryway-control-plane-v1.sql
+          docker exec "$PG_CONTAINER" psql -U entryway_admin -d entryway_control_plane -v ON_ERROR_STOP=1 -c "CREATE ROLE entryway_test LOGIN PASSWORD 'disposable_runtime'; GRANT paper_entryway_runtime TO entryway_test;"
+      - name: Verify restricted roles, concurrent fences and uncertainty
+        working-directory: fedify-sidecar
+        run: npm exec -- vitest run src/entryway/tests/PostgresAccountRouteStore.integration.test.ts
+      - name: Backup and restart PostgreSQL
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$PG_CONTAINER" pg_dump -U entryway_admin -d entryway_control_plane -Fc > /tmp/entryway.dump
+          docker restart "$PG_CONTAINER"
+          ready=false
+          for attempt in $(seq 1 30); do
+            if docker exec "$PG_CONTAINER" pg_isready -U entryway_admin -d entryway_control_plane; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+      - name: Verify restart preserved all authority evidence
+        working-directory: fedify-sidecar
+        env:
+          ENTRYWAY_POSTGRES_VERIFY_RESTART: '1'
+        run: npm exec -- vitest run src/entryway/tests/PostgresAccountRouteStore.integration.test.ts
+      - name: Restore into isolated database
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$PG_CONTAINER" createdb -U entryway_admin entryway_restored
+          docker exec -i "$PG_CONTAINER" pg_restore -U entryway_admin -d entryway_restored --exit-on-error < /tmp/entryway.dump
+      - name: Verify exact restoration and fail-closed write quarantine
+        working-directory: fedify-sidecar
+        env:
+          ENTRYWAY_POSTGRES_RESTORE: '1'
+          ENTRYWAY_TEST_DATABASE_URL: postgres://entryway_test:disposable_runtime@127.0.0.1:5549/entryway_restored
+        run: npm exec -- vitest run src/entryway/tests/PostgresAccountRouteStore.integration.test.ts
