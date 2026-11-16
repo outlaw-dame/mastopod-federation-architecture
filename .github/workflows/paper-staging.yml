@@ -32,6 +32,20 @@ jobs:
           docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" restart postgres
           docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" up -d --wait --wait-timeout 120 postgres
           docker compose -f "$RUNNER_TEMP/paper-staging/compose.json" --profile acceptance run --rm acceptance
+      - name: Bounded sanitized database diagnostics
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'paper-staging'
+          if (root / 'PREPARED').is_file():
+              result = subprocess.run(['docker', 'compose', '-f', str(root / 'compose.json'),
+                  'logs', '--tail', '60', 'postgres'], capture_output=True, text=True, timeout=20)
+              output = result.stdout + result.stderr
+              for name in ('admin', 'runtime'):
+                  output = output.replace((root / 'secrets' / name).read_text().strip(), '[REDACTED]')
+              print(output)
+          PY
       - name: Remove this job's disposable resources
         if: always()
         run: |
