@@ -77,13 +77,16 @@ docker compose -f /absolute/new/private/paper-provider/compose.json --profile pr
 docker compose -f /absolute/new/private/paper-provider/compose.json exec -T provider node /staging/provider-probe.mjs
 ```
 
-Resolve `provider.paper.test` and `login.paper.test` to `127.0.0.1` on the local
+Resolve `provider.paper.example.org` and `login.paper.example.org` to `127.0.0.1` on the local
 browser host. Trust this bundle's `certificates/ca.crt` only in a disposable browser
 profile; do not disable certificate validation globally or install the private CA
-key. Then visit `https://login.paper.test:8443/login`. Generated secrets are read
+key. Then visit `https://login.paper.example.org:8443/login`. Generated secrets are read
 at startup; they are not baked into images or expanded into Compose configuration.
 The backend reads its private secret file before dropping to UID/GID 1000.
 JWT keys, provider state, uploads, Redis and Fuseki have dedicated volumes.
+These names are under the reserved documentation domain `example.org`; this is
+local-only naming, not evidence of public domain ownership or resolvable ATProto
+handles. Production URL syntax checks and all signup release fuses remain intact.
 
 The profile does not provide email delivery, app-server transaction binding or
 a hosted PDS. Its negative signup check must remain a separate result from future

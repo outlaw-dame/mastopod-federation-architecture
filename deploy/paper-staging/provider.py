@@ -6,8 +6,8 @@ import secrets
 import shutil
 import subprocess
 
-API = "https://provider.paper.test:8443"
-UI = "https://login.paper.test:8443"
+API = "https://provider.paper.example.org:8443"
+UI = "https://login.paper.example.org:8443"
 
 
 def add_provider(destination, checkout, lock, config, run, write):
@@ -64,9 +64,9 @@ COPY Frontend.Caddyfile /etc/caddy/Caddyfile
     ca = destination / "private-ca"
     certs = destination / "certificates"
     quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE}
-    run("openssl", "req", "-newkey", "rsa:3072", "-nodes", "-subj", "/CN=provider.paper.test",
+    run("openssl", "req", "-newkey", "rsa:3072", "-nodes", "-subj", "/CN=provider.paper.example.org",
         "-keyout", str(certs / "browser.key"), "-out", str(ca / "browser.csr"), **quiet)
-    write(ca / "browser-extensions", "subjectAltName=DNS:provider.paper.test,DNS:login.paper.test\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
+    write(ca / "browser-extensions", "subjectAltName=DNS:provider.paper.example.org,DNS:login.paper.example.org\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
     run("openssl", "x509", "-req", "-in", str(ca / "browser.csr"), "-CA", str(certs / "ca.crt"),
         "-CAkey", str(ca / "ca.key"), "-CAcreateserial", "-days", "7", "-extfile", str(ca / "browser-extensions"),
         "-out", str(certs / "browser.crt"), **quiet)
@@ -76,11 +76,11 @@ COPY Frontend.Caddyfile /etc/caddy/Caddyfile
   admin off
   auto_https off
 }
-https://provider.paper.test:8443 {
+https://provider.paper.example.org:8443 {
   tls /certificates/browser.crt /certificates/browser.key
   reverse_proxy provider:3000
 }
-https://login.paper.test:8443 {
+https://login.paper.example.org:8443 {
   tls /certificates/browser.crt /certificates/browser.key
   reverse_proxy frontend:8080
 }
@@ -128,7 +128,7 @@ exec /docker-entrypoint.sh /jena-fuseki/fuseki-server
         "frontend": {"build": {"context": "./provider-build", "dockerfile": "Frontend.Dockerfile"},
             "profiles": ["provider"], "networks": ["authority"], "mem_limit": "128m", "restart": "no"},
         "ingress": {"image": lock["caddy_image"], "profiles": ["provider"],
-            "networks": {"authority": {"aliases": ["provider.paper.test", "login.paper.test"]}},
+            "networks": {"authority": {"aliases": ["provider.paper.example.org", "login.paper.example.org"]}},
             "ports": ["127.0.0.1:8443:8443"],
             "volumes": ["./Caddyfile:/etc/caddy/Caddyfile:ro", "./certificates/browser.key:/certificates/browser.key:ro",
                         "./certificates/browser.crt:/certificates/browser.crt:ro"],
