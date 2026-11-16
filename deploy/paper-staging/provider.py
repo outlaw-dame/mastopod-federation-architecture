@@ -33,6 +33,9 @@ def add_provider(destination, checkout, lock, config, run, write):
     for name in ("provider-start.cjs", "provider-probe.mjs"):
         shutil.copyfile(here / name, build / name)
         (build / name).chmod(0o644)
+    readiness = build / "pod-provider/backend/services/staging-readiness.service.js"
+    shutil.copyfile(here / "provider-readiness.cjs", readiness)
+    readiness.chmod(0o644)
     write(build / "Backend.Dockerfile", f'''FROM {lock['node_image']}
 WORKDIR /app
 COPY pod-provider/backend/ ./
@@ -91,7 +94,8 @@ exec /docker-entrypoint.sh /jena-fuseki/fuseki-server
         "SEMAPPS_HOME_URL": API + "/", "SEMAPPS_FRONTEND_URL": UI + "/", "SEMAPPS_PORT": "3000",
         "SEMAPPS_SPARQL_ENDPOINT": "http://fuseki:3030/", "SEMAPPS_JENA_USER": "admin",
         "SEMAPPS_FUSEKI_BASE": "/fuseki", "SEMAPPS_QUEUE_SERVICE_URL": "redis://redis:6379/1",
-        "SEMAPPS_REDIS_OIDC_PROVIDER_URL": "redis://redis:6379/2", "SEMAPPS_REDIS_CACHE_URL": "",
+        "SEMAPPS_REDIS_OIDC_PROVIDER_URL": "redis://redis:6379/2", "SEMAPPS_REDIS_CACHE_URL": "redis://redis:6379/0",
+        "REDIS_URL": "redis://redis:6379/3",
         "SEMAPPS_REDIS_TRANSPORTER_URL": "", "SEMAPPS_FROM_EMAIL": "staging@paper.test",
         "SEMAPPS_FROM_NAME": "Paper staging", "SEMAPPS_SMTP_HOST": "disabled-mail",
         "SEMAPPS_SMTP_PORT": "1025", "SEMAPPS_SMTP_USER": "", "SEMAPPS_SMTP_PASS": "",
