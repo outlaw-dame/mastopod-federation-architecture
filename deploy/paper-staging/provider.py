@@ -25,7 +25,8 @@ def add_provider(destination, checkout, lock, config, run, write):
     password = secrets.token_hex(32)
     write(destination / "secrets/fuseki", password + "\n")
     private_env = {"SEMAPPS_JENA_PASSWORD": password}
-    for name in ("SEMAPPS_COOKIE_SECRET", "ACTIVITYPODS_TOKEN", "SIDECAR_TOKEN", "SIGNING_API_TOKEN"):
+    for name in ("SEMAPPS_COOKIE_SECRET", "ACTIVITYPODS_TOKEN", "SIDECAR_TOKEN", "SIGNING_API_TOKEN",
+                 "ATPROTO_MIGRATION_SECRET_ENC_KEY_HEX"):
         private_env[name] = secrets.token_hex(32)
     write(destination / "secrets/provider.json", json.dumps(private_env))
     here = Path(__file__).resolve().parent
