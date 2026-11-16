@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -16,7 +17,11 @@ class PreparationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="paper staging tests ")
         cls.output = Path(cls.temporary.name) / "review"
-        prepare.prepare(cls.output)
+        previous = os.umask(0o077)
+        try:
+            prepare.prepare(cls.output)
+        finally:
+            os.umask(previous)
 
     @classmethod
     def tearDownClass(cls):
@@ -54,6 +59,9 @@ class PreparationTests(unittest.TestCase):
             self.assertNotIn("privileged", service)
             self.assertNotIn("container_name", service)
         self.assertTrue(compose["networks"]["authority"]["internal"])
+        self.assertEqual(compose["services"]["acceptance"]["user"], f"{os.getuid()}:{os.getgid()}")
+        schema = self.output / "build/fedify-sidecar/sql/entryway-control-plane-v1.sql"
+        self.assertEqual(schema.stat().st_mode & 0o777, 0o644)
 
 
 if __name__ == "__main__":

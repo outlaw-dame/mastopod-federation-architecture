@@ -37,6 +37,12 @@ def prepare(destination):
         run("git", "-C", str(REPO), "archive", lock["federation"], "fedify-sidecar", stdout=archive)
     run("tar", "-xf", str(destination / "source.tar"), "-C", str(destination / "build"))
     (destination / "source.tar").unlink()
+    # Archives respect the restrictive caller umask. Published source must be
+    # readable by the postgres migration user and the unprivileged test runner.
+    # This tree contains only Git-tracked source, never generated credentials.
+    for path in (destination / "build").rglob("*"):
+        if not path.is_symlink():
+            path.chmod(0o755 if path.is_dir() or path.stat().st_mode & 0o111 else 0o644)
     for source, target in (("database.sh", "database.sh"), ("initialize.sh", "initialize.sh"),
                            ("pg_hba.conf", "pg_hba.conf"), ("smoke.ts", "build/fedify-sidecar/staging-smoke.ts")):
         shutil.copyfile(HERE / source, destination / target)
@@ -82,6 +88,7 @@ def compose(lock):
                                 "interval": "2s", "timeout": "3s", "retries": 30}},
             "acceptance": {
                 "build": "./build", "profiles": ["acceptance"],
+                "user": f"{os.getuid()}:{os.getgid()}",
                 "volumes": ["./certificates/ca.crt:/run/ca.crt:ro", "./secrets/runtime:/run/runtime-password:ro"],
                 "networks": ["authority"], "read_only": True, "tmpfs": ["/tmp"],
                 "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
