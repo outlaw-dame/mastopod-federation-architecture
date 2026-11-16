@@ -41,6 +41,7 @@ const createAccountBodySchema = z.object({
 const resumeBodySchema = z.object({
   username: z.string().trim().min(3).max(64),
   appClientId: z.string().trim().url().max(2048),
+  ownerSessionProof: z.string().trim().min(64).max(8192),
 }).strict();
 
 const recoverBodySchema = z.object({

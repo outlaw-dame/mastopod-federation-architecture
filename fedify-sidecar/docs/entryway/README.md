@@ -47,6 +47,9 @@ ENTRYWAY_PROVIDER_PROVISIONING_TOKEN=<provider-approved provisioning token>
 ENTRYWAY_DEFAULT_PROVIDER_URL=https://pods.memory.example
 ENTRYWAY_APP_BOOTSTRAP_ENABLED=true
 ENTRYWAY_APP_BOOTSTRAP_PATH=/api/internal/entryway/app-bootstrap
+ENTRYWAY_OWNER_SESSION_ISSUER=https://pods.memory.example
+ENTRYWAY_OWNER_SESSION_JWKS_URL=https://pods.memory.example/api/entryway-owner-session/jwks
+ENTRYWAY_OWNER_SESSION_AUDIENCE=urn:paper:entryway:owner-session:v1
 # Optional, operator-owned authenticated provider SAI consent page:
 ENTRYWAY_SAI_AUTHORIZATION_URL=https://pods-ui.memory.example/authorize
 ENTRYWAY_SAI_APP_URI=https://memory.example/app
@@ -66,6 +69,9 @@ REDIS_URL=redis://redis:6379
     "redirectUri": "https://memory.example/signup/callback",
     "appBootstrapEnabled": true,
     "appBootstrapPath": "/api/internal/entryway/app-bootstrap",
+    "ownerSessionIssuer": "https://pods-us-east.memory.example",
+    "ownerSessionJwksUrl": "https://pods-us-east.memory.example/api/entryway-owner-session/jwks",
+    "ownerSessionAudience": "urn:paper:entryway:owner-session:v1",
     "saiAuthorizationUrl": "https://pods-ui.memory.example/authorize",
     "saiAppUri": "https://memory.example/app",
     "enabled": true
@@ -166,6 +172,14 @@ configured, the error has no link and the route remains non-active.
 After authorizing the app, the trusted backend can invoke the
 **backend-only consent-resume endpoint below**, supplying the same
 idempotency reference from its protected server-side transaction store.
+It must also supply a fresh provider-signed owner-session proof obtained by
+the authenticated browser from the provider. The proof is ES256, has a maximum
+accepted age of five minutes, and is bound to the exact provider issuer,
+account ID, username, WebID and app client ID. Entryway accepts keys only from
+the operator-pinned same-origin JWKS URL. In the same CAS operation that claims
+the route fence, it stores only a bounded, expiry-pruned set of HMAC proof-JTI
+digests, so failed attempts require fresh proofs, A/B/A replay is rejected, and
+JWT bytes never enter route state.
 The earlier exact-original-signup replay remains supported for legacy
 backend clients, but new clients do not need to resend the signup password
 or verification token. The Paper client must still implement and test
@@ -185,7 +199,8 @@ Content-Type: application/json
 
 {
   "username": "alice",
-  "appClientId": "https://memory.example/app"
+  "appClientId": "https://memory.example/app",
+  "ownerSessionProof": "<short-lived provider-signed ES256 JWT>"
 }
 ```
 
@@ -198,6 +213,20 @@ bound to the original authenticated signup session. Never put the
 idempotency key, signup password, verification challenge, provider bearer
 or access token in a browser callback URL, query string, web storage,
 analytics, or log.
+
+The browser obtains `ownerSessionProof` from the ActivityPods
+`POST /api/entryway-owner-session/proof` endpoint using its native Solid-OIDC
+access token and a DPoP proof verified for that exact HTTP request. The
+provider route is disabled unless both
+`ENTRYWAY_OWNER_SESSION_PROOF_ENABLED=true` and
+`APODS_SOLID_OIDC_DPOP_ENFORCE_ENABLED=true`. The request supplies only the
+account ID, username, WebID and app client ID; the backend idempotency key is
+never exposed to the browser. Paper must deliver the returned JWT to its
+protected server-side signup transaction without placing it in a URL, log,
+analytics event or durable client storage.
+The same opt-in service publishes its matching public ES256 key, never private
+key material, at `GET /api/entryway-owner-session/jwks`; configure Entryway
+with that exact same-origin URL.
 
 Entryway loads the canonical username route and uses the same HMAC secret
 as the original reservation to check the supplied idempotency key
@@ -220,10 +249,12 @@ grants and returns routing state, not a newly minted user session.
 The resume response intentionally **never returns a provider session
 handoff**. This is not a replacement for Solid-OIDC login; an actual
 browser session must authenticate as the Pod owner independently.
-The browser-to-Paper authenticated callback and secure state linkage are
-not yet implemented by this Entryway route. The production signed-PDS,
-restricted PostgreSQL credentials, native SAI permission enforcement
-and real browser callback acceptance remain separate release gates.
+The provider proof verifier and one-time fenced route-state consumption boundary are
+implemented, but the browser-to-Paper authenticated return and secure
+transaction linkage are not yet implemented by this Entryway route. The
+production signed-PDS, PostgreSQL canonical Entryway route store with
+restricted credentials, native SAI permission enforcement and real browser
+acceptance remain separate release gates.
 
 ## Crash recovery, idempotency and reconciliation
 
@@ -298,6 +329,11 @@ until the real signed PDS, canonical PostgreSQL and native SAI owner flows are
 reviewed together. The consent URL is an **initiation link**, not a login token
 or an assertion that any permission was granted. The native browser handoff,
 trusted application callback, deployed cross-worker crash recovery,
-restricted PostgreSQL authority, hosted signed PDS, and
+PostgreSQL canonical Entryway route authority with restricted credentials,
+hosted signed PDS, and
 revocation-at-operation checks still need full cross-repository acceptance.
+Redis remains the current Entryway route/CAS implementation; it is not the
+requested PostgreSQL canonical control plane. Migration, split-brain and
+dual-write avoidance, backup/restore, and restricted-role acceptance remain
+production blockers.
 Production signup remains source-controlled closed.

@@ -48,6 +48,9 @@ export function buildEntrywayProvidersFromEnv(
       appBootstrapEnabled: env["ENTRYWAY_APP_BOOTSTRAP_ENABLED"] === "true",
       saiAuthorizationUrl: env["ENTRYWAY_SAI_AUTHORIZATION_URL"] || undefined,
       saiAppUri: env["ENTRYWAY_SAI_APP_URI"] || undefined,
+      ownerSessionIssuer: env["ENTRYWAY_OWNER_SESSION_ISSUER"] || undefined,
+      ownerSessionJwksUrl: env["ENTRYWAY_OWNER_SESSION_JWKS_URL"] || undefined,
+      ownerSessionAudience: env["ENTRYWAY_OWNER_SESSION_AUDIENCE"] || undefined,
     },
   ];
 }
@@ -89,6 +92,9 @@ function parseProvidersJson(rawJson: string): EntrywayProviderDefinition[] {
       appBootstrapEnabled: record["appBootstrapEnabled"] === true,
       saiAuthorizationUrl: readOptionalString(record, "saiAuthorizationUrl"),
       saiAppUri: readOptionalString(record, "saiAppUri"),
+      ownerSessionIssuer: readOptionalString(record, "ownerSessionIssuer"),
+      ownerSessionJwksUrl: readOptionalString(record, "ownerSessionJwksUrl"),
+      ownerSessionAudience: readOptionalString(record, "ownerSessionAudience"),
     };
   });
 }

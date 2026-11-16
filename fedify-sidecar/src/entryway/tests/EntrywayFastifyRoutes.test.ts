@@ -150,6 +150,7 @@ describe("Entryway Fastify routes", () => {
       payload: {
         username: "Alice",
         appClientId: "https://memory.example/app",
+        ownerSessionProof: "signed-owner-session-proof-" + "x".repeat(96),
       },
     };
     const unauthorized = await app.inject(request);
@@ -163,7 +164,7 @@ describe("Entryway Fastify routes", () => {
       ...request,
       headers: {
         authorization: "Bearer entryway-token",
-        "idempotency-key": "idem.alice.0001",
+        "idempotency-key": "idem.alice.0001.0123456789abcdef",
       },
       payload: {
         ...request.payload,
@@ -177,14 +178,15 @@ describe("Entryway Fastify routes", () => {
       ...request,
       headers: {
         authorization: "Bearer entryway-token",
-        "idempotency-key": "idem.alice.0001",
+        "idempotency-key": "idem.alice.0001.0123456789abcdef",
       },
     });
     expect(success.statusCode).toBe(200);
     expect(resumeAwaitingConsent).toHaveBeenCalledWith({
       username: "Alice",
       appClientId: "https://memory.example/app",
-      idempotencyKey: "idem.alice.0001",
+      idempotencyKey: "idem.alice.0001.0123456789abcdef",
+      ownerSessionProof: "signed-owner-session-proof-" + "x".repeat(96),
     });
     expect(success.json().account.status).toBe("active");
     expect(success.json().replayed).toBe(true);
@@ -215,11 +217,12 @@ describe("Entryway Fastify routes", () => {
       method: "POST", url: "/entryway/accounts/consent/resume",
       headers: {
         authorization: "Bearer entryway-token",
-        "idempotency-key": "idem.alice.0001",
+        "idempotency-key": "idem.alice.0001.0123456789abcdef",
       },
       payload: {
         username: "alice",
         appClientId: "https://memory.example/app",
+        ownerSessionProof: "signed-owner-session-proof-" + "x".repeat(96),
         redirectUri: "https://evil.example/callback",
       },
     });
@@ -229,11 +232,12 @@ describe("Entryway Fastify routes", () => {
       method: "POST", url: "/entryway/accounts/consent/resume",
       headers: {
         authorization: "Bearer entryway-token",
-        "idempotency-key": "idem.alice.0001",
+        "idempotency-key": "idem.alice.0001.0123456789abcdef",
       },
       payload: {
         username: "alice",
         appClientId: "https://memory.example/app",
+        ownerSessionProof: "signed-owner-session-proof-" + "x".repeat(96),
       },
     });
     expect(pending.statusCode).toBe(428);

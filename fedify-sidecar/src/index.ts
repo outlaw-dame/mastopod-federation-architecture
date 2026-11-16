@@ -279,6 +279,7 @@ import { EntrywayRecoveryWorker } from "./entryway/EntrywayRecoveryWorker.js";
 import { registerEntrywayFastifyRoutes } from "./entryway/fastify-routes.js";
 import { ProviderCapabilitiesPreflight } from "./entryway/ProviderPreflight.js";
 import { StaticEntrywayProviderRouter } from "./entryway/ProviderRouter.js";
+import { ProviderJwksOwnerSessionProofVerifier } from "./entryway/OwnerSessionProofVerifier.js";
 import { MediaAssetSyncConsumer } from "./media/MediaAssetSyncConsumer.js";
 import { evaluateMediaSignalPolicy } from "./media/MediaSignalPolicy.js";
 import type { MRFAdminStore } from "./admin/mrf/store.js";
@@ -1798,6 +1799,7 @@ async function main() {
           },
           userAgent: process.env["USER_AGENT"] || "ActivityPods-Entryway/1.0",
         }),
+        ownerSessionProofVerifier: new ProviderJwksOwnerSessionProofVerifier(),
         verifier: new AccountBundleVerifier({
           timeoutMs: config.entrywayVerificationTimeoutMs,
           retryPolicy: {

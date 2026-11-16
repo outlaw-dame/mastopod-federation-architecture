@@ -68,13 +68,16 @@ export function normalizeProviderDefinition(provider: EntrywayProviderDefinition
     });
   }
 
+  const baseUrl = normalizeProviderBaseUrl(provider.baseUrl);
   const sai = normalizeNativeSaiConfig(provider);
+  const ownerSession = normalizeOwnerSessionConfig(provider, baseUrl);
 
   return {
     ...provider,
     ...sai,
+    ...ownerSession,
     providerId,
-    baseUrl: normalizeProviderBaseUrl(provider.baseUrl),
+    baseUrl,
     appClientId: provider.appClientId.trim(),
     provisioningBearerToken: provider.provisioningBearerToken.trim(),
     origin: provider.origin?.trim() || undefined,
@@ -83,6 +86,41 @@ export function normalizeProviderDefinition(provider: EntrywayProviderDefinition
     appBootstrapPath: normalizeBootstrapPath(provider.appBootstrapPath),
     appBootstrapEnabled: provider.appBootstrapEnabled === true,
   };
+}
+
+function normalizeOwnerSessionConfig(
+  provider: EntrywayProviderDefinition,
+  baseUrl: string,
+): Pick<EntrywayProviderDefinition, "ownerSessionIssuer" | "ownerSessionJwksUrl" | "ownerSessionAudience"> {
+  const issuer = provider.ownerSessionIssuer?.trim();
+  const jwks = provider.ownerSessionJwksUrl?.trim();
+  const audience = provider.ownerSessionAudience?.trim() || "urn:paper:entryway:owner-session:v1";
+  if (!issuer && !jwks) {
+    return { ownerSessionIssuer: undefined, ownerSessionJwksUrl: undefined, ownerSessionAudience: audience };
+  }
+  if (!issuer || !jwks || audience.length > 256) {
+    throw new EntrywayError("provider_invalid", "Owner-session proof requires issuer, JWKS and bounded audience", {
+      statusCode: 500,
+    });
+  }
+  try {
+    const issuerUrl = new URL(issuer);
+    const jwksUrl = new URL(jwks);
+    const providerOrigin = new URL(baseUrl).origin;
+    const canonicalIssuer = issuer === issuerUrl.origin || issuer === `${issuerUrl.origin}/`;
+    if (issuerUrl.protocol !== "https:" || !issuerUrl.hostname || issuerUrl.username || issuerUrl.password ||
+        issuerUrl.pathname !== "/" || issuerUrl.search || issuerUrl.hash ||
+        issuerUrl.origin !== providerOrigin || !canonicalIssuer ||
+        jwksUrl.protocol !== "https:" || !jwksUrl.hostname || jwksUrl.username || jwksUrl.password ||
+        jwksUrl.search || jwksUrl.hash || jwksUrl.origin !== providerOrigin || jwksUrl.toString() !== jwks) {
+      throw new Error("invalid owner-session authority");
+    }
+  } catch {
+    throw new EntrywayError("provider_invalid", "Owner-session proof authority must be canonical HTTPS on the provider origin", {
+      statusCode: 500,
+    });
+  }
+  return { ownerSessionIssuer: issuer, ownerSessionJwksUrl: jwks, ownerSessionAudience: audience };
 }
 
 /**
