@@ -7,5 +7,5 @@
   "fuseki_image": "semapps/jena-fuseki-webacl@sha256:e6098e796b8594353bd157ec9017976d65538e542884d3287390197208076561",
   "redis_image": "redis:8.2.11-alpine@sha256:da23c2478319ceb4903857d77a2fd7aa5137d9e9d4c8165dafbacedac6403e95",
   "release": "CLOSED",
-  "scope": "isolated PostgreSQL TLS foundation; provider/PDS deployment remains blocked"
+  "scope": "PostgreSQL TLS foundation and local provider browser profile; successful unified signup remains blocked"
 }

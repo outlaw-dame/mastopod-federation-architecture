@@ -60,6 +60,40 @@ point this package at production data or copy production secrets into it.
 
 ## Provider/PDS deployment specification for the next phase
 
+### Local provider browser profile
+
+The optional `provider` profile builds the actual pinned ActivityPods backend and
+frontend. It adds Redis, Fuseki and explicit HTTPS ingress on **127.0.0.1:8443**.
+It currently tests real configuration/UI delivery and the closed unified-signup
+response, not successful account creation. The PostgreSQL foundation and provider
+account completion are not yet connected. No disposable identity bypass is enabled.
+
+```sh
+python3 deploy/paper-staging/prepare.py /absolute/new/private/paper-provider \
+  --activitypods-checkout /absolute/activity-pods-checkout
+docker compose -f /absolute/new/private/paper-provider/compose.json --profile provider config --quiet
+docker compose -f /absolute/new/private/paper-provider/compose.json --profile provider build provider frontend
+docker compose -f /absolute/new/private/paper-provider/compose.json --profile provider up -d postgres ingress
+docker compose -f /absolute/new/private/paper-provider/compose.json exec -T provider node /staging/provider-probe.mjs
+```
+
+Resolve `provider.paper.test` and `login.paper.test` to `127.0.0.1` on the local
+browser host. Trust this bundle's `certificates/ca.crt` only in a disposable browser
+profile; do not disable certificate validation globally or install the private CA
+key. Then visit `https://login.paper.test:8443/login`. Generated secrets are read
+at startup; they are not baked into images or expanded into Compose configuration.
+The backend reads its private secret file before dropping to UID/GID 1000.
+JWT keys, provider state, uploads, Redis and Fuseki have dedicated volumes.
+
+The profile does not provide email delivery, app-server transaction binding or
+a hosted PDS. Its negative signup check must remain a separate result from future
+positive signup acceptance. Keep enough local disk space for Node build layers and
+data; do not prune unrelated Docker resources to make room. Bounded diagnostics:
+
+```sh
+python3 deploy/paper-staging/diagnose.py /absolute/new/private/paper-provider
+```
+
 Use a dedicated disposable host/project and HTTPS names for provider API, provider
 frontend, PDS, and an ActivityPods app. Paper/Memory remain apps: the provider owns
 identity creation, signing and consent. Frontend-to-provider login/consent must use
@@ -73,7 +107,7 @@ Entryway runtime role separate from the migration role. The provider owns its
 existing Redis/Fuseki storage; PostgreSQL alone owns Entryway routes. This package
 does not change that boundary. Media/search workers are outside this signup gate.
 
-The following are required before adding an executable provider/PDS profile:
+The following are required before enabling successful provider/PDS signup:
 
 | Gate | Required evidence | Current status |
 | --- | --- | --- |
