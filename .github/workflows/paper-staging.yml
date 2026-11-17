@@ -22,7 +22,15 @@ jobs:
         run: |
           git init "$RUNNER_TEMP/activitypods"
           git -C "$RUNNER_TEMP/activitypods" remote add origin https://github.com/outlaw-dame/activity-pods.git
-          git -C "$RUNNER_TEMP/activitypods" fetch --depth=1 origin 6b518a3f90c4cebcffaf5e89cb34be90a3ee402e
+          python3 - <<'PYTHON'
+          import json, os, re, subprocess
+          from pathlib import Path
+          commit = json.loads(Path("deploy/paper-staging/lock.json").read_text())["activitypods"]
+          if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit("Invalid ActivityPods source pin")
+          subprocess.run(["git", "-C", os.path.join(os.environ["RUNNER_TEMP"], "activitypods"),
+                          "fetch", "--depth=1", "origin", commit], check=True, timeout=120)
+          PYTHON
       - name: Prepare and validate actual provider profile
         run: |
           python3 deploy/paper-staging/prepare.py "$RUNNER_TEMP/paper-provider" --activitypods-checkout "$RUNNER_TEMP/activitypods"
