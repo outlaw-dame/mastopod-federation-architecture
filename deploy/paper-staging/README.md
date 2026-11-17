@@ -27,8 +27,11 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. ActivityPods PR #233 is deliberately not
-included while its final exact-head review is incomplete.
+change followed by a new acceptance run. The current ActivityPods pin includes
+merged PRs #233, #234 and #235 (navigation validation, signed PLC readback, and
+incomplete-enrollment authentication fencing). CI reads the ActivityPods commit
+from this same lock file; it does not maintain a second source pin. These changes
+do not enable successful signup or remove the production release fuses.
 
 ## Execute only after reviewing the bundle
 
