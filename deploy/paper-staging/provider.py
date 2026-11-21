@@ -182,6 +182,10 @@ exec /jena-fuseki/fuseki-server
     }
     services["protected-storage-proof"] = {
         "image": lock["node_image"], "profiles": ["storage-proof"],
+        # Only the disposable test process reads owner-private 0600 credential
+        # files. Root has no Linux capabilities, writeable rootfs or Docker socket.
+        # The actual provider never mounts this credential file.
+        "user": "0:0",
         "entrypoint": ["node", "/staging/protected-proof.mjs"],
         "environment": {"NODE_ENV": "test", "PAPER_STAGING_PROTECTED_PROOF": "confirmed"},
         "networks": ["authority"], "read_only": True, "tmpfs": ["/tmp"],
