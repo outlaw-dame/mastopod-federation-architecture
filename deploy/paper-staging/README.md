@@ -27,11 +27,15 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin includes
-merged PRs #233, #234 and #235 (navigation validation, signed PLC readback, and
-incomplete-enrollment authentication fencing). CI reads the ActivityPods commit
-from this same lock file; it does not maintain a second source pin. These changes
-do not enable successful signup or remove the production release fuses.
+change followed by a new acceptance run. The current ActivityPods pin is merged PR #252 at `ab7c486488a8d926bc9fade8ac32f9e9af270435`.
+It includes the prior merged navigation, signed PLC readback and incomplete-enrollment
+fencing fixes, plus disposable browser enrollment, owner activation, independent
+native SAI permissions, current-grant OIDC admission and signed provider genesis.
+Exact PR-head CI on `3db561b56e8be9759b591afaecd73a2b7a545468` passed all 12 workflows
+before merge. CI fetches the merge commit from **this single lock file**, not
+from a second source pin. This staging profile still runs `NODE_ENV=production`,
+so all new-account release fuses remain enforced. A green negative-gate smoke
+is not proof of positive signup or PDS readiness.
 
 ## Execute only after reviewing the bundle
 
@@ -67,9 +71,12 @@ point this package at production data or copy production secrets into it.
 
 The optional `provider` profile builds the actual pinned ActivityPods backend and
 frontend. It adds Redis, Fuseki and explicit HTTPS ingress on **127.0.0.1:8443**.
-It currently tests real configuration/UI delivery and the closed unified-signup
-response, not successful account creation. The PostgreSQL foundation and provider
-account completion are not yet connected. No disposable identity bypass is enabled.
+It tests actual provider configuration/UI delivery and the **closed** unified-signup
+response, not successful new-account creation. PR #252's positive browser/consent,
+PostgreSQL activation and signed provider genesis proofs ran only in its separately
+gated disposable environment, **not in this deployment-equivalent profile**. The
+staging PostgreSQL foundation and provider account-completion services remain
+unconnected; no disposable identity bypass is enabled here.
 
 ```sh
 python3 deploy/paper-staging/prepare.py /absolute/new/private/paper-provider \
@@ -117,11 +124,11 @@ The following are required before enabling successful provider/PDS signup:
 
 | Gate | Required evidence | Current status |
 | --- | --- | --- |
-| Provider completion | Genuine signed PDS, Solid and current SAI evidence committed to the same canonical operation; uncertain creates reconcile without replay | Blocked in source by `ACCOUNT_COMPLETION_ATTESTATION_PENDING` |
-| Signed hosted PDS | Actual HTTPS DID/handle/key/repository checks, native writes, key persistence and restart | Production placeholder/fuses still prevent acceptance |
-| App transaction | Authenticated app-server session, expiry, single-use state, exact callback and owner binding; concurrent tab and replay tests | Not implemented by the navigation-only PR #233 |
-| Consent/revocation | Real browser owner consent; required/optional grants; operation-time denial after revocation | Component tests do not establish this end-to-end gate |
-| Multiworker failure | Two deployed workers; kill before/after provider create, lost acknowledgement, restart and replay; exactly one identity/route | Not yet deployed or measured |
+| Provider completion | Genuine signed PDS, Solid and current SAI evidence committed to the same canonical operation; uncertain creates reconcile without replay | Disposable local PR #252 proof passed; production pathway still blocked by `ACCOUNT_COMPLETION_ATTESTATION_PENDING` |
+| Signed hosted PDS | Actual HTTPS DID/handle/key/repository checks, native writes, key persistence and restart | Disposable signed genesis/readback passed; hosted production PDS, native writes, restart and release gate still unverified |
+| App transaction | Authenticated app-server session, expiry, single-use state, exact callback and owner binding; concurrent tab and replay tests | Local Chromium callback/PKCE proved in PR #252; staged independent app-server transaction and concurrent tab/replay acceptance still pending |
+| Consent/revocation | Real browser owner consent; required/optional grants; operation-time denial after revocation | Local real-Jena / OIDC session admission regression checks passed; staging browser and refresh-token lifecycle proof still pending |
+| Multiworker failure | Two deployed workers; kill before/after provider create, lost acknowledgement, restart and replay; exactly one identity/route | Local PostgreSQL/two-worker consent races passed; deployed kill/recovery/restore and exactly-one-identity acceptance still pending |
 | Cutover and restore | Frozen Redis reconciliation, database ownership inspection, TLS, backup/restore, external physical/PITR write epoch fence | Logical restore CI exists; external restore fence remains open |
 
 Do not add fake successful health endpoints for these gates or remove release
