@@ -67,12 +67,23 @@ const normalizedJwks = jwks.keys.map(key => Object.fromEntries(
 const jwksFingerprint = createHash('sha256')
   .update(JSON.stringify(normalizedJwks)).digest('hex');
 
-const denied = await fetch(`${origin}/api/accounts/create`, {
-  method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000)
-});
-const error = await denied.json();
-assert.equal(denied.status, 503, `Unexpected signup HTTP ${denied.status}, type ${String(error.type).slice(0,100)}`);
-assert.equal(error.type, 'UNIFIED_ACCOUNT_RELEASE_GATE_CLOSED');
+// Neither of the provider's two public account-creation entry points may
+// create an identity in this production-mode staging profile. Probe both on
+// initial startup and after the storage/provider restart, before sending any
+// real account details or irreversible provisioning request.
+for (const [path, type] of [
+  ['/api/accounts/create', 'UNIFIED_ACCOUNT_RELEASE_GATE_CLOSED'],
+  ['/auth/signup', 'ATPROTO_PDS_REPOSITORY_NOT_READY']
+]) {
+  const denied = await fetch(origin + path, {
+    method: 'POST', redirect: 'error',
+    headers: { 'content-type': 'application/json' }, body: '{}',
+    signal: AbortSignal.timeout(5000)
+  });
+  assert.equal(denied.status, 503, `Unexpected HTTP ${denied.status} on ${path}`);
+  const error = await denied.json();
+  assert.equal(error.type, type, `Unexpected account release gate on ${path}`);
+}
 console.log('PASS: actual provider and frontend reachable over verified HTTPS; unified signup release gate remains CLOSED.');
 // Public-key fingerprint only; never emit secrets, identity tokens or JWK
 // private parameters. CI compares this after the same isolated volumes restart.
