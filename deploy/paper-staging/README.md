@@ -27,21 +27,29 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is merged PR #255 at `ff7fed41cc4c6afea2b27c47513490fe8f8fa0c6`,
-building on merged browser-enrollment PR #252. It contains native SAI
-**pending → independently attested → active** PostgreSQL consent activation
-and irreversible owner revocation, along with real Jena/TDB2 credential-isolated
-readback and process/restart acceptance tests. Exact-head CI for PR #255 on
-`e4df88b1d16a3cc02cf03efb6c68a64f98b04d1d` passed seven workflows before
-merge, including PostgreSQL 18, native SAI, signed-repo, and real Jena proofs.
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #256** at
+`9c2db01c0414bf7f9b38d0ae1ed9e91156dab62a`, building on native owner-consent PR #255
+and browser enrollment PR #252. PR #256 closes the unbound initial SAI
+issuer gap by deriving a pending PostgreSQL consent from the exact,
+owner-claimed **signup-journal session** and reserved app/HMAC scope.
+It requires Paper's mandatory rights, rejects unexpected native rights
+and mismatched native registration, and separates the session-bound
+SQL issuer from independently credentialed protected-Jena attestation.
+Restricted login admission, native Jena readback, PostgreSQL CAS and
+post-revocation confirmation are tested under exact-session boundaries.
+The browser-enrollment provider runtime includes a **disposable opt-in**
+issuer connection; the normal production-mode staging profile does not
+enable it. Exact ActivityPods PR-head CI `41e3476db9515b6089c05add920b776163e012fb`
+passed **7/7** workflows before the squash merge.
 
-These changes are **nonactivated candidates**: the actual deployed provider
-has not been wired to the production new-signup journal, protected SAI projection,
-or hosted signed PDS. CI fetches the ActivityPods merge commit from **this single
-lock file**, not from a second source pin. This staging profile still runs
-`NODE_ENV=production`, and both account creation routes must continue returning
-their explicit `503` release-gate errors. A green negative-gate staging smoke
-does not authorize successful signup, owner SAI activation or PDS readiness.
+These changes remain **nonactivated**. No deployed positive signup
+coordinator, real protected SAI projection or hosted signed PDS has
+been commissioned. CI fetches the ActivityPods merge commit from **this
+single lock file**, not another mutable source pin. The staging profile
+still runs `NODE_ENV=production`, and **both** account-creation entrypoints
+must continue returning explicit `503` release-gate denials before and
+after restart. Positive owner signup, active consent/PDS signing and
+production release are deliberately **NOT PROVEN** by this smoke test.
 
 ## Execute only after reviewing the bundle
 
