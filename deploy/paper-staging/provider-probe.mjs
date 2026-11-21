@@ -21,7 +21,12 @@ assert.match(await page.text(), /<div id="root"><\/div>/);
 // CA-trusted HTTPS ingress. Discovery and JWKS are public, not owner sign-in.
 async function readBoundedJson(response, label) {
   assert.equal(response.status, 200, `${label}: unexpected HTTP ${response.status}`);
-  assert.match(response.headers.get('content-type') || '', /^application\/json(?:;|$)/iu);
+  // RFC 7517 JWKS endpoints legitimately use application/jwk-set+json.
+  const contentType = response.headers.get('content-type') || '';
+  const expected = label === 'OIDC signing keys'
+    ? /^application\/(?:json|jwk-set\+json)(?:;|$)/iu
+    : /^application\/json(?:;|$)/iu;
+  assert.match(contentType, expected);
   let bytes = 0;
   const chunks = [];
   for await (const chunk of response.body) {
