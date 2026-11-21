@@ -103,7 +103,8 @@ independent production HSM or of completed account/ATProto recovery.
 A separate optional `storage-proof` profile now creates a physically independent
 protected Jena/Fuseki TDB2 service with an owner-private Shiro policy and volume.
 The ordinary provider receives **none** of its provisioner, projector or attestor
-credentials. The disposable proof container, separately mounted with those
+credentials and is absent from the separate internal `protected-authority`
+network. The disposable proof container, separately mounted with those
 credentials, creates one protected dataset and verifies that ordinary provider
 credentials cannot read, update or administrate it; the independent reader can
 query and not mutate, and only the projector can write. The proof is repeated

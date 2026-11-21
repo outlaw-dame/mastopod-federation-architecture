@@ -47,9 +47,11 @@ jobs:
           protected = cfg["services"]["protected-fuseki"]
           probe = cfg["services"]["protected-storage-proof"]
           assert "ports" not in protected and "ports" not in probe
-          assert protected["networks"] == ["authority"]
-          assert probe["networks"] == ["authority"]
+          assert protected["networks"] == ["protected-authority"]
+          assert probe["networks"] == ["protected-authority"]
+          assert cfg["networks"]["protected-authority"]["internal"] is True
           assert cfg["networks"]["authority"]["internal"] is True
+          assert "protected-authority" not in provider["networks"]
           assert probe["read_only"] is True and probe["cap_drop"] == ["ALL"]
           assert "no-new-privileges:true" in probe["security_opt"]
           assert probe["user"] == "0:0"  # Ephemeral only; reads owner-private 0600 files

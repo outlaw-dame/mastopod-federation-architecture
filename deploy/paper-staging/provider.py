@@ -170,7 +170,7 @@ exec /jena-fuseki/fuseki-server
         "image": lock["fuseki_image"], "profiles": ["storage-proof"],
         "entrypoint": ["/bin/sh", "/staging/protected-fuseki-start.sh"],
         "command": [], "environment": {"JVM_ARGS": "-Xmx768M"},
-        "networks": ["authority"],
+        "networks": ["protected-authority"],
         "volumes": [
             "protected-fuseki:/fuseki",
             "./secrets/protected-shiro.ini:/fuseki/shiro.ini:ro",
@@ -188,7 +188,7 @@ exec /jena-fuseki/fuseki-server
         "user": "0:0",
         "entrypoint": ["node", "/staging/protected-proof.mjs"],
         "environment": {"NODE_ENV": "test", "PAPER_STAGING_PROTECTED_PROOF": "confirmed"},
-        "networks": ["authority"], "read_only": True, "tmpfs": ["/tmp"],
+        "networks": ["protected-authority"], "read_only": True, "tmpfs": ["/tmp"],
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
         "volumes": [
             "./provider-build/protected-proof.mjs:/staging/protected-proof.mjs:ro",
@@ -197,6 +197,9 @@ exec /jena-fuseki/fuseki-server
         "depends_on": {"protected-fuseki": {"condition": "service_healthy"}},
         "mem_limit": "128m", "pids_limit": 48, "restart": "no"
     }
+    # Only the dedicated disposable proof process can reach this network.
+    # The ordinary provider has neither protected secrets nor network access.
+    config["networks"]["protected-authority"] = {"internal": True}
     config["networks"]["provider-egress"] = {}
     for name in ("fuseki", "protected-fuseki", "redis", "provider-jwt", "provider-uploads", "provider-data"):
         config["volumes"][name] = {}
