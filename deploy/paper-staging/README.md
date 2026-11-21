@@ -44,15 +44,16 @@ ActivityPods PR #257 exact head
 `6bb185ef5ebdb5b40ef3203bcedd6d679a6e1622` passed **7/7**
 workflows, including actual Redis 8.2.11 two-worker refresh and signed
 DPoP/PDS OAuth acceptance, PostgreSQL signed-repo/Jena isolation,
-coordinator, PLC, backend and lint. The provider source also includes a reviewed post-#257
+coordinator, PLC, backend and lint.
+
+The provider source also includes a reviewed post-#257
 startup correction in **PR #258**: the pure Redis Lua CAS policy was moved
 from the recursive Moleculer OAuth service-loader glob to `backend/utils`.
 PR #258 head `5f15d21b8e021fd3f9bc605dee3bfd5eeeef3921` passed all
 three triggered workflows, including a loader-layout regression check.
-This fixes the staging provider boot failure seen in run 44942966184;
-the corrected actual-provider acceptance still must pass independently.
-Its merged implementation remains
-**NONACTIVATED**. Existing unversioned OAuth/PDS credentials require fresh
+This correction addresses the startup defect identified in staging run
+44942966184; the corrected actual-provider acceptance must still pass
+independently. The merged implementation remains **NONACTIVATED**. Existing unversioned OAuth/PDS credentials require fresh
 owner approval, and Redis backup/restore epoch fencing plus a genuinely hosted
 PDS remain separate production acceptance requirements.
 
