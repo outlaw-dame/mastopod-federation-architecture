@@ -16,11 +16,18 @@ services:
       - ap-interop
 
   bonfire-app:
-    image: bonfirenetworks/bonfire:1.0.6-social-amd64@sha256:55084069242e4e09619081ca4f05102a8805325371003f79a5bc50d2e91dae05
+    image: ap-bonfire-community-rc8:3b1630f0f59105b3
+    build:
+      context: ./bonfire-rc8
+      dockerfile: Dockerfile
     environment:
       HOSTNAME: bonfire.test
+      SERVER_IP: "0.0.0.0"
       SERVER_PORT: "4000"
       PUBLIC_PORT: "443"
+      REPLACE_OS_VARS: "true"
+      DB_MIGRATE_INDEXES_CONCURRENTLY: "false"
+      OTEL_ENABLED: "0"
       POSTGRES_HOST: bonfire-db
       POSTGRES_USER: postgres
       POSTGRES_DB: bonfire_db
@@ -29,22 +36,27 @@ services:
       SIGNING_SALT: ${BONFIRE_SIGNING_SALT:?BONFIRE_SIGNING_SALT is required}
       ENCRYPTION_SALT: ${BONFIRE_ENCRYPTION_SALT:?BONFIRE_ENCRYPTION_SALT is required}
       RELEASE_COOKIE: ${BONFIRE_RELEASE_COOKIE:?BONFIRE_RELEASE_COOKIE is required}
+      # Generated per ephemeral test boot. Never reuse actual user credentials.
+      AP_INTEROP_USER_PASSWORD: ${AP_INTEROP_BONFIRE_PASSWORD:?Ephemeral Bonfire password is required}
       MAIL_BACKEND: none
       SEARCH_ADAPTER: none
-      FLAVOUR: social
+      # Fixture-only localhost network exemption for the exact ActivityPods actor.
+      # Do not turn off global SSRF protection.
+      SSRF_ALLOW_HOSTS: activitypods.test:443
+      FLAVOUR: community
       MIX_ENV: prod
       SSL_CERT_FILE: /interop/runtime/certs/rootCA.crt
     depends_on:
       bonfire-db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/ >/dev/null"]
+      test: ["CMD-SHELL", "curl --fail --silent --output /dev/null http://127.0.0.1:4000/"]
       interval: 10s
       timeout: 10s
       retries: 24
-      start_period: 90s
+      start_period: 120s
     volumes:
-      - ap_interop_bonfire_uploads:/opt/app/data/uploads
+      - ap_interop_bonfire_uploads:/opt/bonfire/data/uploads
       - ./runtime:/interop/runtime:ro
     networks:
       - ap-interop
