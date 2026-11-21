@@ -107,8 +107,12 @@ credentials. The disposable proof container, separately mounted with those
 credentials, creates one protected dataset and verifies that ordinary provider
 credentials cannot read, update or administrate it; the independent reader can
 query and not mutate, and only the projector can write. The proof is repeated
-after protected-Fuseki restart to establish durable isolation. The proof service
-is a restricted **rehearsal**, not the production canonical consent/identity store:
+after protected-Fuseki restart to establish durable isolation. The disposable
+proof runner explicitly runs as root **without Linux capabilities**, with a
+read-only filesystem, no Docker socket, no host ports, and a bounded lifespan,
+solely to read the generated owner-private (0600) test credentials. The normal
+provider never receives those mounts. The proof service is a restricted
+**rehearsal**, not the production canonical consent/identity store:
 no signup or SAI projection has been connected to it, and protected-storage
 release gates remain disabled.
 
