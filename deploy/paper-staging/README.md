@@ -27,29 +27,45 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #256** at
-`9c2db01c0414bf7f9b38d0ae1ed9e91156dab62a`, building on native owner-consent PR #255
-and browser enrollment PR #252. PR #256 closes the unbound initial SAI
-issuer gap by deriving a pending PostgreSQL consent from the exact,
-owner-claimed **signup-journal session** and reserved app/HMAC scope.
-It requires Paper's mandatory rights, rejects unexpected native rights
-and mismatched native registration, and separates the session-bound
-SQL issuer from independently credentialed protected-Jena attestation.
-Restricted login admission, native Jena readback, PostgreSQL CAS and
-post-revocation confirmation are tested under exact-session boundaries.
-The browser-enrollment provider runtime includes a **disposable opt-in**
-issuer connection; the normal production-mode staging profile does not
-enable it. Exact ActivityPods PR-head CI `41e3476db9515b6089c05add920b776163e012fb`
-passed **7/7** workflows before the squash merge.
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #258** at
+`89dd72abdc4554065b3462dd96659e4428284376`, building on the
+journal-bound owner-consent gate (#256) and independently attested native SAI
+gate (#255). It additionally fences provider-issued OAuth access, one-use
+authorization codes and refresh-token families by a fresh owner-approved
+consent generation. It uses atomic Redis 8.2.11 code consumption and refresh
+CAS; replay can revoke an entire token family. OAuth reapproval cannot revive
+an earlier signed PDS access JWT or refresh token. The Redis grant key hashes
+the exact owner/client tuple to prevent delimiter collisions. OAuth Redis
+services refuse offline command queuing and automatic replay after
+ambiguous write acknowledgments; production refresh encryption now requires
+a private operator-controlled key.
 
-These changes remain **nonactivated**. No deployed positive signup
-coordinator, real protected SAI projection or hosted signed PDS has
-been commissioned. CI fetches the ActivityPods merge commit from **this
-single lock file**, not another mutable source pin. The staging profile
-still runs `NODE_ENV=production`, and **both** account-creation entrypoints
-must continue returning explicit `503` release-gate denials before and
-after restart. Positive owner signup, active consent/PDS signing and
-production release are deliberately **NOT PROVEN** by this smoke test.
+ActivityPods PR #257 exact head
+`6bb185ef5ebdb5b40ef3203bcedd6d679a6e1622` passed **7/7**
+workflows, including actual Redis 8.2.11 two-worker refresh and signed
+DPoP/PDS OAuth acceptance, PostgreSQL signed-repo/Jena isolation,
+coordinator, PLC, backend and lint.
+
+The provider source also includes a reviewed post-#257
+startup correction in **PR #258**: the pure Redis Lua CAS policy was moved
+from the recursive Moleculer OAuth service-loader glob to `backend/utils`.
+PR #258 head `5f15d21b8e021fd3f9bc605dee3bfd5eeeef3921` passed all
+three triggered workflows, including a loader-layout regression check.
+This correction addresses the startup defect identified in staging run
+44942966184; the corrected actual-provider acceptance must still pass
+independently. The merged implementation remains **NONACTIVATED**. Existing unversioned OAuth/PDS credentials require fresh
+owner approval, and Redis backup/restore epoch fencing plus a genuinely hosted
+PDS remain separate production acceptance requirements.
+
+This production-mode Paper staging profile does NOT enable the disposable
+issuer, protected-SAI attestor or positive PDS account flow. It still uses
+`NODE_ENV=production`, and **both** unified and native account-creation
+entrypoints must return their existing explicit `503` release-gate denials
+before and after restart. CI fetches the ActivityPods source only from
+`lock.json`; all image digests and the federation source remain frozen.
+Successful HTTPS/OIDC signing-key continuity, PG TLS and protected Jena
+isolation are a **negative-release smoke test**, not positive owner signup
+or hosted-PDS readiness. `release=CLOSED` must not change.
 
 ## Execute only after reviewing the bundle
 
@@ -107,6 +123,13 @@ profile; do not disable certificate validation globally or install the private C
 key. Then visit `https://login.paper.example.org:8443/login`. Generated secrets are read
 at startup; they are not baked into images or expanded into Compose configuration.
 The backend reads its private secret file before dropping to UID/GID 1000.
+The staging generator now creates a **unique 32-byte OAuth refresh-token
+AES-GCM key** under `secrets/provider.json` (0600), injects it only at
+provider startup, and rejects a missing/extra/malformed secret. This meets
+the pinned provider's fail-closed production encryption-key requirement
+without exposing it in Compose, Docker image layers or logs. Never rotate
+the key under a still-live Redis refresh-token namespace: the corresponding
+family must be revoked or re-authorized first.
 JWT keys, provider state, uploads, Redis and Fuseki have dedicated volumes.
 The `local-provider` CI job also restarts the Redis, Fuseki and provider
 containers without replacing their volumes or credentials. It repeats
