@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #260** at
-`6c3f65c8c5aeb821590a36113a828c44cea4254e`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #261** at
+`c334e364d6ce28d976cd74f97fb76bb5cd51d0ed`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -91,8 +91,37 @@ denials. PR #260 exact head
 `0d249384f457f19dc372ead2c82733891336d565` passed **3/3**
 triggered workflows: OAuth/Redis/DPoP acceptance **44945899874**,
 backend **44945899861**, and lint/PLC/enrollment **44945899843**.
-Those unit/integration results do not substitute for the fresh
-production-mode staging run required by the *current* pin.
+The prior #260 source passed fresh production-mode negative-release
+staging in federation PR #187 exact-head run **44946214742**:
+both `tls-runtime` and `local-provider` succeeded, including real
+HTTPS startup, OIDC JWKS continuity across restarts, independent protected
+Jena attestor credential isolation, 13 hostile-access checks and both
+explicit signup 503 denials.
+
+The newer ActivityPods **PR #261** is an intentionally **NONACTIVATED**
+PostgreSQL 18 recovery-authority candidate. It adds a narrow
+`paper_atproto_authority.oauth_generations` projection linked to
+independently attested SAI consent, separate issuer/revoker/reader/signer
+function-only NOLOGIN roles, and compare-and-swap issuance/revocation.
+A PG transaction-held signer row lock serializes revocation against
+signed-write authorization. Dependent OAuth rows cascade on native
+SAI consent deletion. A real PG18 + Redis 8.2.11 test uses **binary
+Redis DUMP/RESTORE** to confirm that an older active Redis snapshot
+cannot override an intact PG revocation; it also tests competing
+writers/revokers and least-privilege role denial.
+
+PR #261 final head `f034c136b910fd3821cfeb0879d5df7f2141e881`
+passed **3/3** independent workflows: PG18/Redis restore proof
+**44948555620**, backend **44948555646**, and lint/regressions
+**44948555594**. This new candidate is not connected to production
+OAuth token issuance/introspection/refresh or a real signed-PDS commit.
+No issuer/revoker is deployed. A **separate non-rewindable witness**
+is still required to block PostgreSQL PITR/backup rollback; no
+successful signed hosted PDS positive signup has been established.
+See federation P0 issue #186.
+
+These results do not replace the fresh real provider staging test at
+the *current* ActivityPods source pin; they are separate fixture proofs.
 
 The merged implementation remains **NONACTIVATED**. Existing unversioned
 OAuth/PDS credentials require fresh owner approval. Redis backup/restore
