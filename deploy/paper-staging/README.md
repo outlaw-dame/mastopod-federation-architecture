@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #262** at
-`0098cdf948734a94de7ef3a83053c1e1966f1251`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #263** at
+`83a0191c09f31243f58bd922e58c859a91bcd557`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -147,6 +147,32 @@ deployed and the real signed PDS writer does NOT yet acquire the
 new PG OAuth epoch lock inside the signed-commit transaction.
 The independent anti-rollback witness across PG PITR and hosted
 positive signup remain mandatory. Current P0 issue: #186.
+
+The newer ActivityPods **PR #263** is an additional **NONACTIVATED**
+PostgreSQL 18 signed-repository authorization gate: the restricted
+reference-MST signed writer now locks both canonical SAI and OAuth
+generation **in the same PG transaction** that commits signed head,
+immutable blocks, native outbox and projection intent. PG v6 grants the
+signed writer EXECUTE on an exact row-locking SECURITY DEFINER predicate;
+no OAuth table read, reapproval, or revocation privilege is added.
+The trusted provider OAuth bridge carries exact client/grant/scope/epoch
+into its candidate signed writer factory, checked again after commit.
+
+ActivityPods PR #263 exact head
+`9da94b9ab34b61e7e39164eea8d664bccf15cd97` passed **7/7**
+workflows: real PG18 signed reference-MST/OAuth-revoker contention
+**44954374646**, protected Jena **44954374658**, PLC **44954374612**,
+coordinator **44954374614**, real OAuth Redis **44954374616**,
+backend **44954374631**, and lint/regressions **44954374619**.
+The real PG proof reports an OAuth generation lock in the signed
+commit, revoker serialization, denied post-revocation signed write,
+unchanged signed head, and zero leaked idle transactions.
+
+**Production still has no owner-authenticated PG OAuth issuer/revoker,
+independent anti-PITR rollback witness, hosted PDS positive signup, or
+fully released provider writer binding.** PR #263 only adds a
+disposable/proof-only transaction boundary. The release remains CLOSED;
+federation P0 issue #186 stays open. All image digests are unchanged.
 
 This production-mode Paper staging profile does NOT enable the disposable
 issuer, protected-SAI attestor or positive PDS account flow. It still uses
