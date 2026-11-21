@@ -45,6 +45,26 @@ jobs:
             --resolve provider.paper.example.org:8443:127.0.0.1 https://provider.paper.example.org:8443/_staging/ready
           curl --fail --silent --show-error --max-time 10 --cacert "$RUNNER_TEMP/paper-provider/certificates/ca.crt" \
             --resolve login.paper.example.org:8443:127.0.0.1 https://login.paper.example.org:8443/login --output /dev/null
+      - name: Restart provider and storage without rotating OIDC signing keys
+        run: |
+          set -euo pipefail
+          compose="$RUNNER_TEMP/paper-provider/compose.json"
+          before="$RUNNER_TEMP/paper-provider-jwks-before.log"
+          after="$RUNNER_TEMP/paper-provider-jwks-after.log"
+          docker compose -f "$compose" exec -T provider node /staging/provider-probe.mjs | tee "$before"
+          docker compose -f "$compose" --profile provider restart redis fuseki
+          docker compose -f "$compose" --profile provider up -d --wait --wait-timeout 120 redis fuseki
+          docker compose -f "$compose" --profile provider restart provider
+          docker compose -f "$compose" exec -T provider node /staging/provider-probe.mjs | tee "$after"
+          before_fp="$(grep -E '^STAGING_OIDC_JWKS_SHA256=[0-9a-f]{64}$' "$before")"
+          after_fp="$(grep -E '^STAGING_OIDC_JWKS_SHA256=[0-9a-f]{64}$' "$after")"
+          test "$(grep -c '^STAGING_OIDC_JWKS_SHA256=' "$before")" -eq 1
+          test "$(grep -c '^STAGING_OIDC_JWKS_SHA256=' "$after")" -eq 1
+          if test "$before_fp" != "$after_fp"; then
+            echo "::error::OIDC public signing key continuity failed after provider/storage restart"
+            exit 1
+          fi
+          echo "Verified OIDC public signing keys persist after provider, Redis and Fuseki restart; signup remains CLOSED."
       - name: Diagnose provider failure without publishing secrets
         if: failure()
         run: python3 deploy/paper-staging/diagnose.py "$RUNNER_TEMP/paper-provider"

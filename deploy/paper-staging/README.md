@@ -94,6 +94,12 @@ key. Then visit `https://login.paper.example.org:8443/login`. Generated secrets 
 at startup; they are not baked into images or expanded into Compose configuration.
 The backend reads its private secret file before dropping to UID/GID 1000.
 JWT keys, provider state, uploads, Redis and Fuseki have dedicated volumes.
+The `local-provider` CI job also restarts the Redis, Fuseki and provider
+containers without replacing their volumes or credentials. It repeats
+CA-verified discovery, JWKS, UI and signup-denial probes after restart and
+compares a canonical SHA-256 fingerprint of the **public** OIDC signing keys.
+Key continuity alone is not evidence of signing-key custody under an
+independent production HSM or of completed account/ATProto recovery.
 These names are under the reserved documentation domain `example.org`; this is
 local-only naming, not evidence of public domain ownership or resolvable ATProto
 handles. Production URL syntax checks and all signup release fuses remain intact.
