@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
 
 const origin = 'https://provider.paper.example.org:8443';
@@ -53,6 +54,18 @@ for (const key of jwks.keys) {
     assert.equal(Object.hasOwn(key, privateField), false, 'OIDC JWKS must not disclose private material');
   }
 }
+// The JWKS is public; hash a canonical representation so key order and JSON
+// property order cannot manufacture a false restart failure. A change in a
+// signing key or its public metadata is still detectable.
+const normalizedJwks = jwks.keys.map(key => Object.fromEntries(
+  Object.keys(key).sort().map(name => [name, key[name]])
+)).sort((left, right) => {
+  const a = JSON.stringify(left);
+  const b = JSON.stringify(right);
+  return a < b ? -1 : a > b ? 1 : 0;
+});
+const jwksFingerprint = createHash('sha256')
+  .update(JSON.stringify(normalizedJwks)).digest('hex');
 
 const denied = await fetch(`${origin}/api/accounts/create`, {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000)
@@ -61,3 +74,6 @@ const error = await denied.json();
 assert.equal(denied.status, 503, `Unexpected signup HTTP ${denied.status}, type ${String(error.type).slice(0,100)}`);
 assert.equal(error.type, 'UNIFIED_ACCOUNT_RELEASE_GATE_CLOSED');
 console.log('PASS: actual provider and frontend reachable over verified HTTPS; unified signup release gate remains CLOSED.');
+// Public-key fingerprint only; never emit secrets, identity tokens or JWK
+// private parameters. CI compares this after the same isolated volumes restart.
+console.log('STAGING_OIDC_JWKS_SHA256=' + jwksFingerprint);
