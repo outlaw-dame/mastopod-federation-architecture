@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #261** at
-`c334e364d6ce28d976cd74f97fb76bb5cd51d0ed`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #262** at
+`0098cdf948734a94de7ef3a83053c1e1966f1251`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -127,6 +127,26 @@ The merged implementation remains **NONACTIVATED**. Existing unversioned
 OAuth/PDS credentials require fresh owner approval. Redis backup/restore
 epoch fencing, independent protected-SAI positive activation, and a genuinely
 hosted signed PDS remain separate production acceptance requirements.
+
+The newer merged ActivityPods **PR #262** adds a PostgreSQL 18
+reader-only v5 revision function and a **NONACTIVATED** real OAuth handler
+fence. Authorization codes carry the PG generation; signed JWT
+introspection and encrypted refresh issue/rotation/readback consult
+fresh restricted PG as well as Redis. Its disposable proof runs real
+OAuth code, JWT and refresh handlers; a native Redis binary
+DUMP/RESTORE cannot revive credentials after PG revocation, a
+privilege-mismatched PG login is rejected, and a primary PG outage
+fails closed. Exact ActivityPods PR-head `a49e249311abe3bd7baa834638203041c84bf236`
+passed 4/4 workflows: PG18 + Redis8.2 restore proof **44953794032**,
+existing OAuth/DPoP **44953793960**, backend **44953793927**, and
+lint/regressions **44953794007**. Merge commit:
+`0098cdf948734a94de7ef3a83053c1e1966f1251`.
+
+No production owner-authenticated PG OAuth issuer or revoker is
+deployed and the real signed PDS writer does NOT yet acquire the
+new PG OAuth epoch lock inside the signed-commit transaction.
+The independent anti-rollback witness across PG PITR and hosted
+positive signup remain mandatory. Current P0 issue: #186.
 
 This production-mode Paper staging profile does NOT enable the disposable
 issuer, protected-SAI attestor or positive PDS account flow. It still uses
