@@ -35,6 +35,34 @@ jobs:
         run: |
           python3 deploy/paper-staging/prepare.py "$RUNNER_TEMP/paper-provider" --activitypods-checkout "$RUNNER_TEMP/activitypods"
           docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider --profile storage-proof config --quiet
+      - name: Verify protected credentials are absent from ordinary provider
+        run: |
+          python3 - <<'PY'
+          import json, os, stat
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "paper-provider"
+          cfg = json.loads((root / "compose.json").read_text())
+          assert json.loads((root / "lock.json").read_text())["release"] == "CLOSED"
+          provider = cfg["services"]["provider"]
+          protected = cfg["services"]["protected-fuseki"]
+          probe = cfg["services"]["protected-storage-proof"]
+          assert "ports" not in protected and "ports" not in probe
+          assert protected["networks"] == ["authority"]
+          assert probe["networks"] == ["authority"]
+          assert cfg["networks"]["authority"]["internal"] is True
+          assert probe["read_only"] is True and probe["cap_drop"] == ["ALL"]
+          assert "no-new-privileges:true" in probe["security_opt"]
+          assert probe["user"] == "0:0"  # Ephemeral only; reads owner-private 0600 files
+          for file in ("protected-access.json", "protected-shiro.ini"):
+              assert stat.S_IMODE((root / "secrets" / file).stat().st_mode) == 0o600
+          ordinary_mounts = " ".join(provider["volumes"])
+          ordinary_environment = json.dumps(provider["environment"])
+          assert "protected-access" not in ordinary_mounts
+          assert "protected-shiro" not in ordinary_mounts
+          assert "protected-fuseki" not in ordinary_environment
+          assert "protected-storage-proof" not in ordinary_environment
+          print("PASS: protected Jena secrets are owner-private and absent from ordinary provider")
+          PY
       - name: Build actual provider and frontend
         run: docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider build provider frontend
       - name: Verify HTTPS surfaces and closed signup gate
