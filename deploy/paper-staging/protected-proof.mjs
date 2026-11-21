@@ -43,14 +43,18 @@ async function call(path, role, { method = 'POST', body, type, accept } = {}) {
   });
   const chunks = [];
   let bytes = 0;
-  try {
-    for await (const chunk of response.body) {
-      bytes += chunk.byteLength;
-      assert.ok(bytes <= 32768, 'Protected Jena HTTP response too large');
-      chunks.push(Buffer.from(chunk));
+  // Apache Jena's successful SPARQL updates commonly return 204 with no
+  // response stream. Do not mistake an absent body for a failed admission.
+  if (response.body) {
+    try {
+      for await (const chunk of response.body) {
+        bytes += chunk.byteLength;
+        assert.ok(bytes <= 32768, 'Protected Jena HTTP response too large');
+        chunks.push(Buffer.from(chunk));
+      }
+    } finally {
+      await response.body.cancel().catch(() => {});
     }
-  } finally {
-    await response.body?.cancel().catch(() => {});
   }
   return { status: response.status, body: Buffer.concat(chunks).toString('utf8') };
 }
