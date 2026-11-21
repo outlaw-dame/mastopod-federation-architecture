@@ -27,15 +27,21 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is merged PR #252 at `ab7c486488a8d926bc9fade8ac32f9e9af270435`.
-It includes the prior merged navigation, signed PLC readback and incomplete-enrollment
-fencing fixes, plus disposable browser enrollment, owner activation, independent
-native SAI permissions, current-grant OIDC admission and signed provider genesis.
-Exact PR-head CI on `3db561b56e8be9759b591afaecd73a2b7a545468` passed all 12 workflows
-before merge. CI fetches the merge commit from **this single lock file**, not
-from a second source pin. This staging profile still runs `NODE_ENV=production`,
-so all new-account release fuses remain enforced. A green negative-gate smoke
-is not proof of positive signup or PDS readiness.
+change followed by a new acceptance run. The current ActivityPods pin is merged PR #255 at `ff7fed41cc4c6afea2b27c47513490fe8f8fa0c6`,
+building on merged browser-enrollment PR #252. It contains native SAI
+**pending → independently attested → active** PostgreSQL consent activation
+and irreversible owner revocation, along with real Jena/TDB2 credential-isolated
+readback and process/restart acceptance tests. Exact-head CI for PR #255 on
+`e4df88b1d16a3cc02cf03efb6c68a64f98b04d1d` passed seven workflows before
+merge, including PostgreSQL 18, native SAI, signed-repo, and real Jena proofs.
+
+These changes are **nonactivated candidates**: the actual deployed provider
+has not been wired to the production new-signup journal, protected SAI projection,
+or hosted signed PDS. CI fetches the ActivityPods merge commit from **this single
+lock file**, not from a second source pin. This staging profile still runs
+`NODE_ENV=production`, and both account creation routes must continue returning
+their explicit `503` release-gate errors. A green negative-gate staging smoke
+does not authorize successful signup, owner SAI activation or PDS readiness.
 
 ## Execute only after reviewing the bundle
 
