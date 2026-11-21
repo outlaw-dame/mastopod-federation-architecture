@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #263** at
-`83a0191c09f31243f58bd922e58c859a91bcd557`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #267** at
+`de9568fabcf5e53a7c7140fadbc9fdc9c519aa9c`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -173,6 +173,71 @@ independent anti-PITR rollback witness, hosted PDS positive signup, or
 fully released provider writer binding.** PR #263 only adds a
 disposable/proof-only transaction boundary. The release remains CLOSED;
 federation P0 issue #186 stays open. All image digests are unchanged.
+
+### P0 development checkpoint through ActivityPods #267 (November 21, 2026)
+
+**No production activation.** This source pin adds four more **NONACTIVATED**
+security and integration candidates after the previously verified #263
+signed-post transactional consent fence:
+
+- Merged ActivityPods **#264** at `ab518498ce473995abb7418b83679b98a7604ede`:
+  PostgreSQL v7 derives initial narrow ATProto OAuth issuer/revoker
+  authority from the actual authenticated owner signup/SAI journal,
+  instead of accepting an arbitrary owner WebID or client. Real PG18
+  test denies forged/expired owner sessions, foreign clients, scope
+  escalation and stale approvals. Direct signed-JWT issuance without
+  its exact PG epoch is rejected. Eight exact-head checks passed,
+  including signed-PG **44956877983**, PG OAuth **44956878015**,
+  protected Jena **44956878024**, backend **44956877980** and
+  lint **44956877978**.
+- Merged ActivityPods **#265** at `04270e1c9f7d960f1f5e3204083ece624d6b6acf`:
+  independently deployed PostgreSQL 18 witness schema with
+  strictly separated issuer/revoker/reader/receipt-attestor roles,
+  hash-chained revision CAS and fail-closed unsealed transitions.
+  Disposable test on **two different PG18 clusters** plus real Redis
+  binary DUMP/RESTORE passes, including simulated old primary-PG
+  authorization rows; exact-head witness **44957663720**,
+  PG restore **44957663724**, backend **44957663748**,
+  lint **44957663765**.
+- Merged ActivityPods **#266** at `e9ef05651eafbf19db243104858198f9faa666e5`:
+  SAME journal-bound new account/SAI/OAuth fixture advances into
+  a real secp256k1-signed ATProto genesis and `app.bsky.feed.post`
+  with independently verified CAR/CIDs, durable outbox and denied
+  cross-account/post-revocation writes. Six exact-head checks passed,
+  including signed PG18 **44957919478** and protected Jena
+  **44957919484**. It still seeds the signup account fixture
+  directly and uses a synthetic PG-only projection ACK. It is NOT
+  a real HTTPS-browser signup or hosted signed PDS test.
+- Merged ActivityPods **#267** at `de9568fabcf5e53a7c7140fadbc9fdc9c519aa9c`:
+  real signed access JWT issuance/introspection and the shared OAuth
+  authorization/refresh candidate path now require the separate
+  restricted, sealed high-water witness **and** canonical PG/Redis
+  when test-only gates are explicitly enabled. Witness outage,
+  unsealed new grant and pre-revocation PG+Redis restore deny.
+  All four exact-head workflows passed: witness **44958499314**,
+  combined PG **44958499230**, backend **44958499223**,
+  lint **44958499215**. GitHub Codex's review could not run
+  because review credits were exhausted; it did not supply
+  independent code-review approval.
+
+These are security-gated disposable candidate paths: production
+OAuth/owner-browser, actual PDS signer and positive signup have NOT
+been activated or released. No independent immutable WORM receipt
+store has been provisioned; the test used an explicitly fake
+in-memory write-once receipt. It simulated primary PG rollback,
+not a physical WAL PITR/restore with independent WORM catch-up.
+A true witness must survive even its own restore and hold
+authorization through the signed-PDS commit/externally acknowledged
+revocation boundary. Long-lived post-enrollment owner-consent
+management, real protected Jena signed record readback, DID/PLC
+remote signing/rotation, real HTTPS PDS XRPC and remote ActivityPub
+peer acceptance remain P0 blockers.
+
+See ActivityPods docs:
+`docs/paper-oauth-external-pitr-witness.md` and
+`docs/paper-unified-positive-acceptance.md`. The production
+release remains **CLOSED**; issue #186 remains OPEN.
+Every image digest/federation source pin remains unchanged.
 
 This production-mode Paper staging profile does NOT enable the disposable
 issuer, protected-SAI attestor or positive PDS account flow. It still uses
