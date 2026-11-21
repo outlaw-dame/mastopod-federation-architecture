@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #257** at
-`af189b46e6e22ccb9b93d1908ff52c91e89219f1`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #258** at
+`89dd72abdc4554065b3462dd96659e4428284376`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -44,7 +44,14 @@ ActivityPods PR #257 exact head
 `6bb185ef5ebdb5b40ef3203bcedd6d679a6e1622` passed **7/7**
 workflows, including actual Redis 8.2.11 two-worker refresh and signed
 DPoP/PDS OAuth acceptance, PostgreSQL signed-repo/Jena isolation,
-coordinator, PLC, backend and lint. Its merged implementation remains
+coordinator, PLC, backend and lint. The provider source also includes a reviewed post-#257
+startup correction in **PR #258**: the pure Redis Lua CAS policy was moved
+from the recursive Moleculer OAuth service-loader glob to `backend/utils`.
+PR #258 head `5f15d21b8e021fd3f9bc605dee3bfd5eeeef3921` passed all
+three triggered workflows, including a loader-layout regression check.
+This fixes the staging provider boot failure seen in run 44942966184;
+the corrected actual-provider acceptance still must pass independently.
+Its merged implementation remains
 **NONACTIVATED**. Existing unversioned OAuth/PDS credentials require fresh
 owner approval, and Redis backup/restore epoch fencing plus a genuinely hosted
 PDS remain separate production acceptance requirements.
