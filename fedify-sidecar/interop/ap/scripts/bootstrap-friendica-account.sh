@@ -68,5 +68,72 @@ fi
 compose exec -T friendica-db /bin/sh -lc \
   "MYSQL_PWD=\"\$MARIADB_PASSWORD\" mariadb --batch --skip-column-names -u friendica friendica -e \"update user set nickname='friendica' where uid=0 and nickname='';\""
 
+# Disposable federation fixture only. Friendica 2026.05's stream
+# logger refuses to start unless the logfile already exists and is writable
+# by the Apache/worker www-data account. Keep private wire records out of CI.
+compose exec -T -u root friendica-app /bin/sh -ec \
+  'test -e /var/www/html/friendica.log || install -o www-data -g www-data -m 0600 /dev/null /var/www/html/friendica.log'
+# Explicitly enable diagnostics *after* installation wrote persistent config.
+# Logging never bypasses URL validation or HTTP-signature verification.
+compose exec -T friendica-app php bin/console.php config system debugging 1 >/dev/null
+compose exec -T friendica-app php bin/console.php config system logfile /var/www/html/friendica.log >/dev/null
+compose exec -T friendica-app php bin/console.php config system loglevel debug >/dev/null
+# Verify that the newly created local account is actually exposed as an
+# ActivityPub actor, not merely a working HTML profile. Friendica can return
+# HTTP 202 for inbound Follow even if its target actor is not resolvable.
+# This check never prints actor JSON, keys or personal profile fields.
+compose exec -T -e AP_INTEROP_LOCAL_ACTOR="https://friendica.test/profile/${USERNAME}" \
+  -e AP_INTEROP_LOCAL_USERNAME="${USERNAME}" \
+  friendica-app /bin/sh -ec '
+    # The proxy aliases are not installed on this bootstrap container yet.
+    # Test the local Apache origin, still requiring the canonical HTTPS actor
+    # ID in JSON; later wire tests verify real TLS and signed delivery.
+    curl --fail --silent --show-error \
+      --connect-timeout 5 --max-time 20 \
+      -H "Accept: application/activity+json" \
+      "http://127.0.0.1/profile/$AP_INTEROP_LOCAL_USERNAME" |
+    php -r '\''$body = stream_get_contents(STDIN);
+      $actor = json_decode($body, true);
+      $expected = getenv("AP_INTEROP_LOCAL_ACTOR");
+      $type = is_array($actor) ? ($actor["type"] ?? null) : null;
+      $inbox = is_array($actor) ? ($actor["inbox"] ?? null) : null;
+      if (!is_array($actor) || ($actor["id"] ?? null) !== $expected ||
+          !in_array($type, ["Person", "Service", "Organization", "Group", "Application"], true) ||
+          !is_string($inbox) || $inbox === "") {
+        fwrite(STDERR, "Friendica local ActivityPub actor validation failed\\n");
+        exit(1);
+      }
+      echo "Friendica local ActivityPub actor validated\\n";'\''
+  '
+
 compose up -d friendica-worker
+# Friendica's official /cron.sh executes its PHP daemon with -f.
+# Its foreground mode DOES NOT write a PID file (src/System/Daemon.php),
+# so daemon status gives a false negative even for a healthy process.
+# Check the live foreground process without printing command lines, config,
+# credentials or signed ActivityPub request contents.
+worker_ready=false
+attempt=1
+while [ "${attempt}" -le 30 ]; do
+  if compose ps --status running --services | grep -qx friendica-worker &&
+    compose exec -T friendica-worker /bin/sh -ec '
+      for proc in /proc/[0-9]*/cmdline; do
+        [ -r "$proc" ] || continue
+        if tr "\000" " " < "$proc" |
+          grep -Eq "php[[:space:]]+/var/www/html/bin/console[.]php[[:space:]]+daemon[[:space:]]+start[[:space:]]+-f"; then
+          exit 0
+        fi
+      done
+      exit 1
+    ' >/dev/null 2>&1; then
+    worker_ready=true
+    break
+  fi
+  sleep 2
+  attempt=$((attempt + 1))
+done
+if [ "${worker_ready}" != true ]; then
+  echo "Friendica foreground worker did not become ready" >&2
+  exit 1
+fi
 echo "Bootstrapped Friendica federation target ${USERNAME}"
