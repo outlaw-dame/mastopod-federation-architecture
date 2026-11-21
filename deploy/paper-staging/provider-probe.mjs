@@ -17,6 +17,38 @@ assert.ok((await config.text()).includes(origin));
 const page = await fetch('https://login.paper.example.org:8443/', { signal: AbortSignal.timeout(5000) });
 assert.equal(page.status, 200);
 assert.match(await page.text(), /<div id="root"><\/div>/);
+// Verify the public OIDC metadata used by actual apps over this profile's
+// CA-trusted HTTPS ingress. Discovery and JWKS are public, not owner sign-in.
+async function readBoundedJson(response, label) {
+  assert.equal(response.status, 200, `${label}: unexpected HTTP ${response.status}`);
+  assert.match(response.headers.get('content-type') || '', /^application\/json(?:;|$)/iu);
+  let bytes = 0;
+  const chunks = [];
+  for await (const chunk of response.body) {
+    bytes += chunk.length;
+    assert.ok(bytes <= 65536, `${label}: response exceeds bound`);
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+const discovery = await readBoundedJson(await fetch(`${origin}/.well-known/openid-configuration`, {
+  redirect: 'error', signal: AbortSignal.timeout(5000), headers: { accept: 'application/json' }
+}), 'OIDC discovery');
+assert.equal(discovery.issuer, origin + '/');
+for (const key of ['authorization_endpoint', 'token_endpoint', 'jwks_uri']) {
+  assert.equal(new URL(discovery[key]).origin, origin, `OIDC ${key} must stay on this provider`);
+}
+const jwks = await readBoundedJson(await fetch(discovery.jwks_uri, {
+  redirect: 'error', signal: AbortSignal.timeout(5000), headers: { accept: 'application/json' }
+}), 'OIDC signing keys');
+assert.ok(Array.isArray(jwks.keys) && jwks.keys.length > 0 && jwks.keys.length <= 16);
+for (const key of jwks.keys) {
+  assert.ok(['RSA', 'EC', 'OKP'].includes(key.kty), 'OIDC must publish asymmetric signing keys');
+  for (const privateField of ['d', 'p', 'q', 'dp', 'dq', 'qi', 'k']) {
+    assert.equal(Object.hasOwn(key, privateField), false, 'OIDC JWKS must not disclose private material');
+  }
+}
+
 const denied = await fetch(`${origin}/api/accounts/create`, {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000)
 });
