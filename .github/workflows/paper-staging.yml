@@ -34,7 +34,7 @@ jobs:
       - name: Prepare and validate actual provider profile
         run: |
           python3 deploy/paper-staging/prepare.py "$RUNNER_TEMP/paper-provider" --activitypods-checkout "$RUNNER_TEMP/activitypods"
-          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider config --quiet
+          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider --profile storage-proof config --quiet
       - name: Build actual provider and frontend
         run: docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider build provider frontend
       - name: Verify HTTPS surfaces and closed signup gate
@@ -45,6 +45,12 @@ jobs:
             --resolve provider.paper.example.org:8443:127.0.0.1 https://provider.paper.example.org:8443/_staging/ready
           curl --fail --silent --show-error --max-time 10 --cacert "$RUNNER_TEMP/paper-provider/certificates/ca.crt" \
             --resolve login.paper.example.org:8443:127.0.0.1 https://login.paper.example.org:8443/login --output /dev/null
+      - name: Prove physical protected Jena credential isolation
+        run: |
+          set -euo pipefail
+          compose="$RUNNER_TEMP/paper-provider/compose.json"
+          docker compose -f "$compose" --profile storage-proof up -d --wait --wait-timeout 120 protected-fuseki
+          docker compose -f "$compose" --profile storage-proof run --rm protected-storage-proof prepare
       - name: Restart provider and storage without rotating OIDC signing keys
         run: |
           set -euo pipefail
@@ -65,6 +71,13 @@ jobs:
             exit 1
           fi
           echo "Verified OIDC public signing keys persist after provider, Redis and Fuseki restart; signup remains CLOSED."
+      - name: Prove protected RDF survives restart without granting ordinary write access
+        run: |
+          set -euo pipefail
+          compose="$RUNNER_TEMP/paper-provider/compose.json"
+          docker compose -f "$compose" --profile storage-proof restart protected-fuseki
+          docker compose -f "$compose" --profile storage-proof up -d --wait --wait-timeout 120 protected-fuseki
+          docker compose -f "$compose" --profile storage-proof run --rm protected-storage-proof verify
       - name: Diagnose provider failure without publishing secrets
         if: failure()
         run: python3 deploy/paper-staging/diagnose.py "$RUNNER_TEMP/paper-provider"
@@ -72,7 +85,7 @@ jobs:
         if: always()
         run: |
           if test -f "$RUNNER_TEMP/paper-provider/PREPARED"; then
-            docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider down --volumes
+            docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider --profile storage-proof down --volumes
           fi
   tls-runtime:
     runs-on: ubuntu-latest

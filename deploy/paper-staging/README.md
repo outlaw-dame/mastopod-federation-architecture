@@ -100,6 +100,18 @@ CA-verified discovery, JWKS, UI and signup-denial probes after restart and
 compares a canonical SHA-256 fingerprint of the **public** OIDC signing keys.
 Key continuity alone is not evidence of signing-key custody under an
 independent production HSM or of completed account/ATProto recovery.
+A separate optional `storage-proof` profile now creates a physically independent
+protected Jena/Fuseki TDB2 service with an owner-private Shiro policy and volume.
+The ordinary provider receives **none** of its provisioner, projector or attestor
+credentials. The disposable proof container, separately mounted with those
+credentials, creates one protected dataset and verifies that ordinary provider
+credentials cannot read, update or administrate it; the independent reader can
+query and not mutate, and only the projector can write. The proof is repeated
+after protected-Fuseki restart to establish durable isolation. The proof service
+is a restricted **rehearsal**, not the production canonical consent/identity store:
+no signup or SAI projection has been connected to it, and protected-storage
+release gates remain disabled.
+
 These names are under the reserved documentation domain `example.org`; this is
 local-only naming, not evidence of public domain ownership or resolvable ATProto
 handles. Production URL syntax checks and all signup release fuses remain intact.

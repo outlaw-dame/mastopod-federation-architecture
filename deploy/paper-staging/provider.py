@@ -29,8 +29,31 @@ def add_provider(destination, checkout, lock, config, run, write):
                  "ATPROTO_MIGRATION_SECRET_ENC_KEY_HEX"):
         private_env[name] = secrets.token_hex(32)
     write(destination / "secrets/provider.json", json.dumps(private_env))
+    # This physically separate Jena store is rehearsal-only. Its projection,
+    # readback and administrator credentials never enter the provider process.
+    protected = {
+        role: {"username": "paper-protected-" + role,
+               "password": secrets.token_hex(32)}
+        for role in ("provisioner", "projector", "attestor")
+    }
+    protected["ordinary"] = {"username": "admin", "password": password}
+    write(destination / "secrets/protected-access.json", json.dumps(protected))
+    write(destination / "secrets/protected-shiro.ini",
+        "# Generated disposable protected Jena authority. Keep out of deployment images.\n"
+        "[users]\n"
+        f"{protected['provisioner']['username']} = {protected['provisioner']['password']}, admins\n"
+        f"{protected['projector']['username']} = {protected['projector']['password']}, projectors, readers\n"
+        f"{protected['attestor']['username']} = {protected['attestor']['password']}, readers\n"
+        "[urls]\n"
+        "/$/ping = anon\n"
+        "/$/** = authcBasic,roles[admins]\n"
+        "/protected-proof/query = authcBasic,roles[readers]\n"
+        "/protected-proof/update = authcBasic,roles[projectors]\n"
+        "/protected-proof/** = authcBasic,roles[projectors]\n"
+        "/protected-proof = authcBasic,roles[projectors]\n"
+        "/** = authcBasic,roles[admins]\n")
     here = Path(__file__).resolve().parent
-    for name in ("provider-start.cjs", "provider-probe.mjs"):
+    for name in ("provider-start.cjs", "provider-probe.mjs", "protected-proof.mjs"):
         shutil.copyfile(here / name, build / name)
         (build / name).chmod(0o644)
     readiness = build / "pod-provider/backend/services/staging-readiness.service.js"
@@ -91,6 +114,14 @@ ADMIN_PASSWORD=$(cat /run/fuseki-password)
 export ADMIN_PASSWORD
 exec /docker-entrypoint.sh /jena-fuseki/fuseki-server
 ''')
+    # Do not invoke the ordinary image entrypoint: it rewrites the Shiro
+    # credential policy. This mirrors the independently tested Jena fixture.
+    write(destination / "protected-fuseki-start.sh", '''#!/bin/sh
+set -eu
+if [ ! -e /fuseki/extra ]; then ln -s /jena-fuseki/extra /fuseki/extra; fi
+test "$(readlink /fuseki/extra)" = /jena-fuseki/extra
+exec /jena-fuseki/fuseki-server
+''')
     env = {
         "NODE_ENV": "production", "SEMAPPS_INSTANCE_NAME": "Paper local staging",
         "SEMAPPS_INSTANCE_DESCRIPTION_EN": "Disposable local signup acceptance",
@@ -135,7 +166,34 @@ exec /docker-entrypoint.sh /jena-fuseki/fuseki-server
                         "./certificates/browser.crt:/certificates/browser.crt:ro"],
             "depends_on": ["provider", "frontend"], "mem_limit": "128m", "restart": "no"},
     })
+    services["protected-fuseki"] = {
+        "image": lock["fuseki_image"], "profiles": ["storage-proof"],
+        "entrypoint": ["/bin/sh", "/staging/protected-fuseki-start.sh"],
+        "command": [], "environment": {"JVM_ARGS": "-Xmx768M"},
+        "networks": ["authority"],
+        "volumes": [
+            "protected-fuseki:/fuseki",
+            "./secrets/protected-shiro.ini:/fuseki/shiro.ini:ro",
+            "./protected-fuseki-start.sh:/staging/protected-fuseki-start.sh:ro"
+        ],
+        "mem_limit": "1200m", "pids_limit": 128, "restart": "no",
+        "healthcheck": {"test": ["CMD-SHELL", "wget -q -O /dev/null 'http://localhost:3030/$/ping'"],
+                        "interval": "3s", "timeout": "3s", "retries": 40}
+    }
+    services["protected-storage-proof"] = {
+        "image": lock["node_image"], "profiles": ["storage-proof"],
+        "entrypoint": ["node", "/staging/protected-proof.mjs"],
+        "environment": {"NODE_ENV": "test", "PAPER_STAGING_PROTECTED_PROOF": "confirmed"},
+        "networks": ["authority"], "read_only": True, "tmpfs": ["/tmp"],
+        "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
+        "volumes": [
+            "./provider-build/protected-proof.mjs:/staging/protected-proof.mjs:ro",
+            "./secrets/protected-access.json:/run/protected-access.json:ro"
+        ],
+        "depends_on": {"protected-fuseki": {"condition": "service_healthy"}},
+        "mem_limit": "128m", "pids_limit": 48, "restart": "no"
+    }
     config["networks"]["provider-egress"] = {}
-    for name in ("fuseki", "redis", "provider-jwt", "provider-uploads", "provider-data"):
+    for name in ("fuseki", "protected-fuseki", "redis", "provider-jwt", "provider-uploads", "provider-data"):
         config["volumes"][name] = {}
     write(destination / "LOCAL_BROWSER_README.txt", f"Local provider: {API}\nLocal login: {UI}/login\nMap both names to 127.0.0.1 for your browser. Import certificates/ca.crt into a disposable browser profile only. Production signup remains CLOSED until the completion integration passes. Do not use real account credentials.\n")
