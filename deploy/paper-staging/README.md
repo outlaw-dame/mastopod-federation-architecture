@@ -109,9 +109,10 @@ credentials, creates one protected dataset and verifies that ordinary provider
 credentials cannot read, update or administrate it; the independent reader can
 query and not mutate, and only the projector can write. The proof is repeated
 after protected-Fuseki restart to establish durable isolation. The disposable
-proof runner explicitly runs as root **without Linux capabilities**, with a
-read-only filesystem, no Docker socket, no host ports, and a bounded lifespan,
-solely to read the generated owner-private (0600) test credentials. The normal
+proof runner runs as the **host secret-file owner's UID/GID**, without Linux
+capabilities, with a read-only filesystem, no Docker socket, no host ports
+and a bounded lifespan. The generated test credentials remain owner-private
+(0600), so neither broad file permissions nor DAC-override privileges are needed. The normal
 provider never receives those mounts. The proof service is a restricted
 **rehearsal**, not the production canonical consent/identity store:
 no signup or SAI projection has been connected to it, and protected-storage

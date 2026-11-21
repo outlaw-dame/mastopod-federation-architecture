@@ -182,10 +182,11 @@ exec /jena-fuseki/fuseki-server
     }
     services["protected-storage-proof"] = {
         "image": lock["node_image"], "profiles": ["storage-proof"],
-        # Only the disposable test process reads owner-private 0600 credential
-        # files. Root has no Linux capabilities, writeable rootfs or Docker socket.
-        # The actual provider never mounts this credential file.
-        "user": "0:0",
+        # Match the generated secret files' host owner UID/GID. A UID-0
+        # process without DAC_OVERRIDE cannot read a different user's 0600
+        # bind mounts; relaxing permissions or restoring caps is unnecessary.
+        # The proof retains no Linux capabilities, writable rootfs or socket.
+        "user": f"{os.getuid()}:{os.getgid()}",
         "entrypoint": ["node", "/staging/protected-proof.mjs"],
         "environment": {"NODE_ENV": "test", "PAPER_STAGING_PROTECTED_PROOF": "confirmed"},
         "networks": ["protected-authority"], "read_only": True, "tmpfs": ["/tmp"],

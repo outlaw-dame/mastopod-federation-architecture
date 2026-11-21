@@ -54,7 +54,7 @@ jobs:
           assert "protected-authority" not in provider["networks"]
           assert probe["read_only"] is True and probe["cap_drop"] == ["ALL"]
           assert "no-new-privileges:true" in probe["security_opt"]
-          assert probe["user"] == "0:0"  # Ephemeral only; reads owner-private 0600 files
+          assert probe["user"] == f"{os.getuid()}:{os.getgid()}"  # Owner-private 0600 mounts
           for file in ("protected-access.json", "protected-shiro.ini"):
               assert stat.S_IMODE((root / "secrets" / file).stat().st_mode) == 0o600
           ordinary_mounts = " ".join(provider["volumes"])
