@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('node:fs');
 const values = JSON.parse(fs.readFileSync('/run/provider-secrets.json', 'utf8'));
-const keys = ['SEMAPPS_JENA_PASSWORD', 'SEMAPPS_COOKIE_SECRET', 'ACTIVITYPODS_TOKEN', 'SIDECAR_TOKEN', 'SIGNING_API_TOKEN', 'ATPROTO_MIGRATION_SECRET_ENC_KEY_HEX'];
+const keys = ['SEMAPPS_JENA_PASSWORD', 'SEMAPPS_COOKIE_SECRET', 'ACTIVITYPODS_TOKEN', 'SIDECAR_TOKEN', 'SIGNING_API_TOKEN', 'ATPROTO_MIGRATION_SECRET_ENC_KEY_HEX', 'OAUTH_REFRESH_TOKEN_ENC_KEY_HEX'];
 if (Object.keys(values).length !== keys.length || keys.some(k => !/^[a-f0-9]{64}$/.test(values[k] || ''))) {
   throw new Error('Invalid provider staging secret configuration');
 }

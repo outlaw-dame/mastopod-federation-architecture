@@ -115,6 +115,13 @@ profile; do not disable certificate validation globally or install the private C
 key. Then visit `https://login.paper.example.org:8443/login`. Generated secrets are read
 at startup; they are not baked into images or expanded into Compose configuration.
 The backend reads its private secret file before dropping to UID/GID 1000.
+The staging generator now creates a **unique 32-byte OAuth refresh-token
+AES-GCM key** under `secrets/provider.json` (0600), injects it only at
+provider startup, and rejects a missing/extra/malformed secret. This meets
+the pinned provider's fail-closed production encryption-key requirement
+without exposing it in Compose, Docker image layers or logs. Never rotate
+the key under a still-live Redis refresh-token namespace: the corresponding
+family must be revoked or re-authorized first.
 JWT keys, provider state, uploads, Redis and Fuseki have dedicated volumes.
 The `local-provider` CI job also restarts the Redis, Fuseki and provider
 containers without replacing their volumes or credentials. It repeats
