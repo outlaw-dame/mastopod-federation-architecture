@@ -1067,8 +1067,8 @@ export class InboundWorker {
       if (this.config.capabilityGate) {
         const gate = this.config.capabilityGate("ap.federation.ingress");
         if (!gate.allowed) {
-          await this.queue.ack("inbound", messageId);
           await this.queue.moveToDlq("inbound", envelope, gate.message || `Capability denied: ${gate.reasonCode || "feature_disabled"}`);
+          await this.queue.ack("inbound", messageId);
           logger.warn("Inbound processing skipped by capability gate", {
             envelopeId: envelope.envelopeId,
             capabilityId: "ap.federation.ingress",
@@ -1083,8 +1083,8 @@ export class InboundWorker {
       try {
         activity = JSON.parse(envelope.body);
       } catch (err) {
-        await this.queue.ack("inbound", messageId);
         await this.queue.moveToDlq("inbound", envelope, "Invalid JSON body");
+        await this.queue.ack("inbound", messageId);
         logger.warn("Invalid JSON in inbound envelope", { envelopeId: envelope.envelopeId });
         return;
       }
@@ -1095,8 +1095,8 @@ export class InboundWorker {
 
       if (!activity.type || !activity.actor) {
         metrics.inboundActivityPubActivities.inc({ stage: "rejected", activity_type: activityType });
-        await this.queue.ack("inbound", messageId);
         await this.queue.moveToDlq("inbound", envelope, "Missing required activity fields");
+        await this.queue.ack("inbound", messageId);
         logger.warn("Invalid activity structure", { envelopeId: envelope.envelopeId });
         return;
       }
@@ -1546,8 +1546,8 @@ export class InboundWorker {
           forwardedSuccessfully = true;
         } catch (err: any) {
           metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
-          await this.queue.ack("inbound", messageId);
           await this.queue.moveToDlq("inbound", envelope, `Bridge forward failed: ${err.message}`);
+          await this.queue.ack("inbound", messageId);
           logger.warn("Injectable bridge forward failed", {
             envelopeId: envelope.envelopeId,
             error: err.message,
@@ -1559,7 +1559,6 @@ export class InboundWorker {
 
         if (!forwardResult.success) {
           metrics.inboundActivityPubActivities.inc({ stage: "failed_forward", activity_type: activityType });
-          await this.queue.ack("inbound", messageId);
 
           if (forwardResult.permanent || envelope.attempt >= MAX_INBOUND_ATTEMPTS) {
             await this.queue.moveToDlq(
@@ -1590,6 +1589,8 @@ export class InboundWorker {
               error: forwardResult.error,
             });
           }
+          // The replacement/DLQ must be durable before removing the source.
+          await this.queue.ack("inbound", messageId);
           return;
         }
         forwardedSuccessfully = true;
@@ -1717,11 +1718,13 @@ export class InboundWorker {
       });
 
     } catch (err: any) {
-      logger.error("Error processing inbound envelope", { 
-        envelopeId: envelope.envelopeId, 
-        error: err.message 
+      logger.error("Error processing inbound envelope; retaining pending work", {
+        envelopeId: envelope.envelopeId,
+        error: err instanceof Error ? err.message : String(err),
       });
-      await this.queue.ack("inbound", messageId);
+      // Redis overload, unavailable DLQ or transient infrastructure errors
+      // must not silently delete source work. XAUTOCLAIM can recover it after
+      // the pending idle threshold. Never ACK an unpersisted replacement.
     } finally {
       this.activeJobs--;
     }
@@ -1748,12 +1751,12 @@ export class InboundWorker {
     if (!verification.valid || !verification.actorUri) {
       const activityType = this.normalizeActivityType(activity?.type);
       metrics.inboundActivityPubActivities.inc({ stage: "rejected", activity_type: activityType });
-      await this.queue.ack("inbound", messageId);
       await this.queue.moveToDlq(
         "inbound",
         envelope,
         `Signature verification failed: ${verification.error}`,
       );
+      await this.queue.ack("inbound", messageId);
       logger.warn("Signature verification failed", {
         envelopeId: envelope.envelopeId,
         error: verification.error,
@@ -1792,12 +1795,12 @@ export class InboundWorker {
 
     if (!activityActorUri) {
       metrics.inboundActivityPubActivities.inc({ stage: "rejected", activity_type: activityType });
-      await this.queue.ack("inbound", messageId);
       await this.queue.moveToDlq(
         "inbound",
         envelope,
         "Activity actor is missing a resolvable URI",
       );
+      await this.queue.ack("inbound", messageId);
       logger.warn("Inbound activity actor URI missing", {
         envelopeId: envelope.envelopeId,
         verificationSource,
@@ -1807,12 +1810,12 @@ export class InboundWorker {
 
     if (activityActorUri !== verifiedActorUri) {
       metrics.inboundActivityPubActivities.inc({ stage: "rejected", activity_type: activityType });
-      await this.queue.ack("inbound", messageId);
       await this.queue.moveToDlq(
         "inbound",
         envelope,
         `Verified actor mismatch: envelope actor ${verifiedActorUri} != activity actor ${activityActorUri}`,
       );
+      await this.queue.ack("inbound", messageId);
       logger.warn("Inbound activity rejected due to actor mismatch", {
         envelopeId: envelope.envelopeId,
         verificationSource,

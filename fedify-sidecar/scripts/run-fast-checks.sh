@@ -34,6 +34,7 @@ npm exec -- vitest run \
   src/delivery/tests/OutboxIntentWorker.test.ts \
   src/delivery/tests/RemoteSharedInboxCacheRetired.test.ts \
   src/delivery/tests/StreamOriginAuthority.test.ts \
+  src/delivery/tests/RedisQueueBackpressureAcknowledgment.test.ts \
   src/security/tests/ActivityPubEgressPolicy.test.ts \
   src/security/tests/ActivityPubEgressPolicyPhase5Regression.test.ts \
   src/security/tests/ActivityPubPinnedDns.test.ts \
