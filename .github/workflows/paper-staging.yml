@@ -34,7 +34,37 @@ jobs:
       - name: Prepare and validate actual provider profile
         run: |
           python3 deploy/paper-staging/prepare.py "$RUNNER_TEMP/paper-provider" --activitypods-checkout "$RUNNER_TEMP/activitypods"
-          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider config --quiet
+          docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider --profile storage-proof config --quiet
+      - name: Verify protected credentials are absent from ordinary provider
+        run: |
+          python3 - <<'PY'
+          import json, os, stat
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "paper-provider"
+          cfg = json.loads((root / "compose.json").read_text())
+          assert json.loads((root / "lock.json").read_text())["release"] == "CLOSED"
+          provider = cfg["services"]["provider"]
+          protected = cfg["services"]["protected-fuseki"]
+          probe = cfg["services"]["protected-storage-proof"]
+          assert "ports" not in protected and "ports" not in probe
+          assert protected["networks"] == ["protected-authority"]
+          assert probe["networks"] == ["protected-authority"]
+          assert cfg["networks"]["protected-authority"]["internal"] is True
+          assert cfg["networks"]["authority"]["internal"] is True
+          assert "protected-authority" not in provider["networks"]
+          assert probe["read_only"] is True and probe["cap_drop"] == ["ALL"]
+          assert "no-new-privileges:true" in probe["security_opt"]
+          assert probe["user"] == f"{os.getuid()}:{os.getgid()}"  # Owner-private 0600 mounts
+          for file in ("protected-access.json", "protected-shiro.ini"):
+              assert stat.S_IMODE((root / "secrets" / file).stat().st_mode) == 0o600
+          ordinary_mounts = " ".join(provider["volumes"])
+          ordinary_environment = json.dumps(provider["environment"])
+          assert "protected-access" not in ordinary_mounts
+          assert "protected-shiro" not in ordinary_mounts
+          assert "protected-fuseki" not in ordinary_environment
+          assert "protected-storage-proof" not in ordinary_environment
+          print("PASS: protected Jena secrets are owner-private and absent from ordinary provider")
+          PY
       - name: Build actual provider and frontend
         run: docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider build provider frontend
       - name: Verify HTTPS surfaces and closed signup gate
@@ -45,6 +75,12 @@ jobs:
             --resolve provider.paper.example.org:8443:127.0.0.1 https://provider.paper.example.org:8443/_staging/ready
           curl --fail --silent --show-error --max-time 10 --cacert "$RUNNER_TEMP/paper-provider/certificates/ca.crt" \
             --resolve login.paper.example.org:8443:127.0.0.1 https://login.paper.example.org:8443/login --output /dev/null
+      - name: Prove physical protected Jena credential isolation
+        run: |
+          set -euo pipefail
+          compose="$RUNNER_TEMP/paper-provider/compose.json"
+          docker compose -f "$compose" --profile storage-proof up -d --wait --wait-timeout 120 protected-fuseki
+          docker compose -f "$compose" --profile storage-proof run --rm protected-storage-proof prepare
       - name: Restart provider and storage without rotating OIDC signing keys
         run: |
           set -euo pipefail
@@ -65,6 +101,13 @@ jobs:
             exit 1
           fi
           echo "Verified OIDC public signing keys persist after provider, Redis and Fuseki restart; signup remains CLOSED."
+      - name: Prove protected RDF survives restart without granting ordinary write access
+        run: |
+          set -euo pipefail
+          compose="$RUNNER_TEMP/paper-provider/compose.json"
+          docker compose -f "$compose" --profile storage-proof restart protected-fuseki
+          docker compose -f "$compose" --profile storage-proof up -d --wait --wait-timeout 120 protected-fuseki
+          docker compose -f "$compose" --profile storage-proof run --rm protected-storage-proof verify
       - name: Diagnose provider failure without publishing secrets
         if: failure()
         run: python3 deploy/paper-staging/diagnose.py "$RUNNER_TEMP/paper-provider"
@@ -72,7 +115,7 @@ jobs:
         if: always()
         run: |
           if test -f "$RUNNER_TEMP/paper-provider/PREPARED"; then
-            docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider down --volumes
+            docker compose -f "$RUNNER_TEMP/paper-provider/compose.json" --profile provider --profile storage-proof down --volumes
           fi
   tls-runtime:
     runs-on: ubuntu-latest
