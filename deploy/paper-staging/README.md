@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #259** at
-`28170ceb007006f51e9c6dd2e23cdf9a11150023`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #260** at
+`6c3f65c8c5aeb821590a36113a828c44cea4254e`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -70,8 +70,29 @@ two-worker regression forces `GET` + `DEL` implementations to fail
 deterministically. PR #259 exact head
 `ede212aaea59cac1e3d0edd727aa2c528867174e` passed all **3/3**
 triggered workflows: Redis OAuth/DPoP acceptance **44945079574**, backend
-**44945079643**, and dependency/lint **44945079510**. These results do
-**not** replace the fresh live-provider staging run required by this pin.
+**44945079643**, and dependency/lint **44945079510**. Its
+production-mode **negative-release** provider acceptance then passed in
+federation PR #185 exact-head staging run **44945508497**, with both
+`tls-runtime` and `local-provider` jobs successful, verified OIDC
+signing-key continuity after restart, independent Jena isolation,
+13 hostile-access checks, and both signup 503 denials.
+
+ActivityPods **PR #260** closes an additional real browser authentication
+boundary: the OAuth session service previously permitted a fixed development
+HMAC signing fallback even under `NODE_ENV=production` when no private
+session secret was supplied, potentially allowing forged owner WebID cookies.
+The provider now refuses production startup without a private signing secret
+at least 32 UTF-8 bytes. It also validates exact two-segment session-cookie
+MAC shape and size before `timingSafeEqual`, and safely ignores malformed
+URI percent escapes and oversized cookies instead of turning attacker data
+into HTTP 500 errors. A dedicated boundary proof tests real HMAC roundtrip,
+wrong-length signatures, appended segments, malformed cookies, and startup
+denials. PR #260 exact head
+`0d249384f457f19dc372ead2c82733891336d565` passed **3/3**
+triggered workflows: OAuth/Redis/DPoP acceptance **44945899874**,
+backend **44945899861**, and lint/PLC/enrollment **44945899843**.
+Those unit/integration results do not substitute for the fresh
+production-mode staging run required by the *current* pin.
 
 The merged implementation remains **NONACTIVATED**. Existing unversioned
 OAuth/PDS credentials require fresh owner approval. Redis backup/restore
