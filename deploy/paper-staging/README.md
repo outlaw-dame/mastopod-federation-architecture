@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #279** at
-`8e13c8404b3a1af1e1d1edf531ce302f6af8ca71`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #281** at
+`1fa9d0d887d4b5dd85809a56f06989a1e71257c6`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -173,6 +173,48 @@ independent anti-PITR rollback witness, hosted PDS positive signup, or
 fully released provider writer binding.** PR #263 only adds a
 disposable/proof-only transaction boundary. The release remains CLOSED;
 federation P0 issue #186 stays open. All image digests are unchanged.
+
+### Independently retained version-history high-water and composed PG18 proof (#280/#281)
+
+ActivityPods **#280** merged
+`7fc35b2e1f8b5c1fd25809fd499e4d87e46f4328`. AWS S3 Object
+Lock COMPLIANCE retains protected **versions** but does not prevent
+normal DELETE inserting a *delete marker*. A current-object listing
+can therefore hide an immutable revocation. The **NONACTIVATED**
+`ListObjectVersions` reader enumerates historical revisions and
+delete markers, rejects any masked/duplicate version, noncontiguous
+epoch revision, malformed pagination, too many receipts, invalid
+retention or changed latest `VersionId`, and returns independently
+readback canonical epoch bytes for the PG18 witness v6
+`active_checkpoint` before/after comparison. It bounds listing to
+4096 receipts/eight pages with no positive-cache fallback.
+Four exact-head CI workflows passed: S3 SDK **44979090389**,
+independent witness **44979090347**, backend **44979090363** and
+lint **44979090333**.
+
+ActivityPods **#281** merged
+`1fa9d0d887d4b5dd85809a56f06989a1e71257c6`. Its dedicated
+two-physical-PG18 + Redis8.2 witness test now invokes the
+**actual S3 version-history verification code** against a
+**disposable in-memory S3 API transport**, rather than an ad hoc
+Map sort, and feeds the verified bytes to the restricted PostgreSQL
+high-water reader during actual signed JWT admission. It proves
+revoked JWT denial after dual PG/Redis **logical** rollback when
+newer immutable receipts survive, plus immediate denial of an S3
+delete marker. All **4/4** exact-head workflows passed: PG restore
+**44979450419**, independent witness **44979450499**, backend
+**44979450485**, lint **44979450418**.
+
+**This does NOT establish a real immutable archive.** No
+independently controlled S3 COMPLIANCE bucket/account, separate
+audited IAM credentials, live version enumeration/readback or
+production WORM/witness service has been deployed; positive signup
+remains prohibited. The O(n) high-water listing, completeness
+under a misconfigured storage intermediary, independent
+anti-rollback/incarnation anchor, signed-intent chain catch-up,
+physical both-primary-and-witness PG PITR/WAL, owner post-enrollment
+OAuth and hosted cross-protocol acceptance remain P0 blockers.
+No image digest or federation source change; `release=CLOSED`.
 
 ### Verified owner bearer / S3 COMPLIANCE transport security checkpoint (#278/#279)
 
