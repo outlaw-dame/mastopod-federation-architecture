@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #286** at
-`89cab0f0f00022ad863058a23ec07f6539e186ca`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #287** at
+`3c3bf8c0ed17521dcbb055150790c5fadeca0bc8`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -901,3 +901,45 @@ witness, WAL/PITR restore, signed PDS/SAI cross-store authority,
 positive hosted new-account approval and independent human security
 review remain P0. Keep all other source/image digests and
 `release=CLOSED`.
+
+## Browser login and consent same-origin CSRF gate — November 22, 2026
+
+Staging source now pins merged ActivityPods
+[PR #287](https://github.com/outlaw-dame/activity-pods/pull/287)
+at `3c3bf8c0ed17521dcbb055150790c5fadeca0bc8`, following
+#286 browser-only consent. Exact PR head
+`d933bfe0d3662565a0cddc6d33b12d243b557c6e`
+passed Redis8.2 real browser OAuth **45064274228**, backend
+**45064274263**, and dependency/lint **45064274269**.
+
+All browser-sensitive provider OAuth POST routes now require the
+exact issuer HTTPS `Origin`: `/oauth/session/login`,
+`/oauth/session/logout`, `/oauth/authorize`, and
+`/oauth/owner/grant/revoke`. Missing, mismatched, conflicting
+and cross-site Fetch Metadata are denied **before passwords or
+Redis session/grant mutations**. Provider-hosted HTML forms remain
+urlencoded compatible, JSON API owner calls remain supported,
+owner grant revocation stays JSON-only, and bodyless same-origin
+logout does not require a Content-Type. The normal React
+frontend `/auth/login` flow and token/PAR protocol endpoints are
+not changed. The issuer must remain HTTPS.
+
+This staging gate extends real production-mode HTTPS checks beyond
+the two signup fuses and existing owner grant paths. It now checks
+cross-origin/missing-Origin/form-content login denial without
+any signed session cookie, successful passage of a *valid same-origin
+form with intentionally invalid credentials* to its 401 account
+check, malicious Origin/logout denial, empty-body same-origin
+logout 200 with cookie clearing, and cross-origin OAuth consent 403
+without PAR/access mutation. All requests are disposable and use
+synthetic nonexistent usernames. No account is provisioned.
+
+**This remains a negative-release security test**, not acceptance
+for real post-enrollment Solid/SAI, signed PDS, or ActivityPub
+enrollment. Separate immutable admin-controlled Object Lock
+COMPLIANCE receipt storage, physical recovery across trusted
+failure domains, canonical signed JWT/owner epoch and WORM/PDS
+commit barrier, hosted positive cross-protocol signup, and
+independent integrated human security review remain P0. The
+staging lock must preserve `release=CLOSED` and all other
+pinned digest/source values.
