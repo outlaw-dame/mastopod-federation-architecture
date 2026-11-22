@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #281** at
-`1fa9d0d887d4b5dd85809a56f06989a1e71257c6`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #282** at
+`449c003d48c3a6097eed8e8c898c768087e83df1`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -727,3 +727,36 @@ custody, externally trusted complete high-water, WAL-based failover barrier,
 post-enrollment owner-consent flow, or positive multi-protocol signup is
 certified by these checks. Keep all image digests and federation source pins
 unchanged. Negative-release staging must continue denying both signup paths.
+
+## OAuth owner tombstone admission pin — November 22, 2026
+
+The verified merged ActivityPods [PR #282](https://github.com/outlaw-dame/activity-pods/pull/282)
+at `449c003d48c3a6097eed8e8c898c768087e83df1` closes an
+OAuth owner *liveness* gap in the real provider endpoints. A valid
+HMAC browser cookie or provider-verified RS256 bearer no longer proves a
+deleted account may approve fresh authorization. Both routes call the
+account authority on each approval and fail closed for deleted, absent,
+mismatched, malformed or unavailable owner records. Login consumes
+the verified record directly, including valid email aliases; it does
+not perform a second unscoped username lookup.
+
+The exact PR head `dc38c956b1851f93fa9c40060fc15284e7c814f0`
+passed all three workflows: Redis8.2 OAuth consent / owner-signature
+regressions **45052820852**, backend **45052820843**, and dependency/lint
+**45052820842**. The initial test harness improperly called
+`schema.actions.loginSession.handler` for an actual Moleculer function
+and failed; the committed correction calls
+`schema.actions.loginSession` directly. Do not confuse that test
+harness fix with a weakened production authorization check.
+
+This remains **negative-release** evidence. Logout currently clears
+only the browser cookie and does not invalidate already copied signed
+browser sessions server-side; password-reset session invalidation and
+durable owner disabled/consent race fencing remain unproven.
+The independent witness/S3 receipt path is still a *nonactivated test
+candidate* without independently administered immutable storage,
+complete retention/WAL failover proof, hosted post-enrollment OAuth,
+or full positive signed PDS, Solid/SAI and ActivityPub signup.
+Independent human security review also remains outstanding.
+`release=CLOSED` is mandatory. Both native and unified signup must
+continue to return 503 until all production release criteria are met.
