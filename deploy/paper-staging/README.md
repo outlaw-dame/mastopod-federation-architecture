@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #284** at
-`9d9257fb79fc21200dc9937eb0599f1600d6e2d6`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #285** at
+`c2f33d30492606346f17d9ddb30bad14d40349fc`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -828,3 +828,41 @@ positive browser/Solid/SAI/PDS/ActivityPub signup, external DID
 verification, and independent integrated security review remain P0.
 All other image/source digests are unchanged, and `release=CLOSED`
 is required; this staging gate is negative-release only.
+
+## Owner post-enrollment OAuth grant revoke — November 22, 2026
+
+ActivityPods merged [PR #285](https://github.com/outlaw-dame/activity-pods/pull/285)
+at `c2f33d30492606346f17d9ddb30bad14d40349fc`.
+Real Redis 8.2 two-provider OAuth tests **45062027655**, backend
+**45062027585**, and dependency/lint **45062027652** passed at exact
+PR head `ac5fbc7b4d6a1aee5d1e564a2860e20d59be390e`.
+
+The provider now offers a **browser-owner-only** per-client consent
+read/revoke API under `/oauth/owner/grant`. The owner session must be
+Redis-live, HMAC-signed, bound to the current password verifier, and
+verified against a live non-tombstoned account. POST revocation requires
+same-origin HTTPS JSON, a Redis one-use challenge, CSRF/fingerprint,
+and an exact consent generation; a stale challenge cannot revoke a
+later reapproval because one Redis Lua CAS binds owner, active session,
+and grantId at the same linearization point.
+
+This staging version also checks **real HTTPS negative admission** for
+the new GET/POST routes without an authenticated session and with a
+malicious Origin, in addition to pre-existing blocked signup, protected
+Jena storage, JWKS restart and PostgreSQL TLS tests. It cannot test
+the positive owner route without a real preregistered owner account;
+the separate Redis proof covers that behavior with actual Redis and
+two provider contexts, not a hosted user.
+
+**Remaining P0 before release:** Redis-only owner revoke is not a
+durable cross-database PG/Jena/SAI/PDS revocation. An older restored
+Redis and Jena state can revive grants/password verifiers absent an
+independently administered Object Lock COMPLIANCE high-water.
+The connected Cloudflare account currently does not furnish a
+separate admin-controlled WORM failure domain, and R2 bucket locks
+can be removed by their controller; no production receipt/retention
+certificate exists. The signed PDS primary+witness transaction,
+physical PITR recovery, RS256 owner bearer credential epochs,
+positive hosted new-account browser/Solid/ActivityPub/ATProto/PDS/XRPC
+acceptance, and independent human security review are still missing.
+Keep all other image/source pins unchanged and `release=CLOSED`.
