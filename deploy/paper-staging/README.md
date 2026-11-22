@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #282** at
-`449c003d48c3a6097eed8e8c898c768087e83df1`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #283** at
+`d28a30bb8baa6ace0859bf06076678ecbc26245b`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -749,9 +749,9 @@ and failed; the committed correction calls
 `schema.actions.loginSession` directly. Do not confuse that test
 harness fix with a weakened production authorization check.
 
-This remains **negative-release** evidence. Logout currently clears
-only the browser cookie and does not invalidate already copied signed
-browser sessions server-side; password-reset session invalidation and
+This was **negative-release** evidence at the PR #282 baseline. At that
+point logout cleared only the browser cookie and did not invalidate
+copied signed browser sessions server-side; password-reset session invalidation and
 durable owner disabled/consent race fencing remain unproven.
 The independent witness/S3 receipt path is still a *nonactivated test
 candidate* without independently administered immutable storage,
@@ -760,3 +760,37 @@ or full positive signed PDS, Solid/SAI and ActivityPub signup.
 Independent human security review also remains outstanding.
 `release=CLOSED` is mandatory. Both native and unified signup must
 continue to return 503 until all production release criteria are met.
+
+## Cross-replica OAuth browser-session revocation pin — November 22, 2026
+
+The staging lock now pins merged ActivityPods [PR #283](https://github.com/outlaw-dame/activity-pods/pull/283)
+at `d28a30bb8baa6ace0859bf06076678ecbc26245b`.
+That merge introduces the actual provider's live Redis-backed
+owner-bound browser sessions. An HMAC cookie alone no longer authorizes
+OAuth consent. Login registers a random session id before issuing a
+cookie, a copy of the cookie is denied after cross-replica logout, and
+missing Redis admission refuses authorization. Invalid legacy stateless
+cookies are rejected by design. The browser consent-upsert Lua policy
+atomically checks the matching active session key in the SAME Redis
+operation that writes the new grant, preventing consent creation after
+a competing logout has won.
+
+The exact ActivityPods #283 PR head
+`3d3f830c008f8183b1878a4ed40496f5b0a084d3` passed
+Redis8.2 real two-replica OAuth proofs **45058653871**, backend
+**45058654374**, and dependency/lint **45058653920**. Each was
+`success` before the squash merge. The prior lint failure consisted
+of two empty catch blocks in disposable test cleanup, fixed and
+verified at the final exact head.
+
+**This is not a production restore/release approval.** A Redis
+backup restore can resurrect an older browser-session id, grant, or
+token family until every admission is bound to independently attested
+non-rewindable generation state. Password changes still lack full
+owner-wide session revocation. Owner deletion/disable and Jena/PG
+consent do not share an atomic authority transaction with the Redis
+browser grant. Independent immutable WORM/WAL recovery, hosted
+post-enrollment consent and signed Solid/SAI/PDS/ActivityPub positive
+signup, and independent integrated security review remain P0.
+Staging must verify *negative* real-provider signup again and keep
+`release=CLOSED`.
