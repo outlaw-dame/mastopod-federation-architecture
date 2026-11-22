@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #272** at
-`46aa7f7ca5e8db49d8e830caefec879f8699934b`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #273** at
+`0ca8dad559a3e3ad9cc4269e2cff57522ae79647`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -173,6 +173,44 @@ independent anti-PITR rollback witness, hosted PDS positive signup, or
 fully released provider writer binding.** PR #263 only adds a
 disposable/proof-only transaction boundary. The release remains CLOSED;
 federation P0 issue #186 stays open. All image digests are unchanged.
+
+### Independent WORM epoch-receipt readback proof (#273)
+
+ActivityPods **#273**, merged as
+`0ca8dad559a3e3ad9cc4269e2cff57522ae79647`, includes
+the existing **NONACTIVATED** witness v4 commit-only authorization
+boundary from #272 and adds an explicitly disposable WORM epoch
+receipt **attestor protocol**. The isolated attestor reads an exact
+unsealed witness digest, uses deterministic privacy-pseudonymous
+bounded receipt bytes, checks independent storage retention, makes
+a create-only conditional write (`If-None-Match: *`), independently
+reads back and verifies exact bytes, rechecks retention and only then
+calls the restricted witness `seal` function. Lost write
+acknowledgment, corrupted readback, lock-policy removal and
+unavailable storage cannot optimistically seal authority.
+
+The test uses an **in-memory storage/lock-policy substitute**, not
+a live Cloudflare R2 or S3 Object Lock archive. Both physical
+PostgreSQL18 witness clusters and Redis 8.2 remain disposable;
+all new code is test-gated and no provider production runtime
+or privileged cloud credential was activated. After reconciling the
+concurrently merged #272 changes, exact PR #273 head
+`3c88d78486c28c925bd9743a30b8d21fcc1326fc`
+passed **all 4/4 relevant workflows**: independent witness
+**44973545069**, PG18/Redis restore **44973545059**, backend
+**44973545063**, dependency/lint **44973545079**.
+
+**Still P0 before release:** independently administered, actual
+immutable receipt storage with enforceable retained lock and
+restricted credentials; signed-write pending/resolved intent
+receipts and cross-object high-water chain replay; *physical*
+primary and witness PostgreSQL PITR/WAL recovery barrier;
+genuine post-enrollment owner OAuth grant/revoke; hosted real
+WebID/Solid SAI, signed PDS/XRPC and remote ActivityPub
+positive acceptance; independent human security review.
+Automated Codex review was unavailable due to exhausted credits.
+No change to locked federation source, OCI images, or
+`release=CLOSED`. Issue #186 remains OPEN.
 
 ### P0 runtime abort-authority separation (#272)
 
