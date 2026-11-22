@@ -93,6 +93,68 @@ const unauthRevoke = await fetch(origin+'/oauth/owner/grant/revoke', {
 assert.equal(unauthRevoke.status,401,'Owner revocation without a browser session must deny');
 console.log('PASS: owner grant HTTPS routes deny unauthenticated and cross-origin requests.');
 
+// Browser login and authorization are hosted by this provider; callers
+// cannot use a third-party form to log an unrelated user into a session.
+// These are real HTTPS requests, with harmless nonexistent credentials.
+const bogusLogin=new URLSearchParams({
+  username:'no-such-user@invalid.example',password:'disposable-invalid'
+}).toString();
+async function browserPost(path,headers,body) {
+  return fetch(origin+path, {
+    method:'POST',redirect:'error',cache:'no-store',
+    headers,body,signal:AbortSignal.timeout(5000)
+  });
+}
+for (const [label,headers] of [
+  ['cross-site Origin', {
+    origin:'https://attacker.example.org',
+    'content-type':'application/x-www-form-urlencoded'
+  }],
+  ['missing Origin',{'content-type':'application/x-www-form-urlencoded'}],
+  ['cross-site Fetch Metadata',{
+    origin,'content-type':'application/x-www-form-urlencoded',
+    'sec-fetch-site':'cross-site'
+  }],
+  ['invalid form encoding',{origin,'content-type':'text/plain'}]
+]) {
+  const refused=await browserPost('/oauth/session/login',headers,bogusLogin);
+  assert.equal(refused.status,403,'Browser login must deny '+label);
+  assert.match(refused.headers.get('cache-control')||'',/no-store/iu);
+  assert.equal(refused.headers.get('set-cookie'),null,
+    'Rejected login must never issue a browser session');
+}
+const normalBadCredentials=await browserPost('/oauth/session/login',{
+  origin,'content-type':'application/x-www-form-urlencoded',
+  'sec-fetch-site':'same-origin'
+},bogusLogin);
+assert.equal(normalBadCredentials.status,401,
+  'Correct same-origin form must reach password verification and deny unknown account');
+assert.equal(normalBadCredentials.headers.get('set-cookie'),null,
+  'Unverified account may not receive a signed session cookie');
+
+const thirdPartyLogout=await browserPost('/oauth/session/logout',{
+  origin:'https://attacker.example.org'
+});
+assert.equal(thirdPartyLogout.status,403,
+  'Cross-origin forced logout must not delete a browser session');
+assert.equal(thirdPartyLogout.headers.get('set-cookie'),null);
+const ownerLogout=await browserPost('/oauth/session/logout',{
+  origin,'sec-fetch-site':'same-origin'
+});
+assert.equal(ownerLogout.status,200,
+  'Bodyless same-origin logout must work without Content-Type');
+assert.deepEqual(await ownerLogout.json(),{ok:true});
+assert.match(ownerLogout.headers.get('set-cookie')||'',/Max-Age=0/iu);
+const thirdPartyApproval=await browserPost('/oauth/authorize',{
+  origin:'https://attacker.example.org',
+  'content-type':'application/x-www-form-urlencoded',
+  cookie:'oauth_csrf=invalid'
+},'decision=approve&request_uri=invalid&consent_challenge=invalid');
+assert.equal(thirdPartyApproval.status,403,
+  'Cross-origin OAuth consent attempt must reject before PAR or account access');
+assert.equal(thirdPartyApproval.headers.get('location'),null);
+console.log('PASS: real HTTPS origin enforcement for login, consent and logout; same-origin password rejection and bodyless logout.');
+
 // Neither of the provider's two public account-creation entry points may
 // create an identity in this production-mode staging profile. Probe both on
 // initial startup and after the storage/provider restart, before sending any
