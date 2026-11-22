@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #287** at
-`3c3bf8c0ed17521dcbb055150790c5fadeca0bc8`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #288** at
+`6a7893f7f867bc04293afa3451e5741e5e732ecb`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -943,3 +943,57 @@ commit barrier, hosted positive cross-protocol signup, and
 independent integrated human security review remain P0. The
 staging lock must preserve `release=CLOSED` and all other
 pinned digest/source values.
+
+## Independent external AWS custody and two-PG18 physical PITR gate — November 22, 2026
+
+Staging source is pinned to **merged ActivityPods
+[PR #288](https://github.com/outlaw-dame/activity-pods/pull/288)**
+at `6a7893f7f867bc04293afa3451e5741e5e732ecb`. Its exact
+PR head `4b5d6c0e4660922eaf897c666e6566ef35c24b1d`
+passed **six out of six** workflows:
+
+- S3 COMPLIANCE/STS official AWS SDK contract `45067953225`
+- Primary PostgreSQL18 + Redis8.2 restore fence `45067953175`
+- Independent PostgreSQL18 witness and signed repository test `45067953150`
+- **Real two-cluster PostgreSQL18 physical base backup and archived WAL/PITR**
+  named-before/after-revocation `45067953212`
+- Backend suite `45067953238`
+- Dependency, lint and auth regression `45067953147`
+
+No external AWS resource, receipt, account or key was created.
+Every S3 receipt transport command now requires a validated
+`ExpectedBucketOwner` AWS account ID. The separate read-only
+operator probe checks real AWS STS role ownership in **different**
+provider and archive accounts, COMPLIANCE default retention,
+versioning, bucket public access blocks and (when independently
+supplied) a pre-existing exact immutable receipt version and hash.
+It forces official regional AWS TLS endpoints, refuses custom
+endpoints/CA substitutions, uses privately installed exact-pinned
+SDKs and cannot issue S3 writes or change policy. Its result
+always includes `releaseAccepted:false`. Operator runbook:
+`pod-provider/backend/docs` is **not** the document location;
+see `docs/paper-independent-worm-custody-acceptance.md` in the
+pinned ActivityPods source.
+
+The physical PITR test now waits for actual final PostgreSQL
+TCP readiness and successful SQL against the intended database;
+a previous `pg_isready` test raced the official image's temporary
+initializer before the named database existed. Both real cluster
+backups, WAL and named restores passed after the fix.
+
+**Boundary:** These are disposable operator-readiness and recovery
+rehearsals, not a deployed independently administered WORM service,
+nor proof that a restored PG/Redis/Jena/PDS cannot roll back an
+actual live owner grant. P0 still requires a separately operated
+S3 Object Lock COMPLIANCE archive with independent reader/writer
+IAM roles and latest high-water witness receipt; live PG18 WAL/PITR,
+Redis/Jena, signer/PDS failover against those receipts; complete
+canonical owner credentials/SAI/Solid grant and signed-PDS
+transaction integration; positive hosted new-account
+Solid/ActivityPub/ATProto/XRPC acceptance and external peer
+readback; and independent human integrated security review.
+
+This staging PR advances **only** the ActivityPods source pin and
+this checkpoint. All images and other source hashes remain locked,
+both signup paths continue returning 503, and the release remains
+`CLOSED`.
