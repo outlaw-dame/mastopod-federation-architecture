@@ -997,3 +997,46 @@ This staging PR advances **only** the ActivityPods source pin and
 this checkpoint. All images and other source hashes remain locked,
 both signup paths continue returning 503, and the release remains
 `CLOSED`.
+
+## Provider-neutral R2 disposable witness transport gate — November 22, 2026
+
+Staging pins merged ActivityPods
+[PR #289](https://github.com/outlaw-dame/activity-pods/pull/289)
+at `72d131dca15efa33a73c55acac1287b61b82942d`.
+Its exact PR head `bc7e997f2b8072ecf3563736f139b2a03db3020d`
+passed all five GitHub Actions workflows:
+
+- R2/S3 canonical receipts, lock-policy and rollback-denial contract
+  `45083753865`
+- Two-cluster PG18 physical WAL/PITR `45083753802`
+- Independent PG18 witness restore `45083753999`
+- Backend suite `45083753847`
+- Dependency, lint and authorization regressions `45083753857`
+
+**Storage interface correction:** The architecture requires independently
+trusted latest authorization high-water, **not AWS ownership or AWS
+storage as such**. Cloudflare R2 is an S3-compatible transport option,
+but its account-controlled bucket-lock rules are not S3 Object Lock
+COMPLIANCE and can be removed by a privileged Cloudflare operator.
+The existing AWS-only verifier retains its strict bucket-owner,
+versioning and Object Lock checks. New nonactivated R2 receipt transport
+shares canonical receipt validation; create-only PUT, independent
+readback, lock checks and separately supplied latest checkpoint protect
+against ordinary conflict and missing epochs in disposable tests.
+The checkpoint itself must still be independently authenticated and
+durable in a separate failure/privilege domain.
+
+**Verified live account-scoped R2 smoke test:** isolated bucket
+`paper-witness-disposable-tests` (not Atlas backups), Standard class,
+enabled 30-day lock scoped to `paper/oauth-witness/`. A 51-byte
+disposable fixture was PUT and GET with exact bytes; attempted
+overwrite returned HTTP 409; reread stayed intact. This used the
+Cloudflare management API, **not S3 HMAC conditional PUT**. No
+production receipt, S3 access credentials or cross-store live
+revocation recovery was established. Operator details:
+`docs/paper-r2-disposable-witness-contract.md` in the ActivityPods
+source.
+
+No producer, owner grant, SAI or signed PDS paths use this candidate.
+All image digests and the federation source hash remain unchanged,
+staging signup remains 503, and `release=CLOSED`.
