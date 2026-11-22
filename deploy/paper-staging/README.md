@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #269** at
-`7af36f912452dfd106b98f09a436f8b408f9f425`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #271** at
+`8bf51871fb10bc01de690b22ebb85431308195e5`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -173,6 +173,53 @@ independent anti-PITR rollback witness, hosted PDS positive signup, or
 fully released provider writer binding.** PR #263 only adds a
 disposable/proof-only transaction boundary. The release remains CLOSED;
 federation P0 issue #186 stays open. All image digests are unchanged.
+
+### Independently witnessed historical signed commit recovery (#270/#271)
+
+**No activation, no production signer and no positive signup.** The
+immutable ActivityPods pin now includes two further merged **NONACTIVATED**
+security candidates:
+
+- **#270** (ActivityPods merge
+  `c03bf50e65812be4949d97538cc22f943138e7d8`): independent
+  witness v3 seals the exact **previous** and **proposed**
+  CIDv1 DAG-CBOR signed repository heads into every new operation.
+  The old six-argument unbound reservation API was removed.
+  Commit settlement rejects a different CID, even if it looks valid;
+  an unresolved old-intent migration fails closed instead of guessing.
+  Exact-head 4/4 workflows passed: witness **44971196172**,
+  PG18/Redis restore **44971196187**, backend **44971196282**,
+  lint **44971196167**.
+- **#271** (ActivityPods merge
+  `8bf51871fb10bc01de690b22ebb85431308195e5`): a
+  separately credentialed **read-only primary PostgreSQL 18**
+  positive-commit reconciler verifies witness UUID, WebID,
+  expected/proposed signed commit CIDs, historical before-and-after
+  reference MST records, authentic **both** parent and proposed
+  secp256k1 signatures with independently resolved historical
+  DID signing keys, and durable native event outbox, before a
+  distinct independent-witness role can mark the commit `committed`.
+  Rejects wrong signing key, superuser primary reader, missing
+  rolled-back evidence, no-op update, replay and foreign signed CID.
+  A missing row is **never** proof that a commit was `aborted`.
+  All **8/8** exact-head workflows passed: recovery **44972090541**,
+  coordinator **44972090693**, PLC **44972090561**, witness
+  **44972090609**, signed repository **44972090576**, backend
+  **44972090598**, protected Jena **44972090587**, and dependency/lint
+  **44972090600**. Auto-review approval is unavailable because
+  Codex review credits were exhausted; human production security
+  review is still mandatory.
+
+**P0 still blocks `release=OPEN`:** a genuinely independently
+administered immutable WORM/Object Lock receipt and readback attestor
+for every witness transition and pending/settled writer intent;
+physical primary **and witness** PG PITR with non-rewindable restore
+and verified WAL abort barrier; an actual restricted owner-authenticated
+long-lived post-enrollment OAuth approval/revocation; authenticated
+historical DID PLC key custody/resolution and hosted real browser,
+Solid/SAI, PDS XRPC, ActivityPub remote-post acceptance. All changes
+here are source-pin and README only; every image digest, federation
+source SHA and `release=CLOSED` remain unchanged.
 
 ### Incremental P0 external witness/signed-PDS commit ordering (#268/#269)
 
