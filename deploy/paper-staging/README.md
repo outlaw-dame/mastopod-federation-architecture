@@ -707,3 +707,23 @@ scenario, timestamp and sanitized result for each run. Keep raw tokens, password
 proofs, browser storage and signing keys out of logs/artifacts. Any failed or absent
 scenario keeps release CLOSED. No provider/PDS deployment is authorized by the
 database smoke passing alone.
+
+
+## Primary-only independent OAuth witness — exact source pin, NONACTIVATED
+
+The staging lock now pins merged ActivityPods [#277](https://github.com/outlaw-dame/activity-pods/pull/277)
+at `7823b9f2e29ceacc45764771aba904ddac6be585`, following merged
+[#281](https://github.com/outlaw-dame/activity-pods/pull/281). Four
+ActivityPods #277 exact-head workflows passed, including separate PG18
+witness and Redis8.2 recovery simulations, backend checks and lint.
+The restricted witness reader refuses `pg_is_in_recovery()` standby
+connections on every admission check; a coherent but lagging witness replica
+cannot admit an old grant. The latest archive verifier also composes
+S3 ListObjectVersions and immutable receipt checks into real PostgreSQL
+witness code-path tests, using a **test-only fake S3 transport**.
+
+**Release remains CLOSED.** No production locked S3 archive, independent
+custody, externally trusted complete high-water, WAL-based failover barrier,
+post-enrollment owner-consent flow, or positive multi-protocol signup is
+certified by these checks. Keep all image digests and federation source pins
+unchanged. Negative-release staging must continue denying both signup paths.
