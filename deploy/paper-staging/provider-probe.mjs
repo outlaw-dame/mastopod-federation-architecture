@@ -67,6 +67,32 @@ const normalizedJwks = jwks.keys.map(key => Object.fromEntries(
 const jwksFingerprint = createHash('sha256')
   .update(JSON.stringify(normalizedJwks)).digest('hex');
 
+// These are real provider HTTPS responses, not mocked actions. With no
+// authenticated cookie, owner grant details and one-use revocation challenges
+// must never be disclosed. A malicious cross-origin POST is rejected before
+// any consent lookup or mutation. No account is created in this gate.
+const unauthGrant = await fetch(
+  `${origin}/oauth/owner/grant?client_id=${encodeURIComponent('https://client.paper.example.org/metadata.json')}`, {
+    redirect:'error',signal:AbortSignal.timeout(5000),
+    headers:{accept:'application/json'}
+  });
+assert.equal(unauthGrant.status,401,'Unauthenticated owner grant inspection must deny');
+assert.match(unauthGrant.headers.get('cache-control')||'',/no-store/iu);
+const crossOriginRevoke = await fetch(origin+'/oauth/owner/grant/revoke', {
+  method:'POST',redirect:'error',signal:AbortSignal.timeout(5000),
+  headers:{'content-type':'application/json',origin:'https://attacker.example.org'},
+  body:'{}'
+});
+assert.equal(crossOriginRevoke.status,403,'Cross-origin owner revocation must deny');
+assert.match(crossOriginRevoke.headers.get('cache-control')||'',/no-store/iu);
+const unauthRevoke = await fetch(origin+'/oauth/owner/grant/revoke', {
+  method:'POST',redirect:'error',signal:AbortSignal.timeout(5000),
+  headers:{'content-type':'application/json',origin},
+  body:'{}'
+});
+assert.equal(unauthRevoke.status,401,'Owner revocation without a browser session must deny');
+console.log('PASS: owner grant HTTPS routes deny unauthenticated and cross-origin requests.');
+
 // Neither of the provider's two public account-creation entry points may
 // create an identity in this production-mode staging profile. Probe both on
 // initial startup and after the storage/provider restart, before sending any
