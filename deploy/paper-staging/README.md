@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #274** at
-`5f13bd6072b1a4847e0534d34d41e880ca34f462`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #276** at
+`ed424a874cd0bb39b88e98a61546936046e1dee8`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -173,6 +173,58 @@ independent anti-PITR rollback witness, hosted PDS positive signup, or
 fully released provider writer binding.** PR #263 only adds a
 disposable/proof-only transaction boundary. The release remains CLOSED;
 federation P0 issue #186 stays open. All image digests are unchanged.
+
+### Physical PostgreSQL PITR and immutable epoch high-water (#275/#276)
+
+ActivityPods **#275** merged as
+`4f934fc87621255436c9c5d5323d0acb20cb08fc` after
+**4/4** exact-head checks passed (two physical PG18 witness/Redis
+signed-JWT rollback proof **44976466239**, recovery **44976466267**,
+backend **44976466229**, dependency/lint **44976466275**).
+The **NONACTIVATED** v6 independent witness `active_checkpoint`
+function exposes an exact sealed epoch hash/revision/operation only
+to the restricted reader. A separate test-gated immutable high-water
+callback reads the independently retained latest epoch receipt,
+checks strict canonical bytes and owner/client scope, and compares
+the PostgreSQL witness checkpoint **before and after** the external
+readback. A signed JWT is rejected when BOTH primary and witness PG
+and Redis are *logically rewound* to an old, revoked grant.
+Missing/foreign/uncanonical archive objects, stale epoch and
+concurrent revocation deny; no positive caching or runtime activation.
+
+ActivityPods **#276** merged as
+`ed424a874cd0bb39b88e98a61546936046e1dee8`
+after exact-head merge-reconciled physical PostgreSQL PITR
+`466afe5a3f99e4128172708aca7386598372422d`
+passed **3/3** workflows: real physical PG18/WAL test
+**44976808546**, backend **44976808515**, dependency/lint
+**44976808522**. Two independently initialized PG18 systems
+create data-checksummed streamed `pg_basebackup`, verify manifest
+with `pg_verifybackup`, archive actual WAL and restore fresh
+clusters to named **before and after revocation** points with
+`recovery.signal`/`restore_command`, verifying expected epochs,
+system identifiers and promotion.
+
+These two proofs are deliberately **separate**: the high-water JWT
+test exercises true Account/OAuth/Witness SQL with **logical** row
+rewinds and an in-memory archive Map; the physical PITR test
+exercises true WAL recovery using **synthetic** authorization
+records and locally archived ordinary files. **Neither is a
+production-integrated physical restore of real Paper identities,
+nor proof that the WORM archive cannot rewind or omit a later
+receipt.** Both remain NONACTIVATED; no hosted production runtime,
+external storage permissions or signup switch changed.
+
+**Still blocking production release:** a separately administered
+version-retained immutable Object Lock store and independently
+verifiable complete high-water enumeration for epoch plus pending/
+resolved signed-write intent chains; hosted real primary+witness
+PITR and WAL transaction abort barrier; authenticated long-lived
+post-enrollment owner OAuth approval/revocation; genuine hosted
+WebID/Solid/SAI, ATProto XRPC signed PDS and ActivityPub remote
+positive account acceptance; independent security review. Keep
+all OCI digests/frozen federation source unchanged,
+`release=CLOSED`, and P0 issue #186 OPEN.
 
 ### P0 WORM intent settlement barrier (#274, witness v5)
 
