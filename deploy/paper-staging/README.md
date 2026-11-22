@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #267** at
-`de9568fabcf5e53a7c7140fadbc9fdc9c519aa9c`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #269** at
+`7af36f912452dfd106b98f09a436f8b408f9f425`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -173,6 +173,50 @@ independent anti-PITR rollback witness, hosted PDS positive signup, or
 fully released provider writer binding.** PR #263 only adds a
 disposable/proof-only transaction boundary. The release remains CLOSED;
 federation P0 issue #186 stays open. All image digests are unchanged.
+
+### Incremental P0 external witness/signed-PDS commit ordering (#268/#269)
+
+**Production signup still CLOSED. No credentials or migrations for this
+candidate are activated in the staging provider.**
+
+- ActivityPods **#268**, merged at
+  `e037f040a31d764d01c007d47301c87f12827bf4`, added independently
+  credentialed PostgreSQL18 witness writer/reconciler roles and permanent,
+  operation-UUID keyed pending signed-write intents. The witness revoker
+  cannot acknowledge an OAuth epoch transition while any signed write
+  has an unresolved COMMIT outcome. Separate role and PG18/Redis8.2
+  proof, plus existing PG/Redis, backend, lint checks, all green:
+  witness **44964981989**, recovery **44964981805**, backend
+  **44964981782**, lint **44964981991**.
+- ActivityPods **#269**, merged at
+  `7af36f912452dfd106b98f09a436f8b408f9f425`, connected the
+  witnessed operation to the actual upstream Bluesky
+  `@atproto/repo@0.11.0` signed reference-MST transaction. A random
+  intent UUID is reserved in the independent PG18 witness before the
+  canonical signed commit transaction; the signed mutation audit records
+  the same immutable UUID atomically with the signed head, native
+  event outbox and projection intent. Canonical PG native SAI and
+  OAuth generation share-lock the actual signed-head transaction.
+  A forced rollback after staging signed blocks leaves no primary PG
+  commit but leaves the witness pending until a separately reconciled
+  abort. An actually committed signed post prevents witness
+  revocation ACK until verified signed-head settlement. All **8/8**
+  exact-head workflows passed: witness **44965733638**, PG rollback
+  **44965733667**, signed repository **44965733855**, protected Jena
+  **44965733737**, PLC **44965733647**, coordinator **44965734054**,
+  backend **44965733621**, lint **44965733756**.
+
+These integration paths are **test-only NONACTIVATED candidates**, not a
+runtime PDS or a production distributed transaction. The independent
+reconciler is not deployed, its abort/commit evidence is not yet backed
+by a physical PITR/WAL recovery barrier, and no independently immutable
+WORM Object Lock receipts protect the witness high-water or pending
+write intents. General owner-authenticated post-enrollment OAuth
+approval/revoke and actual positive HTTPS/browser Solid/SAI/PDS/remote
+ActivityPub acceptance still remain required; Codex independent review
+is unavailable because credits were exhausted. Do not enable unified
+signup, deploy a signer, change `release=CLOSED`, or close
+federation issue #186 based on these fixture proofs.
 
 ### P0 development checkpoint through ActivityPods #267 (November 21, 2026)
 
