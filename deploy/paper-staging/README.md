@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #276** at
-`ed424a874cd0bb39b88e98a61546936046e1dee8`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #279** at
+`8e13c8404b3a1af1e1d1edf531ce302f6af8ca71`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -173,6 +173,48 @@ independent anti-PITR rollback witness, hosted PDS positive signup, or
 fully released provider writer binding.** PR #263 only adds a
 disposable/proof-only transaction boundary. The release remains CLOSED;
 federation P0 issue #186 stays open. All image digests are unchanged.
+
+### Verified owner bearer / S3 COMPLIANCE transport security checkpoint (#278/#279)
+
+**P0 security remediation in actual OAuth authorization path.** ActivityPods
+**#279** merged at `8e13c8404b3a1af1e1d1edf531ce302f6af8ca71`.
+The previous provider OAuth API used SemApps
+`auth.jwt.decodeToken` to select an owner WebID from HTTP
+`Authorization: Bearer ...`, despite upstream SemApps explicitly marking
+that action **UNVERIFIED**. The actual endpoint now calls
+`auth.jwt.verifyServerSignedToken`, rejects forged/unsigned/expired or
+unknown signing keys, enforces canonical HTTPS WebID claims, and refuses
+invalid bearer fallback to a browser cookie. Because upstream SemApps
+JWT issuance lacks `exp` by default, an owner's verified bearer must
+also have a fresh, valid `iat` within **one hour** for this OAuth
+approval. Existing unrelated SemApps authentication remains untouched.
+
+Exact-head #279 workflows **44978765556** (real Redis8.2 OAuth
+consent/replay/DPoP and signed RSA negative proof), **44978765481**
+(backend) and **44978765482** (lint) all passed. This is a real
+authorization bypass repair, distinct from test-only release candidates.
+It is not sufficient proof of revoked/disabled owner session admission
+or production owner post-enrollment consent.
+
+Merged ActivityPods **#278**, `17da942cd219ace2f8045f048195516df16e497d`,
+adds a **NONACTIVATED**, private, exact-version AWS S3 API COMPLIANCE
+archive transport for owner epoch and signed-write intent receipts.
+It enforces bucket versioning/lock default, conditional
+`If-None-Match: *` PUT, exact `VersionId`, COMPLIANCE
+`GetObjectRetention`, bounded independent byte readback and version
+stability. Four exact-head #278 workflows passed: actual pinned upstream
+SDK contract **44978422733**, two PG18 witness **44978422718**,
+backend **44978422742**, lint **44978422760**.
+
+**Still NOT production-ready:** no independently controlled deployed
+S3 Object Lock account/bucket, no verified cross-object WORM high-water
+against delete-marker history/physical dual PG WAL restore, no
+post-enrollment owner grant/revoke authority or positive hosted
+WebID/Solid/SAI + ActivityPub + signed PDS acceptance.
+No provider production WORM adapter was activated, and frozen
+federation source/OCI images plus `release=CLOSED` remain unchanged.
+See P0 issue #186. Staging MUST still prove both signup entrypoints
+remain 503 and JWKS credentials survive service restarts.
 
 ### Physical PostgreSQL PITR and immutable epoch high-water (#275/#276)
 
