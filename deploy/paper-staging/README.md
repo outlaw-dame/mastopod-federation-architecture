@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #273** at
-`0ca8dad559a3e3ad9cc4269e2cff57522ae79647`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #274** at
+`5f13bd6072b1a4847e0534d34d41e880ca34f462`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -173,6 +173,40 @@ independent anti-PITR rollback witness, hosted PDS positive signup, or
 fully released provider writer binding.** PR #263 only adds a
 disposable/proof-only transaction boundary. The release remains CLOSED;
 federation P0 issue #186 stays open. All image digests are unchanged.
+
+### P0 WORM intent settlement barrier (#274, witness v5)
+
+ActivityPods **#274** merged at
+`5f13bd6072b1a4847e0534d34d41e880ca34f462` after exact
+head `aec7fb3ad774335f1e1a3f607bad521bd4dfddd9` passed
+**8/8** workflows: two physical PG18 witness/Redis signed-MST proof,
+PG/Redis recovery, native signed ATProto repository, protected Jena,
+canonical coordinator, PLC, backend and lint. This candidate adds
+NONACTIVATED v5 witness SQL that rejects unsafe historical-intent
+migrations and binds pending/resolved receipts to the sealed OAuth
+epoch event, operation UUID and both signed commit CIDs.
+
+A signed reference-MST writer must independently verify the exact
+**pending** archive receipt before its primary signed PostgreSQL
+transaction. A verified positive commit now remains **ineligible
+for a successful revocation ACK** until an independently retained
+and sealed **resolved** receipt exists. The runtime reconciler
+retains v4 commit-only authority; no runtime abort is available.
+An indexed eight-intent cap covers all unarchived operations,
+including `committed` outcomes that have not been sealed. The
+disposable test validates this capacity and recovery ordering
+through real PG18 independent roles and the signed repository writer.
+
+**No change in production readiness:** the storage/archive receipt
+and retention check remain in-memory test substitutes, NOT a live
+independently controlled R2/S3 WORM service. Primary+witness
+physical PostgreSQL PITR/WAL barriers, archive high-water rollback
+detection, owner-authenticated post-enrollment OAuth grant/revoke,
+and real hosted WebID/Solid SAI, signed ATProto/PDS and remote
+ActivityPub positive acceptance remain P0. No new cloud credentials,
+privileged runtime role or production signer were activated.
+Federation source SHA, all image digests and `release=CLOSED` remain
+unchanged. Federation issue #186 must remain OPEN.
 
 ### Independent WORM epoch-receipt readback proof (#273)
 
