@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #285** at
-`c2f33d30492606346f17d9ddb30bad14d40349fc`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #286** at
+`89cab0f0f00022ad863058a23ec07f6539e186ca`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -866,3 +866,38 @@ physical PITR recovery, RS256 owner bearer credential epochs,
 positive hosted new-account browser/Solid/ActivityPub/ATProto/PDS/XRPC
 acceptance, and independent human security review are still missing.
 Keep all other image/source pins unchanged and `release=CLOSED`.
+
+## Browser-only public OAuth consent gate — November 22, 2026
+
+Pinned merged ActivityPods [PR #286](https://github.com/outlaw-dame/activity-pods/pull/286)
+at `89cab0f0f00022ad863058a23ec07f6539e186ca`, following
+#285 owner post-enrollment revocation. Exact PR source
+`a7e3874c38cd9f9e02e60bfee875e8d2530a0aa2`
+passed Redis8.2 OAuth **45063555387**, backend **45063555410**,
+and repository lint **45063555407**, all three successful.
+
+The public Authorization Interface's POST approval now requires the
+current password-verifier-bound **browser owner session** and refuses
+every `Authorization` header even when an older signed SemApps
+RS256 bearer token and a valid browser cookie are both supplied.
+Previously, signed tokens from upstream SemApps have an `iat` but
+lack a canonical account/password credential epoch and could
+authorize new owner consent within their one-hour age window after
+a password change. The browser session (HMAC + Redis + live
+account/password verifier) and atomic same-Redis consent CAS remain
+required. The user-facing authorization interface is consistent
+with https://atproto.com/specs/oauth . The internal authorization
+fallback stays production-disabled.
+
+**Exact scope:** The test suite proves negative valid-RS256 bearer
+consent and positive live browser approval under the real Redis
+OAuth workflow. Staging still tests the actual HTTPS provider,
+closed signup and post-enrollment owner endpoint denial, protected
+Jena data and OIDC key restart, and PG18 TLS; these are negative
+release tests and do not establish hosted positive signup.
+Other SemApps bearer endpoints still lack a durable credential
+revocation epoch. The real independent S3 Object Lock COMPLIANCE
+witness, WAL/PITR restore, signed PDS/SAI cross-store authority,
+positive hosted new-account approval and independent human security
+review remain P0. Keep all other source/image digests and
+`release=CLOSED`.
