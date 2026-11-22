@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #283** at
-`d28a30bb8baa6ace0859bf06076678ecbc26245b`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #284** at
+`9d9257fb79fc21200dc9937eb0599f1600d6e2d6`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -794,3 +794,37 @@ post-enrollment consent and signed Solid/SAI/PDS/ActivityPub positive
 signup, and independent integrated security review remain P0.
 Staging must verify *negative* real-provider signup again and keep
 `release=CLOSED`.
+
+## Password-credential browser session admission pin — November 22, 2026
+
+Pinned merged ActivityPods [PR #284](https://github.com/outlaw-dame/activity-pods/pull/284)
+at `9d9257fb79fc21200dc9937eb0599f1600d6e2d6`, following
+merged #283. The provider's browser login HMAC-binds its session
+cookie to a domain-separated digest of the exact authenticated WebID
+and stored password verifier. Browser OAuth POST approval checks a
+fresh authoritative account record and constant-time matches that
+digest before allowing the live Redis session to approve a grant.
+GET authorize no longer displays a stale changed-password cookie as
+active. All old cookies lacking this proof fail closed; raw password
+verifiers are never copied into cookies.
+
+Upstream SemApps exposes `setPassword`, `setNewPassword`, and
+`updateAccountSettings` mutation routes; each changes the password
+verifier. This check denies cookies issued before any of those
+mutations without relying on a callback from one endpoint.
+Exact ActivityPods PR-head `9b238d7a38a67816c75f2d54ac24206e23b0da02`
+passed Redis8.2 real-session/consent proofs **45059177547**, backend
+**45059177454**, and dependency/lint **45059177538**.
+
+**Security and release boundaries:** this check fences browser
+session admission while the account source remains current. Earlier
+SemApps provider-signed RS256 bearer credentials are not
+password-verifier-bound and still honor their separate maximum
+one-hour issue-age window. Redis+account/PG/Jena restore can revive
+older state absent independently immutable WORM high-water; owner
+post-enrollment consent and account/SAI revocation lack a single
+cross-store transaction, as does the signed PDS witness. Hosted
+positive browser/Solid/SAI/PDS/ActivityPub signup, external DID
+verification, and independent integrated security review remain P0.
+All other image/source digests are unchanged, and `release=CLOSED`
+is required; this staging gate is negative-release only.
