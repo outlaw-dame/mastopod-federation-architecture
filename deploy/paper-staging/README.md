@@ -27,8 +27,8 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #271** at
-`8bf51871fb10bc01de690b22ebb85431308195e5`, building on the
+change followed by a new acceptance run. The current ActivityPods pin is **merged PR #272** at
+`46aa7f7ca5e8db49d8e830caefec879f8699934b`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
 authorization codes and refresh-token families by a fresh owner-approved
@@ -173,6 +173,34 @@ independent anti-PITR rollback witness, hosted PDS positive signup, or
 fully released provider writer binding.** PR #263 only adds a
 disposable/proof-only transaction boundary. The release remains CLOSED;
 federation P0 issue #186 stays open. All image digests are unchanged.
+
+### P0 runtime abort-authority separation (#272)
+
+ActivityPods **#272** merged at
+`46aa7f7ca5e8db49d8e830caefec879f8699934b`, adding a
+**NONACTIVATED witness PG18 v4** security migration. It **revokes**
+the runtime positive-commit reconciler role's EXECUTE permission
+on the generic `resolve_signed_write` function, which could falsely
+mark an unresolved signed PDS transaction `aborted` and permit a
+witness revocation ACK before that transaction commits. The runtime
+reconciler now receives only narrow `settle_verified_committed`
+permission, with v3's immutable operation UUID and exact proposed-CID
+checks. The privileged generic abort path is **not** exposed to
+ordinary provider, JWT issuer, writer, revoker or positive-commit
+reconciler; it is exercised only by a supervised disposable
+migration-owner recovery fixture after a simulated proven rollback.
+
+Four exact-head #272 workflows passed: two independent PG18 witness
+clusters+Redis8.2 **44973043218**, PG/Redis restore **44973043251**,
+backend **44973043192**, dependency/lint **44973043263**.
+No automatic abort is possible until an independent physical
+PostgreSQL WAL/PITR recovery barrier, historically verified signature
+and WORM witness intent receipts are deployed and independently
+audited. No runtime SQL migrations/LOGIN roles were activated.
+This source-only staging pin keeps the federation baseline and all
+Docker image digests unchanged and **`release=CLOSED`**. The
+genuine post-enrollment browser owner OAuth approval/revocation and
+hosted real Solid, ATProto PDS and ActivityPub acceptance remain P0.
 
 ### Independently witnessed historical signed commit recovery (#270/#271)
 
