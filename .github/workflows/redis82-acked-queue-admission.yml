@@ -1,0 +1,45 @@
+name: Redis 8.2 acknowledged queue admission
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/workflows/redis82-acked-queue-admission.yml'
+      - 'fedify-sidecar/src/queue/redis-stream-safe-admission.ts'
+      - 'fedify-sidecar/src/queue/sidecar-redis-queue*.ts'
+      - 'fedify-sidecar/src/delivery/outbox-intent-delay-scheduler.ts'
+      - 'fedify-sidecar/scripts/proof-redis82-acked-queue-admission.ts'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acked-queue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      redis:
+        image: redis:8.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: fedify-sidecar/package-lock.json
+      - name: Install exact lockfile
+        run: npm ci --prefix fedify-sidecar
+      - name: Prove real Redis 8.2 ACKED backpressure and delayed recovery
+        working-directory: fedify-sidecar
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          NODE_ENV: test
+        run: npm exec -- tsx scripts/proof-redis82-acked-queue-admission.ts

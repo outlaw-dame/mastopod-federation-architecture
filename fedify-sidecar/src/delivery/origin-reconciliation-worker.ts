@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { request } from "undici";
 import {
   createVerifiedInboundEnvelope,
@@ -90,8 +90,8 @@ export class OriginReconciliationWorker {
       originHost = new URL(job.originObjectUrl).host;
 
       if (job.notBeforeMs > 0 && Date.now() < job.notBeforeMs) {
-        await this.queue.ack("origin_reconcile", messageId);
         await this.queue.enqueueOriginReconciliation(job);
+        await this.queue.ack("origin_reconcile", messageId);
         metrics.queueMessagesProcessed.inc({ topic: "origin_reconcile", status: "deferred" });
         return;
       }
@@ -153,15 +153,10 @@ export class OriginReconciliationWorker {
           return;
         }
 
-        const applyKey = job.canonicalObjectId || job.originObjectUrl;
-        const shouldApply = await this.queue.markOriginReconciliationApplied(
-          applyKey,
-          result.fingerprint,
-          this.config.applyIdempotencyTtlSeconds,
+        const wasEnqueued = await this.enqueueSyntheticUpdate(
+          job, result.body, result.fingerprint,
         );
-
-        if (shouldApply) {
-          await this.enqueueSyntheticUpdate(job, result.body);
+        if (wasEnqueued) {
           metrics.originReconciliationChangedTotal.inc({ origin_host: originHost });
         } else {
           metrics.originReconciliationNoopTotal.inc({ origin_host: originHost });
@@ -230,12 +225,12 @@ export class OriginReconciliationWorker {
       return;
     }
 
-    await this.queue.ack("origin_reconcile", messageId);
     await this.queue.moveToDlq("origin_reconcile", {
       ...job,
       attempt: job.attempt + 1,
       lastError: result.error ?? result.classification,
     }, result.error ?? result.classification);
+    await this.queue.ack("origin_reconcile", messageId);
     metrics.queueMessagesProcessed.inc({ topic: "origin_reconcile", status: "dlq" });
     metrics.originReconciliationJobsTotal.inc({ result: "dlq", reason: job.reason });
     metrics.originReconciliationHostBackoffTotal.inc({ origin_host: originHost, reason: result.classification });
@@ -244,28 +239,33 @@ export class OriginReconciliationWorker {
   private async enqueueSyntheticUpdate(
     job: OriginReconciliationJob,
     object: Record<string, unknown>,
-  ): Promise<void> {
+    fingerprint: string,
+  ): Promise<boolean> {
     const actorUri = job.actorUriHint ?? extractAttributedTo(object);
     if (!actorUri) {
       logger.debug("[origin-reconcile] changed object missing actor hint, skipping synthetic update", {
         originObjectUrl: job.originObjectUrl,
       });
-      return;
+      return false;
     }
 
+    const objectKey = job.canonicalObjectId || job.originObjectUrl;
+    const stableId = createHash("sha256")
+      .update(objectKey).update("\0").update(fingerprint)
+      .digest("hex");
     const objectType = typeof object["type"] === "string" ? object["type"] : null;
     const syntheticActivity = objectType === "Tombstone"
       ? {
           "@context": "https://www.w3.org/ns/activitystreams",
           type: "Delete",
-          id: `urn:origin-reconcile:${randomUUID()}`,
+          id: `urn:origin-reconcile:${stableId}`,
           actor: actorUri,
           object: job.originObjectUrl,
         }
       : {
           "@context": "https://www.w3.org/ns/activitystreams",
           type: "Update",
-          id: `urn:origin-reconcile:${randomUUID()}`,
+          id: `urn:origin-reconcile:${stableId}`,
           actor: actorUri,
           object,
         };
@@ -281,7 +281,9 @@ export class OriginReconciliationWorker {
       },
     });
 
-    await this.queue.enqueueInbound(envelope);
+    return this.queue.enqueueOriginReconciliationUpdateOnce(
+      objectKey, fingerprint, envelope, this.config.applyIdempotencyTtlSeconds,
+    );
   }
 
   private async deferJob(
@@ -302,8 +304,8 @@ export class OriginReconciliationWorker {
     job: OriginReconciliationJob,
     status: "retry" | "deferred" = "retry",
   ): Promise<void> {
-    await this.queue.ack("origin_reconcile", messageId);
     await this.queue.enqueueOriginReconciliation(job);
+    await this.queue.ack("origin_reconcile", messageId);
     metrics.queueMessagesProcessed.inc({ topic: "origin_reconcile", status });
   }
 
