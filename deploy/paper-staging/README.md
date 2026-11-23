@@ -1109,3 +1109,29 @@ configuration. Detailed handoff:
 This PR advances only the exact merged ActivityPods pin and this
 checkpoint. Other image/source digests remain locked, and
 `release=CLOSED` remains mandatory.
+
+## Restricted PostgreSQL credential authority checkpoint — November 22, 2026
+
+Advance the frozen ActivityPods source to merged
+[PR #293](https://github.com/outlaw-dame/activity-pods/pull/293),
+commit `ae7ad7383abeb45ec4f54db311758a95d4373058`, including
+the acknowledged-mutation denial merged in [#292](https://github.com/outlaw-dame/activity-pods/pull/292).
+
+PR #293 exact head `91f5218bebbc773ad5aac8f65cd012545066671b`
+passed **three** workflows: real PostgreSQL18 restricted-credential
+authority `45090947470` (reader/enroller/coordinator functions,
+pending fences, epoch CAS and terminal disable), backend
+`45090947410`, and dependency/lint `45090947848`.
+PR #292 passed exact-head backend `45089773853` and lint
+`45089773840`.
+
+The restricted SQL credential authority is **NONACTIVATED**. No
+production password-change path, SemApps JWT/SAI/PDS token check,
+independent nonrewindable high-water, hosted positive signup or physical
+cross-store restore has been certified. It must not be auto-migrated,
+treated as a signoff, or enabled by removing a fixture guard.
+
+This PR changes only the ActivityPods source commit and this textual
+checkpoint. Every frozen OCI image digest, federation source SHA and
+`release=CLOSED` remain unchanged. Exact-head staging `tls-runtime`
+and `local-provider` jobs remain mandatory before this pin merges.
