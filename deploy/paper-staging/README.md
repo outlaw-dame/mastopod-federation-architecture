@@ -1272,3 +1272,47 @@ remain nonactivated. Positive hosted signup, separately operated
 nonrewindable checkpoint/immutable custody, full cross-store
 PDS/Jena/Redis disaster recovery, and independent human review are
 still required. No image or federation digest changes. `release=CLOSED`.
+
+## Real SemApps mutation integration and recovery-token hardening — November 23, 2026
+
+ActivityPods source now pins merged
+[#301](https://github.com/outlaw-dame/activity-pods/pull/301)
+(`b995f07359cf51dc41ba4d9cca680f9ec67194e1`,
+exact tested head `4ea4d1a354938ff5d8e85f264e3986a25f379d95`):
+real pinned `@semapps/auth` 1.1.4 service, restricted PostgreSQL18
+account adapter, canonical credential v1/v2/v3 schemas, and disposable
+protected-Fuseki workflow. All three exact-head workflows passed:
+real SemApps/Fuseki `45181622231`, backend `45181622038`,
+dependency/lint `45181622270`. The test attempts six actual
+upstream password/reset/settings/delete/tombstone actions and
+direct native adapter bcrypt mutation/deletion, verifies no native
+write receipt, and checks account persistence.
+
+ActivityPods [#302](https://github.com/outlaw-dame/activity-pods/pull/302)
+merged `fd864a25e2491280ca51d914cb980fdf876c99e2`
+(exact head `a720019881823d0eb3b1cbd21aab538cea9ccaec`).
+Six workflows passed: real native PG18 `45182491606`, physical
+dual-cluster PG18 archived-WAL PITR `45182491502`, canonical
+credential `45182491660`, challenged signer `45182491703`,
+backend `45182491589`, dependency/lint `45182491677`.
+
+This hardening scopes credential/recovery/tombstone SQL trigger
+restrictions to unified accounts determined by either immutable
+enrollment marker or canonical PostgreSQL owner, retaining legacy
+SemApps account password/update behavior. A verified native bcrypt
+write now also removes previous reset-token material in the same
+operation-bound transaction; receipt attestation requires token
+absence. Real two-cluster physical backup/restore proves the old
+reset capability present before a rotation, but absent in the
+later restored sealed/disabled generation.
+
+The external Ed25519 signer/witness remains a NONACTIVATED
+disposable candidate. A separately operated nonrewindable latest
+checkpoint and immutable object retention, actual owner-approved
+positive SemApps password change/SAI/OAuth/PDS integration,
+hosted complete signup, Redis/Jena/PDS cross-store disaster
+recovery and independent security acceptance remain P0.
+
+Only ActivityPods source SHA and README change; all federation,
+OCI image and service configurations unchanged.
+`release=CLOSED`, signup CLOSED.
