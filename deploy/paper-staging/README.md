@@ -1415,3 +1415,47 @@ README. Federation source, OCI image digests and
 `release=CLOSED` remain unchanged. No hosted positive signup,
 owner-approved credential change, independent nonrewindable witness
 or full Redis/Jena/PDS physical restore has been certified.
+
+## Provider-neutral conditional S3 writes and adversarial retention test — November 23, 2026
+
+The unified ActivityPods account authority and federation sidecar remain
+separate from product-brand naming (Paper/Memory). Frozen source now
+pins ActivityPods `fa6916e3416d731163ebfea2deee6eb31d60c787`,
+including **two nonactivated, provider-neutral S3 custody gates**:
+
+- [ActivityPods #307](https://github.com/outlaw-dame/activity-pods/pull/307),
+  merged `1bffe66e7801596216be91c6e8842cdbb270e5ac`,
+  exact tested head `b3fad0280ad28e4647cfa54b18cf24db20239bff`;
+  FOUR exact-head workflows succeeded: S3 contract `45207548198`,
+  independent two-PG18 witness recovery `45207548180`,
+  backend `45207548040` and dependency/lint `45207548055`.
+  Adds a provider-neutral S3 receipt writer which respects
+  `IfNoneMatch: '*'`, reconciles lost ACK without retry, verifies
+  exact immutable version/readback and fails closed on missing Object
+  Lock COMPLIANCE or versioning. AWS IAM/STS remains only an optional
+  *provider-specific* custody audit.
+
+- [ActivityPods #309](https://github.com/outlaw-dame/activity-pods/pull/309),
+  merged `fa6916e3416d731163ebfea2deee6eb31d60c787`,
+  exact tested head `89f4f3e8bc0f11b7f2a4463e933b82a1b3e25028`;
+  FOUR exact-head workflows succeeded: S3 contract `45209169706`,
+  independent two-PG18 witness recovery `45209169709`,
+  backend `45209169902`, dependency/lint `45209169915`.
+  Adds operator-only two-attempt conditional PUT race validation
+  with explicit approval for one irreversible test object in
+  `paper-worm-disposable-*`, using separate read/write credentials
+  and a random synthetic receipt. One ACK + one HTTP 412/409 conflict,
+  exact version/bytes, COMPLIANCE retention and absence of delete
+  markers are required. Ambiguous ACK never triggers a retry.
+  Superseded conflicting [#308](https://github.com/outlaw-dame/activity-pods/pull/308)
+  was closed; the portable writer code and coverage were preserved.
+
+This source pin changes only `deploy/paper-staging/lock.json` and this
+handoff note. **All federation, PG18, Redis, Jena and OCI digests
+remain unchanged; `release=CLOSED`; signup CLOSED.** These are
+DISPOSABLE/NONACTIVATED proofs. No live B2/Storj/custom-S3 write
+acceptance, separate operator/key control, immutable COMPLIANCE
+historical delete/refusal, nonrewindable external signer, full
+PG18/Redis/Jena/PDS multi-store recovery, owner-authenticated
+credential change or positive hosted unified signup has been
+certified by this staging promotion.
