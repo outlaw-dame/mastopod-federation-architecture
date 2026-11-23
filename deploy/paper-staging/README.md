@@ -1040,3 +1040,35 @@ source.
 No producer, owner grant, SAI or signed PDS paths use this candidate.
 All image digests and the federation source hash remain unchanged,
 staging signup remains 503, and `release=CLOSED`.
+
+## Signed external R2 latest-head fast path — November 22, 2026
+
+Merged ActivityPods
+[PR #290](https://github.com/outlaw-dame/activity-pods/pull/290)
+at `28ab8c6807deb0b5136f9128f90195d0e7da5241`. Exact tested head
+`2b28d3cbac6578343221f23548bda8a20b574082` passed all five:
+
+- R2 signed Ed25519 and S3 receipt contract `45086641408`
+- Dual real PG18 physical WAL/PITR `45086641520`
+- Independent PG18 witness `45086641407`
+- Backend checks `45086641441`
+- Dependency/lint/auth regression `45086641457`
+
+The new NONACTIVATED, pinned-public-key verifier authenticates
+canonical domain-separated signed `paper.witness.latest-checkpoint.v1`
+heads fetched from an independently configured checkpoint authority.
+The R2 exact-key fast path requires a branded verified authority,
+verifies SHA-256 receipt readback, checks R2 policy on both sides,
+then re-reads the signed checkpoint to detect concurrently advanced
+revocations. The O(history) fixture scan is not used in this path.
+Tests cover stale DB/R2 snapshots, missing/forged/rotated signer,
+cross-owner reuse, caller-supplied fake authority and concurrent change.
+
+**Not completed:** independently deployed nonrewindable latest-head
+authority and external key custody, live signed R2 S3 client readback,
+production cross-store recovery, SemApps bearer/SAI/PDS revocation,
+hosted positive full signup and independent security acceptance.
+A valid signature can still be replayed by a dishonest or restored
+head authority: operator-independent high-water freshness is required.
+This PR updates *only* the source pin and checkpoint text. Staging
+release and all other digests remain `CLOSED`/unchanged respectively.
