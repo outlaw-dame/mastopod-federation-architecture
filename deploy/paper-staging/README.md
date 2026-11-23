@@ -1341,3 +1341,32 @@ The independently operated monotonic signer, separately-administered
 COMPLIANCE WORM retention, authenticated SemApps/SAI/OAuth/PDS
 credential flows, full hosted multi-store recovery and positive
 unified signup remain unproved release dependencies.
+
+## Portable immutable S3 archive qualification — November 23, 2026
+
+Merged ActivityPods [#304](https://github.com/outlaw-dame/activity-pods/pull/304),
+`3b0e8350b99b74ea0914321f39ced610e1f24f35`,
+exact tested head `26440e9979d466a5b4ba6693fedfba6db4021084`.
+
+All four exact-head workflows passed: immutable S3 compliance contract
+`45194952371`, independent PG18 restore witness `45194952231`,
+backend `45194952348`, dependency/lint `45194952705`.
+
+Adds an operator-only READ-ONLY B2/Storj S3 compatibility qualifier with
+strict official HTTPS endpoint allowlist, positive COMPLIANCE lock and
+versioning checks, exact retained receipt/version/digest audit,
+nonretryable S3 failures and denial of unsafe/raced histories. It
+explicitly refuses Filebase as an immutable witness: Filebase does
+not expose the required Object Lock/versions APIs. The tool never
+outputs production grant and is not registered in any running auth
+service. It also documents Backblaze's 2026 Enterprise-only
+IAM/STS/GetCallerIdentity and OIDC support separately from normal
+B2 application keys, and Storj's access-grant model. B2/Storj
+conditional create-only race behavior, independent operators and
+nonrewindable live latest signer are still UNVERIFIED.
+
+This staging change ONLY pins ActivityPods source and updates
+the README; federation source and OCI digests unchanged,
+`release=CLOSED` and signup CLOSED. Neither a B2 nor Storj
+account has been connected to production. Multi-store recovery
+and positive hosted account signup remain P0.
