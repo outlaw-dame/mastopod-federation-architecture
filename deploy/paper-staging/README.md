@@ -1135,3 +1135,56 @@ This PR changes only the ActivityPods source commit and this textual
 checkpoint. Every frozen OCI image digest, federation source SHA and
 `release=CLOSED` remain unchanged. Exact-head staging `tls-runtime`
 and `local-provider` jobs remain mandatory before this pin merges.
+
+## Fresh independent credential-head candidate — November 22, 2026
+
+Frozen ActivityPods source updated to merged
+[PR #294](https://github.com/outlaw-dame/activity-pods/pull/294),
+SHA `39ba2f32d73c980cbedf473e4ee0bc6fe33cbaad`.
+The exact tested head `a6900f1d47ec1c4a1eb5924ab035bfdb809d176f`
+passed **four** workflows: real restricted PostgreSQL18 signed
+challenge head `45094391647`, PG18 authority `45094391639`,
+backend `45094391594` and dependency/lint `45094391560`.
+
+The nonactivated candidate verifies independently challenged Ed25519
+latest-head signatures against a restricted PostgreSQL18 LOGIN and
+the existing RS256 new-unified-account guard. It denies historical
+response replay, concurrent advancement, lost head, altered signer,
+wrong owner, stale SQL state and restored previous credential epoch.
+The real PG test also verifies old bearer denial after password epoch
+advance, database row rewind and owner disable. It **does not prove**
+the independent latest signer's own state is nonrewindable.
+
+An external human-operated signer and immutable audit trail, actual
+production credential mutation/SAI/PDS integration, physical PG/Jena/
+Redis/PDS restore, positive hosted complete signup and independent
+human security review are still open production P0s. Neither the
+restricted reader nor the signer is activated in production. No
+OCI image digest or federation source SHA changes. `release=CLOSED`.
+
+## Final candidate hardening — November 22, 2026
+
+Frozen source now includes two subsequent merged ActivityPods gates:
+- [#295](https://github.com/outlaw-dame/activity-pods/pull/295),
+  merge `19c04cd77de6082d228f7877c3f550814e8b3dcf`:
+  public-only Ed25519 SPKI/key-object admission, explicit denial if a
+  private PEM is accidentally supplied to the verifier. Exact-head
+  signed-head/PG18 `45094805596`, backend `45094805593`, lint
+  `45094805575` all passed.
+- [#296](https://github.com/outlaw-dame/activity-pods/pull/296),
+  merge `6dd0795f63ab05d14f5aabbf5f3404acd31383d2`:
+  both independently backed-up PostgreSQL18 clusters now physically
+  restore the **actual** credential epoch v1/v2 tables from named WAL
+  points before and after a terminal disable. The older snapshot is
+  active epoch 1; the later is disabled epoch 2. Five exact-head jobs
+  passed: real physical PITR `45094981291`, PG18 authority
+  `45094981426`, signed-head regression `45094981293`, backend
+  `45094981308`, and lint `45094981278`.
+
+These are **NONACTIVATED** security/proof implementations. There is no
+new independent human-operated latest-head signer, no live external
+WORM authority, no production SemApps/SAI/PDS password/consent
+mutation integration, no Jena/Redis/PDS full physical recovery, no
+hosted positive new-account signup, and no independent human approval.
+Staging MUST prove exact final source on both HTTPS jobs. All pinned
+OCI/federation digests remain unchanged, and `release=CLOSED`.
