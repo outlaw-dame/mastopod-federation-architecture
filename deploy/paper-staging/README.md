@@ -1370,3 +1370,48 @@ the README; federation source and OCI digests unchanged,
 `release=CLOSED` and signup CLOSED. Neither a B2 nor Storj
 account has been connected to production. Multi-store recovery
 and positive hosted account signup remain P0.
+
+## Unified-owner restore fence and provider-neutral S3 qualification — November 23, 2026
+
+Frozen ActivityPods source advances to
+`fc58582b9ebce2031467ea3dc06b91a51102e76e`
+(two completed merges; **no release activation**):
+
+- [ActivityPods #305](https://github.com/outlaw-dame/activity-pods/pull/305)
+  merge `b7b9a025f4ee5e3a9150903fda8e253447448688`,
+  exact tested head `a758cf642876368e944b47f7b99c1c313b6f4c9b`,
+  all SEVEN workflows successful:
+  native restricted PG18 `45203091910`,
+  real SemApps/ATProto protected Fuseki `45203092082`,
+  canonical PG18 epoch `45203092158`,
+  signed independent-head/PG18 `45203092555`,
+  dual-cluster physical WAL recovery `45203093046`,
+  backend `45203091973`, dependency/lint `45203092019`.
+  The NONACTIVATED PG18 native credential guard now prevents account
+  WebID/username/UUID rebind and any update when the canonical owner
+  survives but the SemApps enrollment marker was rewound/lost.
+  First reserved WebID attachment before canonical enrollment continues
+  to succeed, as proven by the real SemApps integration.
+
+- [ActivityPods #306](https://github.com/outlaw-dame/activity-pods/pull/306)
+  merge `fc58582b9ebce2031467ea3dc06b91a51102e76e`,
+  exact tested head `a950cc177ad033a0c00b5a51150bbe1ada6d99cd`,
+  all FOUR workflows successful:
+  provider-neutral S3 compliance contract `45204750905`,
+  independent PostgreSQL witness PITR `45204750985`,
+  backend `45204750887`,
+  dependency/lint `45204750864`.
+  Any independently operator-pinned public HTTPS S3-compatible origin
+  can now be checked READ-ONLY for retention, versioning and exact
+  receipt data. AWS numeric account IDs/STS are not a generic
+  requirement; provider-specific identity/custody audit is separate.
+  Default result remains `releaseAccepted:false`. It does not
+  establish a live writer, independent signer, conditional-PUT safety
+  or complete recovery. Paper and Memory are candidate application
+  names, not separate identity controllers.
+
+This staging PR changes **only** ActivityPods source pin and operator
+README. Federation source, OCI image digests and
+`release=CLOSED` remain unchanged. No hosted positive signup,
+owner-approved credential change, independent nonrewindable witness
+or full Redis/Jena/PDS physical restore has been certified.
