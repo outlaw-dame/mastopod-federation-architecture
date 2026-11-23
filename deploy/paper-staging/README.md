@@ -1161,3 +1161,30 @@ Redis/PDS restore, positive hosted complete signup and independent
 human security review are still open production P0s. Neither the
 restricted reader nor the signer is activated in production. No
 OCI image digest or federation source SHA changes. `release=CLOSED`.
+
+## Final candidate hardening — November 22, 2026
+
+Frozen source now includes two subsequent merged ActivityPods gates:
+- [#295](https://github.com/outlaw-dame/activity-pods/pull/295),
+  merge `19c04cd77de6082d228f7877c3f550814e8b3dcf`:
+  public-only Ed25519 SPKI/key-object admission, explicit denial if a
+  private PEM is accidentally supplied to the verifier. Exact-head
+  signed-head/PG18 `45094805596`, backend `45094805593`, lint
+  `45094805575` all passed.
+- [#296](https://github.com/outlaw-dame/activity-pods/pull/296),
+  merge `6dd0795f63ab05d14f5aabbf5f3404acd31383d2`:
+  both independently backed-up PostgreSQL18 clusters now physically
+  restore the **actual** credential epoch v1/v2 tables from named WAL
+  points before and after a terminal disable. The older snapshot is
+  active epoch 1; the later is disabled epoch 2. Five exact-head jobs
+  passed: real physical PITR `45094981291`, PG18 authority
+  `45094981426`, signed-head regression `45094981293`, backend
+  `45094981308`, and lint `45094981278`.
+
+These are **NONACTIVATED** security/proof implementations. There is no
+new independent human-operated latest-head signer, no live external
+WORM authority, no production SemApps/SAI/PDS password/consent
+mutation integration, no Jena/Redis/PDS full physical recovery, no
+hosted positive new-account signup, and no independent human approval.
+Staging MUST prove exact final source on both HTTPS jobs. All pinned
+OCI/federation digests remain unchanged, and `release=CLOSED`.
