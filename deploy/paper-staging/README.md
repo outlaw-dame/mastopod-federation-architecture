@@ -1218,3 +1218,43 @@ positive owner signup, and independent human security acceptance
 are outstanding. This PR changes only the ActivityPods source SHA
 and checkpoint prose: pinned images/federation digests and
 `release=CLOSED` are unchanged.
+
+## Native password physical PITR and independent signed-head HTTPS — November 22, 2026
+
+Frozen ActivityPods source advances to merged
+[PR #299](https://github.com/outlaw-dame/activity-pods/pull/299)
+commit `a8ff987f585fd797e773296e39946abcb0a86594`.
+This combines the previously merged native bcrypt/credential SQL boundary
+with:
+
+- [ActivityPods #298](https://github.com/outlaw-dame/activity-pods/pull/298),
+  merge `ac17dd1e1c9ac4364bec212687b3ac1b1e00ee86`.
+  Two independently initialized real PostgreSQL18 clusters physically
+  back up and restore canonical credential epochs, actual private
+  SemApps bcrypt JSONB and persisted operation receipts via WAL
+  before/after credential mutation and terminal disable. All **six**
+  exact-head workflows at `3221ee133bed4fe439994a33324397ccea4ba419`
+  passed: PITR `45097997452`, native SQL `45097997471`,
+  PG18 epoch `45097997411`, signed latest `45097997390`,
+  backend `45097997394`, lint `45097997383`.
+- [ActivityPods #299](https://github.com/outlaw-dame/activity-pods/pull/299),
+  merge `a8ff987f585fd797e773296e39946abcb0a86594`.
+  Test-only genuine HTTPS client supplies the Ed25519 latest-head
+  authority with fresh nonce challenges. Strict TLS certificate
+  validation, no HTTP fallback, redirects, cross-process HTTPS agent,
+  cached approval, automatic retries or TLS verification override.
+  Response size/canonical signature are bounded, with absolute and
+  socket-idle deadlines. Real TLS fixture tests forged/replayed heads,
+  malicious trickle, bad CA and redirects. All **three** exact-head
+  workflows at `f64af7eb81922ec94b91bb87db7cbaac206ebb39`
+  passed: TLS `45098789762`, backend `45098789833`, lint
+  `45098789873`.
+
+Both are **NONACTIVATED**; tests do not provision an externally
+controlled nonrewindable signer/WORM archive, authorize production
+SemApps/SAI/PDS mutation or signoff physical full-store recovery,
+hosted positive signup, or independent human security acceptance.
+Real signing private keys stay with a separate custodian.
+This PR changes only the pinned ActivityPods SHA and these notes.
+All federation source/OCI digests remain identical.
+`release=CLOSED` and both real staging workflow jobs are mandatory.
