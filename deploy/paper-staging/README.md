@@ -1247,3 +1247,28 @@ with genuinely nonrewindable head, owner-authenticated native password
 change/reset, Solid/SAI/OAuth/PDS integrated state, full
 Redis/Jena/PDS restore, positive hosted signup, and independent
 security review remain outstanding. `release=CLOSED`.
+
+## Enrolled-account upstream credential-mutation holding fence — November 23, 2026
+
+Frozen source includes merged ActivityPods
+[#300](https://github.com/outlaw-dame/activity-pods/pull/300),
+`a93bbf9f01f3330a4b2650e0df470b3c9bf1d447`.
+Exact tested head `b62b1989834cb7bade1ed10c4a1767ea15af5b33`
+passed backend `45180282508` and dependency/lint `45180282510`.
+
+On every broker that hosts SemApps authentication, the always-registered
+`AccountEnrollmentMiddleware` now stops six upstream credential
+mutation actions for incompletely enrolled accounts *before* any
+password/hash/reset/delete/tombstone side effect. These actions use a
+fresh isolated `findByWebId` lookup with a 3-second deadline and zero
+retries; missing, forged or malformed enrollment markers fail closed.
+A real Moleculer test covers all six actions and unchanged unmarked
+legacy behavior.
+
+This is a **holding denial**. The old SemApps password-reset/change
+actions are not replaced with an authenticated PostgreSQL operation
+coordinator yet; the native v3 SQL and independently challenged head
+remain nonactivated. Positive hosted signup, separately operated
+nonrewindable checkpoint/immutable custody, full cross-store
+PDS/Jena/Redis disaster recovery, and independent human review are
+still required. No image or federation digest changes. `release=CLOSED`.
