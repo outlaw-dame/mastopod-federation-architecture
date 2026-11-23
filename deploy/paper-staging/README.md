@@ -1218,3 +1218,32 @@ positive owner signup, and independent human security acceptance
 are outstanding. This PR changes only the ActivityPods source SHA
 and checkpoint prose: pinned images/federation digests and
 `release=CLOSED` are unchanged.
+
+## Independent head transport + actual credential restore source — November 23, 2026
+
+The frozen source now includes two recently verified ActivityPods merges:
+
+- [#298](https://github.com/outlaw-dame/activity-pods/pull/298), merge
+  `ac17dd1e1c9ac4364bec212687b3ac1b1e00ee86`: exact-head
+  `3221ee133bed4fe439994a33324397ccea4ba419`, **six passing CI
+  workflows**, including real two-cluster PG18 `pg_basebackup`,
+  archived-WAL named-point recovery of the actual SemApps native account
+  password, append-only operation receipts, and protected credential
+  epochs on either side of disablement.
+- [#299](https://github.com/outlaw-dame/activity-pods/pull/299), merge
+  `a8ff987f585fd797e773296e39946abcb0a86594`: exact-head
+  `f64af7eb81922ec94b91bb87db7cbaac206ebb39`,
+  **three passing workflows**: real HTTPS/TLS nonce-challenged
+  Ed25519 independent-head transport `45098789762`, backend
+  `45098789833`, lint `45098789873`. HTTPS transport has strict
+  TLS, absolute deadline and refused redirects, responses, stale signed
+  nonce replays and globally disabled verification. No production
+  verifier service is wired to it.
+
+No upstream federation source or pinned image changed. This staging pin
+must pass the exact tested TLS/runtime and actual local provider jobs.
+This work is **NONACTIVATED**. The independently administered signer
+with genuinely nonrewindable head, owner-authenticated native password
+change/reset, Solid/SAI/OAuth/PDS integrated state, full
+Redis/Jena/PDS restore, positive hosted signup, and independent
+security review remain outstanding. `release=CLOSED`.
