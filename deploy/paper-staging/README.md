@@ -1072,3 +1072,40 @@ A valid signature can still be replayed by a dishonest or restored
 head authority: operator-independent high-water freshness is required.
 This PR updates *only* the source pin and checkpoint text. Staging
 release and all other digests remain `CLOSED`/unchanged respectively.
+
+## Canonical SemApps credential revocation candidate — November 22, 2026
+
+Staging pins merged ActivityPods
+[PR #291](https://github.com/outlaw-dame/activity-pods/pull/291)
+at `3c5c623ad940c8af10f5fcba1b432235a1aa2e63`.
+Its exact tested PR head `7385e631dee0c525b9169b55c06482d1f38447e9`
+passed **Backend checks** `45089191987` and **Dependency and lint
+consistency** `45089191980`, including the new standalone RS256
+credential epoch proof.
+
+Security audit: upstream SemApps `auth.jwt` signs and verifies RS256
+JWTs without a mandatory expiry or canonical password-change epoch.
+Paper's existing enrollment middleware validates a matching account
+but does not invalidate old signed tokens after password rotation.
+The merged NONACTIVATED `middlewares/credential-epoch.js` verifies
+independent owner classification before enforcing 15-minute JWT
+expirations and per-owner epoch on new unified accounts. The
+test-only mutation proof requires `pending` authorization state
+before downstream password writes, rejects old tokens while the
+credential mutation remains uncertain, and never retries after an
+ambiguous credential write. Two authority reads around issuance
+detect concurrent rotation. Restoration-induced owner/legacy
+classification downgrade is denied rather than silently bypassed.
+Older pre-unification accounts are not implicitly migrated.
+
+**Not production accepted:** No canonical independent credential
+authority or password-reset/administrative mutation service has
+been deployed; no real end-to-end SemApps JWT, Solid/SAI, signed PDS
+and cross-replica revocation acceptance has been performed.
+The file is fixture-only and NOT imported by production middleware
+configuration. Detailed handoff:
+`docs/paper-canonical-credential-revocation-gate.md` in ActivityPods.
+
+This PR advances only the exact merged ActivityPods pin and this
+checkpoint. Other image/source digests remain locked, and
+`release=CLOSED` remains mandatory.
