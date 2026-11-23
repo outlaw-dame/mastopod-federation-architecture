@@ -1316,3 +1316,28 @@ recovery and independent security acceptance remain P0.
 Only ActivityPods source SHA and README change; all federation,
 OCI image and service configurations unchanged.
 `release=CLOSED`, signup CLOSED.
+
+## Production unscoped identity-write closure — November 23, 2026
+
+Merged ActivityPods [#303](https://github.com/outlaw-dame/activity-pods/pull/303)
+`134be7a998d6fc3336b4164e940bc76b0e2cf6bb` fixes five
+unscoped database and identity entrypoints: inherited Moleculer
+`auth.account.insert/update/remove` and direct
+`auth.account.create/attachWebId`, which otherwise bypass the
+closed production signup or owner-approved credential coordinator.
+The always-registered middleware refuses these before the service
+handler. Its production-mode real Moleculer test covers spoofed
+privileged metadata, runtime environment tampering, and legacy
+approved account action compatibility. Exact-head source
+`533eeb2a942afe4f9d4419287c71ff66a894cd03`
+passed all three workflows: ATProto protected Fuseki `45184125566`,
+dependency/lint `45184125693`, and backend `45184125721`.
+
+This pin changes only the ActivityPods source SHA and checkpoint
+documentation; pinned federation, PostgreSQL, Redis, Fuseki and
+ingress image digests stay unchanged. `release=CLOSED`.
+
+The independently operated monotonic signer, separately-administered
+COMPLIANCE WORM retention, authenticated SemApps/SAI/OAuth/PDS
+credential flows, full hosted multi-store recovery and positive
+unified signup remain unproved release dependencies.
