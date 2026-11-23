@@ -1188,3 +1188,33 @@ mutation integration, no Jena/Redis/PDS full physical recovery, no
 hosted positive new-account signup, and no independent human approval.
 Staging MUST prove exact final source on both HTTPS jobs. All pinned
 OCI/federation digests remain unchanged, and `release=CLOSED`.
+
+## Restricted native SemApps bcrypt-write boundary — November 22, 2026
+
+ActivityPods [PR #297](https://github.com/outlaw-dame/activity-pods/pull/297)
+merged at `d6b651ff0fd87348347c665ca6bf8f171a9dbac7`
+from exact-tested head `edb8b4951dd4d641248123552ada413e501ac600`.
+All five GitHub workflows completed successfully: native PG18
+`45097341677`, signed head `45097341661`, PG18 epoch
+`45097341575`, backend `45097341616`, and dependency/lint
+`45097341603`.
+
+The restricted nonactivated v3 SQL closes generic native-account
+`UPDATE(data)` and `DELETE` credential bypasses through a protected
+PostgreSQL18 trigger. A separate operation-bound bcrypt writer,
+read-only native receipt attestor and restricted sealer require an
+exact pending UUID/epoch; the old digest-only generic coordinator
+seal is no longer executable by its role. The proof tests real
+distinct SQL LOGINs, rollback, unexpected ACK, wrong account/operation,
+replay, and terminal disabled owner. Bcrypt work factor is bounded
+to 10–14, matching pinned SemApps hash cost 10.
+
+**This remains NONACTIVATED**. Existing SemApps password-reset/change
+routes are not yet owner-authenticated and wired into the new PG role
+protocol. No live independent nonrewindable signer or WORM custodian
+is available, so the protocol must not be activated by an env flag
+or production migration. Full PG/Redis/Jena/PDS hosted recovery,
+positive owner signup, and independent human security acceptance
+are outstanding. This PR changes only the ActivityPods source SHA
+and checkpoint prose: pinned images/federation digests and
+`release=CLOSED` are unchanged.
