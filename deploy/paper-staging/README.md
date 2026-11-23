@@ -1135,3 +1135,29 @@ This PR changes only the ActivityPods source commit and this textual
 checkpoint. Every frozen OCI image digest, federation source SHA and
 `release=CLOSED` remain unchanged. Exact-head staging `tls-runtime`
 and `local-provider` jobs remain mandatory before this pin merges.
+
+## Fresh independent credential-head candidate — November 22, 2026
+
+Frozen ActivityPods source updated to merged
+[PR #294](https://github.com/outlaw-dame/activity-pods/pull/294),
+SHA `39ba2f32d73c980cbedf473e4ee0bc6fe33cbaad`.
+The exact tested head `a6900f1d47ec1c4a1eb5924ab035bfdb809d176f`
+passed **four** workflows: real restricted PostgreSQL18 signed
+challenge head `45094391647`, PG18 authority `45094391639`,
+backend `45094391594` and dependency/lint `45094391560`.
+
+The nonactivated candidate verifies independently challenged Ed25519
+latest-head signatures against a restricted PostgreSQL18 LOGIN and
+the existing RS256 new-unified-account guard. It denies historical
+response replay, concurrent advancement, lost head, altered signer,
+wrong owner, stale SQL state and restored previous credential epoch.
+The real PG test also verifies old bearer denial after password epoch
+advance, database row rewind and owner disable. It **does not prove**
+the independent latest signer's own state is nonrewindable.
+
+An external human-operated signer and immutable audit trail, actual
+production credential mutation/SAI/PDS integration, physical PG/Jena/
+Redis/PDS restore, positive hosted complete signup and independent
+human security review are still open production P0s. Neither the
+restricted reader nor the signer is activated in production. No
+OCI image digest or federation source SHA changes. `release=CLOSED`.
