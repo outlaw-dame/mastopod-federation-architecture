@@ -1503,3 +1503,39 @@ No independent live COMPLIANCE S3 archive, separately administered signer,
 human-approved complete SemApps/SAI/PDS mutation, multi-store
 PostgreSQL/Redis/Jena/PDS restore, or hosted positive signup is claimed.
 Promoting the protected issuer or changing `release` is forbidden on this PR.
+
+## Final combined credential/OAuth source pin and staging startup regression — November 25, 2026
+
+ActivityPods frozen source now pins merged [#312](https://github.com/outlaw-dame/activity-pods/pull/312)
+`fcf034a97bbd1a70aae8cc7c25ac18e115492282`, containing already-merged
+security [#310](https://github.com/outlaw-dame/activity-pods/pull/310) and
+[#311](https://github.com/outlaw-dame/activity-pods/pull/311).
+ActivityPods #312 restored the **nonsecret local example** settings lost
+during source-secret cleanup, with distinct local Redis DBs and loopback
+configuration regression. Its exact-head backend run `45554761704` and
+dependency/lint run `45554761637` passed.
+
+The initial federation staging candidate pinned #311 and its TLS/runtime
+job passed, but its `local-provider` job failed during startup
+([run 45554942604](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/45554942604)).
+The backend log identified a **missing `SEMAPPS_SHAPE_REPOSITORY_URL`** in
+`services/files.js`: that service constructs a shape-tree URL at import,
+and previously inherited the setting from the tracked backend `.env`.
+Removing the tracked file exposed this implicit dependency. This is a real
+integration failure and must not be recorded as passing HTTPS/fuse checks.
+
+Staging now explicitly supplies the public shape-repository URL in its
+generated provider Compose environment and checks that value plus
+`NODE_ENV=production` **before** any expensive image build. No historical
+credential or implicit local `.env` is restored. A fresh final-head
+`tls-runtime` **and** `local-provider` run must pass with actual HTTPS
+negative PDS authorization-code/refresh exchange denials, protected Jena
+role isolation, stable JWKS through restart and both signup 503 denials.
+
+This staged source-only update preserves the existing federation SHA,
+all OCI image digests and `release=CLOSED`. **It does not assert**
+independent WORM provider credentials/COMPLIANCE retention or hostile
+overwrite/delete refusal, nonrewindable independently signed latest
+head, credential rotation, native owner-authorized SAI/PDS lifecycle,
+full PostgreSQL/Redis/Jena/PDS rollback recovery or a successful hosted
+unified-account signup. Independent human release signoff is still required.
