@@ -1816,3 +1816,54 @@ commit recovery, encrypted physical cross-store PITR,
 credential rotation, hosted positive signup, scale and independent
 operator/security acceptance remain blocked. Keep production
 signup and PDS OAuth issuance `CLOSED`.
+
+## Independent WORM-backed denial signer — CLOSED staging pin (November 25, 2026)
+
+This staging source-only PR advances **only** ActivityPods from
+`2a6a0c595c5eae77eed6c2e460a513b398453be1` to merged
+`f7762a51275edfadf6fa316a85eba05587253a47`
+([ActivityPods PR #321](https://github.com/outlaw-dame/activity-pods/pull/321)).
+The federation SHA, all five pinned container images and
+`release=CLOSED` are unchanged.
+
+The independently located, **NONACTIVATED** denial signer source
+`pod-provider/independent-authority/immutable-denial-head-signer.mjs`
+reconstructs a retained pre-denial for every fresh nonce from
+S3-compatible Object Lock COMPLIANCE read-only evidence, rather
+than trusting restored provider, PG, Redis or signer-local state.
+It obtains an Ed25519 signature through a **separate, injected
+signing callback**, independently verifies that signature against
+a public-only pinned key and **revalidates S3 versions, hash, object
+retention and history after signing**. Missing, forked, corrupted,
+deleted or expired WORM evidence never produces ACTIVE or a positive
+authorization. It is a deny-only statement; no production provider
+service uses the code, no signing key is stored in the repository,
+and no live B2, Storj or alternate S3 custody has been provisioned.
+
+The existing consumer independently verifies the signed nonce,
+subject, grant digest, operation, receipt digest and time.
+Adversarial tests cover stale signer caches after restored
+PostgreSQL, missing or corrupted WORM receipts, different
+versions or delete markers inserted during KMS signing, forged
+signer, stale nonce, unsafe challenge coercion, incomplete S3
+history and canceled requests.
+
+ActivityPods exact-head `f5bdce26fcb2541dd0743b771acbbdd0883729c1`
+passed the full four required CI workflows:
+S3 COMPLIANCE and official SDK `45667844744`,
+independent PG18 witness `45667844647`,
+backend `45667844702`, lint/regressions `45667844785`.
+The first ESLint issue for standalone Node globals was corrected
+using narrow imports, then **all** exact-head CI was rerun.
+Merge leased to that passing SHA and its clean review.
+
+**Still OPEN P0:** independently administered real COMPLIANCE
+storage and KMS custody, full positive+negative monotonic
+high-water protocol, durable generation renewal before 400-day
+expiration, live native OAuth/Solid-OIDC/SAI/PDS authorization and
+signed-write fence, actual cloud operator hostility tests,
+physical multi-store PITR, and positive hosted signup. Storj
+documentation warns that object listings are not always sorted;
+never infer complete ordered high-water from its S3 LIST without
+provider-specific certification. No simulated denial signing
+can activate `release=OPEN`.
