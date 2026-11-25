@@ -1615,3 +1615,42 @@ Operator-proven S3-compatible COMPLIANCE custody, real positive owner
 grant lifecycle, PG/Redis/Jena/PDS coordinated physical PITR, historical
 credential rotation and security/performance signoff remain incomplete.
 No production signup or OAuth issuer release is authorized.
+
+## Immutable pre-denial S3 receipt and signed latest-head contract — CLOSED pin, November 25, 2026
+
+This source-only stage pins merged ActivityPods
+`124543d1ef115cc4e884a77935f6a56a691b8db1`
+([PR #315](https://github.com/outlaw-dame/activity-pods/pull/315)).
+Federation source and all five OCI image digests are unchanged, and
+`release=CLOSED` remains source-controlled.
+
+Upstream ActivityPods now has **NONACTIVATED** strict versioned OAuth
+pre-denial receipt bytes under a separate `pre-deny/v1` prefix.
+The owner/client/grant/revision/credential/SAI fields derive from its
+post-enrollment signed owner/canonical credential/SAI reader, not from
+untrusted request-selected identifiers. The existing vendor-neutral
+S3 COMPLIANCE receipt transport verifies conditional create-only PUT
+request shape, complete version history, exact payload digest, versioned
+retention and independent object readback. A new isolated Ed25519
+public-key-only latest-head verifier checks nonce, signature, subject,
+grant, revision, exact retained receipt digest and timestamp, including
+after owner-session and credential rechecks following WORM archive.
+
+**Exact ActivityPods tested head** passed:
+S3 contract `45602870960`, independent PostgreSQL witness
+`45602871028`, two independent PostgreSQL 18 physical WAL/PITR
+`45602871058`, backend `45602871121`, dependency/lint
+`45602870968`. The S3 endpoint and signer used by the new proof are
+**disposable simulations**, not evidence of a qualified live storage
+provider or independently administered nonrewindable signer.
+The new coordinator cannot call any runtime revoker or PDS writer,
+returns `releaseAccepted:false`, and is not imported by running services.
+
+Independent **live** signer custody, provider-qualified COMPLIANCE retention,
+hostile overwrite/delete tests, complete pre-denial consultation by
+OAuth code/access/refresh/DPoP, browser and PDS signed-write paths,
+signed-write pending intent drain/commit reconciliation, signed current
+owner session-credential epochs, actual native Jena/SAI owner mutation,
+physical PG/Redis/Jena/PDS recovery, rotated historic credentials and
+hosted positive signup still block production. Nothing authorizes opening
+the signup or PDS OAuth release fuse.
