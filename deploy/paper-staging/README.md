@@ -1459,3 +1459,44 @@ historical delete/refusal, nonrewindable external signer, full
 PG18/Redis/Jena/PDS multi-store recovery, owner-authenticated
 credential change or positive hosted unified signup has been
 certified by this staging promotion.
+
+## Closed PDS OAuth and runtime-secret clean-up — November 25, 2026
+
+This **source-only**, deliberately CLOSED staging checkpoint pins ActivityPods
+merged [#311](https://github.com/outlaw-dame/activity-pods/pull/311)
+`919f6f61b96a2a23db87a9481c2e22029eedeff3`, built on merged
+[#310](https://github.com/outlaw-dame/activity-pods/pull/310)
+`dc955028601e7619559a45b6d286c298a89059c2`.
+
+- #310 removed the formerly tracked backend `.env` and binary Redis `dump.rdb`
+  from the **current tree**, added Git/Docker exclusions and an exact-index CI
+  guard, supplied a secret-free `.env.example` and documented secret rotation.
+  This **does not** purge Git history, revoke deployed sessions, rotate
+  historically exposed tokens, or establish whether any credential was active.
+  Operator rotation, image audit and restore checks remain mandatory.
+  Exact-head backend run `45554096435` and dependency/lint run
+  `45554096440` both **passed**.
+- #311 closes the previously permissive Redis-only PDS OAuth issuer for every
+  **non-test** runtime at source level, regardless of disposable env flags.
+  Direct grant approval, consent upsert, token exchange and access-token
+  issuance fail before side effects. Existing JWTs plus a restored Redis grant,
+  and restored encrypted refresh families, cannot regain PDS authorization
+  through the reviewed issuer. Revocation remains possible.
+  The exact-head ActivityPods PG18/Redis OAuth recovery, independent two-PG18
+  witness, Redis refresh/replay, backend, and dependency/lint workflows
+  **passed** before the merge. This does NOT activate the test-only
+  PostgreSQL/WORM authority or positive PDS authorization.
+
+This staging PR must run **both** `tls-runtime` and `local-provider` on the
+**combined pin**. The provider profile must no longer rely on a committed
+runtime `.env`: nonsecret test configuration comes from controlled staging
+settings and secrets are generated into private mounts. The HTTPS/OIDC keys
+must survive restart and both native signup and PDS OAuth authorization must
+remain CLOSED. A 503 refusal is a negative-release test, **not** a positive
+owner/SAI/PDS signup proof.
+
+The federation source SHA, image digests and `release=CLOSED` are unchanged.
+No independent live COMPLIANCE S3 archive, separately administered signer,
+human-approved complete SemApps/SAI/PDS mutation, multi-store
+PostgreSQL/Redis/Jena/PDS restore, or hosted positive signup is claimed.
+Promoting the protected issuer or changing `release` is forbidden on this PR.
