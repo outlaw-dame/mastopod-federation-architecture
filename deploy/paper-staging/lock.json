@@ -1,5 +1,5 @@
 {
-  "activitypods": "5df648afed802397dac8249b4f68cfd9bed62de6",
+  "activitypods": "bd38eded14e17515c9c604a2cb8eafd08ac33699",
   "federation": "416b996f7306b0e0841487d7985fd0abc38aa81e",
   "postgres_image": "postgres:18@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc",
   "node_image": "node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",

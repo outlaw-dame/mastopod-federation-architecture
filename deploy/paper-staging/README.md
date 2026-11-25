@@ -1919,3 +1919,56 @@ ceremony and all OAuth/PDS/DPoP/JWT/signed-write fences, independent
 physical signer/PG/Redis/Jena/PDS disaster restore, hosted positive
 signup and operator/security acceptance. Cloudflare R2's
 reversible bucket locks do not meet COMPLIANCE custody.
+
+## Signed generation high-water and all-surface admission — CLOSED (November 25, 2026)
+
+ActivityPods source pin: merged
+[`#323`](https://github.com/outlaw-dame/activity-pods/pull/323) at
+`bd38eded14e17515c9c604a2cb8eafd08ac33699`
+(exact green reviewed source `a4e6aa21ba3a17c51de06cbe84bd260116dc3297`).
+Only the ActivityPods source pin advanced from
+`5df648afed802397dac8249b4f68cfd9bed62de6`.
+The federation source pin, all five immutable OCI image digests,
+and `release=CLOSED` must remain byte-for-byte unchanged.
+
+The **NONACTIVATED** independent generation high-water candidate
+`pod-provider/independent-authority/signed-generation-high-water.mjs`
+reconciles full immutable S3 COMPLIANCE journal observations with a
+separately persisted compare-and-set checkpoint. It rejects a coherently
+hidden or rewound ACTIVE journal prefix after the checkpoint has
+advanced, never blindly retries ambiguous CAS, and binds a fresh
+nonce, numeric generation, journal hash and S3 version, key epoch,
+subject and owner/grant/scope/OAuth/credential/SAI revision evidence
+in a canonical Ed25519 signed response. Signing is injected, and
+the journal and checkpoint are rechecked after signature creation.
+The shared receipt-version bound is **512 UTF-8 bytes**, including
+multibyte values.
+
+The test-only `oauth-independent-pre-deny-admission.mjs` verifier
+checks the new signed generation evidence at all **15** OAuth/PDS
+admission surfaces, including current owner-proof matching, and
+fails closed on incorrect signature, key epoch, checkpoint,
+evidence scope, rollback and concurrent state changes. This is a
+rejection protocol and does **not** grant production access.
+
+Upstream exact-head CI on source `a4e6aa21ba3a17c51de06cbe84bd260116dc3297`:
+S3 COMPLIANCE/high-water contract `45712187336`;
+independent PostgreSQL witness `45712187656`;
+backend `45712187462`;
+lint/regressions `45712187644` — all successful. The
+multibyte-version boundary review defect was corrected and retested
+before merge; the follow-up code review reported no major issues.
+An independent security-review automation did not return a result
+and is not being represented as complete.
+
+**Critical release P0 remains:** This test-only injected CAS is not
+evidence that the **actual deployed sequencer** is independently
+operated, has irreversible monotonic behavior or survives a hostile
+signer rollback; no real independent S3 COMPLIANCE account or protected
+signing key has been certified. The subject pair and owner-proof
+metadata still need a live, authenticated WebID/client binding.
+Live Solid-OIDC/SAI, OAuth code/access/refresh, DPoP and signed-PDS
+mutation paths need fenced authority integration, independently
+verified cloud contention/deletion/retention tests and real
+multi-store physical recovery. No feature flag permits release to
+open until those tests, operator custody and security review pass.
