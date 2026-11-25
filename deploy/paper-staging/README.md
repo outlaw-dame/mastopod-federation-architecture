@@ -1737,3 +1737,42 @@ witness/PDS pending commit reconciliation, real physical
 PG/Redis/Jena/PDS recovery and historically exposed credential rotation
 remain release blockers. The production signup and PDS OAuth fuse MUST
 remain CLOSED, regardless of successful frozen staging.
+
+## Same-session pre-denial owner proof — CLOSED source pin, November 25, 2026
+
+This frozen staging pin advances ONLY ActivityPods from
+`4469172d59171fd7a967caeb2df09512ecfda0ab` to the merged
+`544316e19d4d816654c48106b453343b9a733ab3`
+([ActivityPods #319](https://github.com/outlaw-dame/activity-pods/pull/319)).
+The pinned federation source, all five OCI image digests, the native
+PG/Jena/Redis/PDS runtime and `release=CLOSED` are unchanged.
+
+The NONACTIVATED pre-denial coordinator previously rechecked owner WebID,
+client/grant, OAuth, SAI and credential revisions after immutable archival
+but did not compare the authenticated session proof itself. It now
+requires a provider-derived SHA256 authentication-proof identifier and
+compares that exact digest before independent witness SEAL and
+latest-head publication. A same-owner logout/relogin with unchanged
+credential epoch cannot silently replace the original owner ceremony.
+Invalid or absent proof stops before WORM PUT. A proof change after
+the PG18 PREPARE and archive leaves the independent denial prepared
+and refuses sealing/publication; no speculative rollback, expiry or
+repeat write is attempted. The proof digest never enters the retained
+receipt.
+
+ActivityPods #319 exact tested head
+`3e7e76b21cca409af215b1a14a5d488a1869cd28` passed all
+four required CI jobs: independent two-PG18 witness
+`45652487167`, S3 COMPLIANCE archive `45652487262`,
+backend `45652487190`, and dependency/lint
+`45652487138`. Its merge used an exact-head SHA lease and had no
+unresolved review threads.
+
+These are disposable candidate regressions, **not** a production
+authenticated SemApps/Solid-OIDC SAI integration or independent
+nonrewindable WORM signer. Physical multi-store restore, real
+independent custody/monotonic signer, complete owner grant/revoke/
+uninstall and signing-key rotation, every live OAuth/PDS denial
+admission, pending PDS COMMIT drain, hosted positive signup and
+operator/security signoff remain P0. Production signup and PDS OAuth
+issuance MUST remain CLOSED.
