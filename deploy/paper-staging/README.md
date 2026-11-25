@@ -27,7 +27,10 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #288** at
+change followed by a new acceptance run. The authoritative current pin is
+always the `activitypods` SHA in `lock.json`; historical milestone paragraphs
+below document earlier revisions and are superseded by the latest dated
+checkpoint. An earlier ActivityPods pin was **merged PR #288** at
 `6a7893f7f867bc04293afa3451e5741e5e732ecb`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
