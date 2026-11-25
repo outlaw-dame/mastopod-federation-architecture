@@ -1690,3 +1690,50 @@ Production release remains blocked until real immutable latest head and
 PRE-DENY enforcement on every OAuth/PDS writer admission, signed-write
 intent drain/recovery, real owner consent/revoke lifecycle, multi-store
 physical restore and operator credential rotation are demonstrated.
+
+## Independent current denial + prepared signed-PDS write fence — CLOSED source pin, November 25, 2026
+
+Frozen source pin advances ONLY ActivityPods to merged
+`4469172d59171fd7a967caeb2df09512ecfda0ab`
+([ActivityPods #318](https://github.com/outlaw-dame/activity-pods/pull/318)),
+which includes earlier merged
+[ActivityPods #317](https://github.com/outlaw-dame/activity-pods/pull/317)
+at `617f0937fd58b5ef998e7f9a22c6b74fd684e4a5`.
+The federation code pin, all five OCI image digests and
+`release=CLOSED` are unchanged.
+
+#317 adds a NONACTIVATED, public-Ed25519-key-only read admission contract
+for 15 identified OAuth, DPoP, owner-consent and signed-PDS entry points.
+It requires canonical PG, independent witness PG18, separate immutable
+archive exact latest readback, nonce-signed current signer head and a
+second cross-check of authenticated owner, grant and credential epoch.
+Its return is `releaseAccepted:false` and no production service imports
+it. Upstream exact-head S3, independent witness, backend and lint passed:
+`45607560525`, `45607560400`, `45607560476`, `45607560397`.
+
+#318 adds an **independent PostgreSQL 18 v7 prepared PRE-DENY
+writer fence** (also NONACTIVATED): one-way exact owner/grant/credential/
+SAI/scope/operation CAS; writer reservations serialize with PREPARE using
+a row lock; new signed-write intents and active witness queries reject
+a prepared denial. Existing PENDING signed-write intents **remain unresolved**
+until their independently retained PENDING/COMMITTED receipts are settled;
+a revocation cannot acknowledge before exact PRE-DENY receipt archival and
+SQL sealing. The two physically distinct PG18 fixture and strict
+SQL-versus-S3 JSON test passed. Coordinator preserves
+**PG PREPARE -> archive WORM -> independently seal -> signed-head publish**
+and refuses unknown acknowledgments without retry or timeout abort.
+Upstream exact-head checks ALL passed: S3 `45608959866`, independent
+two-PG18 witness `45608960002`, backend `45608959891`, and lint
+`45608960160`.
+
+**Important security limits:** The real PG18 SQL/locking proof uses
+disposable, simulated S3 storage and signer; it is not a deployed
+independently controlled COMPLIANCE Object Lock store or a nonrewindable
+latest-head authority. The v7 migration explicitly **refuses any historical
+signed-write intent**; no live migration, signer, revoker or PDS OAuth
+endpoint activation has been performed. Real current browser credential
+epoch + native SAI and grant lifecycle, endpoint-wide independent denial,
+witness/PDS pending commit reconciliation, real physical
+PG/Redis/Jena/PDS recovery and historically exposed credential rotation
+remain release blockers. The production signup and PDS OAuth fuse MUST
+remain CLOSED, regardless of successful frozen staging.
