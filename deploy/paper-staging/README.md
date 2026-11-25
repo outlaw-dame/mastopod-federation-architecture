@@ -1867,3 +1867,55 @@ documentation warns that object listings are not always sorted;
 never infer complete ordered high-water from its S3 LIST without
 provider-specific certification. No simulated denial signing
 can activate `release=OPEN`.
+
+## Independent dual-status generation WORM chain — CLOSED source pin (November 25, 2026)
+
+Source pin advances **only** ActivityPods from
+`f7762a51275edfadf6fa316a85eba05587253a47` to merged
+`5df648afed802397dac8249b4f68cfd9bed62de6`
+([ActivityPods PR #322](https://github.com/outlaw-dame/activity-pods/pull/322)).
+The federation source SHA, all five immutable image digests and
+`release=CLOSED` remain unchanged.
+
+The **NONACTIVATED** independent custody-side generation journal
+`pod-provider/independent-authority/oauth-generation-worm-journal.mjs`
+provides a strict S3-compatible Object Lock COMPLIANCE receipt chain:
+an initial ACTIVE genesis and one terminal BLOCKED transition,
+bound by SHA256, revision, stable grant and owner-proof metadata,
+the legacy epoch-v1 and witness-v5 subject hashes, and the
+independently retained PRE-DENY v7 receipt. It confirms per-object
+COMPLIANCE/version/retention, refuses incomplete version histories,
+forks, delete markers, repeated generations, unsupported third
+transitions and conflicting concurrent S3 writes. A conditional PUT
+receives **one** attempt; lost ACK is reconciled with exact WORM
+versions and hash, never retried blindly.
+
+For every observed ACTIVE or BLOCKED journal,
+`activeAuthorizes:false`, `completeExternallyVerified:false`
+and `releaseAccepted:false`. The two opaque subject hashes are
+**not** cryptographically proven to be derived from the same
+authenticated WebID/client; the live native Solid-OIDC/SAI owner
+bridge must provide that proof. S3 can return a coherent stale
+listing, so positive authorization requires a separate signer
+with nonrewindable monotonic high-water — not this fixture.
+
+Upstream exact-head `7cf9f3c2c1dd0f2c5a21dc45ca238b1d65c08c22`
+passed **all five CI gates** before merge: S3 COMPLIANCE/official
+SDK `45671479779`, independent PG18 witness `45671479766`,
+two-cluster physical PITR `45671479843`, full backend
+`45671479902` and lint `45671479774`. All 4 Codex
+review threads were resolved; code was merged by expected-head
+SHA lease after a reviewed seven-file source diff. The backend
+workflow now also explicitly watches
+`pod-provider/independent-authority/**`.
+
+**Still P0 / release CLOSED:** separately administered real
+Backblaze B2 / Storj / qualified S3 COMPLIANCE account, proven
+hostile conditional-PUT/delete-marker/retention behavior,
+independent externally held signing/KMS key and signed
+nonrewindable positive + negative high-water, proper renewal
+before 400-day expiry, actual authenticated owner/SAI/Solid-OIDC
+ceremony and all OAuth/PDS/DPoP/JWT/signed-write fences, independent
+physical signer/PG/Redis/Jena/PDS disaster restore, hosted positive
+signup and operator/security acceptance. Cloudflare R2's
+reversible bucket locks do not meet COMPLIANCE custody.
