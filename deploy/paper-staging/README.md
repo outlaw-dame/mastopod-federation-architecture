@@ -1654,3 +1654,39 @@ owner session-credential epochs, actual native Jena/SAI owner mutation,
 physical PG/Redis/Jena/PDS recovery, rotated historic credentials and
 hosted positive signup still block production. Nothing authorizes opening
 the signup or PDS OAuth release fuse.
+
+## Independent PG18/pre-deny subject agreement — CLOSED pin, November 25, 2026
+
+Frozen staging advances ONLY ActivityPods Git SHA to merged
+`06ab9a5ed8deaae652555e22f355ed33b1186f9d`
+([ActivityPods #316](https://github.com/outlaw-dame/activity-pods/pull/316)).
+The federation source, all five OCI image digests and
+`release=CLOSED` remain unchanged.
+
+A critical integration mismatch was found in previous nonactivated
+ActivityPods #315: the pre-denial subject used NUL delimiters while the
+independent PostgreSQL 18 witness v5 signed-write receipt uses an
+ASCII/UTF-8 **owner-length-framed** subject hash. The corrected
+pre-denial candidate now uses the exact independent witness v5 algorithm.
+Its strengthened hosted regression compares the actual SQL-produced
+signed-intent receipt bytes with the JavaScript pre-deny subject and
+rejects the legacy NUL-delimited mismatch, as well as owner/client drift.
+All source remains NONACTIVATED: no production OAuth/PDS issuer, revoke,
+replace, Jena permission or independent signer was enabled.
+
+Exact ActivityPods #316 head
+`1c2dc502eeda525f1fa342f39a9e72eebe8f0a81` passed all
+five required CI workflows: independent two-PostgreSQL witness
+`45604722390`, PostgreSQL/Redis recovery `45604722601`, S3 COMPLIANCE
+contract `45604722533`, backend `45604722581` and dependency/lint
+`45604722519`. This is a *disposable real PG18 cross-language proof*,
+not deployed independently administered signer or live S3 provider
+COMPLIANCE-custody certification.
+
+Subsequent source promotion requires both exact-head staging TLS/runtime
+and local-provider jobs, including HTTPS negative signup/PDS OAuth, Jena
+protected permissions, RDF durability and OIDC JWKS restart continuity.
+Production release remains blocked until real immutable latest head and
+PRE-DENY enforcement on every OAuth/PDS writer admission, signed-write
+intent drain/recovery, real owner consent/revoke lifecycle, multi-store
+physical restore and operator credential rotation are demonstrated.
