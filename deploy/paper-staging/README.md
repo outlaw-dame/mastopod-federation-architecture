@@ -27,7 +27,10 @@ silently replace credentials under an existing database.
 `lock.json` pins both approved repository baselines and multi-platform image
 digests. Only federation code is built in this phase, using `npm ci` and the pinned
 lockfile. Package lifecycle scripts are disabled. Updating pins is a reviewed
-change followed by a new acceptance run. The current ActivityPods pin is **merged PR #288** at
+change followed by a new acceptance run. The authoritative current pin is
+always the `activitypods` SHA in `lock.json`; historical milestone paragraphs
+below document earlier revisions and are superseded by the latest dated
+checkpoint. An earlier ActivityPods pin was **merged PR #288** at
 `6a7893f7f867bc04293afa3451e5741e5e732ecb`, building on the
 journal-bound owner-consent gate (#256) and independently attested native SAI
 gate (#255). It additionally fences provider-issued OAuth access, one-use
@@ -1459,3 +1462,80 @@ historical delete/refusal, nonrewindable external signer, full
 PG18/Redis/Jena/PDS multi-store recovery, owner-authenticated
 credential change or positive hosted unified signup has been
 certified by this staging promotion.
+
+## Closed PDS OAuth and runtime-secret clean-up — November 25, 2026
+
+This **source-only**, deliberately CLOSED staging checkpoint pins ActivityPods
+merged [#311](https://github.com/outlaw-dame/activity-pods/pull/311)
+`919f6f61b96a2a23db87a9481c2e22029eedeff3`, built on merged
+[#310](https://github.com/outlaw-dame/activity-pods/pull/310)
+`dc955028601e7619559a45b6d286c298a89059c2`.
+
+- #310 removed the formerly tracked backend `.env` and binary Redis `dump.rdb`
+  from the **current tree**, added Git/Docker exclusions and an exact-index CI
+  guard, supplied a secret-free `.env.example` and documented secret rotation.
+  This **does not** purge Git history, revoke deployed sessions, rotate
+  historically exposed tokens, or establish whether any credential was active.
+  Operator rotation, image audit and restore checks remain mandatory.
+  Exact-head backend run `45554096435` and dependency/lint run
+  `45554096440` both **passed**.
+- #311 closes the previously permissive Redis-only PDS OAuth issuer for every
+  **non-test** runtime at source level, regardless of disposable env flags.
+  Direct grant approval, consent upsert, token exchange and access-token
+  issuance fail before side effects. Existing JWTs plus a restored Redis grant,
+  and restored encrypted refresh families, cannot regain PDS authorization
+  through the reviewed issuer. Revocation remains possible.
+  The exact-head ActivityPods PG18/Redis OAuth recovery, independent two-PG18
+  witness, Redis refresh/replay, backend, and dependency/lint workflows
+  **passed** before the merge. This does NOT activate the test-only
+  PostgreSQL/WORM authority or positive PDS authorization.
+
+This staging PR must run **both** `tls-runtime` and `local-provider` on the
+**combined pin**. The provider profile must no longer rely on a committed
+runtime `.env`: nonsecret test configuration comes from controlled staging
+settings and secrets are generated into private mounts. The HTTPS/OIDC keys
+must survive restart and both native signup and PDS OAuth authorization must
+remain CLOSED. A 503 refusal is a negative-release test, **not** a positive
+owner/SAI/PDS signup proof.
+
+The federation source SHA, image digests and `release=CLOSED` are unchanged.
+No independent live COMPLIANCE S3 archive, separately administered signer,
+human-approved complete SemApps/SAI/PDS mutation, multi-store
+PostgreSQL/Redis/Jena/PDS restore, or hosted positive signup is claimed.
+Promoting the protected issuer or changing `release` is forbidden on this PR.
+
+## Final combined credential/OAuth source pin and staging startup regression — November 25, 2026
+
+ActivityPods frozen source now pins merged [#312](https://github.com/outlaw-dame/activity-pods/pull/312)
+`fcf034a97bbd1a70aae8cc7c25ac18e115492282`, containing already-merged
+security [#310](https://github.com/outlaw-dame/activity-pods/pull/310) and
+[#311](https://github.com/outlaw-dame/activity-pods/pull/311).
+ActivityPods #312 restored the **nonsecret local example** settings lost
+during source-secret cleanup, with distinct local Redis DBs and loopback
+configuration regression. Its exact-head backend run `45554761704` and
+dependency/lint run `45554761637` passed.
+
+The initial federation staging candidate pinned #311 and its TLS/runtime
+job passed, but its `local-provider` job failed during startup
+([run 45554942604](https://github.com/outlaw-dame/mastopod-federation-architecture/actions/runs/45554942604)).
+The backend log identified a **missing `SEMAPPS_SHAPE_REPOSITORY_URL`** in
+`services/files.js`: that service constructs a shape-tree URL at import,
+and previously inherited the setting from the tracked backend `.env`.
+Removing the tracked file exposed this implicit dependency. This is a real
+integration failure and must not be recorded as passing HTTPS/fuse checks.
+
+Staging now explicitly supplies the public shape-repository URL in its
+generated provider Compose environment and checks that value plus
+`NODE_ENV=production` **before** any expensive image build. No historical
+credential or implicit local `.env` is restored. A fresh final-head
+`tls-runtime` **and** `local-provider` run must pass with actual HTTPS
+negative PDS authorization-code/refresh exchange denials, protected Jena
+role isolation, stable JWKS through restart and both signup 503 denials.
+
+This staged source-only update preserves the existing federation SHA,
+all OCI image digests and `release=CLOSED`. **It does not assert**
+independent WORM provider credentials/COMPLIANCE retention or hostile
+overwrite/delete refusal, nonrewindable independently signed latest
+head, credential rotation, native owner-authorized SAI/PDS lifecycle,
+full PostgreSQL/Redis/Jena/PDS rollback recovery or a successful hosted
+unified-account signup. Independent human release signoff is still required.

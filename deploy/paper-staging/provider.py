@@ -127,6 +127,9 @@ exec /jena-fuseki/fuseki-server
         "SEMAPPS_INSTANCE_DESCRIPTION_EN": "Disposable local signup acceptance",
         "SEMAPPS_AVAILABLE_LOCALES": "en", "SEMAPPS_DEFAULT_LOCALE": "en",
         "SEMAPPS_HOME_URL": API + "/", "SEMAPPS_FRONTEND_URL": UI + "/", "SEMAPPS_PORT": "3000",
+        # This used to arrive accidentally via the tracked backend .env.
+        # The provider must start with explicitly supplied nonsecret settings.
+        "SEMAPPS_SHAPE_REPOSITORY_URL": "https://shapes.activitypods.org/",
         "SEMAPPS_SPARQL_ENDPOINT": "http://fuseki:3030/", "SEMAPPS_JENA_USER": "admin",
         "SEMAPPS_FUSEKI_BASE": "/fuseki", "SEMAPPS_QUEUE_SERVICE_URL": "redis://redis:6379/1",
         "SEMAPPS_REDIS_OIDC_PROVIDER_URL": "redis://redis:6379/2", "SEMAPPS_REDIS_CACHE_URL": "redis://redis:6379/0",

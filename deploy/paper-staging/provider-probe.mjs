@@ -155,6 +155,47 @@ assert.equal(thirdPartyApproval.status,403,
 assert.equal(thirdPartyApproval.headers.get('location'),null);
 console.log('PASS: real HTTPS origin enforcement for login, consent and logout; same-origin password rejection and bodyless logout.');
 
+// The actual public PDS OAuth token endpoint must reject both authorization-
+// code and refresh exchanges at the SOURCE-CONTROLLED release gate, before
+// touching a DPoP nonce, authorization code, token family or restored Redis
+// grant. These are synthetic, never-owner-approved inputs. Response errors
+// must remain bounded and noncacheable. This is a negative release proof,
+// not a valid owner session or a positive OAuth/PDS authorization exercise.
+const syntacticallyPresentDpop = 'eyJhbGciOiJFUzI1NiIsInR5cCI6ImRwb3Arand0In0.eyJqdGkiOiJub24tYXV0aG9yaXplZC1maXh0dXJlIn0.c2lnbmF0dXJl';
+for (const [grantType, extra] of [
+  ['authorization_code', {
+    code:'unissued-disposable-code',
+    code_verifier:'unissued-disposable-pkce-verifier',
+    redirect_uri:'https://client.paper.example.org/oauth/callback'
+  }],
+  ['refresh_token', {refresh_token:'unissued-disposable-refresh'}]
+]) {
+  const attempt = await fetch(origin+'/oauth/token', {
+    method:'POST', redirect:'error', cache:'no-store',
+    headers:{
+      'content-type':'application/x-www-form-urlencoded',
+      dpop:syntacticallyPresentDpop
+    },
+    body:new URLSearchParams({
+      grant_type:grantType,
+      client_id:'https://client.paper.example.org/metadata.json',
+      ...extra
+    }).toString(),
+    signal:AbortSignal.timeout(5000)
+  });
+  assert.equal(attempt.status,503,
+    'Production PDS OAuth '+grantType+' must fail closed before validating disposable proof');
+  assert.match(attempt.headers.get('cache-control')||'',/no-store/iu);
+  const response = await attempt.text();
+  assert.ok(response.length>0&&response.length<=4096,
+    'OAuth closed-gate response must be bounded');
+  const error = JSON.parse(response);
+  assert.equal(error.type,'PDS_OAUTH_RELEASE_GATE_CLOSED',
+    'OAuth '+grantType+' unexpectedly bypassed the closed PDS release gate');
+}
+console.log('PASS: live HTTPS PDS OAuth authorization-code and refresh exchange remain source-fused CLOSED.');
+
+
 // Neither of the provider's two public account-creation entry points may
 // create an identity in this production-mode staging profile. Probe both on
 // initial startup and after the storage/provider restart, before sending any

@@ -44,6 +44,10 @@ jobs:
           cfg = json.loads((root / "compose.json").read_text())
           assert json.loads((root / "lock.json").read_text())["release"] == "CLOSED"
           provider = cfg["services"]["provider"]
+          # Source-control cleanup removed the accidental runtime .env.
+          # These startup-critical public settings must be supplied explicitly.
+          assert provider["environment"]["SEMAPPS_SHAPE_REPOSITORY_URL"] == "https://shapes.activitypods.org/"
+          assert provider["environment"]["NODE_ENV"] == "production"
           protected = cfg["services"]["protected-fuseki"]
           probe = cfg["services"]["protected-storage-proof"]
           assert "ports" not in protected and "ports" not in probe
