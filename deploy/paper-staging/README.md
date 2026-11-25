@@ -1539,3 +1539,43 @@ overwrite/delete refusal, nonrewindable independently signed latest
 head, credential rotation, native owner-authorized SAI/PDS lifecycle,
 full PostgreSQL/Redis/Jena/PDS rollback recovery or a successful hosted
 unified-account signup. Independent human release signoff is still required.
+
+## Initial owner-enrollment OAuth coordinator — CLOSED staging source pin, November 25, 2026
+
+This stage advances **only** the reviewed ActivityPods Git source SHA to
+`327ddf9819c14e04e9606eb7e2d6a33143df886f`, merged
+[ActivityPods PR #313](https://github.com/outlaw-dame/activity-pods/pull/313).
+Federation source SHA, all OCI digests and `release=CLOSED` remain unchanged.
+
+The new upstream ActivityPods candidate is intentionally **NONACTIVATED**.
+It proves that the *first* enrollment-bound OAuth consent cannot become
+an active Redis grant before the canonical PostgreSQL epoch is committed
+under a restricted PG18 issuer and an independent immutable-witness
+high-water has been freshly attested and read back. It uses the same
+browser-session Lua CAS as existing session approval and refuses timeout,
+logout, credential rotation, concurrent first approval and lost PG/Redis/
+COMMIT acknowledgements. The issuer's role admission and irreversible SQL
+write execute inside one PG transaction, including under a transaction pooler.
+Tests require `NODE_ENV=test` and multiple explicit disposable gates.
+
+Exact upstream PR-head workflows succeeded: PG18 + Redis 8.2 recovery
+`45558103024` (**15 new tests passing**), backend `45558103064`
+and dependency/lint `45558103008`. The real Redis 8.2 DUMP/RESTORE
+exercise includes signed ES256 token introspection. Other existing
+two-PG18 independent witness recovery proofs also passed. The new v7
+initial issuer's PG role and owner verifier are **simulated contracts**;
+the live post-enrollment browser/SAI authorization path is not wired
+to that candidate.
+
+Staging promotion must pass both exact-head `tls-runtime` and
+`local-provider`, including HTTPS signup refusal and PDS OAuth refusal,
+protected Fuseki isolation and OIDC JWKS continuity through restart.
+This is a **negative-release** integration, not hosted positive signup.
+An independently administered, irreversible high-water head and actual
+S3-compatible COMPLIANCE WORM retention/hostile operation evidence are
+still missing. General owner grant/change/revoke/uninstall **cannot**
+use the short-lived signup enrollment token; new independently archived
+pre-transition denial intent and canonical post-enrollment owner-session
+binding must be implemented before production activation. Historical
+credential rotation, physical multi-store recovery and independent
+release signoff remain P0. **Do not open the signup or PDS OAuth fuse.**
