@@ -1776,3 +1776,43 @@ uninstall and signing-key rotation, every live OAuth/PDS denial
 admission, pending PDS COMMIT drain, hosted positive signup and
 operator/security signoff remain P0. Production signup and PDS OAuth
 issuance MUST remain CLOSED.
+
+## Portable independent PRE-DENY S3 inventory — CLOSED source pin, November 25, 2026
+
+Frozen source pin advances **only** ActivityPods from the preceding
+`544316e19d4d816654c48106b453343b9a733ab3` to merged
+`2a6a0c595c5eae77eed6c2e460a513b398453be1`
+([ActivityPods #320](https://github.com/outlaw-dame/activity-pods/pull/320)).
+The federation source SHA, all five image digests and
+`release=CLOSED` remain exactly unchanged.
+
+The NONACTIVATED candidate adds an actual S3-compatible **read-only**
+pre-denial object-version inventory for the independent witness-v5
+length-framed owner/client subject. It reuses the restricted portable
+bucket/retention/version-content verifier; rejects forks, delete
+markers, malformed receipts, incomplete histories and observed
+mid-read drift; and reports retained PRE-DENY as **denial-only
+evidence**. An empty archive inventory explicitly does **not**
+authorize a code, JWT, DPoP proof, refreshed token or signed PDS
+commit. Its isolated OAuth/PDS admission candidate checks the
+archive inventory twice around current-head and canonical/witness
+reads. It passes the archive reader only the pseudonymous subject
+digest and cancellation signal, not user WebIDs, grant or session
+credentials. No production endpoint imports the code.
+
+**Exact ActivityPods tested head**
+`fe75b7a1525a398f17a05b6f2bc528c2970fd684` passed all
+four required jobs: independent PG18 witness `45664062336`,
+S3 COMPLIANCE/official SDK `45664062416`, backend
+`45664062455`, dependency/lint `45664062609`.
+Source was merged by expected-head SHA lease with clean reviews.
+
+**Still P0:** this does NOT provision independently administered
+COMPLIANCE S3 custody or an outside nonrewindable monotonic signer;
+synthetic listings can be stale and two observations do not
+serialize with a concurrent PREPARE/PUT. Native Solid-OIDC/SAI
+owner lifecycle, real OAuth/PDS admission, pending signed repo
+commit recovery, encrypted physical cross-store PITR,
+credential rotation, hosted positive signup, scale and independent
+operator/security acceptance remain blocked. Keep production
+signup and PDS OAuth issuance `CLOSED`.
