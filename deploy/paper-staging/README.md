@@ -1579,3 +1579,39 @@ pre-transition denial intent and canonical post-enrollment owner-session
 binding must be implemented before production activation. Historical
 credential rotation, physical multi-store recovery and independent
 release signoff remain P0. **Do not open the signup or PDS OAuth fuse.**
+
+## Post-enrollment owner/credential/SAI reader — CLOSED source pin, November 25, 2026
+
+This stage advances **only** the ActivityPods source pin to merged
+`40668f44a0db021591837dbd41c14cc1883264d7`
+([ActivityPods #314](https://github.com/outlaw-dame/activity-pods/pull/314)).
+Federation source commit and five OCI digests are unchanged; `release=CLOSED`.
+
+The newly merged ActivityPods PostgreSQL 18 v8 SQL is a **NONACTIVATED,
+read-only** joined view of the existing managed WebID/DID, active credential
+epoch, native-attested SAI and current OAuth generation. It provisions
+a dedicated function-only NOLOGIN role and grants no direct credential/SAI/
+OAuth table privileges or mutating functions. The accompanying test-only
+owner verifier compares an authenticated browser-session issuance epoch
+to an independently challenge-signed latest credential head plus fresh
+primary PG, SAI and immutable witness checks, repeated across the
+network read window. It returns **pre-denial planning evidence only**,
+not permission to approve, revoke, replace, uninstall or sign PDS writes.
+
+Exact-head upstream security CI passed: real PG18 and Ed25519 signer test
+`45600562738`, backend `45600562912`, lint/regressions `45600562760`.
+The integrated fixture uses a real PG18 schema and restricted SQL logins;
+its native Jena/Redis browser and independently immutable OAuth witness
+callbacks are **simulations**, not deployed cross-service wiring.
+Current production OAuth cookies do not include the independent credential
+epoch, so do not wire this candidate into running services.
+
+The crucial remaining P0 is independently retained **pre-transition
+denial before every revoke/replace/uninstall mutation**, with an
+independently administered immutable high-water signer visible to all
+token, DPoP, PDS and browser authorization paths. Existing signed-write
+pending intents must be durably reconciled before revocation ACK.
+Operator-proven S3-compatible COMPLIANCE custody, real positive owner
+grant lifecycle, PG/Redis/Jena/PDS coordinated physical PITR, historical
+credential rotation and security/performance signoff remain incomplete.
+No production signup or OAuth issuer release is authorized.
