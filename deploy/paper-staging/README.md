@@ -2030,3 +2030,44 @@ only then integrate native owner/SAI OAuth/PDS fences and execute
 multi-store physical PITR. Cloudflare R2 reversible bucket rules
 are not a substitute for separately administered COMPLIANCE
 version custody. The signup/release fuse remains **CLOSED**.
+
+## Storj literal disposable bucket acceptance — CLOSED (November 25, 2026)
+
+Only the ActivityPods source pin advances from merged
+`a4f55d26e9422ca75ca9b74d89d36509eee6a9f6` to merged
+[ActivityPods PR #325](https://github.com/outlaw-dame/activity-pods/pull/325)
+`52fd9ba44bd493c0d9fa7222714249b2a1daa05e`
+(exact green PR head `7f0fc5b66071c9f9247cbf1d2ccdf6b6344fa2b5`).
+The federation source SHA, all five OCI image digests and
+`release=CLOSED` remain unchanged.
+
+The existing **NONACTIVATED** operator-only S3 COMPLIANCE candidate
+probes now permit the literal bucket `paper-worm-disposable` **only
+for the pinned Storj provider**, while preserving the strict
+`paper-worm-disposable-<suffix>` allowlist for other supported
+provider types. Explicit `permanently-retain:<exact-bucket-name>`
+approval and exact signed hostile-object challenge binding remain
+mandatory before any irreversible writes or destructive requests.
+The tests reject close name lookalikes, other providers using the
+bare name, and cross-bucket approval replay. Original conditional
+PUT single-attempt, no blind mutation retry, retention/history
+readback and all `releaseAccepted:false` results are unchanged.
+
+Official Storj documentation distinguishes enabling Object Lock
+from configuring a default COMPLIANCE retention policy. The
+**read-only** S3 qualification still must independently verify
+versioning, ObjectLockEnabled, default `Mode=COMPLIANCE` and
+>=400 days before even attempting the separate human-approved
+synthetic conditional-write test. No real S3 API tests or writes,
+account/key custody proof or operator certificate are claimed by
+this staging pin. A Storj browser tab is not an authenticated S3
+retention response or an independent signer.
+
+Upstream exact-head CI for `7f0fc5b66071c9f9247cbf1d2ccdf6b6344fa2b5`:
+S3 COMPLIANCE `45739970846`, backend `45739970797`
+and lint/regressions `45739970827` all SUCCESS.
+Additional Codex review was requested, but no completed review was
+returned before merge. Production signup remains **CLOSED**, and
+federation P0 #186 remains open until actual separately administered
+immutable custody, nonrewindable signed latest-head, owner consent,
+OAuth/PDS fencing and physical multi-store recovery are proved.
