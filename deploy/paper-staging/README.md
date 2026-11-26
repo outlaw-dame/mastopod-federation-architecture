@@ -1972,3 +1972,61 @@ mutation paths need fenced authority integration, independently
 verified cloud contention/deletion/retention tests and real
 multi-store physical recovery. No feature flag permits release to
 open until those tests, operator custody and security review pass.
+
+## Independent live S3 COMPLIANCE hostile-version certification — CLOSED (November 25, 2026)
+
+ActivityPods source advances **only** from
+`bd38eded14e17515c9c604a2cb8eafd08ac33699`
+to merged [PR #324](https://github.com/outlaw-dame/activity-pods/pull/324)
+`a4f55d26e9422ca75ca9b74d89d36509eee6a9f6`,
+exact CI-tested head `43149914ccdf3f186bc11e6acce674e2ca0d4638`.
+The federation source, **all five** pinned OCI image digests, and
+`release=CLOSED` remain unchanged.
+
+**NONACTIVATED operator-only security harness:**
+`pod-provider/backend/scripts/probe-oauth-portable-s3-hostile-lock.mjs`
+and `candidates/oauth-portable-s3-hostile-lock-probe.mjs`.
+The operator performs **read-only preflight** of a disposable S3
+COMPLIANCE sample created by the preexisting competing-writers
+`probe-oauth-portable-s3-writeonce.mjs` probe. It validates bucket
+versioning, exact historical version and SHA-256, unaltered canonical
+receipt bytes, no delete markers and retention, then derives a SHA-256
+approval challenge binding provider origin, bucket, key, version,
+digest, retention expiration and planned adversarial credential
+profile. The separately approved **hostile phase** requests exact
+VersionId deletion and one-day retention shortening, each **once**,
+re-reading the entire version, retention and digest evidence after
+each denied request. It never performs unversioned deletion or an
+overwrite. Only idempotent `GetObjectRetention` may retry, using a
+bounded exponential backoff with jitter for 429/503/504.
+
+The tool returns `releaseAccepted:false`,
+`iamEnforcementProven:false`,
+`independentAdministrationVerified:false` and
+`monotonicLatestHeadVerified:false`. In particular, a 400/403 may
+come from insufficient IAM privilege or an invalid S3 method rather
+than Object Lock COMPLIANCE. The **external custodian must prove**
+the adversary was otherwise authorized to attempt version deletion
+and retention change, provide out-of-band signed certificate and
+native-API checks, and demonstrate independently governed root,
+billing, retention, permissions, KMS/signing and recovery. Real
+retention-shortening/deletion requests can permanently alter the
+sacrificial sample if a provider is faulty: explicit, informed
+operator approval is mandatory before running them.
+
+Upstream exact-head CI passed all four required jobs:
+S3 COMPLIANCE + official pinned SDK `45729885551`,
+two-PG18 independent witness `45729885654`,
+backend `45729885536`, lint/regressions `45729885515`.
+The reviewed upstream diff was five files; no production service
+imports, no private keys, secrets or endpoint activation. A separate
+Codex review request did not return completed security signoff.
+
+**Next P0** is to execute the already implemented operator probes
+under an **actually independent** qualified Backblaze B2, Storj or
+other S3-compatible COMPLIANCE account, preserve auditor evidence
+and attest independent KMS and signed nonrewindable high-water;
+only then integrate native owner/SAI OAuth/PDS fences and execute
+multi-store physical PITR. Cloudflare R2 reversible bucket rules
+are not a substitute for separately administered COMPLIANCE
+version custody. The signup/release fuse remains **CLOSED**.
